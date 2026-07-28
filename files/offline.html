@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Offline · Euler Motors CRM</title>
+  <link rel="stylesheet" href="assets/css/app.css" />
+</head>
+<body style="display:flex;align-items:center;justify-content:center;min-height:100vh;">
+  <div class="card card-pad" style="max-width:420px;text-align:center;">
+    <h1 style="margin:0 0 8px;font-size:22px;">You are offline</h1>
+    <p style="color:var(--muted);font-size:14px;">Reconnect to the network, then retry. Drafts on forms are kept in this browser.</p>
+    <button class="btn" type="button" onclick="location.href='dashboard.html'">Retry</button>
+  </div>
+  <script>
+    window.addEventListener('online', function () { location.href = 'dashboard.html'; });
+  </script>
+</body>
+</html>

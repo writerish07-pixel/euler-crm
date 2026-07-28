@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f3d68" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Euler CRM" />
+  <meta name="description" content="Euler Motors Dealer Management Portal" />
+  <title>Euler Motors CRM</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="assets/icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/icons/icon-192.png" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="assets/css/app.css" />
+</head>
+<body>
+  <!--
+    MASTER WEB APP — host on GitHub Pages for phone + desktop.
+    Staff open the site URL once; optional: Add to Home Screen.
+  -->
+  <div id="app-root" class="app-shell"></div>
+
+  <script src="assets/js/config.js"></script>
+  <script src="assets/js/utils/helpers.js"></script>
+  <script src="assets/js/utils/offline.js"></script>
+  <script src="assets/js/api/api.js"></script>
+  <script src="assets/js/components/shell.js"></script>
+  <script src="assets/js/components/table.js"></script>
+  <script src="assets/js/components/lead-picker.js"></script>
+  <script src="assets/js/components/lead-context.js"></script>
+  <script src="assets/js/app.js"></script>
+
+  <script src="assets/js/pages/dashboard.js"></script>
+  <script src="assets/js/pages/leads.js"></script>
+  <script src="assets/js/pages/new-lead.js"></script>
+  <script src="assets/js/pages/quotation.js"></script>
+  <script src="assets/js/pages/booking.js"></script>
+  <script src="assets/js/pages/scheme.js"></script>
+  <script src="assets/js/pages/payment.js"></script>
+  <script src="assets/js/pages/finance.js"></script>
+  <script src="assets/js/pages/delivery.js"></script>
+  <script src="assets/js/pages/activity.js"></script>
+  <script src="assets/js/pages/close-lead.js"></script>
+  <script src="assets/js/pages/customer360.js"></script>
+  <script src="assets/js/pages/reports.js"></script>
+  <script src="assets/js/pages/masters.js"></script>
+  <script src="assets/js/pages/settings.js"></script>
+
+  <script>
+    CRM_ROUTER.start();
+  </script>
+</body>
+</html>

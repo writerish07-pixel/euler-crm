@@ -1,0 +1,15 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Redirecting…</title>
+  <script>
+    // Old multi-page link → master SPA
+    var q = location.search || '';
+    location.replace('index.html#/payment' + (q ? q.replace('?', '?') : ''));
+  </script>
+</head>
+<body>
+  <p style="font-family:system-ui;padding:24px;">Opening CRM… <a href="index.html#/payment">Continue</a></p>
+</body>
+</html>
