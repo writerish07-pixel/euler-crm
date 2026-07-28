@@ -28,6 +28,7 @@
     CRM_CONTEXT.clear(ctxEl);
     var rowsEl = document.getElementById('rows');
     var rowCount = 0;
+    var currentOutstanding = 0;
 
     function modeOpts() {
       return modes.map(function (m) { return '<option value="' + U.escapeAttr(m) + '">' + U.escapeHtml(m) + '</option>'; }).join('');
@@ -77,24 +78,36 @@
         var a = Number(row.querySelector('.amt').value) || 0;
         if (a > 0) { t += a; n++; }
       });
+      var after = Math.max(0, Number(currentOutstanding || 0) - t);
       document.getElementById('total').textContent = n
-        ? ('Total this entry: ' + U.formatINR(t) + ' across ' + n + ' line(s)')
+        ? ('Outstanding after payment: ' + U.formatINR(after) + ' (paying ' + U.formatINR(t) + ')')
         : '';
     }
     document.getElementById('add-row').addEventListener('click', addRow);
     addRow();
 
     async function loadCtx(id) {
-      if (!id) { CRM_CONTEXT.clear(ctxEl); return; }
+      if (!id) {
+        currentOutstanding = 0;
+        CRM_CONTEXT.clear(ctxEl);
+        sum();
+        return;
+      }
       try {
         var ctx = await CRM_API.getSchemeContext(id);
+        currentOutstanding = Number((ctx && ctx.outstanding) || 0);
         CRM_CONTEXT.render(ctxEl, ctx);
+        sum();
       } catch (err) {
         try {
           var b = await CRM_API.getBookingContext(id);
+          currentOutstanding = Number((b && (b.outstanding || (b.totals && b.totals.outstanding))) || 0);
           CRM_CONTEXT.render(ctxEl, b);
+          sum();
         } catch (e2) {
+          currentOutstanding = 0;
           CRM_CONTEXT.clear(ctxEl, err.message || 'Could not load outstanding');
+          sum();
         }
       }
     }
