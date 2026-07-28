@@ -30,7 +30,10 @@
     pendingOffers: null,
     model: '',
     variant: '',
-    oemEligible: 0
+    oemEligible: 0,
+    marginGrossInclGst: 0,
+    marginGst: 0,
+    marginNetExGst: 0
   };
   var SCHEME_RULES = { rules: {} };
 
@@ -56,6 +59,9 @@
 
         '<label class="field"><span>Eligible Scheme Total</span><input id="totalDiscount" disabled /></label>' +
         '<label class="field"><span>OEM Scheme Eligible</span><input id="oemEligible" disabled /></label>' +
+        '<label class="field"><span>Dealer Margin Gross (Incl GST)</span><input id="dealerMarginGross" disabled /></label>' +
+        '<label class="field"><span>Dealer Margin GST (5%)</span><input id="dealerMarginGst" disabled /></label>' +
+        '<label class="field"><span>Dealer Margin Net (Ex GST)</span><input id="dealerMarginNet" disabled /></label>' +
 
         '<h4 class="sheet-h4">Owner Decision â€” Customer Benefit</h4>' +
         '<p class="sheet-hint">Customer Payable reduces only by Benefit Passed. OEM Eligible stays available for owner receivable.</p>' +
@@ -112,6 +118,12 @@
         '<select class="offer" id="' + id + '" name="' + id + '"><option value="0">â‚¹0</option></select>' +
         '</div>';
     }).join('');
+    box.insertAdjacentHTML('beforeend',
+      '<div class="field offer-wrap" data-offer="oemExtraSupport" id="wrap_oemExtraSupport">' +
+      '<label id="lbl_oemExtraSupport"><span>OEM Extra Support (case-wise)</span></label>' +
+      '<input class="offer" id="oemExtraSupport" name="oemExtraSupport" type="number" min="0" step="0.01" value="0" placeholder="Type amount ₹" />' +
+      '</div>'
+    );
   }
 
   function el(id) { return document.getElementById(id); }
@@ -244,6 +256,9 @@
     var totalPass = passedOem + dealerPool;
     setVal('totalDiscount', all.toFixed(2));
     setVal('oemEligible', oem.toFixed(2));
+    setVal('dealerMarginGross', num(CTX.marginGrossInclGst).toFixed(2));
+    setVal('dealerMarginGst', num(CTX.marginGst).toFixed(2));
+    setVal('dealerMarginNet', num(CTX.marginNetExGst).toFixed(2));
     setVal('benefitPassedShow', passedOem.toFixed(2));
     setVal('dealerRetained', Number(retainedIncomeClient()).toFixed(2));
     if (CTX.hasBooking) {
@@ -440,8 +455,13 @@
       loyaltyBonus: o.loyaltyBonus || 0,
       referralBonus: o.referralBonus || 0,
       dsaDiscount: o.dsaDiscount || 0,
-      additionalDiscount: o.additionalDiscount || 0
+      additionalDiscount: o.additionalDiscount || 0,
+      oemExtraSupport: o.oemExtraSupport || 0
     };
+    CTX.marginGrossInclGst = num(res.dealerMarginGrossInclGst);
+    CTX.marginGst = num(res.dealerMarginGst);
+    CTX.marginNetExGst = num(res.dealerMarginNetExGst);
+    setVal('oemExtraSupport', num(o.oemExtraSupport || res.oemExtraSupport || 0));
     setBenefitMode(res.benefitMode || 'Full Benefit');
     if (st) {
       st.textContent = 'Lead: ' + (l.leadId || '') + ' | ' + (CTX.model || '') + ' / ' + (CTX.variant || '') +
@@ -513,6 +533,7 @@
       referralBonus: el('referralBonus') && !el('wrap_referralBonus').hidden ? el('referralBonus').value : '0',
       dsaDiscount: el('dsaDiscount') && !el('wrap_dsaDiscount').hidden ? el('dsaDiscount').value : '0',
       additionalDiscount: el('additionalDiscount') ? el('additionalDiscount').value : '0',
+      oemExtraSupport: el('oemExtraSupport') ? el('oemExtraSupport').value : '0',
       benefitMode: mode,
       customerBenefitPassed: passed,
       benefitPassedBreakup: JSON.stringify(passedBreakup())
