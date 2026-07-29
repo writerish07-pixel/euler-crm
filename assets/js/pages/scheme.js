@@ -514,6 +514,19 @@
     return true;
   }
 
+  function readOemExtraSupportForSave() {
+    var recvEl = el('oemExtraSupportReceived') || el('oemExtraSupport');
+    var passEl = el('oemExtraSupportPassed');
+    var recv = Math.max(0, num(recvEl && recvEl.value));
+    var pass = Math.max(0, Math.min(num(passEl && passEl.value), recv));
+    return {
+      oemExtraSupportReceived: recv,
+      oemExtraSupportPassed: pass,
+      oemExtraSupportRetained: Math.max(0, recv - pass),
+      oemExtraSupport: recv
+    };
+  }
+
   async function doSave(picker) {
     var U = CRM_UTIL;
     var leadId = picker.getLeadId();
@@ -526,6 +539,7 @@
     var mode = getBenefitMode();
     var eligible = eligibleTotal();
     var passed = resolvePassed(eligible);
+    var oem = readOemExtraSupportForSave();
     var d = {
       leadId: leadId,
       editCustomer: false,
@@ -535,10 +549,10 @@
       referralBonus: el('referralBonus') && !el('wrap_referralBonus').hidden ? el('referralBonus').value : '0',
       dsaDiscount: el('dsaDiscount') && !el('wrap_dsaDiscount').hidden ? el('dsaDiscount').value : '0',
       additionalDiscount: el('additionalDiscount') ? el('additionalDiscount').value : '0',
-      oemExtraSupportReceived: el('oemExtraSupportReceived')
-        ? el('oemExtraSupportReceived').value
-        : (el('oemExtraSupport') ? el('oemExtraSupport').value : '0'),
-      oemExtraSupportPassed: el('oemExtraSupportPassed') ? el('oemExtraSupportPassed').value : '0',
+      oemExtraSupportReceived: oem.oemExtraSupportReceived,
+      oemExtraSupportPassed: oem.oemExtraSupportPassed,
+      oemExtraSupportRetained: oem.oemExtraSupportRetained,
+      oemExtraSupport: oem.oemExtraSupport,
       benefitMode: mode,
       customerBenefitPassed: passed,
       benefitPassedBreakup: JSON.stringify(passedBreakup())
@@ -546,7 +560,15 @@
 
     try {
       var res = await U.withLoading(CRM_API.updateScheme(d));
-      U.toast((res && res.message) || 'Scheme updated', 'ok');
+      var saved = (res && res.data) || res || {};
+      var oemRecv = num(saved.oemExtraSupportReceived != null ? saved.oemExtraSupportReceived : oem.oemExtraSupportReceived);
+      var msg = (res && res.message) || 'Scheme updated';
+      if (oemRecv > 0) {
+        msg += ' · OEM Extra Support ₹' + fmtInr(oemRecv) + ' recorded';
+      } else if (oem.oemExtraSupportReceived > 0) {
+        msg += ' · Warning: OEM Extra Support may not have saved — redeploy WebApi.gs + LeadService.gs';
+      }
+      U.toast(msg, oemRecv > 0 || oem.oemExtraSupportReceived <= 0 ? 'ok' : 'warn');
       if (picker.reload) await picker.reload();
       CRM_CONTEXT.clear(document.getElementById('ctx'), 'Scheme saved. Lead removed from this list. Continue on Payment / Delivery.');
       el('updateStatus').textContent = 'Scheme saved for ' + leadId;
