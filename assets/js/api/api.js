@@ -192,6 +192,11 @@
     getSchemeRules: function (p) { return request('getSchemeRules', p); },
     updateScheme: function (p) { return request('updateScheme', p); },
 
+    getPriceStructureContext: function (leadId) {
+      return request('getPriceStructureContext', { leadId: leadId });
+    },
+    savePriceStructure: function (p) { return request('savePriceStructure', p); },
+
     savePayment: function (p) { return request('savePayment', p); },
 
     getPendingFinanceFiles: function () { return request('getPendingFinanceFiles', {}); },
@@ -214,7 +219,9 @@
     saveSettings: function (p) { return request('saveSettings', p); },
 
     getOpenClaims: function () { return request('getOpenClaims', {}); },
-    settleClaim: function (p) { return request('settleClaim', p); }
+    getClaimContext: function (claimId) { return request('getClaimContext', { claimId: claimId }); },
+    settleClaim: function (p) { return request('settleClaim', p); },
+    updateClaimStatus: function (p) { return request('updateClaimStatus', p); }
   };
 
   global.CRM_API = api;
