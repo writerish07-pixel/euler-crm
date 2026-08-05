@@ -123,10 +123,7 @@
 
       '<footer class="share-foot">' +
         '<div>Read-only board · no customer mobiles shown</div>' +
-        '<div style="display:flex;gap:10px;align-items:center;">' +
-          '<button type="button" id="btn-refresh">Refresh</button>' +
-          '<a href="index.html">Staff CRM portal</a>' +
-        '</div>' +
+        '<div><button type="button" id="btn-refresh">Refresh</button></div>' +
       '</footer>';
 
     var btn = document.getElementById('btn-refresh');
