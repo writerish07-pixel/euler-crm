@@ -8,6 +8,14 @@ One web app for desktop **and phone**. Staff open a single URL — no HTML files
 https://YOUR_USERNAME.github.io/euler-crm-portal/
 ```
 
+## Company share board (bookings + retail)
+
+```
+https://YOUR_USERNAME.github.io/euler-crm-portal/share.html
+```
+
+Read-only: MTD bookings, MTD retail (deliveries), today counts. Safe to WhatsApp to company people.
+
 See **[DEPLOY-GITHUB.md](DEPLOY-GITHUB.md)** for step-by-step deploy.
 
 ## Local

@@ -171,6 +171,7 @@
     ping: function () { return request('ping', {}, { method: 'GET' }); },
     getSession: function () { return request('getSession', {}, { method: 'GET', cache: true }); },
     getDashboard: function () { return request('getDashboard', {}); },
+    getShareDashboard: function () { return request('getShareDashboard', {}); },
     refreshDashboard: function () { return request('refreshDashboard', {}); },
 
     getLeads: function (opts) {

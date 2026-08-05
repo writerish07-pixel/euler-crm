@@ -42,6 +42,18 @@ After 1–2 minutes your app URL is:
 https://YOUR_USERNAME.github.io/euler-crm-portal/
 ```
 
+### Company share board (bookings + retail)
+
+Separate read-only page for company people (no CRM login forms):
+
+```
+https://YOUR_USERNAME.github.io/euler-crm-portal/share.html
+```
+
+Shows **current-month bookings**, **retail (deliveries)**, today counts, and lists. No customer mobiles. Auto-refreshes every 3 minutes.
+
+Requires Apps Script Web App with `getShareDashboard` (in `DashboardService.gs` + `WebApi.gs`).
+
 ### C. Share with staff
 
 Send that link (WhatsApp / email). On phone:
