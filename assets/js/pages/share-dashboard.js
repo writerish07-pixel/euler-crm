@@ -1,5 +1,5 @@
 /**
- * Company share board — monthly bookings & retail (deliveries).
+ * Company share board — active bookings & retail (deliveries).
  * Standalone page: share.html (no CRM shell / no edit forms).
  */
 (function () {
@@ -46,9 +46,9 @@
     return json.data || {};
   }
 
-  function rowsHtml(list, dateKey, badgeClass, badgeLabel) {
+  function rowsHtml(list, dateKey, badgeClass, badgeLabel, emptyMsg) {
     if (!list || !list.length) {
-      return '<div class="empty-list">No records this month yet.</div>';
+      return '<div class="empty-list">' + esc(emptyMsg || 'No records yet.') + '</div>';
     }
     return '<div class="list">' + list.map(function (r) {
       return '<div class="row">' +
@@ -73,10 +73,12 @@
   function render(data) {
     var company = data.companyName || 'Euler Motors';
     var month = data.monthLabel || 'This month';
+    var activeCount = data.activeBookings != null ? data.activeBookings : (data.bookings || []).length;
+    var newThisMonth = data.monthlyBookings || 0;
     root.innerHTML =
       '<header class="share-hero">' +
         '<h1 class="share-brand"><span>' + esc(company) + '</span></h1>' +
-        '<p class="share-tag">Live bookings &amp; retail for ' + esc(month) +
+        '<p class="share-tag">Active bookings &amp; retail for ' + esc(month) +
           ' — shared with the company team.</p>' +
         '<div class="share-meta">' +
           '<span class="share-pill"><span class="share-dot"></span> Live</span>' +
@@ -87,9 +89,9 @@
 
       '<section class="share-kpis" aria-label="Key numbers">' +
         '<article class="kpi book">' +
-          '<div class="kpi-label">Bookings · ' + esc(month) + '</div>' +
-          '<div class="kpi-value">' + esc(data.monthlyBookings || 0) + '</div>' +
-          '<div class="kpi-hint">New bookings this month</div>' +
+          '<div class="kpi-label">Active bookings</div>' +
+          '<div class="kpi-value">' + esc(activeCount) + '</div>' +
+          '<div class="kpi-hint">' + esc(newThisMonth) + ' new in ' + esc(month) + '</div>' +
         '</article>' +
         '<article class="kpi retail">' +
           '<div class="kpi-label">Retail · ' + esc(month) + '</div>' +
@@ -110,14 +112,14 @@
 
       '<section class="share-grid">' +
         '<div class="panel">' +
-          '<div class="panel-head"><h2>Bookings</h2><span>' + esc((data.bookings || []).length) + ' MTD</span></div>' +
+          '<div class="panel-head"><h2>Bookings</h2><span>' + esc(activeCount) + ' active</span></div>' +
           chipsHtml(data.topBookingModels) +
-          rowsHtml(data.bookings, 'bookingDate', '', 'Booked') +
+          rowsHtml(data.bookings, 'bookingDate', '', 'Booked', 'No active bookings yet.') +
         '</div>' +
         '<div class="panel">' +
           '<div class="panel-head"><h2>Retail</h2><span>' + esc((data.retails || []).length) + ' MTD</span></div>' +
           chipsHtml(data.topRetailModels) +
-          rowsHtml(data.retails, 'deliveryDate', 'retail', 'Retail') +
+          rowsHtml(data.retails, 'deliveryDate', 'retail', 'Retail', 'No records this month yet.') +
         '</div>' +
       '</section>' +
 
