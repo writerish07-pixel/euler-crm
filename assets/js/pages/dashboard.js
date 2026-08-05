@@ -29,6 +29,8 @@
       var data = await U.withLoading(CRM_API.getDashboard());
       var m = (data && (data.metrics || data)) || {};
       destroyCharts();
+      var mtdBookings = m.monthlyNewBookings != null ? m.monthlyNewBookings : m.monthlyBookings;
+      var activeBookings = m.activeBookings != null ? m.activeBookings : m.monthlyBookings;
 
       root.innerHTML =
         '<div class="page-header">' +
@@ -49,7 +51,8 @@
           kpiCard('Customer Outstanding', U.formatINR(m.customerOutstanding || m.outstanding)) +
           kpiCard('Finance Outstanding', U.formatINR(m.financeOutstanding)) +
           kpiCard('Finance Overdue', U.formatNumber(m.financeOverdueCount), U.formatINR(m.financeOverdueAmount)) +
-          kpiCard('MTD Conversion', U.formatPct(m.conversion), U.formatNumber(m.monthlyBookings) + ' / ' + U.formatNumber(m.monthlyLeads)) +
+          kpiCard('MTD Conversion', U.formatPct(m.conversion), U.formatNumber(mtdBookings) + ' / ' + U.formatNumber(m.monthlyLeads)) +
+          kpiCard('Active Bookings', U.formatNumber(activeBookings), mtdBookings + ' new this month') +
         '</div>' +
         '<div style="display:grid;grid-template-columns:1.2fr 1fr;gap:14px;">' +
           '<div class="card card-pad"><h3 style="margin:0 0 12px;font-size:14px;">Payment collection (MTD)</h3><canvas id="chart-pay" height="160"></canvas></div>' +
@@ -90,7 +93,7 @@
           data: {
             labels: ['Leads', 'Bookings', 'Deliveries'],
             datasets: [{
-              data: [m.monthlyLeads || 0, m.monthlyBookings || 0, m.monthlyDeliveries || 0],
+              data: [m.monthlyLeads || 0, mtdBookings || 0, m.monthlyDeliveries || 0],
               backgroundColor: ['#0f3d68', '#1a5f8f', '#0d9488']
             }]
           },
