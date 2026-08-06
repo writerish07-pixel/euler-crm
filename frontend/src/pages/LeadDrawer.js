@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { ArrowRightLeft, Wallet, XCircle } from "lucide-react";
+import { ArrowRightLeft, Wallet, XCircle, Pencil } from "lucide-react";
 import { get, post, put } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
@@ -19,6 +19,7 @@ const SCHEME_FIELDS = [
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("overview");
+  const [editing, setEditing] = useState(false);
 
   const load = useCallback(() => {
     get(`/leads/${leadId}/360`).then(setData);
@@ -52,11 +53,14 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
+        <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
         <div className="ml-auto text-right">
           <div className="text-xs text-ink-faint">Outstanding</div>
           <div className={`font-mono font-bold ${lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{inr(lead.customerOutstanding)}</div>
         </div>
       </div>
+
+      {editing && <EditLeadModal lead={lead} masters={masters} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); refresh(); }} />}
 
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
@@ -327,6 +331,62 @@ function DeliveryTab({ lead, delivery, onSaved }) {
         <Field label="Mark Delivered?"><Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")}><option value="">Not yet</option><option value="Yes">Yes — Delivered</option></Select></Field>
       </div>
       <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save}>Save Delivery</Button></div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Edit lead details */
+function EditLeadModal({ lead, masters, onClose, onSaved }) {
+  const [form, setForm] = useState({
+    customerName: lead.customerName || "", mobile: lead.mobile || "", altMobile: lead.altMobile || "",
+    village: lead.village || "", city: lead.city || "", leadSource: lead.leadSource || "Walk-in",
+    interestedModel: lead.interestedModel || "", variant: lead.variant || "", executive: lead.executive || "",
+    currentStatus: lead.currentStatus || "New", priority: lead.priority || "Normal", budget: lead.budget || 0,
+    remarks: lead.remarks || "", financeRequired: lead.financeRequired || "No",
+    exchangeRequired: lead.exchangeRequired || "No", nextFollowupDate: lead.nextFollowupDate || "",
+  });
+  const [variants, setVariants] = useState([]);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  useEffect(() => { if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants); }, [form.interestedModel]);
+
+  const save = async () => {
+    if (!form.customerName) return toast.error("Customer name is required");
+    try {
+      await put(`/leads/${lead.leadId}`, { ...form, budget: Number(form.budget) });
+      toast.success("Lead updated");
+      onSaved();
+    } catch { toast.error("Update failed"); }
+  };
+  const m = masters || {};
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
+      <Card className="relative w-full max-w-2xl p-6 animate-fade-up max-h-[90vh] overflow-y-auto">
+        <h3 className="font-heading text-lg font-bold text-ink mb-1">Edit Lead — {lead.leadId}</h3>
+        <p className="text-xs text-ink-soft mb-4">Correct any details captured against this lead.</p>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-2"><Field label="Customer Name *"><Input data-testid="edit-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
+          <Field label="Status"><Select data-testid="edit-status" value={form.currentStatus} onChange={set("currentStatus")}>{(m.statuses || ["New","Contacted","Follow-up","In Progress","Booked","Finance Process","Delivered","Lost"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
+          <Field label="Mobile"><Input data-testid="edit-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
+          <Field label="Alt Mobile"><Input value={form.altMobile} onChange={set("altMobile")} /></Field>
+          <Field label="City"><Input value={form.city} onChange={set("city")} /></Field>
+          <Field label="Village"><Input value={form.village} onChange={set("village")} /></Field>
+          <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{(m.leadSources || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
+          <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{(m.executives || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
+          <Field label="Model"><Select value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{(m.models || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
+          <Field label="Variant"><Select value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}</option>)}</Select></Field>
+          <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{(m.priorities || ["Low","Normal","High","Urgent"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
+          <Field label="Budget (₹)"><Input type="number" value={form.budget} onChange={set("budget")} /></Field>
+          <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
+          <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
+          <Field label="Next Follow-up"><Input type="date" value={form.nextFollowupDate || ""} onChange={set("nextFollowupDate")} /></Field>
+          <div className="col-span-3"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button data-testid="save-edit-lead-btn" onClick={save}>Save Changes</Button>
+        </div>
+      </Card>
     </div>
   );
 }

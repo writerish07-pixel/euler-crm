@@ -46,6 +46,9 @@ const SHARE_CSS = `
 .models{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px 16px;}
 .chip{font-size:12px;padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,0.03);color:var(--text);}
 .chip b{color:var(--lime);margin-left:4px;}
+.lead-badge{font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;border:1px solid var(--line);white-space:nowrap;color:var(--muted);}
+.lb-New{color:#7cc4ff;}.lb-Booked{color:var(--cyan);}.lb-Delivered{color:var(--lime);}
+.lb-Lost{color:#ff8a8a;}.lb-Contacted,.lb-Followup{color:var(--warm);}
 .share-foot{margin-top:22px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--muted);}
 .share-foot a{color:var(--cyan);text-decoration:none;}
 .share-foot button{background:transparent;border:1px solid var(--line);color:var(--text);border-radius:999px;padding:6px 12px;cursor:pointer;font:inherit;}
@@ -94,6 +97,7 @@ export default function Share() {
               <div className="share-meta">
                 <span className="share-pill"><span className="share-dot" /> Live</span>
                 <span><strong>{d.month}</strong></span>
+                <span><strong>{d.totalLeads}</strong> total leads</span>
                 <span>Updated {new Date(d.lastUpdated).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
               </div>
             </header>
@@ -165,6 +169,23 @@ export default function Share() {
                 </div>
               </div>
             )}
+
+            <div className="panel" style={{ marginTop: 14 }}>
+              <div className="panel-head"><h2>All Leads</h2><span>{(d.allLeads || []).length} total</span></div>
+              <div className="list">
+                {(d.allLeads || []).length === 0 && <div className="empty-list">No leads yet</div>}
+                {(d.allLeads || []).map((r, i) => (
+                  <div className="row" key={i}>
+                    <div className="row-date">{shortDate(r.date)}</div>
+                    <div className="row-main">
+                      <div className="row-name">{r.name}</div>
+                      <div className="row-sub">{r.model}{r.variant ? ` · ${r.variant}` : ""}</div>
+                    </div>
+                    <div className={`lead-badge lb-${(r.status || "New").replace(/[^A-Za-z]/g, "")}`}>{r.status}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
 
             <footer className="share-foot">
               <span>Euler Motors · Company Board · read-only</span>

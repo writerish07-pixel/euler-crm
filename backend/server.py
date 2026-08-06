@@ -1124,14 +1124,20 @@ async def share_dashboard():
 
     recent_bookings = sorted(active_booked, key=lambda l: str(l.get("bookingDate") or ""), reverse=True)[:20]
     recent_retail = sorted(retail_this_month, key=lambda l: str(l.get("deliveryDate") or ""), reverse=True)[:20]
+    all_leads = sorted(leads, key=lambda l: str(l.get("createdDate") or ""), reverse=True)
+    all_leads_rows = [{"date": l.get("createdDate"), "name": l.get("customerName") or "—",
+                       "model": l.get("interestedModel") or "", "variant": l.get("variant") or "",
+                       "status": l.get("currentStatus") or "New"} for l in all_leads]
 
     return {
         "activeBookings": len(active_booked),
         "newThisMonth": len(new_this_month),
         "retailThisMonth": len(retail_this_month),
         "todayBookings": len(today_bookings),
+        "totalLeads": len(leads),
         "recentBookings": [row(l, "bookingDate") for l in recent_bookings],
         "recentRetail": [row(l, "deliveryDate") for l in recent_retail],
+        "allLeads": all_leads_rows,
         "byModel": [{"model": k, "count": v} for k, v in sorted(by_model.items(), key=lambda x: -x[1])],
         "month": datetime.now(timezone.utc).strftime("%B %Y"),
         "lastUpdated": now_iso(),
