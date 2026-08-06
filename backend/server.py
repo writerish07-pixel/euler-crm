@@ -409,7 +409,7 @@ async def customer_360(lead_id: str):
 @api.put("/leads/{lead_id}")
 async def update_lead(lead_id: str, body: LeadIn):
     await get_lead_or_404(lead_id)
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {**body.model_dump(), "lastUpdated": now_iso()}})
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {**body.model_dump(exclude_unset=True), "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
