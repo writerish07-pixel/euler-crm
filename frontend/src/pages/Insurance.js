@@ -34,8 +34,8 @@ export default function Insurance() {
           { key: "status", label: "Status", render: (r) => <Badge>{r.status || "Pending"}</Badge> },
           { key: "act", label: "", align: "right", render: (r) => (
             <div className="flex justify-end gap-2">
-              <button onClick={(e) => { e.stopPropagation(); setEdit(r); }} className="text-ink-faint hover:text-cobalt"><Pencil size={15} /></button>
-              <button onClick={(e) => { e.stopPropagation(); remove(r); }} className="text-ink-faint hover:text-red-600"><Trash2 size={15} /></button>
+              <button data-testid={`edit-insurance-${r.entryId}`} onClick={(e) => { e.stopPropagation(); setEdit(r); }} className="text-ink-faint hover:text-cobalt"><Pencil size={15} /></button>
+              <button data-testid={`delete-insurance-${r.entryId}`} onClick={(e) => { e.stopPropagation(); remove(r); }} className="text-ink-faint hover:text-red-600"><Trash2 size={15} /></button>
             </div>
           )},
         ]}

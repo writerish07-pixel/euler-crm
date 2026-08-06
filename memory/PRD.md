@@ -54,3 +54,9 @@ User's "Euler company CRM" was built on **Google Sheets + Apps Script (~27,000 l
 - **Import column mapping:** Lead Import is now two-step (upload -> map). Backend import_preview/import_commit accept an optional `mapping` multipart Form field (JSON {field: header}); _suggest_mapping auto-matches by name; works with any header names. Fixed bug: mapping must be Form(None) not a query param.
 - Tested: backend 17/17 pytest (test_iter4_mapping_and_lead_insurance.py), frontend 2/2 core flows. Baseline reseeded clean.
 - Google Sheet sync still READ-ONLY: owner has NOT yet added the service account email as Editor (verified canWrite=false). Appends remain graceful no-ops.
+
+## Iteration 5 (2026-06) — Backfill, Insurer Payout Report, Google Sheet LIVE
+- **Google Sheet sync ACTIVATED & LIVE:** owner granted the service account Editor. Fixed the write-probe bug (empty batchUpdate returns 400 "must specify at least one request" = write OK, not a permission failure). status() now correctly reports enabled=true, canWrite=true. Verified end-to-end: creating a lead appends a row to the live Euler Master sheet.
+- **Backfill (owner):** POST /api/integrations/gsheets/backfill pushes all leads/bookings/payments/deliveries to the sheet, idempotent (dedupes on column-A key so no duplicates). Settings "Backfill" button. Verified: skips existing, appends only missing.
+- **Insurer Payout Report (owner-only):** /insurance-report + GET /api/reports/insurance-payout — expected vs received payouts by month & by insurer, totals, bar chart. Executive blocked (403 + nav hidden + route redirect).
+- Tested: frontend 6/6 (iteration_5), backend verified via curl. Baseline clean (10 leads, 0 insurance).
