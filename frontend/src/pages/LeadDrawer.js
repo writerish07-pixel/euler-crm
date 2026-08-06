@@ -1,0 +1,416 @@
+import React, { useEffect, useState, useCallback } from "react";
+import { toast } from "sonner";
+import { ArrowRightLeft, Wallet, XCircle } from "lucide-react";
+import { get, post, put } from "../lib/api";
+import { inr, fmtDate } from "../lib/format";
+import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
+
+const CHARGE_FIELDS = [
+  ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
+  ["accessoriesAmount", "Accessories"], ["handlingCharges", "Handling"], ["trc", "TRC"],
+  ["fastag", "Fastag"], ["extendedWarranty", "Ext. Warranty"], ["otherCharges", "Other"],
+];
+const SCHEME_FIELDS = [
+  ["consumerDiscount", "Consumer Discount"], ["exchangeBonus", "Exchange Bonus"],
+  ["loyaltyBonus", "Loyalty Bonus"], ["referralBonus", "Referral Bonus"],
+  ["dsaDiscount", "DSA Bonus"], ["additionalDiscount", "Additional (Dealer)"],
+];
+
+export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
+  const [data, setData] = useState(null);
+  const [tab, setTab] = useState("overview");
+
+  const load = useCallback(() => {
+    get(`/leads/${leadId}/360`).then(setData);
+  }, [leadId]);
+  useEffect(() => { load(); }, [load]);
+
+  const refresh = () => { load(); onChanged && onChanged(); };
+
+  if (!data) return <Drawer open onClose={onClose} title="Loading…"><div className="text-ink-faint text-sm">Fetching lead…</div></Drawer>;
+
+  const lead = data.lead;
+  const c = data.commercials;
+  const isBooked = /book|deliver|finance/i.test(lead.currentStatus || "");
+
+  const tabs = [
+    { key: "overview", label: "Overview" },
+    { key: "price", label: "Price Structure" },
+    { key: "scheme", label: "Scheme" },
+    { key: "payments", label: `Payments (${data.payments.length})` },
+    { key: "delivery", label: "Delivery" },
+    { key: "activity", label: `Activity (${data.activities.length})` },
+  ];
+
+  return (
+    <Drawer open onClose={onClose} width="max-w-3xl"
+      title={lead.customerName}
+      subtitle={`${lead.leadId} · ${lead.interestedModel} ${lead.variant} · ${lead.mobile}`}
+      footer={<DrawerActions lead={lead} isBooked={isBooked} refresh={refresh} onClose={onClose} />}
+    >
+      <div className="flex items-center gap-2 mb-4">
+        <Badge>{lead.currentStatus}</Badge>
+        <Badge>{lead.accountStatus}</Badge>
+        <div className="ml-auto text-right">
+          <div className="text-xs text-ink-faint">Outstanding</div>
+          <div className={`font-mono font-bold ${lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{inr(lead.customerOutstanding)}</div>
+        </div>
+      </div>
+
+      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+
+      {tab === "overview" && <Overview lead={lead} c={c} />}
+      {tab === "price" && <PriceStructure lead={lead} onSaved={refresh} />}
+      {tab === "scheme" && <SchemeTab lead={lead} c={c} masters={masters} onSaved={refresh} />}
+      {tab === "payments" && <PaymentsTab lead={lead} payments={data.payments} masters={masters} onSaved={refresh} />}
+      {tab === "delivery" && <DeliveryTab lead={lead} delivery={data.delivery} onSaved={refresh} />}
+      {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} />}
+    </Drawer>
+  );
+}
+
+function DrawerActions({ lead, isBooked, refresh, onClose }) {
+  const [modal, setModal] = useState(null);
+  return (
+    <div className="flex items-center gap-2">
+      {!isBooked && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
+      {isBooked && lead.accountStatus === "Active" && (
+        <Button variant="secondary" data-testid="close-lead-btn" onClick={() => setModal("close")}><XCircle size={15} /> Close Lead</Button>
+      )}
+      <div className="ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
+      {modal === "book" && <BookingModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); }} />}
+      {modal === "close" && <CloseModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); onClose(); }} />}
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Overview */
+function KV({ label, value, tone }) {
+  return (
+    <div className="flex items-center justify-between py-1.5 border-b border-zinc-100 last:border-0">
+      <span className="text-sm text-ink-soft">{label}</span>
+      <span className={`font-mono tabular text-sm font-medium ${tone || "text-ink"}`}>{value}</span>
+    </div>
+  );
+}
+
+function Overview({ lead, c }) {
+  return (
+    <div className="grid grid-cols-2 gap-5">
+      <Card className="p-4">
+        <h4 className="font-heading font-bold text-ink text-sm mb-2">Commercial Breakup</h4>
+        <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
+        <KV label="TCS" value={inr(c.tcs)} />
+        <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />
+        <KV label="Passed to Customer" value={inr(c.totalPassedToCustomer)} />
+        <KV label="Final Exchange Value" value={inr(lead.finalExchangeValue || 0)} />
+        <div className="mt-2 pt-2 border-t border-line flex items-center justify-between">
+          <span className="text-sm font-semibold text-ink">Customer Payable</span>
+          <span className="font-mono font-bold text-cobalt">{inr(c.customerPayable)}</span>
+        </div>
+      </Card>
+      <Card className="p-4">
+        <h4 className="font-heading font-bold text-ink text-sm mb-2">Collections & Claims</h4>
+        <KV label="Total Received" value={inr(lead.totalReceived)} tone="text-emerald-600" />
+        <KV label="Customer Outstanding" value={inr(lead.customerOutstanding)} tone={lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"} />
+        <KV label="OEM Claimable" value={inr(c.claim.claimEligible)} tone="text-amber-600" />
+        <KV label="Dealer Retained" value={inr(c.dealerRetained)} />
+        <KV label="Dealer Margin (Net)" value={inr(c.margin.marginNetExGst)} />
+        <KV label="Lead Source" value={lead.leadSource || "—"} tone="text-ink" />
+      </Card>
+      <Card className="p-4 col-span-2">
+        <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
+        <div className="grid grid-cols-3 gap-x-6">
+          <KV label="Executive" value={lead.executive || "—"} />
+          <KV label="Priority" value={lead.priority} />
+          <KV label="Created" value={fmtDate(lead.createdDate)} />
+          <KV label="Booking Date" value={fmtDate(lead.bookingDate)} />
+          <KV label="Finance" value={lead.financeRequired} />
+          <KV label="Exchange" value={lead.exchangeRequired} />
+        </div>
+        {lead.remarks && <div className="mt-2 text-sm text-ink-soft bg-zinc-50 rounded-lg p-3">{lead.remarks}</div>}
+      </Card>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Price Structure */
+function PriceStructure({ lead, onSaved }) {
+  const [form, setForm] = useState(() => {
+    const f = { tcsApplicable: lead.tcsApplicable || "No", finalExchangeValue: lead.finalExchangeValue || 0 };
+    CHARGE_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
+    return f;
+  });
+  const [preview, setPreview] = useState(null);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const computePreview = useCallback(() => {
+    post("/commercial/compute", {
+      exShowroom: +form.exShowroom, accessories: +form.accessoriesAmount, insurance: +form.insuranceAmount,
+      registrationRto: +form.rto, fastag: +form.fastag, handlingCharges: +form.handlingCharges, trc: +form.trc,
+      extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
+      tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
+      consumerDiscount: lead.consumerDiscount, exchangeBonus: lead.exchangeBonus, loyaltyBonus: lead.loyaltyBonus,
+      referralBonus: lead.referralBonus, dsaDiscount: lead.dsaDiscount, additionalDiscount: lead.additionalDiscount,
+      benefitMode: lead.benefitMode || "Full Benefit",
+    }).then(setPreview);
+  }, [form, lead]);
+  useEffect(() => { computePreview(); }, [computePreview]);
+
+  const save = async () => {
+    await put(`/leads/${lead.leadId}/price-structure`, {
+      exShowroom: +form.exShowroom, rto: +form.rto, insuranceAmount: +form.insuranceAmount,
+      accessoriesAmount: +form.accessoriesAmount, handlingCharges: +form.handlingCharges, trc: +form.trc,
+      fastag: +form.fastag, extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
+      tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
+    });
+    toast.success("Price structure saved");
+    onSaved();
+  };
+
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-3">
+        {CHARGE_FIELDS.map(([k, label]) => (
+          <Field key={k} label={label}><Input data-testid={`price-${k}`} type="number" value={form[k]} onChange={set(k)} /></Field>
+        ))}
+        <Field label="Final Exchange Value"><Input type="number" value={form.finalExchangeValue} onChange={set("finalExchangeValue")} /></Field>
+        <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={set("tcsApplicable")}><option>No</option><option>Yes</option></Select></Field>
+      </div>
+      {preview && (
+        <Card className="p-4 mt-4 bg-cobalt-tint/40 border-cobalt/20">
+          <div className="grid grid-cols-4 gap-3 text-center">
+            <Prev label="Gross Vehicle Cost" v={preview.grossVehicleCost} />
+            <Prev label="TCS" v={preview.tcs} />
+            <Prev label="Total Discount" v={preview.totalDiscount} />
+            <Prev label="Customer Payable" v={preview.customerPayable} highlight />
+          </div>
+        </Card>
+      )}
+      <div className="flex justify-end mt-4">
+        <Button data-testid="save-price-btn" onClick={save}>Save Price Structure</Button>
+      </div>
+    </div>
+  );
+}
+
+function Prev({ label, v, highlight }) {
+  return (
+    <div>
+      <div className="text-[11px] text-ink-faint uppercase tracking-wide">{label}</div>
+      <div className={`font-mono font-bold ${highlight ? "text-cobalt text-lg" : "text-ink"}`}>{inr(v)}</div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Scheme */
+function SchemeTab({ lead, c, masters, onSaved }) {
+  const [form, setForm] = useState(() => {
+    const f = { benefitMode: lead.benefitMode || "Full Benefit", oemExtraSupportReceived: lead.oemExtraSupportReceived || 0, oemExtraSupportPassed: lead.oemExtraSupportPassed || 0, customerBenefitPassed: lead.customerBenefitPassed || 0 };
+    SCHEME_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
+    return f;
+  });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const save = async () => {
+    await put(`/leads/${lead.leadId}/scheme`, {
+      consumerDiscount: +form.consumerDiscount, exchangeBonus: +form.exchangeBonus, loyaltyBonus: +form.loyaltyBonus,
+      referralBonus: +form.referralBonus, dsaDiscount: +form.dsaDiscount, additionalDiscount: +form.additionalDiscount,
+      benefitMode: form.benefitMode, customerBenefitPassed: +form.customerBenefitPassed,
+      oemExtraSupportReceived: +form.oemExtraSupportReceived, oemExtraSupportPassed: +form.oemExtraSupportPassed,
+    });
+    toast.success("Scheme updated");
+    onSaved();
+  };
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-3">
+        {SCHEME_FIELDS.map(([k, label]) => (
+          <Field key={k} label={label}><Input data-testid={`scheme-${k}`} type="number" value={form[k]} onChange={set(k)} /></Field>
+        ))}
+        <Field label="Benefit Mode"><Select data-testid="benefit-mode" value={form.benefitMode} onChange={set("benefitMode")}>{(masters?.benefitModes || ["Full Benefit","Partial Benefit","No Benefit"]).map((m) => <option key={m}>{m}</option>)}</Select></Field>
+        {form.benefitMode === "Partial Benefit" && <Field label="Customer Benefit Passed"><Input type="number" value={form.customerBenefitPassed} onChange={set("customerBenefitPassed")} /></Field>}
+        <Field label="OEM Extra Support Received"><Input type="number" value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} /></Field>
+        <Field label="OEM Extra Support Passed"><Input type="number" value={form.oemExtraSupportPassed} onChange={set("oemExtraSupportPassed")} /></Field>
+      </div>
+      <Card className="p-4 mt-4 bg-amber-50/50 border-amber-200">
+        <div className="grid grid-cols-4 gap-3 text-center">
+          <Prev label="OEM Eligible" v={c.oemEligible} />
+          <Prev label="Dealer Discount" v={c.dealerDiscount} />
+          <Prev label="OEM Claimable" v={c.claim.claimEligible} />
+          <Prev label="Dealer Retained" v={c.dealerRetained} />
+        </div>
+      </Card>
+      <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save}>Update Scheme</Button></div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Payments */
+function PaymentsTab({ lead, payments, masters, onSaved }) {
+  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "" });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const add = async () => {
+    if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
+    await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount });
+    toast.success(`Receipt added · ${inr(+form.amount)}`);
+    setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "" });
+    onSaved();
+  };
+  return (
+    <div>
+      <Card className="p-4 mb-4">
+        <div className="grid grid-cols-4 gap-3 items-end">
+          <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
+          <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{(masters?.paymentModes || []).map((m) => <option key={m}>{m}</option>)}</Select></Field>
+          <Field label="Narration"><Input value={form.narration} onChange={set("narration")} /></Field>
+          <Button data-testid="add-payment-btn" onClick={add}><Wallet size={15} /> Add Receipt</Button>
+        </div>
+        {form.paymentMode === "Finance" && (
+          <div className="grid grid-cols-2 gap-3 mt-3">
+            <Field label="Financer"><Select value={form.financerName} onChange={set("financerName")}><option value="">—</option>{(masters?.financers || []).map((f) => <option key={f}>{f}</option>)}</Select></Field>
+            <Field label="Finance File Number"><Input value={form.financeFileNumber} onChange={set("financeFileNumber")} /></Field>
+          </div>
+        )}
+      </Card>
+      <div className="space-y-2">
+        {payments.length === 0 && <div className="text-sm text-ink-faint text-center py-6">No payments recorded yet</div>}
+        {payments.map((p) => (
+          <div key={p.receiptNumber} className="flex items-center justify-between bg-white border border-line rounded-lg px-4 py-2.5">
+            <div>
+              <div className="text-sm font-semibold text-ink">{inr(p.amount)} <Badge className="ml-1">{p.paymentMode}</Badge></div>
+              <div className="text-xs text-ink-faint">{p.receiptNumber} · {fmtDate(p.date)} · {p.narration || "—"}</div>
+            </div>
+            <div className="text-right text-xs text-ink-soft">
+              <div>Running: <span className="font-mono">{inr(p.runningTotal)}</span></div>
+              <div>Balance: <span className="font-mono">{inr(p.outstandingBalance)}</span></div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Delivery */
+const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
+function DeliveryTab({ lead, delivery, onSaved }) {
+  const [form, setForm] = useState(() => {
+    const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || "" };
+    DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
+    return f;
+  });
+  const toggle = (k) => setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" }));
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const save = async () => {
+    await put(`/leads/${lead.leadId}/delivery`, form);
+    toast.success("Delivery status updated");
+    onSaved();
+  };
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {DELIV_STEPS.map(([k, label]) => (
+          <button key={k} data-testid={`deliv-${k}`} onClick={() => toggle(k)}
+            className={`px-3 py-1.5 rounded-full text-xs font-semibold ring-1 ring-inset transition-colors ${form[k] === "Done" ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-zinc-50 text-ink-soft ring-line"}`}>
+            {label} {form[k] === "Done" ? "✓" : ""}
+          </button>
+        ))}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Invoice Number"><Input value={form.invoiceNumber} onChange={set("invoiceNumber")} /></Field>
+        <Field label="Chassis Number"><Input value={form.chassisNumber} onChange={set("chassisNumber")} /></Field>
+        <Field label="Number Plate"><Input value={form.numberPlate} onChange={set("numberPlate")} /></Field>
+        <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} /></Field>
+        <Field label="Delivery Date"><Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} /></Field>
+        <Field label="Mark Delivered?"><Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")}><option value="">Not yet</option><option value="Yes">Yes — Delivered</option></Select></Field>
+      </div>
+      <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save}>Save Delivery</Button></div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Activity */
+function ActivityTab({ lead, activities, masters, onSaved }) {
+  const [form, setForm] = useState({ activityType: "Call", discussion: "", nextFollowup: "" });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const add = async () => {
+    if (!form.discussion) return toast.error("Add a discussion note");
+    await post(`/leads/${lead.leadId}/activities`, { ...form, executive: lead.executive });
+    toast.success("Activity logged");
+    setForm({ activityType: "Call", discussion: "", nextFollowup: "" });
+    onSaved();
+  };
+  return (
+    <div>
+      <Card className="p-4 mb-4">
+        <div className="grid grid-cols-4 gap-3 items-end">
+          <Field label="Type"><Select value={form.activityType} onChange={set("activityType")}>{(masters?.activityTypes || []).map((t) => <option key={t}>{t}</option>)}</Select></Field>
+          <div className="col-span-2"><Field label="Discussion"><Input data-testid="activity-note" value={form.discussion} onChange={set("discussion")} /></Field></div>
+          <Button data-testid="add-activity-btn" onClick={add}>Log</Button>
+        </div>
+      </Card>
+      <div className="space-y-2">
+        {activities.map((a) => (
+          <div key={a.activityId} className="flex gap-3 bg-white border border-line rounded-lg px-4 py-2.5">
+            <Badge>{a.activityType}</Badge>
+            <div className="flex-1">
+              <div className="text-sm text-ink">{a.discussion}</div>
+              <div className="text-xs text-ink-faint">{fmtDate(a.date)} {a.time} · {a.executive || "—"}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Modals */
+function BookingModal({ lead, onClose, onDone }) {
+  const [form, setForm] = useState({ bookingAmount: lead.bookingAmount || 5000, paymentMode: "UPI", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No" });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const submit = async () => {
+    await post(`/leads/${lead.leadId}/convert-booking`, {
+      bookingAmount: +form.bookingAmount, paymentMode: form.paymentMode, executive: lead.executive,
+      financeRequired: form.financeRequired, exchangeRequired: form.exchangeRequired,
+    });
+    toast.success("Converted to Booking");
+    onDone();
+  };
+  return (
+    <MiniModal title="Convert to Booking" onClose={onClose} onSubmit={submit} submitLabel="Confirm Booking" testid="confirm-booking-btn">
+      <p className="text-xs text-ink-soft mb-3">Books without locking price. Set the Price Structure afterwards to compute payable & outstanding.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Advance Amount (₹)"><Input data-testid="booking-amount" type="number" value={form.bookingAmount} onChange={set("bookingAmount")} /></Field>
+        <Field label="Payment Mode"><Select value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
+        <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
+        <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
+      </div>
+    </MiniModal>
+  );
+}
+
+function CloseModal({ lead, onClose, onDone }) {
+  const [reason, setReason] = useState("");
+  const submit = async () => { await post(`/leads/${lead.leadId}/close`, { closeReason: reason }); toast.success("Lead closed"); onDone(); };
+  return (
+    <MiniModal title="Close Lead" onClose={onClose} onSubmit={submit} submitLabel="Close Lead" danger testid="confirm-close-btn">
+      <Field label="Close Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Delivered & settled" /></Field>
+    </MiniModal>
+  );
+}
+
+function MiniModal({ title, children, onClose, onSubmit, submitLabel, danger, testid }) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
+      <Card className="relative w-full max-w-lg p-6 animate-fade-up">
+        <h3 className="font-heading text-lg font-bold text-ink mb-4">{title}</h3>
+        {children}
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant={danger ? "danger" : "primary"} data-testid={testid} onClick={onSubmit}>{submitLabel}</Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
