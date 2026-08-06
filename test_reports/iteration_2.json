@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 2 (auth, roles, editable masters, share board, export, gsheets no-op) verified end-to-end. Backend: 23/23 pytest tests pass in /app/backend/tests/test_auth_and_iter2.py. Frontend: all 15 critical UI checks pass — owner login, role-based nav, dealer-earnings route protection, price-master add/edit/delete flow, scheme-master add flow, Settings page (Google Sheet 'Not configured' badge, /share link, owner-only User Accounts card with add-user working), executive restrictions (nav hidden, direct URL redirected, Settings hides User Accounts), public /share renders without login, logout returns to /login, export button hits /api/export and returns a valid 11.7KB .xlsx blob with correct openxml content-type, regression (dashboard KPIs + Lead Register) still green.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Topbar (post-login)", "issues": ["'Welcome back' success toast is positioned in the top-right and overlaps the Export button for ~3s after login. Real users can still click after the toast auto-dismisses, but the overlap makes the button momentarily hard to hit (Playwright force-click at element coords was intercepted; JS .click() worked). Consider anchoring toasts below the topbar or reducing default duration."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_auth_and_iter2.py",
+    "/app/backend/tests/test_euler_crm.py",
+    "/app/test_reports/pytest/iter2_results.xml"
+  ],
+  "action_items": [
+    "(Optional polish) Move toast container below the topbar or shorten the default toast duration so the 'Welcome back' notification doesn't overlap the Export button after login.",
+    "(Optional cleanup) After testing, delete leftover TEST_ users and TEST_UIModel price/scheme rows created by the UI tests (see seed_data_creation)."
+  ],
+  "critical_code_review_comments": [
+    "server.py has grown from ~745 to ~920 lines with auth + masters CRUD + export + share. Still over the 700-line guideline — split into routers/auth_routes.py (already partly in auth.py), routers/masters.py (price+scheme CRUD), routers/exports.py (xlsx), and routers/public.py (/share).",
+    "GET /api/export loads whole collections into memory and generates the whole xlsx in-request. Fine at current volume; add pagination/streaming or a background job when leads > 5k.",
+    "auth.py: JWT_SECRET is read via os.environ['JWT_SECRET'] with no default. Good (fails fast). Consider adding a startup assertion so the failure surfaces at boot, not on first login.",
+    "auth.py: seed_users always upserts the owner password to match env — good idempotency. The demo executive is only inserted if missing; if OWNER_PASSWORD is rotated the executive's password will NOT re-sync. Acceptable for a fixed demo account.",
+    "auth.py returns bcrypt hashes from a synchronous bcrypt.hashpw inside an async function — blocking for O(100ms) per login/create; fine at low QPS, would need to be moved to a thread pool at scale.",
+    "gsheets.py append() correctly no-ops when unconfigured; ensure exceptions inside append are swallowed (log-only) so a bad credential can never break lead creation. Currently a network failure inside gspread would propagate — wrap in try/except at the append() call sites or inside the module.",
+    "Owner-only user delete does not prevent deleting the last remaining owner. If the sole owner deletes themselves via userId change or a data script, the org would be locked out. Add a guard: 'Cannot delete the last owner'.",
+    "Excel export is protected by current_user (any authenticated role can export). Business intent says Executives should not access Dealer Earnings; the export sheet includes Price Master/Bookings/Payments which is arguably fine for exec, but consider gating /api/export to owner_only if company financial detail should stay owner-scoped.",
+    "CORS in server.py uses allow_origins=['*'] with allow_credentials=False. Fine because auth is done via Bearer header, not cookies. Confirmed no cookies are set."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_auth_and_iter2.py (new — 23 tests)"
+  ],
+  "success_rate": { "backend": "100% (23/23)", "frontend": "100% (15/15 critical checks)" },
+  "test_credentials": "Owner owner@euler.com/euler@123 and Executive executive@euler.com/euler@123 both seed correctly on startup and log in through /api/auth/login.",
+  "seed_data_creation": "Backend test suite created + deleted a temporary owner-managed executive user (test_<uuid>@euler.com) and a TEST_Model price row + scheme row (all deleted at end). It also created a lead 'TEST_GSheetsNoop' with a 100 INR Cash payment to prove gsheets no-op is graceful. UI test left behind: (a) a TEST_UIModel price row (not deleted after edit), (b) a TEST_UIModel scheme row, (c) two executive users test_fee6b2c3@euler.com and test_ui_1786018500@euler.com (visible on Settings). Main agent can reseed via POST /api/admin/reseed if a clean baseline is needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Two pytest files exist and both should be run on the next iteration: /app/backend/tests/test_euler_crm.py (iter1 core CRM regression, 30 tests) and /app/backend/tests/test_auth_and_iter2.py (auth/roles/masters/export/share, 23 tests). Auth uses Bearer JWT; use fixtures owner_token / exec_token. Frontend login redirects to '/' (root), not '/dashboard', so wait_for_url should check absence of '/login' rather than presence of '/dashboard'. Export button is fired via JS blob-anchor click — Playwright's expect_download does not fire; verify by monitoring the /api/export response (200 + openxml content-type + >500 bytes body) instead. Public /share is fully unauthenticated (backend /api/share/dashboard requires no token). Google Sheets sync is intentionally NOT configured — /api/integrations/gsheets returns enabled=false and record creation still succeeds. No known blockers.",
+  "rca_of_the_issue": "n/a — no failing tests. One non-blocking design observation: the 'Welcome back' toast overlays the topbar Export button after login. Reproduction: log in as owner, immediately (<3s) click 'Export' in top-right — the toast can intercept the click. Mitigation: move toast container below the topbar or shorten duration to 2s. Also, Playwright expect_download() will not fire on this app's blob-URL download path — assert via /api/export response instead."
+}

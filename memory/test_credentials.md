@@ -1,9 +1,23 @@
 # Euler CRM — Test Credentials
 
-**Authentication:** NONE (per user request: "No login for now, single shared view").
-The app is a single shared view — no login required. Open the app root and use directly.
+**Authentication:** JWT email+password with roles (Owner / Executive). Bearer token in `Authorization` header, stored in localStorage on the frontend.
+
+## Accounts (seeded on backend startup)
+| Role | Email | Password |
+|------|-------|----------|
+| Owner | `owner@euler.com` | `euler@123` |
+| Executive | `executive@euler.com` | `euler@123` |
+
+- **Owner** sees everything incl. **Dealer Earnings** (owner-only route `/dealer-earnings`, backend `GET /api/dealer-earnings` requires owner) and **Settings → User Accounts**.
+- **Executive** sees everything EXCEPT Dealer Earnings and User management (gets 403 / redirected).
+- Owner can create/delete users via Settings page (`POST /api/auth/users`).
+
+## Public (no login)
+- `/share` → Company Share Board (read-only monthly bookings/retail, no customer or staff data). Backend `GET /api/share/dashboard` is public.
+
+## Integrations
+- Google Sheets one-way sync: appends new Lead/Booking/Payment/Delivery/Claim to the Euler Master sheet. Activates when `/app/backend/gsheets_credentials.json` (Service Account key) is present and the sheet (`GSHEET_ID` in backend/.env) is shared with the service account email. Currently NOT configured (graceful no-op). Status: `GET /api/integrations/gsheets`.
+- Excel export: `GET /api/export` → one .xlsx with a sheet per module.
 
 ## Seed data (migrated from Euler Master.xlsx)
-- 10 leads (LD26000001–LD26000010); LD26000001/2/3 are "Booked"
-- 69 price master rows (models: Turbo Max, Storm, Hi-Load, Neo HiRange)
-- 33 scheme master rows, 4 incentive rows, 3 bookings, 3 payments, 3 dealer-earnings rows
+10 leads (LD26000001–10; 1-3 Booked), 69 price rows, 33 scheme rows, 4 incentives, 3 bookings/payments/dealer-earnings.

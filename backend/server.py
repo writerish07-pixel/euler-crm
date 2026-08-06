@@ -1,3 +1,4 @@
+import io
 import os
 import uuid
 from datetime import datetime, timezone
@@ -5,13 +6,16 @@ from pathlib import Path
 from typing import Optional, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 
 import commercial as ce
 import seed as seeder
+import auth as authmod
+import gsheets
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -20,7 +24,13 @@ client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="Euler CRM API")
-api = APIRouter(prefix="/api")
+
+auth_router = authmod.build_router(db)
+current_user = auth_router.current_user
+owner_only = auth_router.owner_only
+
+api = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
+public = APIRouter(prefix="/api")
 
 
 # ---------------------------------------------------------------- helpers
@@ -371,6 +381,7 @@ async def create_lead(body: LeadIn):
         "discussion": "Lead created from CRM", "executive": body.executive,
         "customerName": body.customerName, "mobile": body.mobile, "model": body.interestedModel,
     })
+    await gsheets.append("leads", doc)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -420,6 +431,11 @@ async def convert_booking(lead_id: str, body: BookingIn):
         "bookingAmount": body.bookingAmount, "amountReceived": body.bookingAmount, "paymentMode": body.paymentMode,
         "financeRequired": body.financeRequired, "exchangeRequired": body.exchangeRequired,
         "snapshotId": snapshot_id, "bookingStatus": "Booked", "createdBy": "crm", "createdDate": today(),
+    })
+    await gsheets.append("bookings", {
+        "bookingId": booking_id, "leadId": lead_id, "customerName": lead.get("customerName"),
+        "bookingDate": bdate, "model": lead.get("interestedModel"), "variant": lead.get("variant"),
+        "bookingAmount": body.bookingAmount, "paymentMode": body.paymentMode, "bookingStatus": "Booked",
     })
     if body.bookingAmount > 0:
         await _add_payment_internal(lead_id, PaymentIn(
@@ -480,6 +496,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         "financeFileNumber": body.financeFileNumber,
     }
     await db.payments.insert_one(doc)
+    await gsheets.append("payments", doc)
     if body.paymentMode == "Finance" and body.financeFileNumber:
         await _upsert_finance_file(lead_id, body)
     return clean(doc)
@@ -568,6 +585,12 @@ async def mark_delivery(lead_id: str, body: DeliveryIn):
         lead_updates.update({"deliveryStatus": "Delivered", "currentStatus": "Delivered",
                              "deliveryDate": body.deliveryDate or today()})
     await db.leads.update_one({"leadId": lead_id}, {"$set": lead_updates})
+    if delivered:
+        await gsheets.append("deliveries", {
+            "leadId": lead_id, "customerName": lead.get("customerName"),
+            "deliveryDate": body.deliveryDate or today(), "delivered": "Yes",
+            "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
+        })
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -623,13 +646,6 @@ async def list_insurance():
     return [clean(i) for i in await db.insurance.find().to_list(1000)]
 
 
-@api.get("/dealer-earnings")
-async def list_dealer_earnings():
-    rows = await db.dealer_earnings.find().to_list(1000)
-    total = ce.round2(sum(ce.num(r.get("totalDealerEarnings")) for r in rows))
-    return {"rows": [clean(r) for r in rows], "total": total}
-
-
 # ---------------------------------------------------------------- claims
 @api.get("/claims")
 async def list_claims():
@@ -668,12 +684,171 @@ class ClaimSettleIn(BaseModel):
 
 @api.post("/claims/settle")
 async def settle_claim(body: ClaimSettleIn):
+    doc = {"claimId": f"CLM-{body.leadId}-{body.componentKey}", **body.model_dump()}
     await db.claims.update_one(
         {"leadId": body.leadId, "componentKey": body.componentKey},
-        {"$set": {"claimId": f"CLM-{body.leadId}-{body.componentKey}", **body.model_dump()}},
-        upsert=True,
+        {"$set": doc}, upsert=True,
     )
+    lead = await db.leads.find_one({"leadId": body.leadId}) or {}
+    await gsheets.append("claims", {**doc, "customer": lead.get("customerName", ""),
+                                    "model": lead.get("interestedModel", ""), "claimAmount": body.receivedAmount})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- masters CRUD (editable)
+class PriceRowIn(BaseModel):
+    model: str
+    variant: str
+    bodyType: str = ""
+    exShowroom: float = 0
+    rto: float = 0
+    insurance: float = 0
+    accessories: float = 0
+    handlingCharges: float = 0
+    trc: float = 0
+    fastag: float = 0
+    extendedWarranty: float = 0
+    otherCharges: float = 0
+    gstPercent: float = 0
+    tcsApplicable: str = "No"
+    priceVersion: str = ""
+    status: str = "active"
+    remarks: str = ""
+
+
+@api.post("/price-master")
+async def create_price_row(body: PriceRowIn):
+    count = await db.price_master.count_documents({})
+    doc = {"priceId": f"PM{count + 1:04d}", **body.model_dump()}
+    await db.price_master.insert_one(doc)
+    return clean(doc)
+
+
+@api.put("/price-master/{price_id}")
+async def update_price_row(price_id: str, body: PriceRowIn):
+    res = await db.price_master.update_one({"priceId": price_id}, {"$set": body.model_dump()})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Price row not found")
+    return clean(await db.price_master.find_one({"priceId": price_id}))
+
+
+@api.delete("/price-master/{price_id}")
+async def delete_price_row(price_id: str):
+    await db.price_master.delete_one({"priceId": price_id})
+    return {"ok": True}
+
+
+class SchemeRowIn(BaseModel):
+    schemeMonth: Optional[str] = None
+    effectiveFrom: Optional[str] = None
+    effectiveTo: Optional[str] = None
+    circularRef: str = ""
+    model: str = ""
+    variant: str = ""
+    component: str = ""
+    componentKey: str = ""
+    dealerShare: float = 0
+    companyShare: float = 0
+    totalBenefit: float = 0
+    status: str = "Active"
+    notes: str = ""
+
+
+@api.post("/scheme-master")
+async def create_scheme_row(body: SchemeRowIn):
+    count = await db.scheme_master.count_documents({})
+    payload = body.model_dump()
+    payload["totalBenefit"] = payload["totalBenefit"] or ce.round2(payload["dealerShare"] + payload["companyShare"])
+    doc = {"schemeId": f"SCM{count + 1:04d}", **payload}
+    await db.scheme_master.insert_one(doc)
+    return clean(doc)
+
+
+@api.put("/scheme-master/{scheme_id}")
+async def update_scheme_row(scheme_id: str, body: SchemeRowIn):
+    payload = body.model_dump()
+    payload["totalBenefit"] = payload["totalBenefit"] or ce.round2(payload["dealerShare"] + payload["companyShare"])
+    res = await db.scheme_master.update_one({"schemeId": scheme_id}, {"$set": payload})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Scheme row not found")
+    return clean(await db.scheme_master.find_one({"schemeId": scheme_id}))
+
+
+@api.delete("/scheme-master/{scheme_id}")
+async def delete_scheme_row(scheme_id: str):
+    await db.scheme_master.delete_one({"schemeId": scheme_id})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- dealer earnings (owner-only)
+@api.get("/dealer-earnings", dependencies=[Depends(owner_only)])
+async def list_dealer_earnings():
+    rows = await db.dealer_earnings.find().to_list(1000)
+    total = ce.round2(sum(ce.num(r.get("totalDealerEarnings")) for r in rows))
+    return {"rows": [clean(r) for r in rows], "total": total}
+
+
+# ---------------------------------------------------------------- integrations status
+@api.get("/integrations/gsheets")
+async def gsheets_status():
+    return gsheets.status()
+
+
+# ---------------------------------------------------------------- excel export
+@api.get("/export")
+async def export_xlsx():
+    import openpyxl
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    exports = {
+        "Leads": ("leads", ["leadId", "customerName", "mobile", "interestedModel", "variant", "executive",
+                            "currentStatus", "customerPayable", "totalReceived", "customerOutstanding", "bookingDate"]),
+        "Payments": ("payments", ["receiptNumber", "leadId", "customerName", "date", "amount", "paymentMode",
+                                  "runningTotal", "outstandingBalance"]),
+        "Bookings": ("bookings", ["bookingId", "leadId", "customerName", "bookingDate", "model", "variant",
+                                  "bookingAmount", "paymentMode", "bookingStatus"]),
+        "Claims": ("claims", ["claimId", "leadId", "customer", "component", "claimAmount", "claimStatus", "receivedAmount"]),
+        "Finance": ("finance", ["fileNumber", "leadId", "customerName", "financer", "sanctionedAmount",
+                                "receivedAgainstFile", "fileOutstanding", "status"]),
+        "Price Master": ("price_master", ["model", "variant", "bodyType", "exShowroom", "rto", "insurance", "tcsApplicable", "status"]),
+    }
+    for sheet_name, (coll, cols) in exports.items():
+        ws = wb.create_sheet(sheet_name)
+        ws.append(cols)
+        for doc in await db[coll].find().to_list(5000):
+            ws.append([doc.get(c, "") for c in cols])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"euler_crm_export_{today()}.xlsx"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ---------------------------------------------------------------- public share board (no auth)
+@public.get("/share/dashboard")
+async def share_dashboard():
+    leads = await db.leads.find().to_list(5000)
+    ym = this_month()
+    booked = [l for l in leads if "book" in (l.get("currentStatus") or "").lower()]
+    active_booked = [l for l in booked if (l.get("deliveryStatus") or "").lower() != "delivered"]
+    delivered = [l for l in leads if (l.get("deliveryStatus") or "").lower() == "delivered"]
+    new_this_month = [l for l in booked if str(l.get("bookingDate") or "").startswith(ym)]
+    retail_this_month = [l for l in delivered if str(l.get("deliveryDate") or "").startswith(ym)]
+    by_model = {}
+    for l in active_booked:
+        m = l.get("interestedModel") or "Unknown"
+        by_model[m] = by_model.get(m, 0) + 1
+    return {
+        "activeBookings": len(active_booked),
+        "newThisMonth": len(new_this_month),
+        "retailThisMonth": len(retail_this_month),
+        "byModel": [{"model": k, "count": v} for k, v in sorted(by_model.items(), key=lambda x: -x[1])],
+        "month": datetime.now(timezone.utc).strftime("%B %Y"),
+        "lastUpdated": now_iso(),
+    }
 
 
 # ---------------------------------------------------------------- commercial preview + quotation
@@ -725,15 +900,18 @@ async def create_quotation(body: QuotationIn):
 
 
 # ---------------------------------------------------------------- startup
+app.include_router(auth_router)
 app.include_router(api)
+app.include_router(public)
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
 )
 
 
 @app.on_event("startup")
 async def startup():
+    await authmod.seed_users(db)
     res = await seeder.run_seed(db)
     if res.get("seeded"):
         for l in await db.leads.find().to_list(3000):

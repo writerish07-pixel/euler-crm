@@ -1,7 +1,10 @@
 import React from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
+import { AuthProvider, useAuth } from "./context/AuthContext";
 import Layout from "./components/Layout";
+import Login from "./pages/Login";
+import Share from "./pages/Share";
 import Dashboard from "./pages/Dashboard";
 import Leads from "./pages/Leads";
 import PriceMaster from "./pages/PriceMaster";
@@ -16,29 +19,50 @@ import Activities from "./pages/Activities";
 import DealerEarnings from "./pages/DealerEarnings";
 import Quotations from "./pages/Quotations";
 import Bookings from "./pages/Bookings";
+import Settings from "./pages/Settings";
+
+function Protected({ children, ownerOnly }) {
+  const { user } = useAuth();
+  const loc = useLocation();
+  if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
+  if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
+  if (ownerOnly && user.role !== "owner") return <Navigate to="/" replace />;
+  return <Layout>{children}</Layout>;
+}
+
+function AppRoutes() {
+  const P = (el, ownerOnly) => <Protected ownerOnly={ownerOnly}>{el}</Protected>;
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/share" element={<Share />} />
+      <Route path="/" element={P(<Dashboard />)} />
+      <Route path="/leads" element={P(<Leads />)} />
+      <Route path="/bookings" element={P(<Bookings />)} />
+      <Route path="/quotations" element={P(<Quotations />)} />
+      <Route path="/activities" element={P(<Activities />)} />
+      <Route path="/payments" element={P(<Payments />)} />
+      <Route path="/finance" element={P(<Finance />)} />
+      <Route path="/insurance" element={P(<Insurance />)} />
+      <Route path="/deliveries" element={P(<Deliveries />)} />
+      <Route path="/claims" element={P(<Claims />)} />
+      <Route path="/scheme-master" element={P(<SchemeMaster />)} />
+      <Route path="/incentive-master" element={P(<IncentiveMaster />)} />
+      <Route path="/dealer-earnings" element={P(<DealerEarnings />, true)} />
+      <Route path="/price-master" element={P(<PriceMaster />)} />
+      <Route path="/settings" element={P(<Settings />)} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
 
 export default function App() {
   return (
     <BrowserRouter>
       <Toaster richColors position="top-right" />
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/leads" element={<Leads />} />
-          <Route path="/bookings" element={<Bookings />} />
-          <Route path="/quotations" element={<Quotations />} />
-          <Route path="/activities" element={<Activities />} />
-          <Route path="/payments" element={<Payments />} />
-          <Route path="/finance" element={<Finance />} />
-          <Route path="/insurance" element={<Insurance />} />
-          <Route path="/deliveries" element={<Deliveries />} />
-          <Route path="/claims" element={<Claims />} />
-          <Route path="/scheme-master" element={<SchemeMaster />} />
-          <Route path="/incentive-master" element={<IncentiveMaster />} />
-          <Route path="/dealer-earnings" element={<DealerEarnings />} />
-          <Route path="/price-master" element={<PriceMaster />} />
-        </Routes>
-      </Layout>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
     </BrowserRouter>
   );
 }
