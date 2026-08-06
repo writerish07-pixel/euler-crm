@@ -27,6 +27,7 @@ SYNC_MAP = {
 
 _service = None
 _status = {"enabled": False, "reason": "not configured", "email": None}
+_health = {"lastWriteOk": None, "lastWriteAt": None, "lastError": None, "writes": 0, "failures": 0}
 
 
 def _init():
@@ -58,7 +59,7 @@ def status():
     if _service is None:
         _init()
     if _service is None:
-        return {**_status, "spreadsheetId": os.environ.get("GSHEET_ID", "")}
+        return {**_status, "spreadsheetId": os.environ.get("GSHEET_ID", ""), "health": _health}
     # probe write permission with a harmless empty batchUpdate (needs Editor)
     sheet_id = os.environ.get("GSHEET_ID", "")
     try:
@@ -67,7 +68,7 @@ def status():
     except Exception as e:
         _status.update({"enabled": False, "canRead": False, "canWrite": False,
                         "reason": "cannot access sheet — share it with the service account email"})
-        return {**_status, "spreadsheetId": sheet_id}
+        return {**_status, "spreadsheetId": sheet_id, "health": _health}
     try:
         _service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": []}).execute()
         _status.update({"enabled": True, "canWrite": True, "reason": "connected (read + write)"})
@@ -81,7 +82,7 @@ def status():
         else:
             _status.update({"enabled": False, "canWrite": False,
                             "reason": "read-only — share the sheet with the service account email as EDITOR to enable syncing"})
-    return {**_status, "spreadsheetId": sheet_id}
+    return {**_status, "spreadsheetId": sheet_id, "health": _health}
 
 
 def _append_sync(tab, values):
@@ -107,9 +108,13 @@ async def append(entity: str, doc: dict):
     row = [doc.get(f, "") for f in fields]
     try:
         await asyncio.to_thread(_append_sync, tab, row)
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
         return True
     except Exception as e:
         _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
         return False
 
 

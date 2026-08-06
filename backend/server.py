@@ -1024,6 +1024,49 @@ async def insurance_payout_report():
             "totals": {k: (ce.round2(v) if isinstance(v, float) else v) for k, v in totals.items()}}
 
 
+@api.get("/reports/dealer-earnings", dependencies=[Depends(owner_only)])
+async def dealer_earnings_report():
+    rows = await db.dealer_earnings.find().to_list(5000)
+    comp_keys = [
+        ("dealerMarginNetExGst", "Dealer Margin"),
+        ("dealerSchemeRetained", "Scheme Retained"),
+        ("dealerInsuranceIncome", "Insurance Income"),
+        ("financeIncentive", "Finance Incentive"),
+        ("accessoriesMargin", "Accessories Margin"),
+        ("exchangeMargin", "Exchange Margin"),
+        ("otherIncome", "Other Income"),
+    ]
+    by_month = {}
+    components = {label: 0.0 for _, label in comp_keys}
+    totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "total": 0.0, "count": 0}
+    for r in rows:
+        month = str(r.get("deliveryDate") or r.get("bookingDate") or "")[:7] or "Unknown"
+        m = by_month.setdefault(month, {"key": month, "margin": 0.0, "scheme": 0.0,
+                                        "insurance": 0.0, "other": 0.0, "total": 0.0, "count": 0})
+        margin = ce.num(r.get("dealerMarginNetExGst"))
+        scheme = ce.num(r.get("dealerSchemeRetained"))
+        insurance = ce.num(r.get("dealerInsuranceIncome"))
+        other = ce.round2(ce.num(r.get("financeIncentive")) + ce.num(r.get("accessoriesMargin"))
+                          + ce.num(r.get("exchangeMargin")) + ce.num(r.get("otherIncome")))
+        total = ce.round2(margin + scheme + insurance + other)
+        m["margin"] += margin; m["scheme"] += scheme; m["insurance"] += insurance
+        m["other"] += other; m["total"] += total; m["count"] += 1
+        totals["margin"] += margin; totals["scheme"] += scheme
+        totals["insurance"] += insurance; totals["total"] += total; totals["count"] += 1
+        for key, label in comp_keys:
+            components[label] += ce.num(r.get(key))
+
+    months = sorted(by_month.values(), key=lambda x: x["key"], reverse=True)
+    for m in months:
+        for k in ("margin", "scheme", "insurance", "other", "total"):
+            m[k] = ce.round2(m[k])
+    return {
+        "byMonth": months,
+        "components": [{"label": lbl, "amount": ce.round2(amt)} for lbl, amt in components.items() if amt],
+        "totals": {k: (ce.round2(v) if isinstance(v, float) else v) for k, v in totals.items()},
+    }
+
+
 # ---------------------------------------------------------------- excel export
 @api.get("/export")
 async def export_xlsx():

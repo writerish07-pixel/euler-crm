@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
@@ -8,7 +8,7 @@ import {
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
-import { downloadFile } from "../lib/api";
+import { downloadFile, get } from "../lib/api";
 
 const NAV = [
   { section: "Overview", items: [{ to: "/", label: "Dashboard", icon: LayoutDashboard, end: true }] },
@@ -30,6 +30,7 @@ const NAV = [
     { to: "/scheme-master", label: "Scheme Master", icon: Percent },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy },
     { to: "/dealer-earnings", label: "Dealer Earnings", icon: Coins, ownerOnly: true },
+    { to: "/earnings-report", label: "Earnings Report", icon: TrendingUp, ownerOnly: true },
   ]},
   { section: "Catalogue & Admin", items: [
     { to: "/price-master", label: "Price Master", icon: Tag },
@@ -74,6 +75,36 @@ function Sidebar({ isOwner }) {
   );
 }
 
+function SyncBadge() {
+  const [s, setS] = useState(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => get("/integrations/gsheets").then((d) => { if (live) setS(d); }).catch(() => {});
+    load();
+    const t = setInterval(load, 60000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
+  if (!s) return null;
+  const failed = s.enabled && s.health?.lastWriteOk === false;
+  let tone, dot, label, title;
+  if (failed) {
+    tone = "bg-red-50 text-red-700 ring-red-600/20"; dot = "bg-red-500"; label = "Sync Error";
+    title = `Last sheet write failed: ${s.health?.lastError || "unknown"}`;
+  } else if (s.enabled && s.canWrite) {
+    tone = "bg-emerald-50 text-emerald-700 ring-emerald-600/20"; dot = "bg-emerald-500 animate-pulse"; label = "Sheet Synced";
+    title = s.health?.lastWriteAt ? `Last write ${new Date(s.health.lastWriteAt).toLocaleString("en-IN")}` : "Connected — writes flow to your Google Sheet";
+  } else {
+    tone = "bg-amber-50 text-amber-700 ring-amber-600/20"; dot = "bg-amber-500"; label = "Sync Off";
+    title = s.reason || "Google Sheet sync not enabled";
+  }
+  return (
+    <div data-testid="sync-badge" title={title} className={cx("flex items-center gap-2 rounded-full px-3 py-1.5 ring-1 ring-inset", tone)}>
+      <span className={cx("h-1.5 w-1.5 rounded-full", dot)} />
+      <span className="text-xs font-medium">{label}</span>
+    </div>
+  );
+}
+
 function Topbar() {
   const { user, logout } = useAuth();
   const [menu, setMenu] = useState(false);
@@ -92,10 +123,7 @@ function Topbar() {
       </div>
       <div className="ml-auto flex items-center gap-3">
         <Button variant="secondary" data-testid="export-btn" onClick={exportXlsx} disabled={dl}><Download size={15} /> {dl ? "Exporting…" : "Export"}</Button>
-        <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 ring-1 ring-inset ring-emerald-600/20">
-          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-          <span className="text-xs font-medium text-emerald-700">Live DB</span>
-        </div>
+        <SyncBadge />
         <div className="relative">
           <button data-testid="user-menu" onClick={() => setMenu((m) => !m)} className="h-9 w-9 rounded-full bg-ink flex items-center justify-center text-white text-sm font-bold font-heading">{initials}</button>
           {menu && (

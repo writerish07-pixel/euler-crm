@@ -1,0 +1,32 @@
+{
+  "summary": "Frontend-only verification of Euler CRM Earnings Report + Sync Badge + role gating. Found and fixed a critical import bug in Layout.js (SyncBadge used useEffect without importing it, crashing the entire authenticated layout). After fix, all 4 target flows PASS.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "Layout.js -> SyncBadge",
+        "issue": "CRITICAL (FIXED): `useEffect` was used but not imported from React. This threw `ReferenceError: useEffect is not defined` on every authenticated page and prevented Topbar/Sidebar (and therefore Earnings Report nav + sync-badge) from rendering. Fixed by adding useEffect to the React import.",
+        "selector": "[data-testid=\"sync-badge\"]",
+        "priority": "CRITICAL"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [],
+  "action_items": [
+    "None — fix already applied. Main agent should retain the useEffect import in /app/frontend/src/components/Layout.js."
+  ],
+  "critical_code_review_comments": [
+    "Layout.js SyncBadge component was missing useEffect import — trivial but crashed all authenticated routes; consider adding an ErrorBoundary around Topbar so a single component failure doesn't blank the entire app.",
+    "Consider adding an eslint rule for react-hooks/rules-of-hooks + no-undef to catch such missing imports during CI."
+  ],
+  "updated_files": ["/app/frontend/src/components/Layout.js"],
+  "success_rate": {"backend": "N/A (skipped)", "frontend": "100% after fix"},
+  "test_credentials": "Owner: owner@euler.com / euler@123, Executive: executive@euler.com / euler@123 (both worked)",
+  "seed_data_creation": "None — read-only verification, used existing seed (3 dealer-earnings rows → margin ₹548 total).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All 4 acceptance criteria verified after fixing missing useEffect import in Layout.js. Owner /earnings-report shows KPIs Total ₹548 / Margin ₹548 / Scheme ₹0 / Insurance ₹0, stacked bar chart for 2026-07 & 2026-08, and By Month table with rows (2026-08: 2 deals ₹363, 2026-07: 1 deal ₹185). Sync badge shows green 'Sheet Synced' (emerald classes). Executive: Earnings Report / Payout Report / Dealer Earnings nav hidden, direct /earnings-report visit redirects to /. Payout Report (/insurance-report) + Settings (with Sheet Sync 'Connected · read + write' + Backfill button) still render for owner.",
+  "rca of the issue": "RCA: Layout.js line 1 imported `useState` only, but line 80 inside SyncBadge used `useEffect(...)` for the polling loop → ReferenceError at first render of the authenticated Layout, propagating up and blanking Topbar+Sidebar. Reproduction: log in as owner; before fix the page was blank with 'useEffect is not defined' overlay in dev. Mitigation: added useEffect to the React import in /app/frontend/src/components/Layout.js. Long-term: wrap Topbar/SyncBadge in an ErrorBoundary and enable eslint no-undef."
+}

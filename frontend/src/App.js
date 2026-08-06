@@ -21,6 +21,7 @@ import Quotations from "./pages/Quotations";
 import Bookings from "./pages/Bookings";
 import Settings from "./pages/Settings";
 import InsurancePayoutReport from "./pages/InsurancePayoutReport";
+import EarningsReport from "./pages/EarningsReport";
 
 function Protected({ children, ownerOnly }) {
   const { user } = useAuth();
@@ -51,6 +52,7 @@ function AppRoutes() {
       <Route path="/incentive-master" element={P(<IncentiveMaster />)} />
       <Route path="/dealer-earnings" element={P(<DealerEarnings />, true)} />
       <Route path="/insurance-report" element={P(<InsurancePayoutReport />, true)} />
+      <Route path="/earnings-report" element={P(<EarningsReport />, true)} />
       <Route path="/price-master" element={P(<PriceMaster />)} />
       <Route path="/settings" element={P(<Settings />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
