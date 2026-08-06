@@ -71,9 +71,16 @@ def status():
     try:
         _service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": []}).execute()
         _status.update({"enabled": True, "canWrite": True, "reason": "connected (read + write)"})
-    except Exception:
-        _status.update({"enabled": False, "canWrite": False,
-                        "reason": "read-only — share the sheet with the service account email as EDITOR to enable syncing"})
+    except Exception as e:
+        # 400 "Must specify at least one request" means the write PASSED permission
+        # (only failed body validation) => we DO have Editor access. 403 = no access.
+        code = getattr(getattr(e, "resp", None), "status", None)
+        msg = str(e)
+        if str(code) == "400" or "at least one request" in msg:
+            _status.update({"enabled": True, "canWrite": True, "reason": "connected (read + write)"})
+        else:
+            _status.update({"enabled": False, "canWrite": False,
+                            "reason": "read-only — share the sheet with the service account email as EDITOR to enable syncing"})
     return {**_status, "spreadsheetId": sheet_id}
 
 
