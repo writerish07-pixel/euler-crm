@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -477,6 +477,104 @@ async def close_lead(lead_id: str, body: CloseIn):
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
+# ---------------------------------------------------------------- lead bulk import
+IMPORT_COLUMNS = [
+    ("Customer Name", "customerName"), ("Mobile", "mobile"), ("Alternate Mobile", "altMobile"),
+    ("Village", "village"), ("City", "city"), ("Lead Source", "leadSource"),
+    ("Interested Model", "interestedModel"), ("Variant", "variant"), ("Executive", "executive"),
+    ("Current Status", "currentStatus"), ("Priority", "priority"), ("Budget", "budget"),
+    ("Remarks", "remarks"), ("Finance Required", "financeRequired"), ("Exchange Required", "exchangeRequired"),
+]
+
+
+def _parse_import_bytes(filename: str, content: bytes):
+    """Return (headers, list-of-dicts) from an uploaded .xlsx or .csv."""
+    name = (filename or "").lower()
+    rows = []
+    if name.endswith(".csv"):
+        import csv, io as _io
+        text = content.decode("utf-8-sig", errors="replace")
+        reader = csv.reader(_io.StringIO(text))
+        rows = [r for r in reader]
+    else:
+        import openpyxl, io as _io
+        wb = openpyxl.load_workbook(_io.BytesIO(content), data_only=True, read_only=True)
+        ws = wb.active
+        rows = [[c for c in r] for r in ws.iter_rows(values_only=True)]
+    if not rows:
+        return [], []
+    header = [str(h).strip() if h is not None else "" for h in rows[0]]
+    idx = {h.lower(): i for i, h in enumerate(header)}
+    out = []
+    for r in rows[1:]:
+        if not any(c not in (None, "", "None") for c in r):
+            continue
+        d = {}
+        for label, field in IMPORT_COLUMNS:
+            i = idx.get(label.lower())
+            v = r[i] if (i is not None and i < len(r)) else None
+            if field == "budget":
+                try:
+                    v = float(v) if v not in (None, "") else 0
+                except (ValueError, TypeError):
+                    v = 0
+            elif field == "mobile" or field == "altMobile":
+                if isinstance(v, float):
+                    v = str(int(v))
+                v = str(v).strip() if v not in (None, "None") else ""
+            else:
+                v = str(v).strip() if v not in (None, "None") else ""
+            d[field] = v
+        if not d.get("customerName"):
+            continue
+        out.append(d)
+    return header, out
+
+
+@api.post("/leads/import/preview")
+async def import_preview(file: UploadFile = File(...)):
+    content = await file.read()
+    try:
+        header, rows = _parse_import_bytes(file.filename, content)
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse file: {e}")
+    return {"detectedHeaders": header, "matchedColumns": [c[0] for c in IMPORT_COLUMNS],
+            "rowCount": len(rows), "sample": rows[:8]}
+
+
+@api.post("/leads/import/commit")
+async def import_commit(file: UploadFile = File(...)):
+    content = await file.read()
+    try:
+        _, rows = _parse_import_bytes(file.filename, content)
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse file: {e}")
+    created = 0
+    for d in rows:
+        lead_id = await next_id("lead", "LD26")
+        doc = {
+            "leadId": lead_id, "createdDate": today(),
+            "customerName": d.get("customerName", ""), "mobile": d.get("mobile", ""),
+            "altMobile": d.get("altMobile", ""), "village": d.get("village", ""), "city": d.get("city", ""),
+            "leadSource": d.get("leadSource") or "Import", "interestedModel": d.get("interestedModel", ""),
+            "variant": d.get("variant", ""), "executive": d.get("executive", ""),
+            "currentStatus": d.get("currentStatus") or "New", "priority": d.get("priority") or "Normal",
+            "budget": d.get("budget", 0), "remarks": d.get("remarks", ""),
+            "financeRequired": d.get("financeRequired") or "No", "exchangeRequired": d.get("exchangeRequired") or "No",
+            "accountStatus": "Active", "deliveryStatus": "",
+            "outstandingAmount": 0, "customerOutstanding": 0, "companyOutstanding": 0, "totalReceived": 0,
+            "customerPayable": 0, "grossVehicleCost": 0, "totalDiscount": 0,
+            "consumerDiscount": 0, "exchangeBonus": 0, "loyaltyBonus": 0, "referralBonus": 0,
+            "dsaDiscount": 0, "additionalDiscount": 0, "exShowroom": 0, "rto": 0, "insuranceAmount": 0,
+            "accessoriesAmount": 0, "handlingCharges": 0, "trc": 0, "fastag": 0, "extendedWarranty": 0,
+            "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(), "importedBatch": today(),
+        }
+        await db.leads.insert_one(doc)
+        await gsheets.append("leads", doc)
+        created += 1
+    return {"created": created}
+
+
 # ---------------------------------------------------------------- payments
 async def _add_payment_internal(lead_id, body: PaymentIn):
     lead = await db.leads.find_one({"leadId": lead_id})
@@ -643,7 +741,70 @@ async def add_activity(lead_id: str, body: ActivityIn):
 
 @api.get("/insurance")
 async def list_insurance():
-    return [clean(i) for i in await db.insurance.find().to_list(1000)]
+    return [clean(i) for i in await db.insurance.find().sort("entryId", -1).to_list(1000)]
+
+
+class InsuranceIn(BaseModel):
+    leadId: str = ""
+    customerName: str
+    mobile: str = ""
+    model: str = ""
+    variant: str = ""
+    insuranceCompany: str = ""
+    policyNumber: str = ""
+    insuranceAmount: float = 0
+    payoutRate: float = 0          # fraction, e.g. 0.15 for 15%
+    receivedPayout: float = 0
+    status: str = "Pending"
+    policyDate: Optional[str] = None
+    insuranceExecutive: str = ""
+    remarks: str = ""
+
+
+def _insurance_derive(body: dict):
+    premium = ce.num(body.get("insuranceAmount"))
+    rate = ce.num(body.get("payoutRate"))
+    if rate > 1:  # allow entering 15 meaning 15%
+        rate = rate / 100.0
+    expected = ce.round2(premium * rate)
+    received = ce.num(body.get("receivedPayout"))
+    outstanding = ce.round2(max(0.0, expected - received))
+    status = body.get("status") or "Pending"
+    if expected > 0 and received >= expected:
+        status = "Received"
+    elif received > 0:
+        status = "Partial"
+    return {"payoutRate": rate, "expectedPayout": expected, "receivedPayout": received,
+            "payoutOutstanding": outstanding, "status": status}
+
+
+@api.post("/insurance")
+async def create_insurance(body: InsuranceIn):
+    data = body.model_dump()
+    data.update(_insurance_derive(data))
+    data["entryId"] = await next_id("insurance", "INS26")
+    if data.get("leadId"):
+        lead = await db.leads.find_one({"leadId": data["leadId"]})
+        if lead:
+            data["deliveryDate"] = lead.get("deliveryDate")
+    await db.insurance.insert_one(data)
+    return clean(data)
+
+
+@api.put("/insurance/{entry_id}")
+async def update_insurance(entry_id: str, body: InsuranceIn):
+    data = body.model_dump()
+    data.update(_insurance_derive(data))
+    res = await db.insurance.update_one({"entryId": entry_id}, {"$set": data})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Insurance entry not found")
+    return clean(await db.insurance.find_one({"entryId": entry_id}))
+
+
+@api.delete("/insurance/{entry_id}")
+async def delete_insurance(entry_id: str):
+    await db.insurance.delete_one({"entryId": entry_id})
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- claims

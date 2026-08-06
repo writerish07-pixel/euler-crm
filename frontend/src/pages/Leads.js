@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { Plus, Phone, ChevronRight } from "lucide-react";
+import { Plus, Phone, ChevronRight, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
+import LeadImport from "./LeadImport";
 
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"];
 
@@ -14,6 +15,7 @@ export default function Leads() {
   const [q, setQ] = useState("");
   const [active, setActive] = useState(null);
   const [showNew, setShowNew] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [masters, setMasters] = useState(null);
 
   const load = useCallback(() => {
@@ -28,7 +30,10 @@ export default function Leads() {
       <PageHeader
         title="Lead Register"
         subtitle={`${leads.length} leads in pipeline`}
-        actions={<Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> New Lead</Button>}
+        actions={<div className="flex gap-2">
+          <Button variant="secondary" data-testid="import-leads-btn" onClick={() => setShowImport(true)}><Upload size={16} /> Import</Button>
+          <Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> New Lead</Button>
+        </div>}
       />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -76,6 +81,9 @@ export default function Leads() {
       )}
       {showNew && (
         <NewLeadDrawer masters={masters} onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); load(); setActive(id); }} />
+      )}
+      {showImport && (
+        <LeadImport onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); load(); }} />
       )}
     </div>
   );
