@@ -42,3 +42,9 @@ User's "Euler company CRM" was built on **Google Sheets + Apps Script (~27,000 l
 ## Next
 - P1: Activate Google Sheets sync when user supplies the Service Account JSON.
 - P2: Insurance payout entry form; incentive computation; split server.py into routers.
+
+## Iteration 3 (2026-06) — Insurance Entry, Lead Import, Google Sheet activation
+- **Insurance Entry:** full CRUD (backend /api/insurance POST/PUT/DELETE). Expected payout = premium * rate (rate entered as % e.g. 15 -> 0.15, or fraction). Outstanding + status auto. Frontend Insurance page with add/edit/delete drawer + live preview.
+- **Lead Import:** upload .xlsx/.csv -> /api/leads/import/preview (maps by header, skips no-name rows) then /api/leads/import/commit (creates LD26 leads, status New). Frontend Import drawer with dropzone, preview table, CSV template download.
+- **Google Sheet sync ACTIVATED (credential installed):** service account key saved at /app/backend/gsheets_credentials.json (euler-crm-service@shubham-motors-ai-agent.iam.gserviceaccount.com). Verified it can READ the Euler Master sheet. WRITE currently 403 because the sheet is shared as VIEWER — appends are gracefully swallowed (never break creation). status() now probes read/write and reports canRead/canWrite. **ACTION PENDING: owner must change the sheet share for the service account email from Viewer to EDITOR; then enabled=true and appends flow automatically.**
+- Tested: backend 13/13 pytest, frontend 6/6 — all pass. Baseline reseeded clean (10 leads, 69 price rows, 0 insurance).
