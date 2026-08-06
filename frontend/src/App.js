@@ -59,7 +59,7 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
-      <Toaster richColors position="top-right" />
+      <Toaster richColors position="bottom-right" duration={2500} />
       <AuthProvider>
         <AppRoutes />
       </AuthProvider>

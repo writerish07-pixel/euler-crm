@@ -110,6 +110,11 @@ def build_router(db):
     async def delete_user(user_id: str, user=Depends(owner_only)):
         if user_id == user["userId"]:
             raise HTTPException(400, "Cannot delete yourself")
+        target = await db.users.find_one({"userId": user_id})
+        if target and target.get("role") == "owner":
+            owners = await db.users.count_documents({"role": "owner"})
+            if owners <= 1:
+                raise HTTPException(400, "Cannot delete the last owner")
         await db.users.delete_one({"userId": user_id})
         return {"ok": True}
 

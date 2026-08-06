@@ -30,3 +30,15 @@ User's "Euler company CRM" was built on **Google Sheets + Apps Script (~27,000 l
 - P2: Editable Price Master / Scheme Master (currently read-only)
 - P2: Insurance payout entry form, incentive register computation
 - P2: Export / share board (read-only company view), CSV export
+
+## Iteration 2 (2026-06) — Auth, Masters CRUD, Share, Export, Sheets sync
+- **Auth:** JWT email+password, roles Owner/Executive (backend/auth.py). Seeds owner@euler.com/euler@123 + demo executive@euler.com/euler@123 on startup. Bearer token in localStorage. All /api/* protected; /api/dealer-earnings owner-only; /api/auth/users owner-only (last-owner delete guarded). Frontend: Login, AuthContext, Protected routes, role-filtered sidebar, user menu + logout.
+- **Editable Masters:** Price Master & Scheme Master full CRUD via drawers.
+- **Company Share Board:** public /share (no login), backend /api/share/dashboard public — active bookings, monthly retail, by-model bars; no customer/staff data.
+- **Excel Export:** GET /api/export → single .xlsx, sheet per module. Topbar Export button.
+- **Google Sheets one-way sync (backend/gsheets.py):** appends new Lead/Booking/Payment/Delivery/Claim to the Euler Master sheet via Service Account. GSHEET_ID=173a0LK-L7sgEBmkxwpZI3ovkxDNCdwf7DTyH8AZyn7w set. **NOT YET ACTIVE** — user must place Service Account JSON at /app/backend/gsheets_credentials.json and share the sheet with the SA email. Graceful no-op until then. Status: /api/integrations/gsheets + Settings page.
+- Tested: backend 23/23, frontend 15/15 pass.
+
+## Next
+- P1: Activate Google Sheets sync when user supplies the Service Account JSON.
+- P2: Insurance payout entry form; incentive computation; split server.py into routers.
