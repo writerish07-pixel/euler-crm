@@ -39,6 +39,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
     { key: "scheme", label: "Scheme" },
     { key: "payments", label: `Payments (${data.payments.length})` },
     { key: "delivery", label: "Delivery" },
+    { key: "insurance", label: "Insurance" },
     { key: "activity", label: `Activity (${data.activities.length})` },
   ];
 
@@ -64,6 +65,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       {tab === "scheme" && <SchemeTab lead={lead} c={c} masters={masters} onSaved={refresh} />}
       {tab === "payments" && <PaymentsTab lead={lead} payments={data.payments} masters={masters} onSaved={refresh} />}
       {tab === "delivery" && <DeliveryTab lead={lead} delivery={data.delivery} onSaved={refresh} />}
+      {tab === "insurance" && <InsuranceTab lead={lead} masters={masters} />}
       {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} />}
     </Drawer>
   );
@@ -325,6 +327,71 @@ function DeliveryTab({ lead, delivery, onSaved }) {
         <Field label="Mark Delivered?"><Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")}><option value="">Not yet</option><option value="Yes">Yes — Delivered</option></Select></Field>
       </div>
       <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save}>Save Delivery</Button></div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------- Insurance (from lead) */
+function InsuranceTab({ lead, masters }) {
+  const [entries, setEntries] = useState([]);
+  const [form, setForm] = useState({
+    insuranceCompany: lead.insurerName || "", policyNumber: "",
+    insuranceAmount: lead.insuranceAmount || 0, payoutRate: 0, receivedPayout: 0,
+    insuranceExecutive: lead.executive || "",
+  });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const load = useCallback(() => get("/insurance", { lead_id: lead.leadId }).then(setEntries), [lead.leadId]);
+  useEffect(() => { load(); }, [load]);
+
+  const premium = Number(form.insuranceAmount) || 0;
+  const rate = Number(form.payoutRate) || 0;
+  const expected = Math.round(premium * (rate / 100));
+
+  const save = async () => {
+    await post("/insurance", {
+      leadId: lead.leadId, customerName: lead.customerName, mobile: lead.mobile,
+      model: lead.interestedModel, variant: lead.variant,
+      insuranceCompany: form.insuranceCompany, policyNumber: form.policyNumber,
+      insuranceAmount: +form.insuranceAmount, payoutRate: +form.payoutRate,
+      receivedPayout: +form.receivedPayout, insuranceExecutive: form.insuranceExecutive,
+    });
+    toast.success("Insurance entry added");
+    setForm((f) => ({ ...f, policyNumber: "" }));
+    load();
+  };
+
+  return (
+    <div>
+      <Card className="p-4 mb-4">
+        <p className="text-xs text-ink-soft mb-3">Premium is pre-filled from this lead's price structure. Enter the insurer & payout rate.</p>
+        <div className="grid grid-cols-3 gap-3">
+          <Field label="Insurer"><Input data-testid="lead-ins-company" value={form.insuranceCompany} onChange={set("insuranceCompany")} /></Field>
+          <Field label="Policy Number"><Input value={form.policyNumber} onChange={set("policyNumber")} /></Field>
+          <Field label="Executive"><Select value={form.insuranceExecutive} onChange={set("insuranceExecutive")}><option value="">—</option>{(masters?.executives || []).map((x) => <option key={x}>{x}</option>)}</Select></Field>
+          <Field label="Premium (₹)"><Input data-testid="lead-ins-premium" type="number" value={form.insuranceAmount} onChange={set("insuranceAmount")} /></Field>
+          <Field label="Payout Rate (%)"><Input data-testid="lead-ins-rate" type="number" value={form.payoutRate} onChange={set("payoutRate")} /></Field>
+          <Field label="Received (₹)"><Input type="number" value={form.receivedPayout} onChange={set("receivedPayout")} /></Field>
+        </div>
+        <div className="flex items-center justify-between mt-3">
+          <div className="text-sm text-ink-soft">Expected payout <span className="font-mono font-semibold text-cobalt">{inr(expected)}</span></div>
+          <Button data-testid="lead-add-insurance-btn" onClick={save}>Add Insurance</Button>
+        </div>
+      </Card>
+      <div className="space-y-2">
+        {entries.length === 0 && <div className="text-sm text-ink-faint text-center py-4">No insurance entries for this lead yet</div>}
+        {entries.map((e) => (
+          <div key={e.entryId} className="flex items-center justify-between bg-white border border-line rounded-lg px-4 py-2.5">
+            <div>
+              <div className="text-sm font-semibold text-ink">{e.insuranceCompany || "—"} <Badge className="ml-1">{e.status}</Badge></div>
+              <div className="text-xs text-ink-faint">Premium {inr(e.insuranceAmount)} · Rate {(Number(e.payoutRate) * 100).toFixed(1)}%</div>
+            </div>
+            <div className="text-right text-xs text-ink-soft">
+              <div>Expected: <span className="font-mono">{inr(e.expectedPayout)}</span></div>
+              <div>Outstanding: <span className="font-mono">{inr(e.payoutOutstanding)}</span></div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

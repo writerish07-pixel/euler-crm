@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -487,44 +487,64 @@ IMPORT_COLUMNS = [
 ]
 
 
-def _parse_import_bytes(filename: str, content: bytes):
-    """Return (headers, list-of-dicts) from an uploaded .xlsx or .csv."""
+def _read_rows(filename: str, content: bytes):
     name = (filename or "").lower()
-    rows = []
     if name.endswith(".csv"):
         import csv, io as _io
         text = content.decode("utf-8-sig", errors="replace")
-        reader = csv.reader(_io.StringIO(text))
-        rows = [r for r in reader]
-    else:
-        import openpyxl, io as _io
-        wb = openpyxl.load_workbook(_io.BytesIO(content), data_only=True, read_only=True)
-        ws = wb.active
-        rows = [[c for c in r] for r in ws.iter_rows(values_only=True)]
+        return [r for r in csv.reader(_io.StringIO(text))]
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    return [[c for c in r] for r in ws.iter_rows(values_only=True)]
+
+
+def _suggest_mapping(headers):
+    """Auto-match detected headers to target fields by (case-insensitive) label/name."""
+    lower = {str(h).strip().lower(): str(h).strip() for h in headers if h not in (None, "")}
+    mapping = {}
+    for label, field in IMPORT_COLUMNS:
+        if label.lower() in lower:
+            mapping[field] = lower[label.lower()]
+        elif field.lower() in lower:
+            mapping[field] = lower[field.lower()]
+        else:
+            mapping[field] = ""
+    return mapping
+
+
+def _coerce(field, v):
+    if field == "budget":
+        try:
+            return float(v) if v not in (None, "") else 0
+        except (ValueError, TypeError):
+            return 0
+    if field in ("mobile", "altMobile"):
+        if isinstance(v, float):
+            v = str(int(v))
+        return str(v).strip() if v not in (None, "None") else ""
+    return str(v).strip() if v not in (None, "None") else ""
+
+
+def _parse_import_bytes(filename: str, content: bytes, mapping: dict = None):
+    """Return (headers, rows). If mapping {field: headerName} given, use it; else auto-suggest."""
+    rows = _read_rows(filename, content)
     if not rows:
         return [], []
     header = [str(h).strip() if h is not None else "" for h in rows[0]]
-    idx = {h.lower(): i for i, h in enumerate(header)}
+    header_idx = {h.lower(): i for i, h in enumerate(header)}
+    if not mapping:
+        mapping = _suggest_mapping(header)
     out = []
     for r in rows[1:]:
         if not any(c not in (None, "", "None") for c in r):
             continue
         d = {}
-        for label, field in IMPORT_COLUMNS:
-            i = idx.get(label.lower())
+        for _, field in IMPORT_COLUMNS:
+            src = mapping.get(field)
+            i = header_idx.get(str(src).strip().lower()) if src else None
             v = r[i] if (i is not None and i < len(r)) else None
-            if field == "budget":
-                try:
-                    v = float(v) if v not in (None, "") else 0
-                except (ValueError, TypeError):
-                    v = 0
-            elif field == "mobile" or field == "altMobile":
-                if isinstance(v, float):
-                    v = str(int(v))
-                v = str(v).strip() if v not in (None, "None") else ""
-            else:
-                v = str(v).strip() if v not in (None, "None") else ""
-            d[field] = v
+            d[field] = _coerce(field, v)
         if not d.get("customerName"):
             continue
         out.append(d)
@@ -532,21 +552,27 @@ def _parse_import_bytes(filename: str, content: bytes):
 
 
 @api.post("/leads/import/preview")
-async def import_preview(file: UploadFile = File(...)):
+async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
+    import json as _json
     content = await file.read()
     try:
-        header, rows = _parse_import_bytes(file.filename, content)
+        headers = [str(h).strip() if h is not None else "" for h in (_read_rows(file.filename, content) or [[]])[0]]
+        mp = _json.loads(mapping) if mapping else _suggest_mapping(headers)
+        _, rows = _parse_import_bytes(file.filename, content, mp)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
-    return {"detectedHeaders": header, "matchedColumns": [c[0] for c in IMPORT_COLUMNS],
-            "rowCount": len(rows), "sample": rows[:8]}
+    return {"detectedHeaders": [h for h in headers if h],
+            "targetFields": [{"label": lbl, "field": fld} for lbl, fld in IMPORT_COLUMNS],
+            "suggestedMapping": mp, "rowCount": len(rows), "sample": rows[:8]}
 
 
 @api.post("/leads/import/commit")
-async def import_commit(file: UploadFile = File(...)):
+async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
+    import json as _json
     content = await file.read()
     try:
-        _, rows = _parse_import_bytes(file.filename, content)
+        mp = _json.loads(mapping) if mapping else None
+        _, rows = _parse_import_bytes(file.filename, content, mp)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
     created = 0
@@ -740,8 +766,9 @@ async def add_activity(lead_id: str, body: ActivityIn):
 
 
 @api.get("/insurance")
-async def list_insurance():
-    return [clean(i) for i in await db.insurance.find().sort("entryId", -1).to_list(1000)]
+async def list_insurance(lead_id: Optional[str] = None):
+    q = {"leadId": lead_id} if lead_id else {}
+    return [clean(i) for i in await db.insurance.find(q).sort("entryId", -1).to_list(1000)]
 
 
 class InsuranceIn(BaseModel):

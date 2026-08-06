@@ -1,0 +1,31 @@
+{
+  "summary": "Iteration 4 testing PASSED end-to-end for the two new features (Insurance-from-Lead and Lead Import column-mapping) plus regressions. Backend pytest: 17/17 pass in /app/backend/tests/test_iter4_mapping_and_lead_insurance.py. Frontend Playwright: (1) opened Lead 360 for LD26000001, switched to Insurance tab — Premium prefilled from lead (22000), Expected payout live-updated to ₹3,300 with rate=15, Add Insurance created entry INS26000103 which appeared in the list; (2) opened Lead Import drawer with a CUSTOM-header CSV (Name,Phone,Town,Vehicle,Sales Person,Budget), drawer advanced to mapping step (map-* selects rendered empty as expected because none of the custom headers match target field labels), setting map-customerName='Name' etc updated the preview and rowCount=2, commit-import-btn imported 2 leads (LD26000014 and LD26000015 status=New) shown in the register with a '2 leads imported' toast. Regressions verified: owner login+/api/auth/me, executive still blocked on /api/dealer-earnings (403), public /api/share/dashboard 200, price-master + scheme-master 200, GSheets status returns enabled=false canWrite=false while POST /api/leads and POST /api/insurance still return 200.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_report_links": [
+    "/app/backend/tests/test_iter4_mapping_and_lead_insurance.py",
+    "/app/test_reports/pytest/iter4_results.xml"
+  ],
+  "action_items": [
+    "None required for functionality. Optional: main agent may POST /api/admin/reseed to remove residual closed TEST_UI_Map_* leads (LD26000014, LD26000015) — they are closed but still in DB. Insurance test entries were fully deleted."
+  ],
+  "critical_code_review_comments": [
+    "import_preview/import_commit correctly accept `mapping` via multipart Form (fixes the prior query-param bug) — confirmed by test_preview_with_explicit_mapping and test_commit_with_mapping_creates_leads.",
+    "list_insurance lead_id filter query {leadId: lead_id} is correctly isolated — verified LD26000002 does NOT return LD26000001 entries.",
+    "_insurance_derive handles percent (15) and fraction (0.15) inputs uniformly — expectedPayout=premium*rate rounded to 2dp, status flips to Received/Partial correctly.",
+    "GSheets append is a graceful no-op (canWrite=false does not block writes to Mongo) — POST /api/leads and POST /api/insurance still return 200.",
+    "Frontend LeadImport.js correctly re-runs preview on every mapping change (changeMap) — verified rowCount updates live from 0 → 2 as user maps columns.",
+    "InsuranceTab premium pre-fills from lead.insuranceAmount (from price structure) — for LD26000001 prefilled 22000 and computed expected 3300 at 15%.",
+    "Minor nit (not blocking): when user hits Escape on the Lead 360 drawer it doesn't close (has to click X). Not a regression from this iteration."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iter4_mapping_and_lead_insurance.py (new)"
+  ],
+  "success_rate": { "backend": "100% (17/17 pytest)", "frontend": "100% (2/2 core UI flows: insurance-from-lead + import mapping)" },
+  "test_credentials": "owner@euler.com / euler@123 ; executive@euler.com / euler@123",
+  "seed_data_creation": "All TEST_* data cleaned up: TEST_UI_Ins_Co insurance entry deleted (INS26000103); TEST_UI_Map_A/B and Mohan Lal / Sita Rani imported leads closed via /leads/{id}/close (main agent may reseed to fully purge). No mutation to seeded lead LD26000001 other than transient insurance entry that was deleted.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter4 both features (Insurance-from-Lead, Import column mapping) verified working end-to-end via backend pytest + Playwright UI. Regression suite: /app/backend/tests/test_iter4_mapping_and_lead_insurance.py (17 tests, ~5s). Note: mapping MUST be sent as multipart Form field (JSON string), not query param — the backend uses Form(None). For UI: use set_input_files on [data-testid=import-file-input] with a temp .csv; drawer auto-advances to map step via onFile→runPreview. GSheets remains in read-only mode by design (canWrite=false, enabled=false). No blocking bugs found.",
+  "rca of the issue": "N/A — no failures."
+}
