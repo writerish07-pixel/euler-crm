@@ -1,0 +1,175 @@
+{
+  "theme": "light",
+  "archetype": "Swiss & High-Contrast / Data-Dense Admin",
+  "target_audience": "Euler EV Dealership Staff (Sales, Finance, Operations)",
+  "emotional_tone": "Clinical precision, high-tech, functional beauty, and authoritative.",
+  "colors": {
+    "background": {
+      "app": "#FAFAFA",
+      "sidebar": "#FFFFFF",
+      "surface": "#FFFFFF"
+    },
+    "text": {
+      "primary": "#09090B",
+      "secondary": "#52525B",
+      "tertiary": "#A1A1AA"
+    },
+    "borders": {
+      "default": "#E4E4E7",
+      "focus": "#2563EB"
+    },
+    "primary": {
+      "DEFAULT": "#1D4ED8",
+      "hover": "#1E40AF",
+      "active": "#1E3A8A",
+      "foreground": "#FFFFFF"
+    },
+    "accent": {
+      "DEFAULT": "#000000",
+      "hover": "#27272A"
+    },
+    "status": {
+      "success": {
+        "bg": "#DCFCE7",
+        "text": "#166534",
+        "border": "#BBF7D0"
+      },
+      "warning": {
+        "bg": "#FEF9C3",
+        "text": "#854D0E",
+        "border": "#FEF08A"
+      },
+      "error": {
+        "bg": "#FEE2E2",
+        "text": "#991B1B",
+        "border": "#FECACA"
+      },
+      "info": {
+        "bg": "#DBEAFE",
+        "text": "#1E40AF",
+        "border": "#BFDBFE"
+      }
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Cabinet Grotesk, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "rules": {
+      "h1": "text-2xl sm:text-3xl font-bold tracking-tight text-zinc-950",
+      "h2": "text-xl sm:text-2xl font-semibold tracking-tight text-zinc-900",
+      "h3": "text-lg font-medium text-zinc-900",
+      "body": "text-sm text-zinc-700 leading-relaxed",
+      "table_header": "text-xs font-semibold tracking-wider text-zinc-500 uppercase",
+      "table_cell": "text-sm text-zinc-800 font-medium tabular-nums",
+      "currency": "font-mono tabular-nums tracking-tight"
+    }
+  },
+  "layouts": {
+    "app_structure": {
+      "sidebar": "w-64 fixed inset-y-0 left-0 z-50 flex flex-col border-r border-zinc-200 bg-white",
+      "topbar": "sticky top-0 z-40 flex h-16 shrink-0 items-center gap-x-4 border-b border-zinc-200 bg-white px-4 sm:px-6 lg:px-8",
+      "main_content": "ml-64 p-6 lg:p-8 bg-zinc-50 min-h-screen"
+    },
+    "grids": {
+      "kpi_grid": "grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4",
+      "bento_dashboard": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6"
+    },
+    "spacing": "Dense and compact for data tables (py-2 px-3 cells), generous for layout structural elements (p-6, p-8 containers)."
+  },
+  "components": {
+    "kpi_card": {
+      "container": "bg-white rounded-lg border border-zinc-200 p-4 shadow-sm hover:shadow-md transition-shadow duration-200",
+      "title": "text-sm font-medium text-zinc-500",
+      "value": "text-2xl font-bold text-zinc-950 mt-1 tabular-nums",
+      "trend": "text-xs font-medium flex items-center mt-2"
+    },
+    "table": {
+      "container": "bg-white rounded-lg border border-zinc-200 overflow-hidden shadow-sm",
+      "header": "bg-zinc-50/80 border-b border-zinc-200 backdrop-blur-sm",
+      "row": "hover:bg-zinc-50/50 transition-colors border-b border-zinc-100 last:border-0",
+      "cell": "py-2.5 px-4 text-sm align-middle whitespace-nowrap"
+    },
+    "badge": {
+      "base": "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ring-inset",
+      "variants": {
+        "New": "bg-blue-50 text-blue-700 ring-blue-600/20",
+        "In Progress": "bg-amber-50 text-amber-700 ring-amber-600/20",
+        "Booked": "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
+        "Lost": "bg-red-50 text-red-700 ring-red-600/20"
+      }
+    },
+    "button": {
+      "primary": "inline-flex items-center justify-center rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow hover:bg-blue-700 focus-visible:outline-blue-600 transition-colors",
+      "secondary": "inline-flex items-center justify-center rounded-md bg-white px-4 py-2 text-sm font-medium text-zinc-900 shadow-sm ring-1 ring-inset ring-zinc-300 hover:bg-zinc-50 transition-colors"
+    },
+    "forms": {
+      "input": "block w-full rounded-md border-0 py-1.5 text-zinc-900 shadow-sm ring-1 ring-inset ring-zinc-300 placeholder:text-zinc-400 focus:ring-2 focus:ring-inset focus:ring-blue-600 sm:text-sm sm:leading-6",
+      "label": "block text-sm font-medium leading-6 text-zinc-900 mb-1"
+    },
+    "overlays": {
+      "modal": "fixed inset-0 z-50 bg-black/40 backdrop-blur-sm",
+      "modal_content": "bg-white rounded-xl shadow-2xl ring-1 ring-zinc-200",
+      "side_drawer": "fixed inset-y-0 right-0 z-50 w-full max-w-md bg-white shadow-2xl ring-1 ring-zinc-200"
+    }
+  },
+  "motion": {
+    "hover": "transition-all duration-200 ease-in-out",
+    "drawer_enter": "transform transition ease-in-out duration-300 sm:duration-500",
+    "modal_enter": "ease-out duration-300 opacity-0 scale-95 to opacity-100 scale-100"
+  },
+  "formatting": {
+    "currency": "Use Indian Rupee (₹) format with lakh/crore grouping using Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }). Examples: ₹ 1,50,000, ₹ 12,00,000."
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "usage": "Use Phosphor Icons (weight: 'regular' for sidebar/UI, 'fill' for active states). Extremely legible for dense data tables."
+  },
+  "media": {
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1592838064575-70ed626d3a0e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwxfHxlbGVjdHJpYyUyMHRydWNrfGVufDB8fHx8MTc4NjAxNTk1OHww&ixlib=rb-4.1.0&q=85",
+        "description": "Black electric truck on road",
+        "category": "vehicle_thumbnail",
+        "usage": "Use for Price Master or vehicle model thumbnails in the dashboard."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1593941707882-a5bba14938c7?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzV8MHwxfHNlYXJjaHwyfHxlbGVjdHJpYyUyMHRydWNrfGVufDB8fHx8MTc4NjAxNTk1OHww&ixlib=rb-4.1.0&q=85",
+        "description": "Electric vehicle charger plugged into car",
+        "category": "kpi_background",
+        "usage": "Use as a subtle overlay or header image for EV related statistics."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1519219788971-8d9797e0928e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMzl8MHwxfHNlYXJjaHwxfHxlbXB0eSUyMGRlc2t8ZW58MHx8fHwxNzg2MDE1OTU0fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Empty desk with lamp",
+        "category": "empty_state",
+        "usage": "Use for empty states in tables or activity logs."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "This is a DATA-DENSE operations console. Do not use giant paddings in tables. Use py-2.5 px-4 for table cells.",
+    "Do NOT use 'Inter' for headings. Use 'Cabinet Grotesk' for headings and 'IBM Plex Sans' for body and data.",
+    "Implement the 'Bento Grid Protocol - High Density Grid' for the main dashboard. Utilize col-span logic effectively.",
+    "For all currency representations, STRICTLY use the Indian Lakh/Crore grouping system (e.g., ₹ 1,50,000).",
+    "Use side-drawers (max-w-md or max-w-2xl) for complex forms like 'Convert to Booking', 'Price Structure Editor', and 'Lead Detail View', instead of navigating to separate pages.",
+    "Implement 'data-testid' attributes on all interactive elements (buttons, inputs, tabs, row actions) for robust testing.",
+    "The UI is purely Light Mode focused, built for clarity under fluorescent dealership lights. Use sharp, high-contrast borders and pure white cards on an off-white background.",
+    "All status badges should be small, fully rounded pills with subtle background tints and strong text contrast.",
+    "Ensure the Sidebar navigation has an active state that uses the primary Cobalt Blue color (#1D4ED8) with a subtle background tint.",
+    "Include an Activity Log module, a Delivery Tracker with status chips (Insurance/Registration/Invoice/RC/PDI), and a complex Price Structure editor."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. Make creative, distinctive frontends that surprise and delight.",
+    "Don't make generic centered layouts. Left-align data and forms for rapid scanning.",
+    "Create depth through layered design elements with z-index hierarchy, especially for sticky headers and side panels.",
+    "You MUST NOT apply universal transition (e.g., transition: all). Add transitions for specific interactive elements only.",
+    "You MUST NOT center align the app container. Do not add '.App { text-align: center; }'.",
+    "Use modern pill-shaped or rounded-md button styles with interaction animations.",
+    "NEVER use AI assistant Emoji characters (🤖🧠💭💡) for icons. Use Phosphor icons.",
+    "Every interaction needs micro-animations - hover states, transitions.",
+    "Use sonner for toast notifications."
+  ]
+}
