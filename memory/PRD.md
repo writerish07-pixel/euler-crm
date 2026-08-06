@@ -48,3 +48,9 @@ User's "Euler company CRM" was built on **Google Sheets + Apps Script (~27,000 l
 - **Lead Import:** upload .xlsx/.csv -> /api/leads/import/preview (maps by header, skips no-name rows) then /api/leads/import/commit (creates LD26 leads, status New). Frontend Import drawer with dropzone, preview table, CSV template download.
 - **Google Sheet sync ACTIVATED (credential installed):** service account key saved at /app/backend/gsheets_credentials.json (euler-crm-service@shubham-motors-ai-agent.iam.gserviceaccount.com). Verified it can READ the Euler Master sheet. WRITE currently 403 because the sheet is shared as VIEWER — appends are gracefully swallowed (never break creation). status() now probes read/write and reports canRead/canWrite. **ACTION PENDING: owner must change the sheet share for the service account email from Viewer to EDITOR; then enabled=true and appends flow automatically.**
 - Tested: backend 13/13 pytest, frontend 6/6 — all pass. Baseline reseeded clean (10 leads, 69 price rows, 0 insurance).
+
+## Iteration 4 (2026-06) — Insurance-from-Lead & Import column mapping
+- **Insurance-from-Lead:** new "Insurance" tab in the Lead 360 drawer; premium pre-fills from the lead's price structure; staff add an insurance entry tied to the lead (GET /api/insurance?lead_id=, POST /api/insurance with leadId). LeadDrawer.js InsuranceTab.
+- **Import column mapping:** Lead Import is now two-step (upload -> map). Backend import_preview/import_commit accept an optional `mapping` multipart Form field (JSON {field: header}); _suggest_mapping auto-matches by name; works with any header names. Fixed bug: mapping must be Form(None) not a query param.
+- Tested: backend 17/17 pytest (test_iter4_mapping_and_lead_insurance.py), frontend 2/2 core flows. Baseline reseeded clean.
+- Google Sheet sync still READ-ONLY: owner has NOT yet added the service account email as Editor (verified canWrite=false). Appends remain graceful no-ops.
