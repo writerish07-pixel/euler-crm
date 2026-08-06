@@ -36,8 +36,22 @@ export default function Settings() {
           <div className="text-sm text-ink-soft space-y-1">
             <div className="flex items-center gap-2">{gs.enabled ? <CheckCircle2 size={15} className="text-emerald-500" /> : <XCircle size={15} className="text-amber-500" />}<span>{gs.reason}</span></div>
             <div>Spreadsheet: <a href={`https://docs.google.com/spreadsheets/d/${gs.spreadsheetId}/edit`} target="_blank" rel="noreferrer" className="text-cobalt inline-flex items-center gap-1">Euler Master <ExternalLink size={12} /></a></div>
-            {gs.email && <div>Service account: <span className="font-mono text-xs">{gs.email}</span></div>}
-            {!gs.enabled && <div className="text-xs text-ink-faint mt-2 bg-amber-50 rounded-lg p-3 ring-1 ring-amber-200">To activate: create a Google Service Account, download its JSON key to <span className="font-mono">/app/backend/gsheets_credentials.json</span>, and share the Euler Master sheet with the service account email as Editor. Sync then appends every new Lead, Booking, Payment, Delivery & Claim automatically.</div>}
+            {gs.email && <div>Service account: <span className="font-mono text-xs break-all">{gs.email}</span></div>}
+            {!gs.enabled && gs.canRead && gs.canWrite === false && (
+              <div className="text-xs text-ink mt-2 bg-amber-50 rounded-lg p-3 ring-1 ring-amber-200">
+                The sheet is shared as <b>Viewer</b>. Open your Euler Master sheet → <b>Share</b> → find <span className="font-mono">{gs.email}</span> → change its access to <b>Editor</b>. Sync then appends every new Lead, Booking, Payment, Delivery & Claim automatically.
+              </div>
+            )}
+            {!gs.enabled && !gs.canRead && (
+              <div className="text-xs text-ink-faint mt-2 bg-amber-50 rounded-lg p-3 ring-1 ring-amber-200">
+                Add the service account JSON key at <span className="font-mono">/app/backend/gsheets_credentials.json</span> and share the Euler Master sheet with the service account email as <b>Editor</b>.
+              </div>
+            )}
+            {gs.enabled && (
+              <div className="text-xs text-emerald-700 mt-2 bg-emerald-50 rounded-lg p-3 ring-1 ring-emerald-200">
+                Live — new Leads, Bookings, Payments, Deliveries & Claims are appended to your Euler Master sheet automatically.
+              </div>
+            )}
           </div>
         )}
       </Card>

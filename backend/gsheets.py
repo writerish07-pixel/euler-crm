@@ -54,9 +54,27 @@ def _init():
 
 
 def status():
-    if _service is None and _status.get("reason") in ("not configured", "credentials JSON not found — add the service account key to enable sync"):
+    global _status
+    if _service is None:
         _init()
-    return {**_status, "spreadsheetId": os.environ.get("GSHEET_ID", "")}
+    if _service is None:
+        return {**_status, "spreadsheetId": os.environ.get("GSHEET_ID", "")}
+    # probe write permission with a harmless empty batchUpdate (needs Editor)
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    try:
+        _service.spreadsheets().get(spreadsheetId=sheet_id, fields="properties.title").execute()
+        _status["canRead"] = True
+    except Exception as e:
+        _status.update({"enabled": False, "canRead": False, "canWrite": False,
+                        "reason": "cannot access sheet — share it with the service account email"})
+        return {**_status, "spreadsheetId": sheet_id}
+    try:
+        _service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": []}).execute()
+        _status.update({"enabled": True, "canWrite": True, "reason": "connected (read + write)"})
+    except Exception:
+        _status.update({"enabled": False, "canWrite": False,
+                        "reason": "read-only — share the sheet with the service account email as EDITOR to enable syncing"})
+    return {**_status, "spreadsheetId": sheet_id}
 
 
 def _append_sync(tab, values):

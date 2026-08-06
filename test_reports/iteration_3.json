@@ -1,0 +1,26 @@
+{
+  "summary": "Iteration 3 testing (Insurance CRUD, Lead Import CSV/XLSX, GSheets graceful no-op, and regressions) — all backend + frontend flows PASS. Executed 13 pytest tests in /app/backend/tests/test_iter3_insurance_import.py (13/13 pass). Verified GSheets status endpoint reports read-only + EDITOR reason and record creation (lead) still returns HTTP 200 with sheet in read-only mode. Playwright UI: owner login, Insurance add-entry drawer with live Expected=1500 preview & save & delete, Lead Import preview + commit with CSV, Settings shows read-only Google Sheet message. Executive blocked from /api/dealer-earnings (403). Public /api/share/dashboard reachable without auth (200).",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": { "ui_bugs": [], "integration_issues": [], "design_issues": [] },
+  "test_report_links": [
+    "/app/backend/tests/test_iter3_insurance_import.py",
+    "/app/test_reports/pytest/iter3_results.xml"
+  ],
+  "action_items": [
+    "Owner should share Google Sheet with service account euler-crm-service@shubham-motors-ai-agent.iam.gserviceaccount.com as Editor to enable actual writes (currently gracefully degraded; not a bug).",
+    "Optional: main agent may POST /api/admin/reseed to clear any residual TEST_UI_Imp_* and TEST_Imp_Csv_*/Xlsx_* leads (closed via cleanup but still present). The single UI insurance entry TEST_UI_InsCust was deleted by the Playwright flow."
+  ],
+  "critical_code_review_comments": [
+    "gsheets.append() correctly swallows 403 so lead/payment/booking/insurance creation is not blocked — verified.",
+    "_insurance_derive handles both percent (15) and fraction (0.15) rate inputs and recomputes on PUT — verified.",
+    "Import commit correctly skips rows without Customer Name and assigns LD26 ids with status 'New'."
+  ],
+  "updated_files": [],
+  "success_rate": { "backend": "100% (13/13 pytest + 4/4 curl contract checks)", "frontend": "100% (6/6 UI checks)" },
+  "test_credentials": "owner@euler.com / euler@123 ; executive@euler.com / euler@123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Only ephemeral TEST_ prefixed data created during tests. Insurance entries deleted (backend test class deletes all created; UI-created TEST_UI_InsCust deleted via row delete). Imported leads (TEST_Imp_Csv_A/B, TEST_Imp_Xlsx_A, TEST_UI_Imp_A/B) were closed via /leads/{id}/close but remain in DB — main agent can call /api/admin/reseed if needed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "All iter3 functionality (Insurance CRUD, bulk lead import CSV+XLSX, GSheets read-only graceful degradation) is verified working end-to-end. Reusable regression suite: /app/backend/tests/test_iter3_insurance_import.py (pytest, 13 tests, ~3.6s runtime). GSheets currently in read-only mode by design; sheet id 173a0LK-L7sgEBmkxwpZI3ovkxDNCdwf7DTyH8AZyn7w, service account email in status response. If owner enables Editor sharing, canWrite should flip to true and enabled=true.",
+  "rca of the issue": "N/A — no failures observed."
+}
