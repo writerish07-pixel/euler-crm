@@ -1105,19 +1105,33 @@ async def export_xlsx():
 async def share_dashboard():
     leads = await db.leads.find().to_list(5000)
     ym = this_month()
+    td = today()
     booked = [l for l in leads if "book" in (l.get("currentStatus") or "").lower()]
     active_booked = [l for l in booked if (l.get("deliveryStatus") or "").lower() != "delivered"]
     delivered = [l for l in leads if (l.get("deliveryStatus") or "").lower() == "delivered"]
     new_this_month = [l for l in booked if str(l.get("bookingDate") or "").startswith(ym)]
     retail_this_month = [l for l in delivered if str(l.get("deliveryDate") or "").startswith(ym)]
+    today_bookings = [l for l in booked if str(l.get("bookingDate") or "") == td]
+
     by_model = {}
     for l in active_booked:
         m = l.get("interestedModel") or "Unknown"
         by_model[m] = by_model.get(m, 0) + 1
+
+    def row(l, date_field):
+        return {"date": l.get(date_field), "name": l.get("customerName") or "—",
+                "model": l.get("interestedModel") or "", "variant": l.get("variant") or ""}
+
+    recent_bookings = sorted(active_booked, key=lambda l: str(l.get("bookingDate") or ""), reverse=True)[:20]
+    recent_retail = sorted(retail_this_month, key=lambda l: str(l.get("deliveryDate") or ""), reverse=True)[:20]
+
     return {
         "activeBookings": len(active_booked),
         "newThisMonth": len(new_this_month),
         "retailThisMonth": len(retail_this_month),
+        "todayBookings": len(today_bookings),
+        "recentBookings": [row(l, "bookingDate") for l in recent_bookings],
+        "recentRetail": [row(l, "deliveryDate") for l in recent_retail],
         "byModel": [{"model": k, "count": v} for k, v in sorted(by_model.items(), key=lambda x: -x[1])],
         "month": datetime.now(timezone.utc).strftime("%B %Y"),
         "lastUpdated": now_iso(),

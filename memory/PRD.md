@@ -66,3 +66,7 @@ User's "Euler company CRM" was built on **Google Sheets + Apps Script (~27,000 l
 - **Sync Health Badge:** top-bar badge (SyncBadge) polls /api/integrations/gsheets every 60s → green 'Sheet Synced' (enabled+writable), amber 'Sync Off', red 'Sync Error' (with tooltip of lastError). gsheets.py tracks _health {lastWriteOk, lastWriteAt, lastError, writes, failures} updated on every append.
 - **Full Backfill run:** executed POST /api/integrations/gsheets/backfill — all existing leads(10)/bookings(3)/payments(3) already present, 0 duplicates added; sheet is 100% in sync.
 - Bug fixed by testing agent: Layout.js was missing `useEffect` import (crashed authenticated layout) — now fixed. Tested frontend 4/4 pass.
+
+## Iteration 7 (2026-06) — Company board restyled to original
+- Rebuilt public /share (Share.js) to EXACTLY match the original portal's company board using the original assets/css/share.css verbatim: dark navy (#07111f) gradient + grid bg, Syne + Instrument Sans fonts, cyan/lime/warm accents, gradient brand "Euler Motors / Bookings & Retail", live pill, glass KPI cards (Active Bookings, Retail MTD, New Bookings, Today), Active Bookings + Retail lists (date/name/model/badge), model chips, refresh footer.
+- Expanded GET /api/share/dashboard to also return todayBookings, recentBookings[], recentRetail[] (name/model/variant/date). Still public, no auth.
