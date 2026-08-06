@@ -32,7 +32,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
   const lead = data.lead;
   const c = data.commercials;
-  const isBooked = /book|deliver|finance/i.test(lead.currentStatus || "");
+  const actions = data.actions || {};
 
   const tabs = [
     { key: "overview", label: "Overview" },
@@ -48,7 +48,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
     <Drawer open onClose={onClose} width="max-w-3xl"
       title={lead.customerName}
       subtitle={`${lead.leadId} · ${lead.interestedModel} ${lead.variant} · ${lead.mobile}`}
-      footer={<DrawerActions lead={lead} isBooked={isBooked} refresh={refresh} onClose={onClose} />}
+      footer={<DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} />}
     >
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
@@ -65,22 +65,28 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
       {tab === "overview" && <Overview lead={lead} c={c} />}
-      {tab === "price" && <PriceStructure lead={lead} onSaved={refresh} />}
-      {tab === "scheme" && <SchemeTab lead={lead} c={c} masters={masters} onSaved={refresh} />}
-      {tab === "payments" && <PaymentsTab lead={lead} payments={data.payments} masters={masters} onSaved={refresh} />}
-      {tab === "delivery" && <DeliveryTab lead={lead} delivery={data.delivery} onSaved={refresh} />}
+      {tab === "price" && <PriceStructure lead={lead} actions={actions} onSaved={refresh} />}
+      {tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} masters={masters} onSaved={refresh} />}
+      {tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} onSaved={refresh} />}
+      {tab === "delivery" && <DeliveryTab lead={lead} actions={actions} delivery={data.delivery} onSaved={refresh} />}
       {tab === "insurance" && <InsuranceTab lead={lead} masters={masters} />}
       {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} />}
     </Drawer>
   );
 }
 
-function DrawerActions({ lead, isBooked, refresh, onClose }) {
+function StepLock({ text }) {
+  return <div data-testid="step-lock-notice" className="mb-3 flex items-center gap-2 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{text}</div>;
+}
+
+function DrawerActions({ lead, actions, refresh, onClose }) {
   const [modal, setModal] = useState(null);
   return (
     <div className="flex items-center gap-2">
-      {!isBooked && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
-      {isBooked && lead.accountStatus === "Active" && (
+      {actions.canBook && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
+      {actions.isBooked && !actions.canBook && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
+      {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+      {actions.canClose && (
         <Button variant="secondary" data-testid="close-lead-btn" onClick={() => setModal("close")}><XCircle size={15} /> Close Lead</Button>
       )}
       <div className="ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
@@ -119,8 +125,8 @@ function Overview({ lead, c }) {
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Collections & Claims</h4>
         <KV label="Total Received" value={inr(lead.totalReceived)} tone="text-emerald-600" />
         <KV label="Customer Outstanding" value={inr(lead.customerOutstanding)} tone={lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"} />
-        <KV label="OEM Claimable" value={inr(c.claim.claimEligible)} tone="text-amber-600" />
-        <KV label="Dealer Retained" value={inr(c.dealerRetained)} />
+        <KV label="OEM Claimable (Company Share)" value={inr(c.oemClaimCompanyShare ?? c.claim.claimEligible)} tone="text-amber-600" />
+        <KV label="Dealer Scheme Retained" value={inr(c.dealerSchemeRetained ?? c.dealerRetained)} />
         <KV label="Dealer Margin (Net)" value={inr(c.margin.marginNetExGst)} />
         <KV label="Lead Source" value={lead.leadSource || "—"} tone="text-ink" />
       </Card>
@@ -141,7 +147,8 @@ function Overview({ lead, c }) {
 }
 
 /* -------------------------------------------------- Price Structure */
-function PriceStructure({ lead, onSaved }) {
+function PriceStructure({ lead, actions = {}, onSaved }) {
+  const locked = !actions.canPrice;
   const [form, setForm] = useState(() => {
     const f = { tcsApplicable: lead.tcsApplicable || "No", finalExchangeValue: lead.finalExchangeValue || 0 };
     CHARGE_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
@@ -176,12 +183,13 @@ function PriceStructure({ lead, onSaved }) {
 
   return (
     <div>
+      {locked && <StepLock text="This lead is not Active — price structure is read-only." />}
       <div className="grid grid-cols-3 gap-3">
         {CHARGE_FIELDS.map(([k, label]) => (
-          <Field key={k} label={label}><Input data-testid={`price-${k}`} type="number" value={form[k]} onChange={set(k)} /></Field>
+          <Field key={k} label={label}><Input data-testid={`price-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} /></Field>
         ))}
-        <Field label="Final Exchange Value"><Input type="number" value={form.finalExchangeValue} onChange={set("finalExchangeValue")} /></Field>
-        <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={set("tcsApplicable")}><option>No</option><option>Yes</option></Select></Field>
+        <Field label="Final Exchange Value"><Input type="number" value={form.finalExchangeValue} onChange={set("finalExchangeValue")} disabled={locked} /></Field>
+        <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={set("tcsApplicable")} disabled={locked}><option>No</option><option>Yes</option></Select></Field>
       </div>
       {preview && (
         <Card className="p-4 mt-4 bg-cobalt-tint/40 border-cobalt/20">
@@ -194,7 +202,7 @@ function PriceStructure({ lead, onSaved }) {
         </Card>
       )}
       <div className="flex justify-end mt-4">
-        <Button data-testid="save-price-btn" onClick={save}>Save Price Structure</Button>
+        <Button data-testid="save-price-btn" onClick={save} disabled={locked}>Save Price Structure</Button>
       </div>
     </div>
   );
@@ -210,51 +218,83 @@ function Prev({ label, v, highlight }) {
 }
 
 /* -------------------------------------------------- Scheme */
-function SchemeTab({ lead, c, masters, onSaved }) {
+function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
+  const locked = !actions.canScheme;
   const [form, setForm] = useState(() => {
     const f = { benefitMode: lead.benefitMode || "Full Benefit", oemExtraSupportReceived: lead.oemExtraSupportReceived || 0, oemExtraSupportPassed: lead.oemExtraSupportPassed || 0, customerBenefitPassed: lead.customerBenefitPassed || 0 };
     SCHEME_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
     return f;
   });
+  // Partial-benefit per-component breakup (how much of each OEM offer is passed to customer)
+  const OEM_KEYS = SCHEME_FIELDS.filter(([k]) => k !== "additionalDiscount");
+  const [breakup, setBreakup] = useState(() => {
+    let b = {};
+    try { b = lead.benefitPassedBreakup ? JSON.parse(lead.benefitPassedBreakup) : {}; } catch { b = {}; }
+    return b;
+  });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const setBk = (k) => (e) => setBreakup((b) => ({ ...b, [k]: e.target.value }));
+
   const save = async () => {
-    await put(`/leads/${lead.leadId}/scheme`, {
+    const payload = {
       consumerDiscount: +form.consumerDiscount, exchangeBonus: +form.exchangeBonus, loyaltyBonus: +form.loyaltyBonus,
       referralBonus: +form.referralBonus, dsaDiscount: +form.dsaDiscount, additionalDiscount: +form.additionalDiscount,
       benefitMode: form.benefitMode, customerBenefitPassed: +form.customerBenefitPassed,
       oemExtraSupportReceived: +form.oemExtraSupportReceived, oemExtraSupportPassed: +form.oemExtraSupportPassed,
-    });
+    };
+    if (form.benefitMode === "Partial Benefit") {
+      const clean = {};
+      OEM_KEYS.forEach(([k]) => { if (+breakup[k]) clean[k] = +breakup[k]; });
+      payload.benefitPassedBreakup = JSON.stringify(clean);
+    } else {
+      payload.benefitPassedBreakup = "";
+    }
+    await put(`/leads/${lead.leadId}/scheme`, payload);
     toast.success("Scheme updated");
     onSaved();
   };
   return (
     <div>
+      {locked && <StepLock text="This lead is not Active — scheme is read-only." />}
       <div className="grid grid-cols-3 gap-3">
         {SCHEME_FIELDS.map(([k, label]) => (
-          <Field key={k} label={label}><Input data-testid={`scheme-${k}`} type="number" value={form[k]} onChange={set(k)} /></Field>
+          <Field key={k} label={label}><Input data-testid={`scheme-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} /></Field>
         ))}
-        <Field label="Benefit Mode"><Select data-testid="benefit-mode" value={form.benefitMode} onChange={set("benefitMode")}>{(masters?.benefitModes || ["Full Benefit","Partial Benefit","No Benefit"]).map((m) => <option key={m}>{m}</option>)}</Select></Field>
-        {form.benefitMode === "Partial Benefit" && <Field label="Customer Benefit Passed"><Input type="number" value={form.customerBenefitPassed} onChange={set("customerBenefitPassed")} /></Field>}
-        <Field label="OEM Extra Support Received"><Input type="number" value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} /></Field>
-        <Field label="OEM Extra Support Passed"><Input type="number" value={form.oemExtraSupportPassed} onChange={set("oemExtraSupportPassed")} /></Field>
+        <Field label="Benefit Mode"><Select data-testid="benefit-mode" value={form.benefitMode} onChange={set("benefitMode")} disabled={locked}>{(masters?.benefitModes || ["Full Benefit","Partial Benefit","No Benefit"]).map((m) => <option key={m}>{m}</option>)}</Select></Field>
+        <Field label="OEM Extra Support Received"><Input type="number" value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} disabled={locked} /></Field>
+        <Field label="OEM Extra Support Passed"><Input type="number" value={form.oemExtraSupportPassed} onChange={set("oemExtraSupportPassed")} disabled={locked} /></Field>
       </div>
+      {form.benefitMode === "Partial Benefit" && (
+        <Card className="p-4 mt-4 bg-cobalt-tint/30 border-cobalt/20">
+          <div className="text-xs font-semibold text-ink mb-2">Partial Benefit — amount of each OEM offer passed to customer</div>
+          <div className="grid grid-cols-3 gap-3">
+            {OEM_KEYS.map(([k, label]) => (
+              <Field key={k} label={`${label} (max ${inr(+form[k] || 0)})`}>
+                <Input data-testid={`breakup-${k}`} type="number" value={breakup[k] ?? ""} onChange={setBk(k)} disabled={locked} />
+              </Field>
+            ))}
+          </div>
+        </Card>
+      )}
       <Card className="p-4 mt-4 bg-amber-50/50 border-amber-200">
         <div className="grid grid-cols-4 gap-3 text-center">
           <Prev label="OEM Eligible" v={c.oemEligible} />
           <Prev label="Dealer Discount" v={c.dealerDiscount} />
-          <Prev label="OEM Claimable" v={c.claim.claimEligible} />
-          <Prev label="Dealer Retained" v={c.dealerRetained} />
+          <Prev label="OEM Claimable (Co. Share)" v={c.oemClaimCompanyShare ?? c.claim.claimEligible} />
+          <Prev label="Dealer Scheme Retained" v={c.dealerSchemeRetained ?? c.dealerRetained} />
         </div>
       </Card>
-      <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save}>Update Scheme</Button></div>
+      <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save} disabled={locked}>Update Scheme</Button></div>
     </div>
   );
 }
 
 /* -------------------------------------------------- Payments */
-function PaymentsTab({ lead, payments, masters, onSaved }) {
+function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "" });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const isFinance = form.paymentMode === "Finance";
+  const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
   const add = async () => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount });
@@ -264,12 +304,13 @@ function PaymentsTab({ lead, payments, masters, onSaved }) {
   };
   return (
     <div>
+      {locked && <StepLock text={isFinance ? "This lead is archived — no receipts allowed." : "This lead is not Active — only Finance receipts are allowed."} />}
       <Card className="p-4 mb-4">
         <div className="grid grid-cols-4 gap-3 items-end">
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
           <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{(masters?.paymentModes || []).map((m) => <option key={m}>{m}</option>)}</Select></Field>
           <Field label="Narration"><Input value={form.narration} onChange={set("narration")} /></Field>
-          <Button data-testid="add-payment-btn" onClick={add}><Wallet size={15} /> Add Receipt</Button>
+          <Button data-testid="add-payment-btn" onClick={add} disabled={locked}><Wallet size={15} /> Add Receipt</Button>
         </div>
         {form.paymentMode === "Finance" && (
           <div className="grid grid-cols-2 gap-3 mt-3">
@@ -299,7 +340,7 @@ function PaymentsTab({ lead, payments, masters, onSaved }) {
 
 /* -------------------------------------------------- Delivery */
 const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
-function DeliveryTab({ lead, delivery, onSaved }) {
+function DeliveryTab({ lead, actions = {}, delivery, onSaved }) {
   const [form, setForm] = useState(() => {
     const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || "" };
     DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
@@ -312,8 +353,12 @@ function DeliveryTab({ lead, delivery, onSaved }) {
     toast.success("Delivery status updated");
     onSaved();
   };
+  const alreadyDelivered = actions.isDelivered;
+  const canMarkDelivered = actions.canDeliver;   // active + booked + not delivered
   return (
     <div>
+      {alreadyDelivered && <StepLock text="Vehicle already delivered — paperwork editable, but it can't be re-delivered." />}
+      {!alreadyDelivered && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
       <div className="flex flex-wrap gap-2 mb-4">
         {DELIV_STEPS.map(([k, label]) => (
           <button key={k} data-testid={`deliv-${k}`} onClick={() => toggle(k)}
@@ -328,9 +373,13 @@ function DeliveryTab({ lead, delivery, onSaved }) {
         <Field label="Number Plate"><Input value={form.numberPlate} onChange={set("numberPlate")} /></Field>
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} /></Field>
         <Field label="Delivery Date"><Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} /></Field>
-        <Field label="Mark Delivered?"><Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")}><option value="">Not yet</option><option value="Yes">Yes — Delivered</option></Select></Field>
+        <Field label="Mark Delivered?">
+          <Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")} disabled={alreadyDelivered || !canMarkDelivered}>
+            <option value="">Not yet</option><option value="Yes">Yes — Delivered</option>
+          </Select>
+        </Field>
       </div>
-      <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save}>Save Delivery</Button></div>
+      <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save} disabled={!alreadyDelivered && !canMarkDelivered}>Save Delivery</Button></div>
     </div>
   );
 }

@@ -64,10 +64,10 @@ const STATUS_TONES = {
   "Not Applicable": "bg-zinc-100 text-zinc-500 ring-zinc-400/20",
 };
 
-export function Badge({ children, tone, className }) {
+export function Badge({ children, tone, className, ...rest }) {
   const t = tone || STATUS_TONES[children] || "bg-zinc-100 text-zinc-700 ring-zinc-500/20";
   return (
-    <span className={cx("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ring-inset whitespace-nowrap", t, className)}>
+    <span {...rest} className={cx("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ring-inset whitespace-nowrap", t, className)}>
       {children || "—"}
     </span>
   );

@@ -67,9 +67,54 @@ async def get_lead_or_404(lead_id):
     return clean(lead)
 
 
+async def get_scheme_rows():
+    return [clean(s) for s in await db.scheme_master.find().to_list(1000)]
+
+
+# ---------------------------------------------------------------- step eligibility (LeadPickerService PICKER_STAGE + requireActiveLead_)
+def _is_booked(lead):
+    cs = (lead.get("currentStatus") or "").lower()
+    return ("book" in cs or cs == "delivered" or "finance" in cs
+            or bool(lead.get("bookingDate")) or ce.num(lead.get("bookingAmount")) > 0)
+
+
+def _is_delivered(lead):
+    return (lead.get("deliveryStatus") or "").lower() == "delivered" or (lead.get("currentStatus") or "").lower() == "delivered"
+
+
+def _acct(lead):
+    return (lead.get("accountStatus") or "Active").strip() or "Active"
+
+
+def lead_actions(lead):
+    """Which workflow steps a lead is eligible for (faithful to PICKER_STAGE + requireActiveLead_)."""
+    active = _acct(lead) == "Active"
+    booked = _is_booked(lead)
+    delivered = _is_delivered(lead)
+    not_archived = _acct(lead) != "Archived"
+    return {
+        "canBook": active and not booked,                 # booking stage: exclude booked/delivered
+        "canPrice": active,                               # requires Active
+        "canScheme": active,                              # requires Active
+        "canPayment": active,                             # customer payment requires Active
+        "canFinanceReceipt": not_archived,               # finance receipt allowed after close
+        "canDeliver": active and booked and not delivered,# delivery stage: exclude delivered
+        "canClose": active and not delivered,             # close stage: exclude delivered / non-active
+        "isBooked": booked, "isDelivered": delivered, "isActive": active,
+    }
+
+
+def _require_action(lead, key, verb):
+    acts = lead_actions(lead)
+    if not acts.get(key):
+        raise HTTPException(409, f"This lead is not eligible for {verb} (status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}).")
+
+
 def lead_to_snapshot(lead):
     """Build a commercial-engine snapshot dict from a lead document."""
     return {
+        "bookingDate": lead.get("bookingDate", ""),
+        "benefitPassedBreakup": lead.get("benefitPassedBreakup", ""),
         "exShowroom": lead.get("exShowroom", 0),
         "accessories": lead.get("accessoriesAmount", 0),
         "insurance": lead.get("insuranceAmount", 0),
@@ -103,9 +148,11 @@ async def recompute_lead(lead_id):
     if not lead:
         return None
     snap = lead_to_snapshot(lead)
+    scheme_rows = await get_scheme_rows()
     totals = ce.compute_commercial_totals(snap)
     margin = ce.compute_dealer_margin(snap)
-    claim = ce.derive_claim(snap)
+    income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
+    shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
     # total received from payments
     agg = await db.payments.aggregate([
         {"$match": {"leadId": lead_id}},
@@ -123,7 +170,12 @@ async def recompute_lead(lead_id):
         "totalReceived": total_received,
         "customerOutstanding": customer_outstanding,
         "outstandingAmount": customer_outstanding,
-        "companyOutstanding": claim["claimEligible"],
+        # OEM claimable = OEM COMPANY share (per Scheme Master), not the raw offer sum
+        "companyOutstanding": shares["eligibleTotal"],
+        "oemClaimCompanyShare": shares["eligibleTotal"],
+        "schemeCompanyTotal": shares["displayTotal"],
+        "dealerSchemeRetained": income["retainedIncomeTotal"],
+        "dealerMarginNetExGst": margin["marginNetExGst"],
         "lastUpdated": now_iso(),
     }
     await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
@@ -182,6 +234,7 @@ class SchemeIn(BaseModel):
     additionalDiscount: float = 0
     benefitMode: str = "Full Benefit"
     customerBenefitPassed: float = 0
+    benefitPassedBreakup: Optional[str] = None
     oemExtraSupportReceived: float = 0
     oemExtraSupportPassed: float = 0
 
@@ -394,7 +447,8 @@ async def get_lead(lead_id: str):
 async def customer_360(lead_id: str):
     lead = await get_lead_or_404(lead_id)
     snap = lead_to_snapshot(lead)
-    commercials = ce.compute_full_commercials(snap)
+    scheme_rows = await get_scheme_rows()
+    commercials = ce.compute_full_commercials(snap, scheme_rows)
     payments = [clean(p) for p in await db.payments.find({"leadId": lead_id}).sort("date", 1).to_list(500)]
     activities = [clean(a) for a in await db.activities.find({"leadId": lead_id}).sort("activityId", -1).to_list(500)]
     delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
@@ -402,7 +456,8 @@ async def customer_360(lead_id: str):
     claims = [clean(c) for c in await db.claims.find({"leadId": lead_id}).to_list(100)]
     return {
         "lead": lead, "commercials": commercials, "payments": payments,
-        "activities": activities, "delivery": delivery, "booking": booking, "claims": claims,
+        "activities": activities, "delivery": delivery, "booking": booking,
+        "claims": claims, "actions": lead_actions(lead),
     }
 
 
@@ -417,6 +472,7 @@ async def update_lead(lead_id: str, body: LeadIn):
 @api.post("/leads/{lead_id}/convert-booking")
 async def convert_booking(lead_id: str, body: BookingIn):
     lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canBook", "conversion to booking")
     booking_id = await next_id("booking", "BK26")
     snapshot_id = await next_id("snapshot", "SN26")
     bdate = body.bookingDate or today()
@@ -453,7 +509,8 @@ async def convert_booking(lead_id: str, body: BookingIn):
 
 @api.put("/leads/{lead_id}/price-structure")
 async def set_price_structure(lead_id: str, body: PriceStructureIn):
-    await get_lead_or_404(lead_id)
+    lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canPrice", "price-structure edits (only Active leads)")
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**body.model_dump(), "lastUpdated": now_iso()}})
     lead = await recompute_lead(lead_id)
     return clean(await db.leads.find_one({"leadId": lead_id}))
@@ -461,8 +518,12 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn):
 
 @api.put("/leads/{lead_id}/scheme")
 async def set_scheme(lead_id: str, body: SchemeIn):
-    await get_lead_or_404(lead_id)
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {**body.model_dump(), "lastUpdated": now_iso()}})
+    lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canScheme", "scheme edits (only Active leads)")
+    payload = body.model_dump()
+    if payload.get("benefitPassedBreakup") is None:
+        payload.pop("benefitPassedBreakup", None)
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
@@ -470,6 +531,7 @@ async def set_scheme(lead_id: str, body: SchemeIn):
 @api.post("/leads/{lead_id}/close")
 async def close_lead(lead_id: str, body: CloseIn):
     lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canClose", "closing (delivered or non-active leads cannot be closed here)")
     await db.leads.update_one({"leadId": lead_id}, {"$set": {
         "accountStatus": "Closed", "closedDate": today(), "closeReason": body.closeReason,
         "finalOutstanding": lead.get("customerOutstanding", 0), "lastUpdated": now_iso(),
@@ -634,7 +696,11 @@ async def list_payments(lead_id: Optional[str] = None):
 
 @api.post("/leads/{lead_id}/payments")
 async def add_payment(lead_id: str, body: PaymentIn):
-    await get_lead_or_404(lead_id)
+    lead = await get_lead_or_404(lead_id)
+    if body.paymentMode == "Finance":
+        _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)")
+    else:
+        _require_action(lead, "canPayment", "customer payment (only Active leads)")
     rec = await _add_payment_internal(lead_id, body)
     await recompute_lead(lead_id)
     return rec
@@ -696,6 +762,8 @@ async def list_deliveries():
 async def mark_delivery(lead_id: str, body: DeliveryIn):
     lead = await get_lead_or_404(lead_id)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
+    if delivered and not _is_delivered(lead):
+        _require_action(lead, "canDeliver", "delivery (not booked/active)")
     doc = {"leadId": lead_id, "customerName": lead.get("customerName"), **body.model_dump(),
            "deliveryId": f"DL{uuid.uuid4().hex[:8]}"}
     await db.deliveries.update_one({"leadId": lead_id}, {"$set": doc}, upsert=True)
@@ -837,24 +905,29 @@ async def delete_insurance(entry_id: str):
 # ---------------------------------------------------------------- claims
 @api.get("/claims")
 async def list_claims():
-    """Derive per-component OEM claims from booked leads."""
+    """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads."""
     leads = await db.leads.find({"currentStatus": {"$regex": "book", "$options": "i"}}).to_list(2000)
+    scheme_rows = await get_scheme_rows()
     result = []
     for l in leads:
         snap = lead_to_snapshot(l)
-        claim = ce.derive_claim(snap)
-        for comp in claim["breakdown"]:
-            if not comp["claimable"]:
+        shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
+        display = shares["displayByComponent"]
+        eligible = shares["eligibleByComponent"]
+        for key, company_share in display.items():
+            if company_share <= 0:
                 continue
-            existing = await db.claims.find_one({"leadId": l["leadId"], "componentKey": comp["key"]})
+            existing = await db.claims.find_one({"leadId": l["leadId"], "componentKey": key})
+            elig = ce.round2(eligible.get(key, 0))
             result.append({
-                "claimId": (existing or {}).get("claimId", f"CLM-{l['leadId']}-{comp['key']}"),
+                "claimId": (existing or {}).get("claimId", f"CLM-{l['leadId']}-{key}"),
                 "leadId": l["leadId"], "customer": l.get("customerName"),
                 "model": l.get("interestedModel"), "variant": l.get("variant"),
-                "bookingDate": l.get("bookingDate"), "component": comp["label"],
-                "componentKey": comp["key"], "claimAmount": comp["amount"],
-                "eligibleClaim": comp["amount"] if (not comp["approvalRequired"] or comp["approvalStatus"] == "Approved") else 0,
-                "approvalStatus": comp["approvalStatus"],
+                "bookingDate": l.get("bookingDate"),
+                "component": ce.SCHEME_COMPONENT_LABELS.get(key, key),
+                "componentKey": key, "claimAmount": ce.round2(company_share),
+                "eligibleClaim": elig,
+                "approvalStatus": "Approved" if elig >= company_share else "Pending",
                 "claimStatus": (existing or {}).get("claimStatus", "Pending"),
                 "receivedAmount": (existing or {}).get("receivedAmount", 0),
                 "claimReference": (existing or {}).get("claimReference", ""),
@@ -1026,35 +1099,36 @@ async def insurance_payout_report():
 
 @api.get("/reports/dealer-earnings", dependencies=[Depends(owner_only)])
 async def dealer_earnings_report():
-    rows = await db.dealer_earnings.find().to_list(5000)
-    comp_keys = [
-        ("dealerMarginNetExGst", "Dealer Margin"),
-        ("dealerSchemeRetained", "Scheme Retained"),
-        ("dealerInsuranceIncome", "Insurance Income"),
-        ("financeIncentive", "Finance Incentive"),
-        ("accessoriesMargin", "Accessories Margin"),
-        ("exchangeMargin", "Exchange Margin"),
-        ("otherIncome", "Other Income"),
-    ]
+    """Live dealer earnings from booked leads: margin + scheme retained + insurance income + other."""
+    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    scheme_rows = await get_scheme_rows()
+    # insurance income (dealer payout) per lead
+    ins_by_lead = {}
+    for e in await db.insurance.find().to_list(5000):
+        lid = e.get("leadId")
+        if lid:
+            ins_by_lead[lid] = ce.round2(ins_by_lead.get(lid, 0) + ce.num(e.get("expectedPayout")))
     by_month = {}
-    components = {label: 0.0 for _, label in comp_keys}
+    components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0}
     totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "total": 0.0, "count": 0}
-    for r in rows:
-        month = str(r.get("deliveryDate") or r.get("bookingDate") or "")[:7] or "Unknown"
+    for l in leads:
+        snap = lead_to_snapshot(l)
+        margin = ce.compute_dealer_margin(snap)["marginNetExGst"]
+        income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
+        scheme = income["retainedIncomeTotal"]
+        insurance = ins_by_lead.get(l.get("leadId"), 0)
+        other = 0.0
+        total = ce.round2(margin + scheme + insurance + other)
+        month = str(l.get("deliveryDate") or l.get("bookingDate") or "")[:7] or "Unknown"
         m = by_month.setdefault(month, {"key": month, "margin": 0.0, "scheme": 0.0,
                                         "insurance": 0.0, "other": 0.0, "total": 0.0, "count": 0})
-        margin = ce.num(r.get("dealerMarginNetExGst"))
-        scheme = ce.num(r.get("dealerSchemeRetained"))
-        insurance = ce.num(r.get("dealerInsuranceIncome"))
-        other = ce.round2(ce.num(r.get("financeIncentive")) + ce.num(r.get("accessoriesMargin"))
-                          + ce.num(r.get("exchangeMargin")) + ce.num(r.get("otherIncome")))
-        total = ce.round2(margin + scheme + insurance + other)
         m["margin"] += margin; m["scheme"] += scheme; m["insurance"] += insurance
         m["other"] += other; m["total"] += total; m["count"] += 1
         totals["margin"] += margin; totals["scheme"] += scheme
         totals["insurance"] += insurance; totals["total"] += total; totals["count"] += 1
-        for key, label in comp_keys:
-            components[label] += ce.num(r.get(key))
+        components["Dealer Margin"] += margin
+        components["Scheme Retained"] += scheme
+        components["Insurance Income"] += insurance
 
     months = sorted(by_month.values(), key=lambda x: x["key"], reverse=True)
     for m in months:

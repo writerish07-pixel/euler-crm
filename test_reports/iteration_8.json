@@ -1,0 +1,36 @@
+{
+  "summary": "Iteration 8: validated STEP-ELIGIBILITY gating (canBook/canDeliver/canClose) and SCHEME company-share split end-to-end. 9 backend pytests pass (1 skipped: no Delivered lead in baseline). Frontend LeadDrawer footer correctly gates Convert-to-Booking on booked leads and shows the Booked ✓ badge; Scheme tab preview labels match spec; Partial Benefit reveals breakup inputs. Owner sees Dealer Earnings nav, Executive does not; public /share loads. Backend 100% (9/9), Frontend 100% on tested flows.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "components/ui.js Badge", "issue": "Badge did not forward extra props (e.g. data-testid), so <Badge data-testid=\"already-booked-badge\"> rendered without the attribute. Fixed by spreading ...rest onto the span so all test IDs on Badge now work (already-booked-badge, already-delivered-badge, and any future Badge-based selectors).", "selector": "[data-testid=already-booked-badge]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter8_step_gating_and_scheme.py",
+    "/app/test_reports/pytest/iter8.xml"
+  ],
+  "action_items": [
+    "Consider adding a 'reset lead scheme to zero' or 'reseed' admin endpoint — currently the test does the reset manually. Not blocking.",
+    "Baseline mutation notice: LD26000005 has now been converted to Booked (single mutation as allowed by the request). Bookings count moved 3 -> 4. If a pristine baseline is required for later iterations, main agent should reseed."
+  ],
+  "critical_code_review_comments": [
+    "components/ui.js Badge did not spread props (breaks any data-testid or aria-* attributes passed to it). Fixed in this iteration.",
+    "server.py delivery endpoint: mark_delivery only enforces canDeliver when body.delivered is Yes AND lead is not already delivered. Non-delivered paperwork updates on a non-active lead are still allowed — probably fine but worth documenting.",
+    "SchemeTab preview labels differ between drawer footer overview ('OEM Claimable (Company Share)') and Scheme tab preview ('OEM Claimable (Co. Share)'). Consider unifying copy for consistency.",
+    "recompute_lead persists derived fields but PUT /leads/{id} (update_lead) now uses exclude_unset — good; ensure the frontend EditLeadModal continues to send only intended fields."
+  ],
+  "updated_files": [
+    "/app/frontend/src/components/ui.js (Badge now forwards data-testid via ...rest)",
+    "/app/backend/tests/test_iter8_step_gating_and_scheme.py (new pytest suite)"
+  ],
+  "success_rate": {"backend": "100% (9/9, 1 skipped)", "frontend": "100% on tested flows"},
+  "test_credentials": "Owner: owner@euler.com / euler@123 ; Executive: executive@euler.com / euler@123",
+  "seed_data_creation": "None new. Mutated LD26000005 (New -> Booked, ₹5000 booking advance) as the single allowed conversion. Reset scheme fields on LD26000006 back to zero+Full Benefit after scheme test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend gating & scheme share-split verified live against seed data. Key evidence: (1) POST /leads/LD26000003/convert-booking -> 409; (2) PUT /leads/LD26000005/delivery{delivered:Yes} on New -> 409; (3) GET /leads/LD26000003/360 returns actions{canBook:false,isBooked:true,canDeliver:true,canClose:true}; GET /leads/LD26000005/360 returns actions{canBook:true,canDeliver:false,isBooked:false} PRIOR to conversion (after conversion in this run, LD26000005 is now Booked); (4) PUT /leads/{id}/scheme with consumerDiscount=20000+exchangeBonus=15000 on an Active lead computes companyOutstanding <= raw offer sum (Scheme Master caps applied); (5) GET /reports/dealer-earnings returns {byMonth, components, totals}; (6) executive gets 401/403 on /reports/dealer-earnings, /reports/insurance-payout, /dealer-earnings. UI: LD26000003 drawer footer shows Booked ✓ badge (data-testid=already-booked-badge) and NO convert-booking-btn; LD26000006 shows convert-booking-btn and no booked badge. Scheme tab preview shows 'OEM Claimable (Co. Share)' + 'Dealer Scheme Retained'; benefit-mode=Partial Benefit reveals breakup-<key> inputs (verified consumerDiscount + exchangeBonus). Public /share loads with 'Active Bookings' + 'All Leads'. Executive session lacks 'Dealer Earnings' in sidebar. IMPORTANT: LD26000005 is now Booked in the baseline; future tests that expect it to be a 'New' lead must switch to LD26000006/7/8/9/10. Also, the Badge data-testid forwarding fix in ui.js is a small but important shared-component patch — all consumers of <Badge data-testid=...> now work.",
+  "rca of the issue": "Missing data-testid on already-booked-badge was traced to shared Badge component not forwarding extra props. Fixed via {...rest} spread on the wrapping <span>. Rest of the review request items were already correctly implemented in the codebase."
+}

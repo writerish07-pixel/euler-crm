@@ -200,9 +200,316 @@ def derive_claim(s, approvals=None):
     }
 
 
-def compute_full_commercials(s):
-    """Convenience: returns totals + margin + claim in one object."""
+# ===========================================================================
+# SCHEME SHARE-SPLIT ENGINE — faithful port of SchemeMasterService.gs
+# (schemeShareSplitFor_, getSchemeSharesForLead_, model/variant matchers) +
+# CommercialEngineService.gs (computeSchemeIncomeBreakdown_, computeSchemeClaimShares_)
+# ===========================================================================
+import re
+
+# component key -> master label used for byComponent output
+SCHEME_COMPONENT_LABELS = {
+    "consumerDiscount": "Consumer Scheme",
+    "exchangeBonus": "Exchange Benefit",
+    "loyaltyBonus": "Loyalty",
+    "referralBonus": "Referral",
+    "dsaDiscount": "DSA",
+    "additionalDiscount": "Additional Discount",
+}
+
+
+def _alnum(v):
+    return re.sub(r"[^a-z0-9]", "", str(v or "").lower().strip())
+
+
+def normalize_scheme_model_key(model, variant=""):
+    raw = str(model or "").lower().strip()
+    s = _alnum(raw)
+    v_raw = str(variant or "").lower().strip()
+    v = _alnum(v_raw)
+    if "storm" in s or "strom" in s:
+        return "storm"
+    if "turbo" in s or "tyrbo" in s:
+        return "turbo"
+    if ("hirange" in s or "highrange" in s or "neohirange" in s
+            or "high range" in raw or "hi range" in raw or "hi-range" in raw):
+        return "hirange"
+    if "hicity" in s or "hi city" in raw or "hi-city" in raw:
+        return "hicity"
+    if "hiload" in s:
+        if v == "xr" or "hicity" in v_raw:
+            return "hicity"
+        return "hiload"
+    if "hi load" in raw or "hi-load" in raw:
+        return "hiload"
+    return s
+
+
+def normalize_scheme_variant_key(variant):
+    s = _alnum(variant)
+    if not s:
+        return ""
+    if "nongbt" in s or "trnc" in s:
+        return "nongbt"
+    if "withgbt" in s or ("gbt" in s and "nongbt" not in s):
+        return "gbt"
+    if s == "xr" or s.startswith("xr"):
+        return "xr"
+    if s == "tr" or s.startswith("tr"):
+        return "tr"
+    if s == "sr" or s.startswith("sr"):
+        return "sr"
+    return s
+
+
+def models_match_scheme(lead_model, master_model, lead_variant=""):
+    return normalize_scheme_model_key(lead_model, lead_variant) == normalize_scheme_model_key(master_model)
+
+
+def variants_match_scheme(lead_variant, master_variant, master_model):
+    mv = str(master_variant or "").strip()
+    if not mv:
+        return True  # Storm / Turbo — any variant
+    a = normalize_scheme_variant_key(lead_variant)
+    b = normalize_scheme_variant_key(mv)
+    if a == b:
+        return True
+    family = normalize_scheme_model_key(master_model)
+    if family == "hiload":
+        if not a:
+            return True
+        if b == "nongbt":
+            return a != "gbt"
+    if family in ("hicity", "hirange"):
+        if b == "xr" and (a == "xr" or "xr" in a):
+            return True
+        if b == "tr" and (a == "tr" or a.startswith("tr")):
+            return True
+    return False
+
+
+def scheme_month_from_date(date_iso):
+    d = str(date_iso or "")[:10]
+    if re.match(r"^\d{4}-\d{2}", d):
+        return d[:7]
+    return d[:7]
+
+
+def _norm_month(value):
+    s = str(value or "").strip()
+    if re.match(r"^\d{4}-\d{2}", s):
+        return s[:7]
+    return s
+
+
+def get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows):
+    """Active scheme rows for a lead model/variant on a booking date -> map componentKey -> shares."""
+    month = scheme_month_from_date(booking_date)
+    iso = str(booking_date or "")[:10]
+    exact, in_window, any_family = {}, {}, {}
+    for r in (scheme_rows or []):
+        if str(r.get("status") or "").lower() != "active":
+            continue
+        if not models_match_scheme(model, r.get("model"), variant):
+            continue
+        if not variants_match_scheme(variant, r.get("variant"), r.get("model")):
+            continue
+        key = r.get("componentKey")
+        if not key:
+            continue
+        r_month = _norm_month(r.get("schemeMonth") or month)
+        payload = {
+            "dealerShare": num(r.get("dealerShare")),
+            "companyShare": num(r.get("companyShare")),
+            "totalBenefit": num(r.get("totalBenefit")) or (num(r.get("dealerShare")) + num(r.get("companyShare"))),
+            "label": r.get("component") or SCHEME_COMPONENT_LABELS.get(key, key),
+            "schemeMonth": r_month,
+        }
+        eff_from = str(r.get("effectiveFrom") or "")[:10]
+        eff_to = str(r.get("effectiveTo") or "")[:10]
+        window_ok = True
+        if eff_from and iso and iso < eff_from:
+            window_ok = False
+        if eff_to and iso and iso > eff_to:
+            window_ok = False
+        if r_month == month and window_ok:
+            exact[key] = payload
+        if window_ok:
+            if key not in in_window or r_month >= str(in_window[key].get("schemeMonth") or ""):
+                in_window[key] = payload
+        if key not in any_family or r_month >= str(any_family[key].get("schemeMonth") or ""):
+            any_family[key] = payload
+    if exact:
+        return exact
+    if in_window:
+        return in_window
+    return any_family
+
+
+def scheme_share_split_for(model, variant, booking_date, offers, scheme_rows):
+    """PURE share splitter — company share applied FIRST (partial/under-package rule)."""
+    master = get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows)
+    by_component = {}
+    dealer_total = 0.0
+    company_total = 0.0
+    for key in ["consumerDiscount", "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount"]:
+        m = master.get(key)
+        actual = num((offers or {}).get(key))
+        if not m or actual <= 0:
+            continue
+        company = min(num(m.get("companyShare")), actual)
+        company = round2(company)
+        dealer = round2(min(num(m.get("dealerShare")), max(0.0, actual - company)))
+        by_component[key] = {"actual": actual, "dealerShare": dealer,
+                             "companyShare": company, "label": m.get("label") or key}
+        dealer_total = round2(dealer_total + dealer)
+        company_total = round2(company_total + company)
+    addl = num((offers or {}).get("additionalDiscount"))
+    if addl > 0:
+        by_component["additionalDiscount"] = {"actual": addl, "dealerShare": addl,
+                                              "companyShare": 0.0, "label": "Additional Discount"}
+        dealer_total = round2(dealer_total + addl)
+    return {"dealerTotal": dealer_total, "companyTotal": company_total,
+            "byComponent": by_component, "schemeMonth": scheme_month_from_date(booking_date),
+            "model": model, "variant": variant}
+
+
+def resolve_passed_breakup(s):
+    """Full vs passed OEM offer amounts per component, honouring benefit mode."""
+    mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
+    full, passed = {}, {}
+    for key in OFFER_KEYS:
+        pol = COMPONENT_POLICY.get(key)
+        if not pol or pol["payer"] != "OEM":
+            continue
+        amt = max(0.0, num(s.get(key)))
+        if amt > 0:
+            full[key] = amt
+    if mode == "Full Benefit":
+        passed = dict(full)
+    elif mode == "Partial Benefit":
+        breakup = s.get("benefitPassedBreakup")
+        if isinstance(breakup, str) and breakup:
+            import json
+            try:
+                breakup = json.loads(breakup)
+            except Exception:
+                breakup = None
+        if isinstance(breakup, dict):
+            for k, cap in full.items():
+                passed[k] = max(0.0, min(num(breakup.get(k)), cap))
+        else:
+            remaining = max(0.0, num(s.get("customerBenefitPassed")))
+            for k in OFFER_KEYS:
+                if k not in full:
+                    continue
+                take = min(full[k], remaining)
+                passed[k] = take
+                remaining = round2(remaining - take)
+    # No Benefit -> passed stays {}
+    return {"full": full, "passed": passed, "mode": mode}
+
+
+def compute_scheme_income_breakdown(s, scheme_rows):
+    """Dealer retained income (company unpassed − dealer passed) + OEM claim total per component."""
+    bk = resolve_passed_breakup(s)
+    model = str(s.get("model") or s.get("interestedModel") or "").strip()
+    variant = str(s.get("variant") or "").strip()
+    booking_date = s.get("bookingDate") or ""
+    offers_all = _oem_offers(s)
+    out = {"retainedIncomeTotal": 0.0, "retainedByComponent": {}, "oemClaimTotal": 0.0,
+           "oemClaimByComponent": {}, "dealerCostPassed": 0.0,
+           "passedByComponent": bk["passed"], "fullByComponent": bk["full"], "shareSplitAvailable": False}
+    if model and scheme_rows:
+        full_split = scheme_share_split_for(model, variant, booking_date, offers_all, scheme_rows)
+        pass_split = scheme_share_split_for(model, variant, booking_date, bk["passed"], scheme_rows)
+        f_by = full_split["byComponent"]
+        p_by = pass_split["byComponent"]
+        keys = set(list(f_by.keys()) + list(p_by.keys()))
+        for k in keys:
+            c_full = num(f_by.get(k, {}).get("companyShare"))
+            c_pass = num(p_by.get(k, {}).get("companyShare"))
+            d_pass = num(p_by.get(k, {}).get("dealerShare"))
+            retained = round2((c_full - c_pass) - d_pass)
+            if c_full > 0:
+                out["oemClaimByComponent"][k] = c_full
+            if retained != 0:
+                out["retainedByComponent"][k] = retained
+            out["oemClaimTotal"] = round2(out["oemClaimTotal"] + c_full)
+            out["retainedIncomeTotal"] = round2(out["retainedIncomeTotal"] + retained)
+            out["dealerCostPassed"] = round2(out["dealerCostPassed"] + d_pass)
+        has_oem_offer = len(bk["full"]) > 0
+        out["shareSplitAvailable"] = (out["oemClaimTotal"] > 0) if has_oem_offer else True
+        return out
+    # Fallback: treat each component as 100% company-funded
+    for k, f in bk["full"].items():
+        p = num(bk["passed"].get(k))
+        retained = round2(f - p)
+        if retained != 0:
+            out["retainedByComponent"][k] = retained
+        if f > 0:
+            out["oemClaimByComponent"][k] = f
+        out["retainedIncomeTotal"] = round2(out["retainedIncomeTotal"] + retained)
+        out["oemClaimTotal"] = round2(out["oemClaimTotal"] + f)
+    return out
+
+
+def compute_scheme_claim_shares(s, scheme_rows, approvals=None):
+    """Company-share amounts for claim register: display (all) vs eligible (DSA needs approval)."""
+    approvals = approvals or {}
+    model = str(s.get("model") or s.get("interestedModel") or "").strip()
+    variant = str(s.get("variant") or "").strip()
+    booking_date = s.get("bookingDate") or ""
+    offers_all = _oem_offers(s)
+    offers_eligible = {}
+    for key, amt in offers_all.items():
+        pol = COMPONENT_POLICY.get(key)
+        status = approvals.get(key) or "Pending"
+        # DSA applied on a booked deal is treated approved unless explicitly rejected
+        if key == "dsaDiscount" and pol and pol["approvalRequired"] and status == "Pending" and amt > 0:
+            status = "Approved"
+        if pol and pol["approvalRequired"] and status != "Approved":
+            continue
+        offers_eligible[key] = amt
+    out = {"displayByComponent": {}, "eligibleByComponent": {},
+           "displayTotal": 0.0, "eligibleTotal": 0.0, "shareSplitAvailable": False}
+    if model and scheme_rows:
+        disp = scheme_share_split_for(model, variant, booking_date, offers_all, scheme_rows)["byComponent"]
+        elig = scheme_share_split_for(model, variant, booking_date, offers_eligible, scheme_rows)["byComponent"]
+        for k, v in disp.items():
+            c = num(v.get("companyShare"))
+            if c > 0:
+                out["displayByComponent"][k] = c
+                out["displayTotal"] = round2(out["displayTotal"] + c)
+        for k, v in elig.items():
+            c = num(v.get("companyShare"))
+            if c > 0:
+                out["eligibleByComponent"][k] = c
+                out["eligibleTotal"] = round2(out["eligibleTotal"] + c)
+        has_oem_offer = len(offers_all) > 0
+        out["shareSplitAvailable"] = (out["displayTotal"] > 0) if has_oem_offer else True
+        return out
+    for k, amt in offers_all.items():
+        out["displayByComponent"][k] = amt
+        out["displayTotal"] = round2(out["displayTotal"] + amt)
+    for k, amt in offers_eligible.items():
+        out["eligibleByComponent"][k] = amt
+        out["eligibleTotal"] = round2(out["eligibleTotal"] + amt)
+    return out
+
+
+def compute_full_commercials(s, scheme_rows=None):
+    """Convenience: returns totals + margin + claim (+ scheme share-split when scheme rows given)."""
     totals = compute_commercial_totals(s)
     margin = compute_dealer_margin(s)
     claim = derive_claim(s)
-    return {**totals, "margin": margin, "claim": claim}
+    result = {**totals, "margin": margin, "claim": claim}
+    if scheme_rows is not None:
+        income = compute_scheme_income_breakdown(s, scheme_rows)
+        shares = compute_scheme_claim_shares(s, scheme_rows)
+        result["schemeIncome"] = income
+        result["schemeClaimShares"] = shares
+        # Report-facing truths derived from the share split
+        result["oemClaimCompanyShare"] = shares["eligibleTotal"]
+        result["dealerSchemeRetained"] = income["retainedIncomeTotal"]
+    return result
