@@ -106,5 +106,58 @@ async def append(entity: str, doc: dict):
         return False
 
 
+def _read_column_a(tab):
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    res = _service.spreadsheets().values().get(spreadsheetId=sheet_id, range=f"'{tab}'!A:A").execute()
+    return {str(r[0]).strip() for r in res.get("values", []) if r}
+
+
+def _append_many(tab, rows):
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    _service.spreadsheets().values().append(
+        spreadsheetId=sheet_id, range=f"'{tab}'!A1",
+        valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+        body={"values": rows},
+    ).execute()
+
+
+def _backfill_sync(datasets):
+    """datasets = {entity: [docs]}. Idempotent: skips records whose key already
+    exists in the sheet's column A. Returns per-entity {appended, skipped}."""
+    result = {}
+    for entity, docs in datasets.items():
+        mapping = SYNC_MAP.get(entity)
+        if not mapping:
+            continue
+        tab, fields = mapping
+        key_field = fields[0]
+        existing = _read_column_a(tab)
+        rows, skipped = [], 0
+        for d in docs:
+            key = str(d.get(key_field, "")).strip()
+            if key and key in existing:
+                skipped += 1
+                continue
+            rows.append([d.get(f, "") for f in fields])
+        if rows:
+            _append_many(tab, rows)
+        result[entity] = {"appended": len(rows), "skipped": skipped}
+    return result
+
+
+async def backfill(datasets):
+    global _service
+    if _service is None:
+        _init()
+    st = status()
+    if not st.get("enabled") or not st.get("canWrite"):
+        return {"ok": False, "reason": st.get("reason", "sync not enabled"), "canWrite": st.get("canWrite", False)}
+    try:
+        result = await asyncio.to_thread(_backfill_sync, datasets)
+        return {"ok": True, "result": result}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
+
 # initialise on import
 _init()

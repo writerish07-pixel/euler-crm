@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -10,9 +10,24 @@ export default function Settings() {
   const [users, setUsers] = useState([]);
   const [gs, setGs] = useState(null);
   const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive" });
+  const [backfilling, setBackfilling] = useState(false);
 
   const loadUsers = useCallback(() => { if (isOwner) get("/auth/users").then(setUsers).catch(() => {}); }, [isOwner]);
   useEffect(() => { loadUsers(); get("/integrations/gsheets").then(setGs).catch(() => {}); }, [loadUsers]);
+
+  const runBackfill = async () => {
+    setBackfilling(true);
+    try {
+      const r = await post("/integrations/gsheets/backfill", {});
+      if (r.ok) {
+        const total = Object.values(r.result || {}).reduce((s, x) => s + (x.appended || 0), 0);
+        toast.success(`Backfill done — ${total} new rows added to the sheet`);
+      } else {
+        toast.error(r.reason || "Sheet not writable yet — grant Editor access first");
+      }
+    } catch { toast.error("Backfill failed"); }
+    finally { setBackfilling(false); }
+  };
 
   const addUser = async () => {
     if (!form.email || !form.password) return toast.error("Email & password required");
@@ -50,6 +65,14 @@ export default function Settings() {
             {gs.enabled && (
               <div className="text-xs text-emerald-700 mt-2 bg-emerald-50 rounded-lg p-3 ring-1 ring-emerald-200">
                 Live — new Leads, Bookings, Payments, Deliveries & Claims are appended to your Euler Master sheet automatically.
+              </div>
+            )}
+            {isOwner && (
+              <div className="pt-2">
+                <Button variant="secondary" data-testid="backfill-btn" onClick={runBackfill} disabled={backfilling}>
+                  <RefreshCcw size={14} /> {backfilling ? "Backfilling…" : "Backfill existing data to sheet"}
+                </Button>
+                <span className="text-xs text-ink-faint ml-2">Pushes all current leads, bookings & payments (skips rows already in the sheet)</span>
               </div>
             )}
           </div>

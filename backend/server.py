@@ -982,6 +982,48 @@ async def gsheets_status():
     return gsheets.status()
 
 
+@api.post("/integrations/gsheets/backfill", dependencies=[Depends(owner_only)])
+async def gsheets_backfill():
+    leads = [clean(x) for x in await db.leads.find().to_list(5000)]
+    payments = [clean(x) for x in await db.payments.find().to_list(5000)]
+    bookings = [clean(x) for x in await db.bookings.find().to_list(5000)]
+    delivered = [clean(x) for x in await db.leads.find({"deliveryStatus": "Delivered"}).to_list(5000)]
+    deliveries = [{"leadId": l.get("leadId"), "customerName": l.get("customerName"),
+                   "deliveryDate": l.get("deliveryDate"), "delivered": "Yes",
+                   "invoiceNumber": l.get("invoiceNumber", ""), "chassisNumber": l.get("chassisNumber", ""),
+                   "numberPlate": l.get("numberPlate", "")} for l in delivered]
+    return await gsheets.backfill({"leads": leads, "bookings": bookings, "payments": payments, "deliveries": deliveries})
+
+
+# ---------------------------------------------------------------- owner reports
+@api.get("/reports/insurance-payout", dependencies=[Depends(owner_only)])
+async def insurance_payout_report():
+    entries = await db.insurance.find().to_list(5000)
+    by_month = {}
+    by_insurer = {}
+    totals = {"premium": 0.0, "expected": 0.0, "received": 0.0, "outstanding": 0.0, "count": 0}
+    for e in entries:
+        month = str(e.get("policyDate") or e.get("deliveryDate") or "")[:7] or "Unknown"
+        premium = ce.num(e.get("insuranceAmount"))
+        expected = ce.num(e.get("expectedPayout"))
+        received = ce.num(e.get("receivedPayout"))
+        outstanding = ce.num(e.get("payoutOutstanding"))
+        for bucket, key in ((by_month, month), (by_insurer, e.get("insuranceCompany") or "Unknown")):
+            row = bucket.setdefault(key, {"key": key, "premium": 0.0, "expected": 0.0, "received": 0.0, "outstanding": 0.0, "count": 0})
+            row["premium"] += premium; row["expected"] += expected
+            row["received"] += received; row["outstanding"] += outstanding; row["count"] += 1
+        totals["premium"] += premium; totals["expected"] += expected
+        totals["received"] += received; totals["outstanding"] += outstanding; totals["count"] += 1
+
+    def norm(bucket, sort_key=False):
+        rows = [{**r, "premium": ce.round2(r["premium"]), "expected": ce.round2(r["expected"]),
+                 "received": ce.round2(r["received"]), "outstanding": ce.round2(r["outstanding"])} for r in bucket.values()]
+        return sorted(rows, key=lambda x: x["key"], reverse=True) if sort_key else sorted(rows, key=lambda x: -x["expected"])
+
+    return {"byMonth": norm(by_month, True), "byInsurer": norm(by_insurer),
+            "totals": {k: (ce.round2(v) if isinstance(v, float) else v) for k, v in totals.items()}}
+
+
 # ---------------------------------------------------------------- excel export
 @api.get("/export")
 async def export_xlsx():

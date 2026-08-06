@@ -3,7 +3,7 @@ import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
-  Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download,
+  Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -22,6 +22,7 @@ const NAV = [
     { to: "/payments", label: "Payment Ledger", icon: Wallet },
     { to: "/finance", label: "Finance Register", icon: Landmark },
     { to: "/insurance", label: "Insurance Payouts", icon: ShieldCheck },
+    { to: "/insurance-report", label: "Payout Report", icon: TrendingUp, ownerOnly: true },
   ]},
   { section: "Fulfilment", items: [{ to: "/deliveries", label: "Delivery Tracker", icon: Truck }] },
   { section: "OEM & Commercial", items: [
