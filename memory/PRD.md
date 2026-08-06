@@ -60,3 +60,9 @@ User's "Euler company CRM" was built on **Google Sheets + Apps Script (~27,000 l
 - **Backfill (owner):** POST /api/integrations/gsheets/backfill pushes all leads/bookings/payments/deliveries to the sheet, idempotent (dedupes on column-A key so no duplicates). Settings "Backfill" button. Verified: skips existing, appends only missing.
 - **Insurer Payout Report (owner-only):** /insurance-report + GET /api/reports/insurance-payout — expected vs received payouts by month & by insurer, totals, bar chart. Executive blocked (403 + nav hidden + route redirect).
 - Tested: frontend 6/6 (iteration_5), backend verified via curl. Baseline clean (10 leads, 0 insurance).
+
+## Iteration 6 (2026-06) — Dealer Earnings Report, Sync Health Badge, Full Backfill
+- **Dealer Earnings Report (owner-only):** /earnings-report + GET /api/reports/dealer-earnings — monthly margin/scheme/insurance/other breakdown, KPI cards, stacked bar chart, By-Month table. Total derived from component fields (migrated totalDealerEarnings was 0). Executive blocked.
+- **Sync Health Badge:** top-bar badge (SyncBadge) polls /api/integrations/gsheets every 60s → green 'Sheet Synced' (enabled+writable), amber 'Sync Off', red 'Sync Error' (with tooltip of lastError). gsheets.py tracks _health {lastWriteOk, lastWriteAt, lastError, writes, failures} updated on every append.
+- **Full Backfill run:** executed POST /api/integrations/gsheets/backfill — all existing leads(10)/bookings(3)/payments(3) already present, 0 duplicates added; sheet is 100% in sync.
+- Bug fixed by testing agent: Layout.js was missing `useEffect` import (crashed authenticated layout) — now fixed. Tested frontend 4/4 pass.
