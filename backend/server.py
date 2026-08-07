@@ -1055,7 +1055,7 @@ async def add_activity(lead_id: str, body: ActivityIn):
     return clean(doc)
 
 
-@api.get("/insurance")
+@api.get("/insurance", dependencies=[Depends(owner_only)])
 async def list_insurance(lead_id: Optional[str] = None):
     q = {"leadId": lead_id} if lead_id else {}
     return [clean(i) for i in await db.insurance.find(q).sort("entryId", -1).to_list(1000)]
@@ -1097,7 +1097,7 @@ def _insurance_derive(body: dict):
             "payoutOutstanding": outstanding, "status": status}
 
 
-@api.post("/insurance")
+@api.post("/insurance", dependencies=[Depends(owner_only)])
 async def create_insurance(body: InsuranceIn, act=Depends(actor)):
     data = body.model_dump()
     data.update(_insurance_derive(data))
@@ -1114,7 +1114,7 @@ async def create_insurance(body: InsuranceIn, act=Depends(actor)):
     return clean(data)
 
 
-@api.put("/insurance/{entry_id}")
+@api.put("/insurance/{entry_id}", dependencies=[Depends(owner_only)])
 async def update_insurance(entry_id: str, body: InsuranceIn, act=Depends(actor)):
     existing = await db.insurance.find_one({"entryId": entry_id}) or {}
     data = body.model_dump()
@@ -1128,7 +1128,7 @@ async def update_insurance(entry_id: str, body: InsuranceIn, act=Depends(actor))
     return clean(await db.insurance.find_one({"entryId": entry_id}))
 
 
-@api.delete("/insurance/{entry_id}")
+@api.delete("/insurance/{entry_id}", dependencies=[Depends(owner_only)])
 async def delete_insurance(entry_id: str, act=Depends(actor)):
     existing = await db.insurance.find_one({"entryId": entry_id}) or {}
     await db.insurance.delete_one({"entryId": entry_id})
@@ -1137,7 +1137,7 @@ async def delete_insurance(entry_id: str, act=Depends(actor)):
     return {"ok": True}
 
 
-@api.post("/insurance/{entry_id}/receipt")
+@api.post("/insurance/{entry_id}/receipt", dependencies=[Depends(owner_only)])
 async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(actor)):
     """Record insurer payout received against an entry; accrues receivedPayout + keeps a receipt history."""
     e = await db.insurance.find_one({"entryId": entry_id})

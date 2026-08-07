@@ -4,6 +4,7 @@ import { ArrowRightLeft, Wallet, XCircle, Pencil } from "lucide-react";
 import { get, post, put } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
+import { useAuth } from "../context/AuthContext";
 
 const CHARGE_FIELDS = [
   ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
@@ -17,6 +18,7 @@ const SCHEME_FIELDS = [
 ];
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
+  const { isOwner } = useAuth();
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
@@ -40,7 +42,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
     { key: "scheme", label: "Scheme" },
     { key: "payments", label: `Payments (${data.payments.length})` },
     { key: "delivery", label: "Delivery" },
-    { key: "insurance", label: "Insurance" },
+    ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
     { key: "activity", label: `Activity (${data.activities.length})` },
   ];
 
@@ -69,7 +71,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       {tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} masters={masters} onSaved={refresh} />}
       {tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} onSaved={refresh} />}
       {tab === "delivery" && <DeliveryTab lead={lead} actions={actions} delivery={data.delivery} onSaved={refresh} />}
-      {tab === "insurance" && <InsuranceTab lead={lead} masters={masters} />}
+      {tab === "insurance" && isOwner && <InsuranceTab lead={lead} masters={masters} />}
       {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} />}
     </Drawer>
   );

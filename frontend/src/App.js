@@ -50,7 +50,7 @@ function AppRoutes() {
       <Route path="/activities" element={P(<Activities />)} />
       <Route path="/payments" element={P(<Payments />)} />
       <Route path="/finance" element={P(<Finance />)} />
-      <Route path="/insurance" element={P(<Insurance />)} />
+      <Route path="/insurance" element={P(<Insurance />, true)} />
       <Route path="/deliveries" element={P(<Deliveries />)} />
       <Route path="/claims" element={P(<Claims />)} />
       <Route path="/scheme-master" element={P(<SchemeMaster />)} />

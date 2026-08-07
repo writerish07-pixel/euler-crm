@@ -142,3 +142,10 @@ User approved implementing every remaining gap in priority order. All done, back
 - **Perf:** startup indexes on leads.leadId/mobile/currentStatus/bookingDate + payments.leadId + audit_log.timestamp.
 - Docs updated: ERP_PARITY_SPEC, FIELD_MAPPING, FORMULA_MIGRATION, GO_LIVE_CHECKLIST (96/100), TEST_CASES.
 - **Remaining to reach ≥99% GO-LIVE (operational only, not code):** production redeploy + production smoke test; optional password-reset/lockout policy; confirm append-only Google Sheet sync is acceptable. Verdict stays "NOT READY FOR PRODUCTION" until the user redeploys + smoke-tests on production.
+
+## Iteration 15 (2026-06) — Insurance payout hidden from staff (Executive)
+User: staff must not see the dealer payout %/expected; owner manages the rate.
+- Lead drawer Insurance tab now Owner-only (hidden for Executive) — `useAuth().isOwner` gate in LeadDrawer.js (tab list + render).
+- Standalone "Insurance Payouts" page + sidebar link now Owner-only (App.js route P(...,true), Layout.js ownerOnly).
+- Insurance API locked Owner-only: GET/POST/PUT/DELETE /api/insurance + POST /api/insurance/{id}/receipt → 403 for Executive (verified), 200 for Owner. Prevents API-level payout leakage.
+- Preview change — user must REDEPLOY to push to production (euler-connect.emergent.host).

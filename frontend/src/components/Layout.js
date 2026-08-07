@@ -22,7 +22,7 @@ const NAV = [
   { section: "Money", items: [
     { to: "/payments", label: "Payment Ledger", icon: Wallet },
     { to: "/finance", label: "Finance Register", icon: Landmark },
-    { to: "/insurance", label: "Insurance Payouts", icon: ShieldCheck },
+    { to: "/insurance", label: "Insurance Payouts", icon: ShieldCheck, ownerOnly: true },
     { to: "/insurance-report", label: "Payout Report", icon: TrendingUp, ownerOnly: true },
   ]},
   { section: "Fulfilment", items: [{ to: "/deliveries", label: "Delivery Tracker", icon: Truck }] },
