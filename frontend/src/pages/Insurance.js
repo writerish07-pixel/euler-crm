@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { Plus, Pencil, Trash2, Banknote } from "lucide-react";
+import { Plus, Pencil, Trash2, Banknote, HandCoins } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
@@ -9,17 +9,27 @@ export default function Insurance() {
   const [rows, setRows] = useState([]);
   const [edit, setEdit] = useState(null);
   const [masters, setMasters] = useState(null);
+  const [delivered, setDelivered] = useState([]);
+  const [receipt, setReceipt] = useState(false);
   const load = useCallback(() => get("/insurance").then(setRows), []);
-  useEffect(() => { load(); get("/masters").then(setMasters); }, [load]);
+  useEffect(() => {
+    load();
+    get("/masters").then(setMasters);
+    get("/leads").then((ls) => setDelivered(ls.filter((l) => (l.deliveryStatus || "").toLowerCase() === "delivered" || (l.currentStatus || "").toLowerCase() === "delivered")));
+  }, [load]);
 
   const expected = rows.reduce((s, r) => s + Number(r.expectedPayout || 0), 0);
   const received = rows.reduce((s, r) => s + Number(r.receivedPayout || 0), 0);
   const remove = async (r) => { if (!window.confirm("Delete entry?")) return; await del(`/insurance/${r.entryId}`); toast.success("Deleted"); load(); };
+  const outstandingRows = rows.filter((r) => Number(r.payoutOutstanding || 0) > 0.01);
 
   return (
     <div>
       <PageHeader title="Insurance Payouts" subtitle={`${rows.length} entries · ${inr(received)} received of ${inr(expected)} expected`}
-        actions={<Button data-testid="add-insurance-btn" onClick={() => setEdit({})}><Plus size={16} /> Add Entry</Button>} />
+        actions={<div className="flex items-center gap-2">
+          <Button variant="secondary" data-testid="record-payout-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Payout</Button>
+          <Button data-testid="add-insurance-btn" onClick={() => setEdit({})}><Plus size={16} /> Add Entry</Button>
+        </div>} />
       <Table
         rowKey="entryId"
         onRowClick={setEdit}
@@ -42,12 +52,56 @@ export default function Insurance() {
         rows={rows}
         empty="No insurance entries — click Add Entry"
       />
-      {edit && <EntryDrawer row={edit} masters={masters} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
+      {edit && <EntryDrawer row={edit} masters={masters} delivered={delivered} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
+      {receipt && <PayoutReceiptModal rows={outstandingRows} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />}
     </div>
   );
 }
 
-function EntryDrawer({ row, masters, onClose, onSaved }) {
+function PayoutReceiptModal({ rows, onClose, onDone }) {
+  const [entryId, setEntryId] = useState("");
+  const [form, setForm] = useState({ amount: "", date: "", reference: "" });
+  const sel = rows.find((r) => r.entryId === entryId);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const submit = async () => {
+    if (!sel) return toast.error("Select an entry");
+    if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
+    try {
+      await post(`/insurance/${sel.entryId}/receipt`, { amount: +form.amount, date: form.date, reference: form.reference });
+      toast.success("Payout recorded");
+      onDone();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
+      <Card className="relative w-full max-w-lg p-6 animate-fade-up">
+        <h3 className="font-heading text-lg font-bold text-ink mb-1">Record Insurer Payout</h3>
+        <p className="text-xs text-ink-soft mb-4">Pick an insurance entry with a pending payout</p>
+        <Field label="Entry (customer · insurer · outstanding)">
+          <Select data-testid="payout-receipt-select" value={entryId} onChange={(e) => setEntryId(e.target.value)}>
+            <option value="">— Select —</option>
+            {rows.map((r) => <option key={r.entryId} value={r.entryId}>{r.customerName} · {r.insuranceCompany} · {inr(r.payoutOutstanding)}</option>)}
+          </Select>
+        </Field>
+        {sel && (
+          <div className="grid grid-cols-3 gap-3 mt-3">
+            <Field label="Amount Received (₹)"><Input data-testid="payout-receipt-amount" type="number" value={form.amount} onChange={set("amount")} placeholder={String(sel.payoutOutstanding)} /></Field>
+            <Field label="Date"><Input type="date" value={form.date} onChange={set("date")} /></Field>
+            <Field label="Reference / UTR"><Input value={form.reference} onChange={set("reference")} /></Field>
+          </div>
+        )}
+        {sel && <p className="text-xs text-ink-soft mt-2">Outstanding: <span className="font-mono font-semibold text-red-600">{inr(sel.payoutOutstanding)}</span></p>}
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button data-testid="save-payout-receipt-btn" onClick={submit}>Record Payout</Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function EntryDrawer({ row, masters, delivered = [], onClose, onSaved }) {
   const isNew = !row.entryId;
   const [form, setForm] = useState({
     leadId: row.leadId || "", customerName: row.customerName || "", mobile: row.mobile || "",
@@ -57,6 +111,11 @@ function EntryDrawer({ row, masters, onClose, onSaved }) {
     policyDate: row.policyDate || "", insuranceExecutive: row.insuranceExecutive || "", remarks: row.remarks || "",
   });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const pickLead = (e) => {
+    const id = e.target.value;
+    const l = delivered.find((x) => x.leadId === id);
+    setForm((f) => ({ ...f, leadId: id, customerName: l ? l.customerName : f.customerName, mobile: l ? l.mobile : f.mobile, model: l ? l.interestedModel : f.model, variant: l ? l.variant : f.variant }));
+  };
   const premium = Number(form.insuranceAmount) || 0;
   const rate = Number(form.payoutRate) || 0;
   const expected = Math.round(premium * (rate / 100));
@@ -75,8 +134,13 @@ function EntryDrawer({ row, masters, onClose, onSaved }) {
     <Drawer open onClose={onClose} width="max-w-xl" title={isNew ? "Add Insurance Entry" : "Insurance Entry"}
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-insurance-btn" onClick={save}><Banknote size={15} /> Save</Button></div>}>
       <div className="grid grid-cols-2 gap-3">
+        <Field label="Delivered Lead">
+          <Select data-testid="ins-lead-select" value={form.leadId} onChange={pickLead}>
+            <option value="">— Manual (no lead) —</option>
+            {delivered.map((l) => <option key={l.leadId} value={l.leadId}>{l.leadId} · {l.customerName} · {l.interestedModel}</option>)}
+          </Select>
+        </Field>
         <Field label="Customer Name *"><Input data-testid="ins-customer" value={form.customerName} onChange={set("customerName")} /></Field>
-        <Field label="Lead ID (optional)"><Input value={form.leadId} onChange={set("leadId")} /></Field>
         <Field label="Insurer"><Input value={form.insuranceCompany} onChange={set("insuranceCompany")} /></Field>
         <Field label="Policy Number"><Input value={form.policyNumber} onChange={set("policyNumber")} /></Field>
         <Field label="Premium (₹)"><Input data-testid="ins-premium" type="number" value={form.insuranceAmount} onChange={set("insuranceAmount")} /></Field>

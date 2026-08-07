@@ -749,6 +749,12 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
     running = ce.round2((prior[0]["t"] if prior else 0) + body.amount)
     snap = lead_to_snapshot(lead) if lead else {}
     payable = ce.compute_commercial_totals(snap)["customerPayable"] if lead else 0
+    # Over-payment guard (port of BusinessRulesService.validatePaymentAmount_): a receipt may
+    # never push total received above Customer Payable. Provisional allowed only when payable is
+    # still ₹0 (slim booking, price deferred to Price Structure).
+    if payable > 0 and running > payable + 0.01:
+        room = ce.round2(max(0.0, payable - (running - body.amount)))
+        raise HTTPException(422, f"Amount ₹{ce.round2(body.amount)} exceeds the balance. Customer payable is ₹{payable}; only ₹{room} can still be collected.")
     outstanding = ce.round2(max(0.0, payable - running)) if payable > 0 else 0.0
     doc = {
         "receiptNumber": receipt, "leadId": lead_id, "customerName": lead.get("customerName") if lead else "",
@@ -784,23 +790,29 @@ async def add_payment(lead_id: str, body: PaymentIn):
 
 # ---------------------------------------------------------------- finance
 async def _upsert_finance_file(lead_id, body: PaymentIn):
+    """A Finance-mode entry on a lead = amount the FINANCER is now liable to disburse.
+    It accrues the file's committed amount; the customer's outstanding already dropped
+    by this amount (recompute counts Finance payments). Actual disbursement is booked
+    separately via POST /finance/{file}/receipt and never re-touches customer outstanding."""
     lead = await db.leads.find_one({"leadId": lead_id})
     existing = await db.finance.find_one({"fileNumber": body.financeFileNumber})
     if existing:
-        received = ce.round2(ce.num(existing.get("receivedAgainstFile")) + body.amount)
-        outstanding = ce.round2(max(0.0, ce.num(existing.get("sanctionedAmount")) - received))
+        committed = ce.round2(ce.num(existing.get("sanctionedAmount")) + body.amount)
+        received = ce.num(existing.get("receivedAgainstFile"))
+        outstanding = ce.round2(max(0.0, committed - received))
         await db.finance.update_one({"fileNumber": body.financeFileNumber}, {"$set": {
-            "receivedAgainstFile": received, "fileOutstanding": outstanding,
-            "status": "Closed" if outstanding <= 0 else "Open", "lastPaymentDate": body.date or today(),
+            "sanctionedAmount": committed, "fileOutstanding": outstanding, "financer": body.financerName or existing.get("financer"),
+            "status": "Received" if outstanding <= 0 else ("Partial" if received > 0 else "Pending"),
+            "lastUpdated": today(),
         }})
     else:
-        sanctioned = ce.num(lead.get("customerPayable")) if lead else 0
+        committed = ce.round2(body.amount)
         await db.finance.insert_one({
             "fileNumber": body.financeFileNumber, "leadId": lead_id,
             "customerName": lead.get("customerName") if lead else "", "financer": body.financerName,
-            "sanctionedAmount": sanctioned, "receivedAgainstFile": ce.round2(body.amount),
-            "fileOutstanding": ce.round2(max(0.0, sanctioned - body.amount)), "status": "Open",
-            "lastPaymentDate": body.date or today(),
+            "sanctionedAmount": committed, "receivedAgainstFile": 0.0,
+            "fileOutstanding": committed, "status": "Pending", "receipts": [],
+            "lastUpdated": today(),
         })
 
 
@@ -810,8 +822,36 @@ async def list_finance(view: str = "all"):
     if view == "pending":
         files = [f for f in files if ce.num(f.get("fileOutstanding")) > 0]
     elif view == "overdue":
-        files = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Closed"]
+        files = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
     return files
+
+
+class ReceiptIn(BaseModel):
+    amount: float
+    date: str = ""
+    reference: str = ""
+
+
+@api.post("/finance/{file_number}/receipt")
+async def record_financer_receipt(file_number: str, body: ReceiptIn):
+    """Record money actually disbursed by the financer against a file. Does NOT change customer outstanding."""
+    f = await db.finance.find_one({"fileNumber": file_number})
+    if not f:
+        raise HTTPException(404, "Finance file not found")
+    if body.amount <= 0:
+        raise HTTPException(422, "Enter a valid receipt amount")
+    committed = ce.num(f.get("sanctionedAmount"))
+    received = ce.round2(ce.num(f.get("receivedAgainstFile")) + body.amount)
+    outstanding = ce.round2(max(0.0, committed - received))
+    receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
+               "reference": body.reference, "recordedAt": now_iso()}
+    await db.finance.update_one({"fileNumber": file_number}, {
+        "$set": {"receivedAgainstFile": received, "fileOutstanding": outstanding,
+                 "status": "Received" if outstanding <= 0 else "Partial",
+                 "lastPaymentDate": body.date or today(), "lastUpdated": today()},
+        "$push": {"receipts": receipt},
+    })
+    return clean(await db.finance.find_one({"fileNumber": file_number}))
 
 
 # ---------------------------------------------------------------- deliveries
@@ -980,6 +1020,28 @@ async def update_insurance(entry_id: str, body: InsuranceIn):
 async def delete_insurance(entry_id: str):
     await db.insurance.delete_one({"entryId": entry_id})
     return {"ok": True}
+
+
+@api.post("/insurance/{entry_id}/receipt")
+async def record_insurer_payout(entry_id: str, body: ReceiptIn):
+    """Record insurer payout received against an entry; accrues receivedPayout + keeps a receipt history."""
+    e = await db.insurance.find_one({"entryId": entry_id})
+    if not e:
+        raise HTTPException(404, "Insurance entry not found")
+    if body.amount <= 0:
+        raise HTTPException(422, "Enter a valid receipt amount")
+    expected = ce.num(e.get("expectedPayout"))
+    received = ce.round2(ce.num(e.get("receivedPayout")) + body.amount)
+    outstanding = ce.round2(max(0.0, expected - received))
+    status = "Received" if expected > 0 and received >= expected - 0.01 else "Partial"
+    receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
+               "reference": body.reference, "recordedAt": now_iso()}
+    await db.insurance.update_one({"entryId": entry_id}, {
+        "$set": {"receivedPayout": received, "payoutOutstanding": outstanding, "status": status,
+                 "lastPayoutDate": body.date or today()},
+        "$push": {"receipts": receipt},
+    })
+    return clean(await db.insurance.find_one({"entryId": entry_id}))
 
 
 # ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)
@@ -1229,6 +1291,44 @@ async def settle_claim(body: ClaimSettleIn):
     await gsheets.append("claims", {**doc, "customer": lead.get("customerName", ""),
                                     "model": lead.get("interestedModel", ""), "claimAmount": body.receivedAmount})
     return {"ok": True}
+
+
+class ClaimReceiptIn(BaseModel):
+    leadId: str
+    componentKey: str
+    amount: float
+    date: str = ""
+    reference: str = ""
+
+
+@api.post("/claims/receipt")
+async def record_claim_receipt(body: ClaimReceiptIn):
+    """Record OEM money received against ONE claim component; accrues receivedAmount + keeps a receipt history."""
+    if body.amount <= 0:
+        raise HTTPException(422, "Enter a valid receipt amount")
+    # eligible company share for this component (recomputed live)
+    lead = await get_lead_or_404(body.leadId)
+    scheme_rows = await get_scheme_rows()
+    shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
+    eligible = ce.round2(ce.num(shares["eligibleByComponent"].get(body.componentKey)))
+    existing = await db.claims.find_one({"leadId": body.leadId, "componentKey": body.componentKey}) or {}
+    received = ce.round2(ce.num(existing.get("receivedAmount")) + body.amount)
+    status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
+    receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
+               "reference": body.reference, "recordedAt": now_iso()}
+    await db.claims.update_one(
+        {"leadId": body.leadId, "componentKey": body.componentKey},
+        {"$set": {"claimId": f"CLM-{body.leadId}-{body.componentKey}", "leadId": body.leadId,
+                  "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
+                  "claimReference": body.reference or existing.get("claimReference", ""),
+                  "eligibleClaim": eligible, "lastUpdated": now_iso()},
+         "$push": {"receipts": receipt}},
+        upsert=True,
+    )
+    await gsheets.append("claims", {"claimId": f"CLM-{body.leadId}-{body.componentKey}", "leadId": body.leadId,
+                                    "customer": lead.get("customerName", ""), "model": lead.get("interestedModel", ""),
+                                    "claimStatus": status, "receivedAmount": received, "claimAmount": body.amount})
+    return {"ok": True, "receivedAmount": received, "status": status}
 
 
 # ---------------------------------------------------------------- masters CRUD (editable)
