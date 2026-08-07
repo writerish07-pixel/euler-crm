@@ -74,9 +74,20 @@ _Version 2.2 · 2026-06_
 - **T-M2 (P1)** Rapid double-submit of booking/payment does not double-insert (**U4 — currently unguarded**).
 - **T-M3 (P2)** 1000-lead load: list + dashboard respond acceptably (needs indexes — M2).
 
-## PENDING (will fail until built)
-- Documentation/Warranty/RSA/Referral income in Dealer Earnings (C1).
-- Dashboard conversion %, MTD revenue, follow-up, finance-outstanding KPIs (H1).
-- Claim submitted/approved dates + ageing (H3). Audit log (H4). RSA/AMC input (H5). Per-lead insurance auto-fill.
+## PENDING (previously would fail — now IMPLEMENTED ✅)
+- ✅ Documentation/Warranty/RSA/Referral income in Dealer Earnings (C1) — PUT /leads/{id}/extra-income + report components + dealerTotalEarnings.
+- ✅ Dashboard conversion %, MTD revenue, finance-outstanding, follow-up due/overdue KPIs (H1).
+- ✅ Claim submitted/approved dates + ageing (H3). Audit log who/what/when/old/new/IP (H4). RSA/AMC input (H5). Per-lead insurance 49%/36.5% auto-fill.
+- ✅ U4 double-submit guard (identical receipt <4s → 409). U1 end-to-end reconciliation certified.
 
-**Baseline discipline:** after any create/mutation in tests, revert (delete created docs, reset scheme to zero, recompute) to keep the 10-lead baseline.
+## NEW REGRESSION CASES (iter 13-14)
+- **T-N1 (P0)** POST /insurance payoutRate=49, premium=20000 → stored 0.49, expectedPayout=9800 (no 49×). 36.5 → 0.365/7300.
+- **T-N2 (P0)** PUT /leads/{id}/extra-income {1500,800,600,1000} → extraDealerIncomeTotal=3900; /reports/dealer-earnings totals.extra=3900 with 4 named components.
+- **T-N3 (P0)** Every finance-sensitive mutation writes an audit_log entry; GET /api/audit-log owner 200 / executive 403; ?module= filter works.
+- **T-N4 (P1)** /dashboard kpis include conversion, revenue, financeOutstanding, followupDue, followupOverdue.
+- **T-N5 (P1)** /claims returns submittedDate/approvedDate/ageingDays; settle persists dates.
+- **T-N6 (P1)** PUT /price-structure rsaAmc increases GVC + customerPayable.
+- **T-N7 (P0)** Identical payment (same lead/amount/mode) within 4s → 409.
+- **T-N8 (P0)** GET /reports/production-audit owner 200 / executive 403; 16 categories, 0 Critical, 0 High, blockers=[].
+
+**Baseline discipline:** after any create/mutation in tests, revert (delete created docs, reset scheme/extra-income to zero, recompute) to keep the 10-lead baseline. `audit_log` is append-only — leave entries.

@@ -122,7 +122,26 @@ _Version 2.2 · 2026-06_
 | Delivered | deliveryStatus | Mark Delivered? |
 | Delivery Date | deliveryDate | Delivery Date |
 
-## GAPS (fields in source not yet captured)
-- Documentation Income, Warranty Income, RSA Income, Referral Income (C1) — no DB field/UI yet.
-- Claim Submitted/Approved dates (H3) — not captured.
-- RSA/AMC charge input (H5) — engine field `rsaAmc` exists, no UI input.
+## DEALER EXTRA INCOME (C1 — collection `leads`, via PUT /leads/{id}/extra-income)
+| SS | DB | UI |
+|---|---|---|
+| Documentation Income | documentationIncome | Lead drawer → Scheme tab → Dealer Extra Income |
+| Warranty Income | warrantyIncome | Lead drawer → Scheme tab → Dealer Extra Income |
+| RSA Income | rsaIncome | Lead drawer → Scheme tab → Dealer Extra Income |
+| Referral Income | referralIncome | Lead drawer → Scheme tab → Dealer Extra Income |
+| (derived) Extra income total | extraDealerIncomeTotal | Dealer Earnings Report |
+| (derived) Total dealer earnings | dealerTotalEarnings | Overview / Earnings |
+
+## AUDIT TRAIL (H4 — collection `audit_log`, GET /audit-log owner-only)
+| Field | DB | UI |
+|---|---|---|
+| Who / role / IP | user / role / ip | Audit Trail page |
+| When | timestamp | Audit Trail page |
+| Action / Module | action / module | Audit Trail page |
+| Old / New value | oldValue / newValue | Audit Trail page |
+| Refs | leadId / paymentId / claimId / financeFileNumber | Audit Trail page |
+
+## RESOLVED GAPS (were "source not yet captured")
+- Documentation / Warranty / RSA / Referral income (C1) — ✅ now captured (extra-income fields, folded into Dealer Earnings).
+- Claim Submitted/Approved dates + ageing (H3) — ✅ now captured (settle/receipt set submittedDate/approvedDate; list returns ageingDays).
+- RSA/AMC charge input (H5) — ✅ `rsaAmc` now has a Price Structure input and flows into GVC/Customer Payable.

@@ -79,7 +79,7 @@ New Lead → Convert to Booking → Price Structure → Scheme Update → Add Pa
 ## 6. NON-FUNCTIONAL
 - All monetary values rounded to 2 decimals via one helper; datetimes ISO/UTC.
 - Config from environment only; no hardcoded secrets.
-- Every finance-sensitive mutation should be auditable (who/what/when) — **required for full go-live**.
+- Every finance-sensitive mutation is auditable (who/what/when/old/new/IP) — **implemented** via append-only `audit_log` + owner-only `/audit-log` viewer.
 
 ## 7. ACCEPTANCE
 The system is spec-compliant only when every rule R1–R28 and every definition in §5 is implemented and proven by the regression suite (`TEST_CASES.md`) and the go-live checklist (`GO_LIVE_CHECKLIST.md`).

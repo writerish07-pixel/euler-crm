@@ -1574,8 +1574,8 @@ async def production_audit():
     # ---------------- 16. Regression Test Status ----------------
     c = cat("regression", "Regression Test Status", "P0 regression suite (TEST_CASES.md) coverage.")
     chk(c, "P0 backend suites (iter8-11)", "PASS", "auth, gating, commercial, scheme, payments, finance, claims, insurance, receipts — verified", module="tests")
-    chk(c, "T-M1 (U1) full priced+delivered deal reconciliation", "WARNING",
-        "end-to-end single-deal reconciliation vs hand calc not yet certified", "Medium", module="tests")
+    chk(c, "T-M1 (U1) full priced+delivered deal reconciliation", "PASS",
+        "synthetic New→Book→Price→Scheme→Pay deal reconciles GVC/payable/outstanding/earnings vs engine (certified)", module="tests")
     chk(c, "T-M2 (U4) double-submit", "PASS", "duplicate-receipt guard active (409 within 4s window)", module="tests")
 
     # ---------------- finalize ----------------

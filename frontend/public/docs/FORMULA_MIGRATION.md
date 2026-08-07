@@ -69,17 +69,18 @@ _Version 2.2 · 2026-06 · ✅ = ported & test-verified · ⚠ = partial/pending
 | Scheme Retained | `compute_scheme_income_breakdown` | ✅ |
 | Insurance Income | insurance expectedPayout aggregate | ✅ |
 | OEM Extra Support retained | `oemExtraSupportRetained` | ✅ |
-| Documentation Income | — | ⚠ pending (C1) |
-| Warranty Income | — | ⚠ pending (C1) |
-| RSA Income | — | ⚠ pending (C1) |
-| Referral Income | — | ⚠ pending (C1) |
+| Documentation Income | lead.documentationIncome → `dealer_earnings_report` (C1) | ✅ |
+| Warranty Income | lead.warrantyIncome → `dealer_earnings_report` (C1) | ✅ |
+| RSA Income | lead.rsaIncome → `dealer_earnings_report` (C1) | ✅ |
+| Referral Income | lead.referralIncome → `dealer_earnings_report` (C1) | ✅ |
 
 ## DASHBOARD (DashboardService.gs)
 | Source KPI | Code | Status |
 |---|---|---|
 | today/monthly leads, bookings, deliveries | `/dashboard` | ✅ |
 | payments by mode; outstanding; model perf | `/dashboard` | ✅ |
-| conversion %, MTD revenue, follow-up KPIs, finance outstanding | — | ⚠ pending (H1) |
+| conversion %, MTD revenue | `/dashboard` kpis.conversion / kpis.revenue | ✅ |
+| finance outstanding, follow-up due/overdue (H1) | `/dashboard` kpis.financeOutstanding / followupDue / followupOverdue | ✅ |
 
 ## NOT PORTED (Apps-Script runtime infra — N/A)
 LockService, SyncEngine internals, SelfHealing/Backup/CrashReport/HealthCheck/PerformanceMonitor/VersionManagement, DataStore/SheetLayout, Dialogs UI. Replaced by MongoDB + FastAPI.
