@@ -22,6 +22,9 @@ import Bookings from "./pages/Bookings";
 import Settings from "./pages/Settings";
 import InsurancePayoutReport from "./pages/InsurancePayoutReport";
 import EarningsReport from "./pages/EarningsReport";
+import OwnerCommercialReport from "./pages/OwnerCommercialReport";
+import OemClaimDashboard from "./pages/OemClaimDashboard";
+import ClaimExceptions from "./pages/ClaimExceptions";
 
 function Protected({ children, ownerOnly }) {
   const { user } = useAuth();
@@ -53,6 +56,9 @@ function AppRoutes() {
       <Route path="/dealer-earnings" element={P(<DealerEarnings />, true)} />
       <Route path="/insurance-report" element={P(<InsurancePayoutReport />, true)} />
       <Route path="/earnings-report" element={P(<EarningsReport />, true)} />
+      <Route path="/owner-commercial" element={P(<OwnerCommercialReport />, true)} />
+      <Route path="/oem-claim-dashboard" element={P(<OemClaimDashboard />, true)} />
+      <Route path="/claim-exceptions" element={P(<ClaimExceptions />, true)} />
       <Route path="/price-master" element={P(<PriceMaster />)} />
       <Route path="/settings" element={P(<Settings />)} />
       <Route path="*" element={<Navigate to="/" replace />} />

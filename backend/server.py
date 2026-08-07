@@ -982,6 +982,201 @@ async def delete_insurance(entry_id: str):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)
+async def _owner_booking_metrics():
+    """Per booked-lead economics + claim register — shared by owner reports (ownerAggregates_/dashboard)."""
+    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    scheme_rows = await get_scheme_rows()
+    reg_by_lead = {}
+    ref_counts = {}
+    for c in await db.claims.find().to_list(5000):
+        lid = c.get("leadId")
+        if not lid:
+            continue
+        r = reg_by_lead.setdefault(lid, {"received": 0.0, "refs": [], "statuses": [], "components": {}})
+        r["received"] = ce.round2(r["received"] + ce.num(c.get("receivedAmount")))
+        ref = str(c.get("claimReference") or "").strip()
+        if ref:
+            r["refs"].append(ref)
+            ref_counts[ref] = ref_counts.get(ref, 0) + 1
+        r["statuses"].append(c.get("claimStatus") or "Pending")
+        r["components"][c.get("componentKey")] = ce.num(c.get("receivedAmount"))
+    rows = []
+    for l in leads:
+        snap = lead_to_snapshot(l)
+        totals = ce.compute_commercial_totals(snap)
+        claim = ce.derive_claim(snap)
+        shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
+        income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
+        split = ce.scheme_share_split_for(l.get("interestedModel") or "", l.get("variant") or "",
+                                          l.get("bookingDate") or "", ce._oem_offers(snap), scheme_rows)
+        use_shares = shares["shareSplitAvailable"]
+        company_claim = shares["eligibleTotal"] if use_shares else (income["oemClaimTotal"] if income["shareSplitAvailable"] else claim["claimEligible"])
+        company_oem = shares["displayTotal"] if use_shares else (income["oemClaimTotal"] if income["shareSplitAvailable"] else claim["oemDiscount"])
+        dealer_scheme = ce.num(split.get("dealerTotal"))
+        if not (dealer_scheme > 0) and not use_shares:
+            dealer_scheme = ce.num(claim["dealerDiscount"])
+        reg = reg_by_lead.get(l.get("leadId"))
+        rows.append({
+            "leadId": l.get("leadId"), "executive": l.get("executive") or "Unassigned",
+            "month": str(l.get("bookingDate") or "")[:7] or "Unknown",
+            "totals": totals, "claim": claim, "shares": shares, "income": income,
+            "companyClaim": company_claim, "companyOem": company_oem, "dealerScheme": dealer_scheme,
+            "paid": ce.num(l.get("totalReceived")), "reg": reg,
+            "displayByComponent": shares["displayByComponent"] if use_shares else income["oemClaimByComponent"],
+        })
+    return rows, ref_counts
+
+
+@api.get("/reports/owner-commercial", dependencies=[Depends(owner_only)])
+async def owner_commercial_report():
+    """Port of buildOwnerCommercialReport_ — discount ownership, claim position, averages, executive usage."""
+    rows, _ = await _owner_booking_metrics()
+    n = len(rows)
+    dealer_cost = ce.round2(sum(r["claim"]["dealerDiscount"] for r in rows))
+    oem_cost = ce.round2(sum(r["companyOem"] for r in rows))
+    total_disc = ce.round2(sum(r["totals"]["totalDiscount"] for r in rows))
+    claim_total = ce.round2(sum(r["companyClaim"] for r in rows))
+    retained = ce.round2(sum(r["income"]["retainedIncomeTotal"] for r in rows))
+    payable_total = ce.round2(sum(r["totals"]["customerPayable"] for r in rows))
+    pending_claims = 0
+    pending_value = 0.0
+    received_value = 0.0
+    for r in rows:
+        reg = r["reg"]
+        recvd = ce.num(reg["received"]) if reg else 0.0
+        if recvd > 0:
+            received_value = ce.round2(received_value + recvd)
+        elif r["companyClaim"] > 0:
+            pending_claims += 1
+            pending_value = ce.round2(pending_value + r["companyClaim"])
+    scheme_roi = ce.round2((oem_cost / total_disc) * 100) if total_disc > 0 else 0
+    by_exec = {}
+    for r in rows:
+        e = by_exec.setdefault(r["executive"], {"executive": r["executive"], "bookings": 0,
+                                                "totalDiscount": 0.0, "dealerDiscount": 0.0, "oemDiscount": 0.0})
+        e["bookings"] += 1
+        e["totalDiscount"] = ce.round2(e["totalDiscount"] + r["totals"]["totalDiscount"])
+        e["dealerDiscount"] = ce.round2(e["dealerDiscount"] + r["claim"]["dealerDiscount"])
+        e["oemDiscount"] = ce.round2(e["oemDiscount"] + r["companyOem"])
+    return {
+        "bookings": n,
+        "discountOwnership": {
+            "totalBookings": n, "dealerShareGiven": dealer_cost, "oemFunded": oem_cost,
+            "totalDiscountGiven": total_disc, "oemReceivable": claim_total, "schemeIncomeRetained": retained,
+        },
+        "claimPosition": {
+            "pendingClaims": pending_claims, "pendingValue": pending_value,
+            "receivedValue": received_value, "schemeRoiPct": scheme_roi,
+        },
+        "averages": {
+            "avgDiscountPerBooking": ce.round2(total_disc / n) if n else 0,
+            "avgCustomerPayable": ce.round2(payable_total / n) if n else 0,
+        },
+        "byExecutive": sorted(by_exec.values(), key=lambda x: x["executive"]),
+    }
+
+
+@api.get("/reports/oem-claim-dashboard", dependencies=[Depends(owner_only)])
+async def oem_claim_dashboard():
+    """Port of buildOemClaimDashboard_ — status/value/monthly/scheme-wise/executive-wise claim summaries."""
+    rows, _ = await _owner_booking_metrics()
+    status_keys = ["Pending", "Submitted", "Approved", "Rejected", "Received", "Not Applicable"]
+    status_count = {s: 0 for s in status_keys}
+    status_value = {s: 0.0 for s in status_keys}
+    total_oem = 0.0
+    dealer_share_val = 0.0
+    company_share_val = 0.0
+    total_disc_val = 0.0
+    eligible_val = 0.0
+    monthly = {}
+    scheme = {}
+    execu = {}
+    for r in rows:
+        cc = r["companyClaim"]
+        total_disc_val = ce.round2(total_disc_val + r["totals"]["totalDiscount"])
+        dealer_share_val = ce.round2(dealer_share_val + r["dealerScheme"])
+        company_share_val = ce.round2(company_share_val + cc)
+        eligible_val = ce.round2(eligible_val + cc)
+        reg = r["reg"]
+        recvd = ce.num(reg["received"]) if reg else 0.0
+        status = "Received" if recvd > 0 else ("Pending" if cc > 0 else "Not Applicable")
+        if reg and reg["statuses"]:
+            picked = next((s for s in reg["statuses"] if s in status_keys and s != "Pending"), None)
+            if picked:
+                status = picked
+        status_count.setdefault(status, 0)
+        status_value.setdefault(status, 0.0)
+        status_count[status] += 1
+        status_value[status] = ce.round2(status_value[status] + (recvd or cc))
+        if cc > 0:
+            total_oem = ce.round2(total_oem + cc)
+        m = monthly.setdefault(r["month"], {"month": r["month"], "bookings": 0, "claim": 0.0, "oem": 0.0})
+        m["bookings"] += 1
+        m["claim"] = ce.round2(m["claim"] + cc)
+        m["oem"] = ce.round2(m["oem"] + cc)
+        for b in r["claim"]["breakdown"]:
+            if not b["claimable"]:
+                continue
+            val = ce.num((r["displayByComponent"] or {}).get(b["key"], b["amount"]))
+            if val <= 0:
+                continue
+            sc = scheme.setdefault(b["label"], {"scheme": b["label"], "count": 0, "value": 0.0})
+            sc["count"] += 1
+            sc["value"] = ce.round2(sc["value"] + val)
+        e = execu.setdefault(r["executive"], {"executive": r["executive"], "bookings": 0, "claim": 0.0})
+        e["bookings"] += 1
+        e["claim"] = ce.round2(e["claim"] + cc)
+    return {
+        "bookings": len(rows), "totalOemClaimValue": total_oem,
+        "statusSummary": [{"status": s, "bookings": status_count.get(s, 0), "value": status_value.get(s, 0)} for s in status_keys],
+        "valueSummary": {
+            "totalDiscountGiven": total_disc_val, "eligibleClaim": eligible_val,
+            "companyShare": company_share_val, "yourOwnShare": dealer_share_val,
+            "oemLiability": ce.round2(eligible_val - status_value.get("Received", 0)),
+        },
+        "monthly": sorted(monthly.values(), key=lambda x: x["month"]),
+        "schemeWise": sorted(scheme.values(), key=lambda x: x["scheme"]),
+        "executiveWise": sorted(execu.values(), key=lambda x: x["executive"]),
+    }
+
+
+@api.get("/reports/claim-exceptions", dependencies=[Depends(owner_only)])
+async def claim_exceptions_report():
+    """Port of reconcileAllClaims_/reconcileBooking_ — surfaces claim & data-integrity exceptions."""
+    rows, ref_counts = await _owner_booking_metrics()
+    exceptions = []
+    for r in rows:
+        lid = r["leadId"]
+        cc = ce.round2(r["companyClaim"])
+        reg = r["reg"]
+        recvd = ce.num(reg["received"]) if reg else 0.0
+        if cc > 0 and (not reg or recvd <= 0):
+            exceptions.append({"leadId": lid, "type": "Missing Claim", "severity": "High",
+                               "detail": f"Claimable \u20b9{cc} (company share) but nothing recorded as received"})
+        if reg and recvd > cc + 0.01:
+            exceptions.append({"leadId": lid, "type": "Incorrect Claim Amount", "severity": "High",
+                               "detail": f"Recorded \u20b9{ce.round2(recvd)} exceeds claimable company share \u20b9{cc}"})
+        for b in r["claim"]["breakdown"]:
+            if b["claimable"] and b["approvalRequired"] and b["approvalStatus"] != "Approved" and recvd >= b["amount"] and b["amount"] > 0:
+                exceptions.append({"leadId": lid, "type": "Unapproved Claim", "severity": "High",
+                                   "detail": f"{b['label']} \u20b9{b['amount']} recorded, approval={b['approvalStatus']}"})
+        if reg:
+            for ref in set(reg["refs"]):
+                if ref_counts.get(ref, 0) > 1:
+                    exceptions.append({"leadId": lid, "type": "Duplicate Claim", "severity": "High",
+                                       "detail": f"Claim reference reused: {ref}"})
+        if r["paid"] > ce.round2(r["totals"]["customerPayable"]) + 0.01:
+            exceptions.append({"leadId": lid, "type": "Overpayment", "severity": "High",
+                               "detail": f"Paid \u20b9{ce.round2(r['paid'])} > payable \u20b9{r['totals']['customerPayable']}"})
+        if r["totals"]["totalDiscount"] < 0:
+            exceptions.append({"leadId": lid, "type": "Negative Discount", "severity": "High", "detail": ""})
+        if r["totals"]["customerPayable"] < 0:
+            exceptions.append({"leadId": lid, "type": "Negative Payable", "severity": "High", "detail": ""})
+    return {"count": len(exceptions), "exceptions": exceptions}
+
+
+
 # ---------------------------------------------------------------- claims
 @api.get("/claims")
 async def list_claims():

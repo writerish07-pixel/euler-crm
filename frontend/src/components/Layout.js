@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
+  BarChart3, ShieldAlert, PieChart,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -31,6 +32,11 @@ const NAV = [
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy },
     { to: "/dealer-earnings", label: "Dealer Earnings", icon: Coins, ownerOnly: true },
     { to: "/earnings-report", label: "Earnings Report", icon: TrendingUp, ownerOnly: true },
+  ]},
+  { section: "Owner Reports", ownerOnly: true, items: [
+    { to: "/owner-commercial", label: "Owner Commercial", icon: BarChart3, ownerOnly: true },
+    { to: "/oem-claim-dashboard", label: "OEM Claim Dashboard", icon: PieChart, ownerOnly: true },
+    { to: "/claim-exceptions", label: "Claim Exceptions", icon: ShieldAlert, ownerOnly: true },
   ]},
   { section: "Catalogue & Admin", items: [
     { to: "/price-master", label: "Price Master", icon: Tag },

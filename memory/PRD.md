@@ -93,3 +93,10 @@ Source of truth: user's original `final fix` .gs codebase (27k lines). Read & mi
 
 ### Not ported (Apps-Script infra, N/A to React+FastAPI stack)
 Locking, Dialogs UI, SyncEngine internals, SelfHealing/Backup/CrashReport/HealthCheck/PerformanceMonitor/VersionManagement/TransactionLog, DataStore/SheetLayout — these are Google-Sheets runtime concerns replaced by MongoDB + FastAPI.
+
+## Iteration 10 (2026-06) — Owner reports parity (OemClaimService.gs ports)
+Added the 3 report/register builders that existed in the .gs codebase but were missing from the app (all owner-only, computed LIVE from booked leads + claim register):
+- **Owner Commercial Report** `GET /api/reports/owner-commercial` (port of buildOwnerCommercialReport_): Discount Cost Ownership (dealer vs OEM company share, total discount, OEM receivable, scheme income retained), Claim Position (pending/received value, scheme ROI %), Averages, Executive Discount Usage. Page: /owner-commercial (OwnerCommercialReport.js).
+- **OEM Claim Dashboard** `GET /api/reports/oem-claim-dashboard` (port of buildOemClaimDashboard_): Claim Status Summary, Value Summary (company vs dealer share, OEM liability), Monthly / Scheme-wise / Executive-wise claim summaries — all at COMPANY-SHARE values. Page: /oem-claim-dashboard (OemClaimDashboard.js).
+- **Claim Exception Report** `GET /api/reports/claim-exceptions` (port of reconcileAllClaims_/reconcileBooking_): Missing Claim, Incorrect Claim Amount, Unapproved Claim, Duplicate Claim, Overpayment, Negative Discount/Payable. Page: /claim-exceptions (ClaimExceptions.js).
+- New sidebar section "Owner Reports" (owner-only). Verified: owner 200 / executive 403 on all three; Owner Commercial page renders. Existing registers already present: Lead/Booking/Payment/Finance/Insurance/Delivery/Claim/Dealer-Earnings/Insurance-Payout.
