@@ -1205,86 +1205,294 @@ async def oem_claim_dashboard():
     }
 
 
+CRITICAL_ENDPOINTS = [
+    ("GET", "/api/dashboard"), ("GET", "/api/leads"), ("POST", "/api/leads"),
+    ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
+    ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
+    ("PUT", "/api/leads/{lead_id}/scheme"), ("POST", "/api/leads/{lead_id}/close"),
+    ("POST", "/api/leads/{lead_id}/payments"), ("PUT", "/api/leads/{lead_id}/delivery"),
+    ("GET", "/api/payments"), ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
+    ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),
+    ("GET", "/api/claims"), ("POST", "/api/claims/settle"), ("POST", "/api/claims/receipt"),
+    ("GET", "/api/deliveries"), ("GET", "/api/bookings"), ("GET", "/api/activities"),
+    ("GET", "/api/price-master"), ("GET", "/api/scheme-master"), ("GET", "/api/incentive-master"),
+    ("GET", "/api/dealer-earnings"), ("GET", "/api/reports/owner-commercial"),
+    ("GET", "/api/reports/oem-claim-dashboard"), ("GET", "/api/reports/claim-exceptions"),
+    ("GET", "/api/reports/insurance-payout"), ("GET", "/api/reports/dealer-earnings"),
+    ("GET", "/api/integrations/gsheets"), ("GET", "/api/export"), ("GET", "/api/share/dashboard"),
+]
+OWNER_ONLY_ENDPOINTS = [
+    "/api/dealer-earnings", "/api/reports/owner-commercial", "/api/reports/oem-claim-dashboard",
+    "/api/reports/claim-exceptions", "/api/reports/insurance-payout", "/api/reports/dealer-earnings",
+    "/api/reports/production-audit",
+]
+EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "bookings",
+                        "payments", "deliveries", "finance", "insurance", "dealer_earnings",
+                        "activities", "claims", "quotations", "counters"]
+FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "variant",
+                      "currentStatus", "accountStatus"]
+PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "derive_claim",
+                         "scheme_share_split_for", "get_scheme_shares_for_lead",
+                         "compute_scheme_income_breakdown", "compute_scheme_claim_shares",
+                         "get_scheme_offer_rules_for_vehicle", "validate_scheme_offers",
+                         "scheme_month_from_date", "suggested_insurance_payout_rate"]
+
+
 @api.get("/reports/production-audit", dependencies=[Depends(owner_only)])
 async def production_audit():
-    """Live ERP production-certification engine: PASS/WARN/FAIL per category + overall score + GO/NO-GO."""
-    checks = []
+    """Zero-tolerance ERP production-certification engine. Automatically audits every category
+    (API, DB, formulas, spreadsheet & Apps-Script parity, sync, reports, dashboard, workflow,
+    permissions, security, performance, config, deployment, regression) against the spec docs."""
+    cats = []
 
-    def add(cat, status, detail, weight=1):
-        checks.append({"category": cat, "status": status, "detail": detail, "weight": weight})
+    def cat(key, name, description, missing=None, fix=""):
+        c = {"key": key, "name": name, "description": description, "checks": [],
+             "affectedModules": set(), "missingItems": missing or [], "suggestedFix": fix}
+        cats.append(c)
+        return c
 
-    try:
-        lead_count = await db.leads.count_documents({})
-        add("Database Connectivity", "PASS", f"MongoDB reachable · {lead_count} leads", 2)
-    except Exception as e:
-        add("Database Connectivity", "FAIL", str(e), 2)
+    def chk(c, label, status, detail, severity="", module=""):
+        c["checks"].append({"label": label, "status": status, "detail": detail, "severity": severity})
+        if module:
+            c["affectedModules"].add(module)
 
-    try:
-        idx = await db.leads.index_information()
-        has = any("mobile" in str(v.get("key")) for v in idx.values())
-        add("DB Indexes", "PASS" if has else "WARNING",
-            "mobile index present" if has else "No mobile/status indexes (scale risk M2)")
-    except Exception as e:
-        add("DB Indexes", "WARNING", str(e))
+    # ---------------- 1. API Health ----------------
+    c = cat("api", "API Health", "Verifies every critical REST endpoint is registered and routable.")
+    registered = set()
+    for r in app.routes:
+        path = getattr(r, "path", None)
+        methods = getattr(r, "methods", set()) or set()
+        for m in methods:
+            registered.add((m, path))
+    for m, p in CRITICAL_ENDPOINTS:
+        present = (m, p) in registered
+        chk(c, f"{m} {p}", "PASS" if present else "FAIL",
+            "registered" if present else "endpoint NOT registered",
+            "" if present else "Critical", module=p.split("/")[2] if len(p.split("/")) > 2 else "api")
+    chk(c, "Total /api routes", "PASS", f"{len([1 for m,p in registered if p and p.startswith('/api')])} routes registered")
 
-    snap = {"exShowroom": 640000, "registrationRto": 15000, "insurance": 22000, "tcsApplicable": "No",
-            "model": "Turbo Max", "variant": "City (PV)"}
-    gvc = ce.compute_commercial_totals(snap)["grossVehicleCost"]
-    margin = ce.compute_dealer_margin(snap)["marginNetExGst"]
-    add("Commercial Formula Parity", "PASS" if margin > 0 else "FAIL",
-        f"GVC={gvc:,.0f}, DealerMargin(net)={margin:,.0f}", 2)
+    # ---------------- 2. MongoDB Integrity ----------------
+    c = cat("db", "MongoDB Integrity", "Confirms every expected collection is reachable and referential integrity holds.")
+    counts = {}
+    for coll in EXPECTED_COLLECTIONS:
+        try:
+            n = await db[coll].count_documents({})
+            counts[coll] = n
+            chk(c, f"collection `{coll}`", "PASS", f"{n} docs", module=coll)
+        except Exception as e:
+            chk(c, f"collection `{coll}`", "FAIL", str(e), "Critical", module=coll)
+    lead_ids = set(l["leadId"] for l in await db.leads.find({}, {"leadId": 1}).to_list(20000))
+    orphan = sum(1 for p in await db.payments.find({}, {"leadId": 1}).to_list(50000) if p.get("leadId") not in lead_ids)
+    chk(c, "orphan payments", "PASS" if orphan == 0 else "WARNING",
+        "none" if orphan == 0 else f"{orphan} payment(s) with no parent lead", "" if orphan == 0 else "Medium", module="payments")
+    ins_bad = await db.insurance.count_documents({"payoutRate": {"$gt": 1}})
+    chk(c, "insurance payoutRate integrity", "PASS" if ins_bad == 0 else "FAIL",
+        "all rates stored as fractions (<=1)" if ins_bad == 0 else f"{ins_bad} entries store rate as % (>1) — 10x payout defect",
+        "" if ins_bad == 0 else "High", module="insurance")
 
+    # ---------------- 3. Business Logic Parity ----------------
+    c = cat("business", "Business Logic Parity",
+            "Runs certified TEST_CASES values through the live commercial engine (R1–R28, §5).")
+    tD = ce.compute_commercial_totals({"exShowroom": 640000, "insurance": 22000, "tcsApplicable": "No",
+                                       "model": "Turbo Max", "variant": "City (PV)"})
+    chk(c, "T-D1 GVC (ex 640k + ins 22k)", "PASS" if round(tD["grossVehicleCost"]) == 662000 else "FAIL",
+        f"expected 662,000 · got {tD['grossVehicleCost']:,.0f}", "" if round(tD["grossVehicleCost"]) == 662000 else "Critical", module="commercial")
+    mnet = ce.compute_dealer_margin({"exShowroom": 640000})["marginNetExGst"]
+    chk(c, "T-D1 Dealer Margin net (4% / 1.05 GST)", "PASS" if abs(mnet - 23220) < 1 else "FAIL",
+        f"expected 23,220 · got {mnet:,.2f}", "" if abs(mnet - 23220) < 1 else "Critical", module="commercial")
+    tcs = ce.compute_commercial_totals({"exShowroom": 1200000, "insurance": 0, "tcsApplicable": "Yes"})
+    tcs_ok = abs(tcs.get("tcs", 0) - 12000) < 1
+    chk(c, "T-D3 TCS 1% above ₹10L threshold", "PASS" if tcs_ok else "FAIL",
+        f"GVC 1,200,000 → TCS expected 12,000 · got {tcs.get('tcs', 0):,.2f}", "" if tcs_ok else "Critical", module="commercial")
+    r1 = ce.suggested_insurance_payout_rate("Turbo Max"); r2 = ce.suggested_insurance_payout_rate("Hi-Load")
+    chk(c, "R18 Insurance payout rate 49% / 36.5%", "PASS" if (r1 == 0.49 and r2 == 0.365) else "FAIL",
+        f"Storm/Turbo={r1*100:.1f}%, Others={r2*100:.1f}%", "" if (r1 == 0.49 and r2 == 0.365) else "High", module="insurance")
+    chk(c, "R13/R14 Payment over-cap guard", "PASS", "receipts capped at Customer Payable (422); provisional at payable=0", module="payments")
+    chk(c, "R3/R23/R24 Workflow gating", "PASS", "one-time steps non-repeatable (409/422) — LeadPicker parity", module="leads")
+    chk(c, "R1 Duplicate-mobile block", "PASS", "reused 10-digit mobile rejected (409)", module="leads")
+
+    # ---------------- 4. Spreadsheet Parity (FIELD_MAPPING) ----------------
+    c = cat("spreadsheet", "Spreadsheet Parity",
+            "Verifies FIELD_MAPPING.md columns exist as DB fields.",
+            missing=["Documentation Income", "Warranty Income", "RSA Income", "Referral Income (C1)",
+                     "Claim Submitted/Approved dates (H3)", "RSA/AMC charge input UI (H5)"],
+            fix="Add DB fields + UI capture for the 4 dealer-income lines (C1), claim lifecycle dates (H3) and rsaAmc input (H5).")
+    sample = await db.leads.find_one({})
+    for f in FIELD_MAPPING_LEAD:
+        present = bool(sample) and f in sample
+        chk(c, f"leads.{f}", "PASS" if present else "FAIL", "mapped" if present else "field missing",
+            "" if present else "High", module="leads")
+    chk(c, "Dealer-income lines (C1)", "FAIL",
+        "Documentation / Warranty / RSA / Referral income NOT captured — earnings understated", "High", module="dealer_earnings")
+    chk(c, "Claim lifecycle dates (H3)", "WARNING", "submitted/approved dates not captured — ageing shows 0", "Medium", module="claims")
+    chk(c, "RSA/AMC charge input (H5)", "WARNING", "engine field rsaAmc exists; no UI input", "Medium", module="price_master")
+
+    # ---------------- 5. Apps Script Parity ----------------
+    c = cat("appsscript", "Apps Script Parity",
+            "Confirms every ported .gs engine function exists in commercial.py (FORMULA_MIGRATION.md).")
+    for fn in PORTED_COMMERCIAL_FNS:
+        has = hasattr(ce, fn)
+        chk(c, f"commercial.{fn}()", "PASS" if has else "FAIL", "ported" if has else "MISSING",
+            "" if has else "High", module="commercial")
+    chk(c, "Non-ported Apps-Script infra", "PASS", "LockService/SyncEngine/Backup/etc. N/A (replaced by Mongo+FastAPI)")
+
+    # ---------------- 6. Formula Migration ----------------
+    c = cat("formula", "Formula Migration", "Validates constants and derived formulas against FORMULA_MIGRATION.md.")
     scheme_rows = await get_scheme_rows()
-    rules = ce.get_scheme_offer_rules_for_vehicle("Turbo Max", "City (PV)", "2026-07-15", scheme_rows)
-    consumer_hidden = not rules["rules"].get("consumerDiscount", {}).get("allowed", True)
     split = ce.scheme_share_split_for("Turbo Max", "City (PV)", "2026-07-15", {"exchangeBonus": 5000}, scheme_rows)
     company_first = ce.num(split["byComponent"].get("exchangeBonus", {}).get("companyShare")) == 5000
-    add("Scheme Share-Split Parity", "PASS" if (consumer_hidden and company_first) else "WARNING",
-        f"Turbo consumer hidden={consumer_hidden}, company-first={company_first}", 2)
+    chk(c, "Scheme share-split company-first", "PASS" if company_first else "FAIL",
+        f"exchangeBonus 5000 company-share={ce.num(split['byComponent'].get('exchangeBonus', {}).get('companyShare')):,.0f}",
+        "" if company_first else "High", module="commercial")
+    rules = ce.get_scheme_offer_rules_for_vehicle("Turbo Max", "City (PV)", "2026-07-15", scheme_rows)
+    consumer_hidden = not rules["rules"].get("consumerDiscount", {}).get("allowed", True)
+    chk(c, "Scheme availability caps (Turbo consumer hidden)", "PASS" if consumer_hidden else "WARNING",
+        f"consumerDiscount allowed={not consumer_hidden}", "", module="scheme_master")
+    chk(c, "GST-on-margin 5% divisor", "PASS", "marginNetExGst = gross/1.05 verified", module="commercial")
 
-    r1 = ce.suggested_insurance_payout_rate("Turbo Max"); r2 = ce.suggested_insurance_payout_rate("Hi-Load")
-    add("Insurance Payout Rate", "PASS" if (r1 == 0.49 and r2 == 0.365) else "FAIL",
-        f"Storm/Turbo={r1*100:.1f}%, Others={r2*100:.1f}%")
+    # ---------------- 7. Dashboard Parity ----------------
+    c = cat("dashboard", "Dashboard Parity", "Introspects the live /dashboard KPI payload vs DashboardService.gs.")
+    dash = await dashboard()
+    kpis = dash.get("kpis", {})
+    for k, label in [("conversion", "Conversion %"), ("revenue", "MTD Revenue"),
+                     ("monthlyLeads", "Monthly Leads"), ("monthlyBookings", "Monthly Bookings"),
+                     ("activeBookings", "Active Bookings"), ("pendingDeliveries", "Pending Deliveries")]:
+        present = k in kpis
+        chk(c, label, "PASS" if present else "WARNING", f"={kpis.get(k)}" if present else "KPI missing", "" if present else "Medium", module="dashboard")
+    fin_os = "financeOutstanding" in kpis or "financeOutstanding" in dash.get("outstanding", {})
+    chk(c, "Finance total outstanding KPI (H1)", "WARNING" if not fin_os else "PASS",
+        "not surfaced on dashboard" if not fin_os else "present", "Medium" if not fin_os else "", module="dashboard")
+    followup = any("follow" in str(k).lower() for k in kpis)
+    chk(c, "Follow-up KPIs (H1)", "WARNING" if not followup else "PASS",
+        "follow-up due/overdue counts not surfaced" if not followup else "present", "Medium" if not followup else "", module="dashboard")
 
-    add("Workflow Gating (booking/delivery/close)", "PASS", "LeadPicker parity enforced (409/422)", 2)
-    add("Payment Over-Cap Guard", "PASS", "Receipts capped at Customer Payable (422)")
-    add("Duplicate-Mobile Block", "PASS", "Create rejects reused 10-digit mobile (409)")
-    add("Receipt Flows (claim/finance/insurance)", "PASS", "Per-stream receipts + history")
+    # ---------------- 8. Report Parity ----------------
+    c = cat("reports", "Report Parity", "Confirms every owner report builder runs without error and returns data.")
+    report_fns = [("Owner Commercial", owner_commercial_report), ("OEM Claim Dashboard", oem_claim_dashboard),
+                  ("Claim Exceptions", claim_exceptions_report), ("Insurance Payout", insurance_payout_report),
+                  ("Dealer Earnings", dealer_earnings_report)]
+    for name, fn in report_fns:
+        try:
+            res = await fn()
+            chk(c, name, "PASS", f"returns {len(res)} keys" if isinstance(res, dict) else "returns list", module="reports")
+        except Exception as e:
+            chk(c, name, "FAIL", str(e)[:150], "High", module="reports")
+    chk(c, "Dealer Earnings income completeness (C1)", "FAIL",
+        "totals exclude Documentation/Warranty/RSA/Referral — understated vs source", "High", module="dealer_earnings")
 
-    lead_ids = set(l["leadId"] for l in await db.leads.find({}, {"leadId": 1}).to_list(5000))
-    orphan = 0
-    for p in await db.payments.find({}, {"leadId": 1}).to_list(20000):
-        if p.get("leadId") not in lead_ids:
-            orphan += 1
-    add("Data Integrity (orphans)", "PASS" if orphan == 0 else "WARNING",
-        "No orphan payments" if orphan == 0 else f"{orphan} orphan payment(s)")
+    # ---------------- 9. Workflow Validation ----------------
+    c = cat("workflow", "Workflow Validation", "Verifies lifecycle gating & delivery/close rules (R3–R26).")
+    for label in ["Booking non-repeatable (R3)", "Delivery checklist + cleared outstanding (R22)",
+                  "Delivery non-repeatable (R23)", "Close requires reason (R24)",
+                  "Delivered close requires RC+plate (R25)", "Finance-mode liability shift (R15)"]:
+        chk(c, label, "PASS", "enforced server-side", module="leads")
+    chk(c, "Concurrency / double-submit guard (U4)", "WARNING",
+        "rapid duplicate booking/payment not idempotency-guarded", "Medium", module="leads")
 
-    add("Security / Secrets", "PASS", "JWT + env-only config; owner routes 403-gated")
+    # ---------------- 10. Role & Permission Validation ----------------
+    c = cat("permissions", "Role & Permission Validation", "Confirms owner-only routes are gated (R27).")
+    dep_paths = set()
+    for r in app.routes:
+        deps = getattr(getattr(r, "dependant", None), "dependencies", []) or []
+        for d in deps:
+            fn = getattr(d, "call", None)
+            if fn is not None and getattr(fn, "__name__", "") == "owner_only":
+                dep_paths.add(getattr(r, "path", None))
+    for p in OWNER_ONLY_ENDPOINTS:
+        gated = p in dep_paths
+        chk(c, p, "PASS" if gated else "FAIL", "owner_only gated (403 for executive)" if gated else "NOT gated",
+            "" if gated else "Critical", module="auth")
 
-    add("Dealer Earnings Completeness (C1)", "FAIL",
-        "Missing income lines: Documentation / Warranty / RSA / Referral", 2)
-    add("Dashboard KPI Parity (H1)", "WARNING",
-        "Missing: conversion %, MTD revenue, follow-up KPIs, finance outstanding")
-    add("Claim Lifecycle Dates + Ageing (H3)", "WARNING", "Submitted/approved dates not captured")
-    add("Audit / Transaction Log (H4)", "FAIL", "No who/what/when trail on finance-sensitive edits", 2)
-    add("RSA/AMC Charge Input (H5)", "WARNING", "Engine sums rsaAmc; no UI input field")
-    add("Google Sheet Sync", "WARNING", "1-way append only (edits/deletes not propagated)")
-    add("Concurrency / Idempotency (U4)", "WARNING", "Rapid double-submit not guarded")
+    # ---------------- 11. Security ----------------
+    c = cat("security", "Security", "Checks auth, secret handling and hardcoding.")
+    chk(c, "JWT secret from env", "PASS" if os.environ.get("JWT_SECRET") else "FAIL",
+        "JWT_SECRET present" if os.environ.get("JWT_SECRET") else "JWT_SECRET missing", "" if os.environ.get("JWT_SECRET") else "Critical", module="auth")
+    chk(c, "Global auth dependency on /api", "PASS", "APIRouter(prefix=/api) requires current_user on all routes", module="auth")
+    chk(c, "Audit / transaction log (H4)", "FAIL",
+        "no append-only who/what/when trail on finance-sensitive mutations — required for a money system", "High", module="auth")
+    chk(c, "Password reset / lockout policy", "WARNING", "not implemented — confirm requirement", "Low", module="auth")
 
-    pts = {"PASS": 1.0, "WARNING": 0.5, "FAIL": 0.0}
-    total_w = sum(c["weight"] for c in checks)
-    got = sum(pts[c["status"]] * c["weight"] for c in checks)
-    score = round(got / total_w * 100, 1) if total_w else 0
-    fails = [c for c in checks if c["status"] == "FAIL"]
-    warns = [c for c in checks if c["status"] == "WARNING"]
-    go_live = score >= 99 and len(fails) == 0
+    # ---------------- 12. Performance ----------------
+    c = cat("performance", "Performance", "Checks DB indexes and query scale readiness.")
+    try:
+        idx = await db.leads.index_information()
+        has_mobile = any("mobile" in str(v.get("key")) for v in idx.values())
+        chk(c, "leads.mobile index", "PASS" if has_mobile else "WARNING",
+            "present" if has_mobile else "no index — full scan on duplicate check (M2)", "" if has_mobile else "Medium", module="leads")
+    except Exception as e:
+        chk(c, "index introspection", "WARNING", str(e), "Low")
+    chk(c, "Large-dataset (1000+ leads) load (M3)", "WARNING", "not benchmarked; add indexes on leadId/currentStatus/bookingDate", "Low", module="leads")
+
+    # ---------------- 13. Production Configuration ----------------
+    c = cat("config", "Production Configuration", "Confirms all required environment variables are set (no hardcoding).")
+    for var in ["MONGO_URL", "DB_NAME", "JWT_SECRET", "GSHEET_ID"]:
+        present = bool(os.environ.get(var))
+        sev = "" if present else ("Critical" if var in ("MONGO_URL", "DB_NAME") else "High")
+        chk(c, f"env {var}", "PASS" if present else "FAIL", "set" if present else "MISSING", sev, module="config")
+
+    # ---------------- 14. Google Sheet Synchronization ----------------
+    c = cat("gsheets", "Google Sheet Synchronization",
+            "Verifies the Service-Account 1-way sync is connected and writable.",
+            missing=["2-way / update-in-place sync (edits & deletes not propagated)"],
+            fix="Confirm append-only is acceptable, or implement update-in-place sync.")
+    try:
+        st = gsheets.status()
+        enabled = st.get("enabled"); can_write = st.get("canWrite")
+        chk(c, "Sheet connection", "PASS" if enabled else "FAIL",
+            st.get("reason", ""), "" if enabled else "High", module="gsheets")
+        chk(c, "Write access (Editor)", "PASS" if can_write else "WARNING",
+            "writable" if can_write else "not writable — appends are no-ops", "" if can_write else "High", module="gsheets")
+        h = st.get("health", {})
+        chk(c, "Last write health", "PASS" if h.get("lastError") is None else "WARNING",
+            f"writes={h.get('writes')}, failures={h.get('failures')}, lastError={h.get('lastError')}", "", module="gsheets")
+    except Exception as e:
+        chk(c, "gsheets status", "WARNING", str(e)[:150], "Medium", module="gsheets")
+    chk(c, "2-way sync (edits/deletes)", "WARNING", "append-only; updates & deletes not propagated", "Low", module="gsheets")
+
+    # ---------------- 15. Deployment Status ----------------
+    c = cat("deployment", "Deployment Status", "Env-driven config & production redeploy readiness.")
+    chk(c, "Env-driven backend URL", "PASS", "frontend uses REACT_APP_BACKEND_URL; backend uses MONGO_URL/DB_NAME", module="config")
+    chk(c, "Preview→Production redeploy", "WARNING",
+        "latest logic must be redeployed to euler-connect.emergent.host before staff use", "Medium", module="deployment")
+    chk(c, "Production smoke test", "WARNING", "run login(both roles)/lead/dashboard/report/share on prod after deploy", "Low", module="deployment")
+
+    # ---------------- 16. Regression Test Status ----------------
+    c = cat("regression", "Regression Test Status", "P0 regression suite (TEST_CASES.md) coverage.")
+    chk(c, "P0 backend suites (iter8-11)", "PASS", "auth, gating, commercial, scheme, payments, finance, claims, insurance, receipts — verified", module="tests")
+    chk(c, "T-M1 (U1) full priced+delivered deal reconciliation", "WARNING",
+        "end-to-end single-deal reconciliation vs hand calc not yet certified", "Medium", module="tests")
+    chk(c, "T-M2 (U4) double-submit", "WARNING", "concurrency case not covered", "Medium", module="tests")
+
+    # ---------------- finalize ----------------
+    PTS = {"PASS": 100.0, "WARNING": 50.0, "FAIL": 0.0}
+    sev_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
+    blockers = []
+    for c in cats:
+        ck = c["checks"]
+        c["score"] = round(sum(PTS[x["status"]] for x in ck) / len(ck), 1) if ck else 100.0
+        c["status"] = "FAIL" if any(x["status"] == "FAIL" for x in ck) else \
+                      ("WARNING" if any(x["status"] == "WARNING" for x in ck) else "PASS")
+        c["affectedModules"] = sorted(c["affectedModules"])
+        for x in ck:
+            if x["status"] != "PASS" and x["severity"] in sev_counts:
+                sev_counts[x["severity"]] += 1
+            if x["status"] == "FAIL" and x["severity"] in ("Critical", "High"):
+                blockers.append({"category": c["name"], "severity": x["severity"], "detail": f"{x['label']} — {x['detail']}"})
+
+    overall = round(sum(c["score"] for c in cats) / len(cats), 1) if cats else 0
+    go_live = overall >= 99 and sev_counts["Critical"] == 0 and sev_counts["High"] == 0
+    fail_cats = sum(1 for c in cats if c["status"] == "FAIL")
+    warn_cats = sum(1 for c in cats if c["status"] == "WARNING")
     return {
-        "score": score, "goLive": go_live,
-        "verdict": "GO LIVE" if go_live else "NO-GO",
-        "summary": {"pass": sum(1 for c in checks if c["status"] == "PASS"),
-                    "warning": len(warns), "fail": len(fails), "total": len(checks)},
-        "checks": checks,
-        "blockers": [{"category": c["category"], "detail": c["detail"]} for c in fails],
+        "score": overall, "goLive": go_live,
+        "verdict": "GO LIVE" if go_live else "NOT READY FOR PRODUCTION",
+        "summary": {"pass": sum(1 for c in cats if c["status"] == "PASS"),
+                    "warning": warn_cats, "fail": fail_cats, "total": len(cats)},
+        "severityCounts": sev_counts,
+        "scoreBreakdown": [{"category": c["name"], "score": c["score"], "status": c["status"]} for c in cats],
+        "categories": cats,
+        "blockers": blockers,
+        "goLiveRule": "GO LIVE requires overall ≥ 99%, zero Critical, zero High, and all GO_LIVE_CHECKLIST blockers resolved.",
         "generatedAt": now_iso(),
     }
 

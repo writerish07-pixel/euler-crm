@@ -116,3 +116,15 @@ Added the 3 report/register builders that existed in the .gs codebase but were m
 - Frontend Insurance EntryDrawer auto-fills Payout Rate % from the model/delivered-lead selection, with manual override preserved (rateTouched flag).
 - Verified: Turbo Max 20000 -> 0.49 -> 9800; Hi-Load 20000 -> 0.365 -> 7300.
 - Insurance receipts: "Record Payout" accrues receivedPayout + receipts[] history; Payout Outstanding = Expected - Received; status Partial/Received.
+
+## Iteration 13 (2026-06) — ERP Production Audit Engine (Zero-Tolerance Certification)
+- **Wired the ERP Production Audit page** (was built but unreachable): import + owner-only route `/erp-audit` in App.js + sidebar link (Owner Reports) in Layout.js.
+- **Rebuilt `GET /api/reports/production-audit`** into a 16-category automated certification engine that introspects the live system at runtime:
+  1 API Health (verifies 35 critical endpoints registered via app.routes), 2 MongoDB Integrity (14 collections reachable + orphan-payment + insurance-rate integrity), 3 Business Logic Parity (runs certified TEST_CASES values: GVC 662k, margin 23,220, TCS 1% above ₹10L, rates 49/36.5), 4 Spreadsheet Parity (FIELD_MAPPING fields), 5 Apps Script Parity (11 ported commercial fns present), 6 Formula Migration (scheme company-first split + caps), 7 Dashboard Parity (introspects live /dashboard KPIs), 8 Report Parity (runs all 5 owner report builders), 9 Workflow Validation, 10 Role & Permission (introspects owner_only deps on routes), 11 Security, 12 Performance (indexes), 13 Production Config (env vars), 14 Google Sheet Sync (gsheets.status), 15 Deployment, 16 Regression.
+- Each category returns status/score%, per-check detail+severity, affectedModules, missingItems, suggestedFix. Response adds severityCounts, scoreBreakdown, blockers (Critical+High), goLiveRule. GO LIVE only when overall≥99% + zero Critical + zero High.
+- Frontend page rewritten to render verdict, severity grid, per-category score bars, blockers, and expandable category cards.
+- **First certified run: overall 86.1% · NOT READY FOR PRODUCTION.** Severity: 0 Critical, 3 High, 9 Medium, 4 Low. Owner 200 / Executive 403 verified.
+- **High blockers:** C1 dealer-income lines (Documentation/Warranty/RSA/Referral) missing (surfaces in Spreadsheet + Report parity); H4 no audit/transaction log for finance-sensitive mutations.
+- **Audit revealed H1 doc is partly STALE:** /dashboard already returns `conversion` % and `revenue` (MTD) KPIs; only finance-outstanding + follow-up KPIs remain (downgraded to Medium).
+- **Latent HIGH defect noted (not auto-fixed, awaiting approval):** Insurance.js line ~139 posts payoutRate as a percent (e.g. 49) while backend `_insurance_derive` treats it as a fraction → 10× expected payout. Baseline unaffected only because no UI-created insurance entries exist. DB integrity check (payoutRate>1) currently PASS on empty data but will FAIL the moment an entry is created via UI.
+- Status: engine built + verified (curl + screenshot). Parity-gap FIXES are HELD pending user approval per the user's "present findings first, wait for approval" directive.

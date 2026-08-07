@@ -37,6 +37,7 @@ const NAV = [
     { to: "/owner-commercial", label: "Owner Commercial", icon: BarChart3, ownerOnly: true },
     { to: "/oem-claim-dashboard", label: "OEM Claim Dashboard", icon: PieChart, ownerOnly: true },
     { to: "/claim-exceptions", label: "Claim Exceptions", icon: ShieldAlert, ownerOnly: true },
+    { to: "/erp-audit", label: "ERP Production Audit", icon: ShieldCheck, ownerOnly: true },
   ]},
   { section: "Catalogue & Admin", items: [
     { to: "/price-master", label: "Price Master", icon: Tag },
