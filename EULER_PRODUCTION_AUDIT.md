@@ -40,16 +40,14 @@ However, the app is **NOT yet 100% identical** to the source. There are **3 CRIT
 ## 3. DEFECTS
 
 ### CRITICAL (must fix before go-live)
-- **C1 — Dealer Earnings is INCOMPLETE.** Source `ExtraIncomeService.gs` dealer-earnings register captures **Documentation Income, Warranty Income, RSA Income, Referral Income** (plus OEM extra support, insurance income, scheme retained). The app's `/reports/dealer-earnings` computes only **Margin + Scheme Retained + Insurance + OEM Extra Support**. There is **no field/UI to capture Documentation / Warranty / RSA / Referral income**, so **Total Dealer Earnings will be understated**. → Add these income inputs (per booked lead) + include them in the report.
+- **C1 — Dealer Earnings is INCOMPLETE.** *(OPEN)* Source `ExtraIncomeService.gs` dealer-earnings register captures **Documentation Income, Warranty Income, RSA Income, Referral Income** (plus OEM extra support, insurance income, scheme retained). The app's `/reports/dealer-earnings` computes only **Margin + Scheme Retained + Insurance + OEM Extra Support**. There is **no field/UI to capture Documentation / Warranty / RSA / Referral income**, so **Total Dealer Earnings will be understated**. → Add these income inputs (per booked lead) + include them in the report.
   Files: `backend/server.py::dealer_earnings_report`, new income fields on lead + a capture UI.
-- **C2 — Payments are NOT capped at Customer Payable.** Source `BusinessRulesService.validatePaymentAmount_` rejects `paid > payable` unless explicitly provisional. App `_add_payment_internal` records any amount. Over-payment is only *reported* later (Exception Report), not *prevented*. Real risk of ledger corruption on day one. → Enforce cap in `add_payment` (allow provisional only when payable is still ₹0 / slim booking).
-  File: `backend/server.py::_add_payment_internal` / `add_payment`.
-- **C3 — "Record Receipt" dropdown flows are UNFINISHED.** Per the requested design (dropdown of leads/files/entries with outstanding → enter amount → update against that lead/financer/insurer, with receipt history), the **backend endpoints exist** (`/claims/receipt`, `/finance/{file}/receipt`, `/insurance/{id}/receipt`) but the **front-end UI is not built and nothing is tested**. Finance semantics were also reworked (Finance-mode entry shifts outstanding customer→financer; disbursement recorded separately) and need end-to-end testing. → Build the 3 UIs + test.
-  Files: `frontend/src/pages/Claims.js`, `Finance.js`, `Insurance.js`; backend endpoints already added.
+- **C2 — Payments capped at Customer Payable.** ✅ **RESOLVED (iter 11).** `_add_payment_internal` now returns 422 when a receipt would push total received above payable; provisional allowed only while payable is ₹0 (slim booking). Verified 900000→422, within-cap→200.
+- **C3 — "Record Receipt" dropdown flows.** ✅ **RESOLVED (iter 11).** Backend `/claims/receipt`, `/finance/{file}/receipt`, `/insurance/{id}/receipt` + full UIs on Claims / Finance / Insurance, each with a dropdown of outstanding items, partial receipts, status transitions and receipt history. Finance-mode entry shifts outstanding customer→financer; financer receipt does NOT change customer outstanding. 8/8 tests pass.
 
 ### HIGH
 - **H1 — Dashboard KPI parity is PARTIAL.** Source `DashboardService.gs` computes today-followups, pending-followups, monthly **new** bookings (distinct from active), monthly deliveries, **conversion %**, **MTD revenue**, payments-by-mode, and a **Finance Total Outstanding** KPI. App `/dashboard` has today leads/bookings/deliveries, monthly leads/bookings, payments-by-mode, customer & company outstanding, model performance — but is **missing follow-up KPIs, conversion %, MTD revenue and the Finance-outstanding KPI**. → Add missing KPIs.
-- **H2 — Insurance Lead is free-text, not a delivered-lead dropdown.** Data-integrity + user requirement. `Insurance.js` `EntryDrawer` uses a text `leadId`. → Replace with a dropdown of delivered leads (auto-fill customer/model/mobile). *(frontend pending)*
+- **H2 — Insurance Lead is a delivered-lead dropdown.** ✅ **RESOLVED (iter 11).** `Insurance.js` EntryDrawer now uses `ins-lead-select` listing only delivered leads (auto-fills customer/model/mobile). Manual entry still allowed.
 - **H3 — Claim register lacks lifecycle dates + ageing.** Source register has Claim Submitted / Approved / Received dates; the Owner report's **Average Claim Ageing** depends on them. App stores only status/received/reference. → Capture submitted/approved dates so ageing is real (currently ageing = 0).
 - **H4 — No audit / transaction log.** Source `TransactionLogService` / `logAudit_` records who/what/when on every mutation. App has none → no traceability on finance-sensitive edits (a Big-4 blocker for a money system). → Add an append-only audit log with user + before/after.
 - **H5 — RSA/AMC charge cannot be entered.** `lead_to_snapshot` hardcodes `rsaAmc: 0`; no price-structure field feeds it, even though the engine sums it. If the dealership charges RSA/AMC, payable is understated. → Add the input field.
@@ -84,14 +82,14 @@ LockService, SyncEngine internals, SelfHealing/Backup/CrashReport/HealthCheck/Pe
 |---|---|---|
 | Commercial / Scheme math | 96 | Verified; minus RSA/AMC input (H5) |
 | Workflow & validations | 92 | Step-gating, delivery, close, dup-mobile proven |
-| Finance & payments | 62 | C2 (no cap), C3 (receipts unfinished) |
-| Dealer earnings / commercials | 60 | C1 (missing income lines) |
+| Finance & payments | 90 | C2 (cap) ✅, C3 (receipts) ✅; audit log pending (H4) |
+| Dealer earnings / commercials | 60 | C1 (missing income lines) open |
 | Reports & dashboards | 80 | Reports done; dashboard partial (H1) |
-| Data integrity / audit | 65 | No audit log (H4), no locking (M1) |
+| Data integrity / audit | 70 | Receipts + cap in; no audit log (H4), no locking (M1) |
 | Security / permissions | 75 | JWT + owner/exec proven; coarse roles (M3) |
 | Performance / scalability | 80 | Fine now; indexes/pagination later (M2) |
 | Maintainability | 78 | Monolith (M5) |
-| **Overall** | **78** | NO-GO for "identical"; GO for supervised pilot |
+| **Overall** | **84** | Pilot-ready; close C1 + H1/H3/H4/H5 for full go-live |
 
 ---
 
@@ -99,4 +97,5 @@ LockService, SyncEngine internals, SelfHealing/Backup/CrashReport/HealthCheck/Pe
 **NO-GO** for the stated bar ("100% identical, staff live tomorrow, single missing rule = critical failure") until **C1, C2, C3, H1, H2, H3, H4, H5** are resolved and **U1–U4** are tested.
 **Conditional GO** for a **supervised pilot** (owner present, finance/claim receipts reconciled manually, no reliance on Dealer Earnings totals) — the customer-facing money math (payable, discounts, outstanding, scheme company share) is verified-correct.
 
-**Recommended fix order:** C2 → C3 → C1 → H5 → H3 → H1 → H2 → H4 → then U1–U4 regression, then re-score.
+**Status after iteration 11:** C2, C3, H2 **resolved & tested (8/8)**. Remaining before full go-live: **C1, H1, H3, H4, H5** + regression **U1, U3, U4** (U2 receipts now covered).
+**Recommended remaining order:** C1 (dealer-earnings income lines) → H5 (RSA input) → H3 (claim lifecycle dates + ageing) → H1 (dashboard KPIs) → H4 (audit log) → U1/U3/U4 regression → re-score.
