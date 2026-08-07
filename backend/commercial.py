@@ -531,6 +531,18 @@ FAMILY_LABELS = {
     "storm": "Storm",
 }
 
+# Insurer payout rate of premium (InsuranceService.getSuggestedInsurancePayoutRate_)
+INSURANCE_RATE_STORM_TURBO = 0.49
+INSURANCE_RATE_OTHER = 0.365
+
+
+def suggested_insurance_payout_rate(model, variant=""):
+    """Storm/Turbo -> 49%, all other models -> 36.5% (decimal)."""
+    fam = normalize_scheme_model_key(model, variant)
+    if fam in ("storm", "turbo"):
+        return INSURANCE_RATE_STORM_TURBO
+    return INSURANCE_RATE_OTHER
+
 
 def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows):
     """Which scheme offer fields are allowed for Model+Variant on a booking date (port of getSchemeOfferRulesForVehicle_)."""

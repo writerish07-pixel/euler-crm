@@ -981,6 +981,8 @@ def _insurance_derive(body: dict):
     rate = ce.num(body.get("payoutRate"))
     if rate > 1:  # allow entering 15 meaning 15%
         rate = rate / 100.0
+    if rate <= 0:  # no manual rate -> suggested default by model (49% Storm/Turbo, 36.5% others)
+        rate = ce.suggested_insurance_payout_rate(body.get("model"), body.get("variant"))
     expected = ce.round2(premium * rate)
     received = ce.num(body.get("receivedPayout"))
     outstanding = ce.round2(max(0.0, expected - received))

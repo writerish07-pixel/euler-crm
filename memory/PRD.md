@@ -109,3 +109,10 @@ Added the 3 report/register builders that existed in the .gs codebase but were m
 - **Over-payment guard:** _add_payment_internal returns 422 if a receipt exceeds Customer Payable (provisional allowed only when payable is 0 / slim booking). Port of BusinessRulesService.validatePaymentAmount_.
 - Tested: iteration_10.json (labelled iter 11) — 8/8 pytest PASS + frontend testids verified, baseline preserved.
 - **Production Readiness Audit** written to /app/EULER_PRODUCTION_AUDIT.md (zero-tolerance parity vs original .gs). Overall 84/100. RESOLVED: C2 payment cap, C3 receipts, H2 insurance dropdown. OPEN before full go-live: C1 Dealer-Earnings missing income lines (Documentation/Warranty/RSA/Referral), H1 dashboard KPI parity (followups, conversion %, MTD revenue, finance-outstanding), H3 claim lifecycle dates+ageing, H4 audit/transaction log, H5 RSA/AMC charge input. UNVERIFIED regression: U1 full priced+delivered deal reconciliation, U3 dashboard values, U4 concurrency.
+
+## Iteration 12 (2026-06) — Insurance payout rate auto-fill (per model)
+- Ported InsuranceService.getSuggestedInsurancePayoutRate_: Storm/Turbo -> 49%, all other models -> 36.5% (commercial.suggested_insurance_payout_rate).
+- Backend _insurance_derive now falls back to the model-based rate when no manual Payout Rate % is entered. Expected Payout = premium x rate.
+- Frontend Insurance EntryDrawer auto-fills Payout Rate % from the model/delivered-lead selection, with manual override preserved (rateTouched flag).
+- Verified: Turbo Max 20000 -> 0.49 -> 9800; Hi-Load 20000 -> 0.365 -> 7300.
+- Insurance receipts: "Record Payout" accrues receivedPayout + receipts[] history; Payout Outstanding = Expected - Received; status Partial/Received.

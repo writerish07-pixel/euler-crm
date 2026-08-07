@@ -111,11 +111,24 @@ function EntryDrawer({ row, masters, delivered = [], onClose, onSaved }) {
     policyDate: row.policyDate || "", insuranceExecutive: row.insuranceExecutive || "", remarks: row.remarks || "",
   });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const [rateTouched, setRateTouched] = useState(Number(row.payoutRate) > 0);
+  const suggestRate = (model) => {
+    const s = String(model || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    return (s.includes("storm") || s.includes("strom") || s.includes("turbo")) ? 49 : 36.5;
+  };
   const pickLead = (e) => {
     const id = e.target.value;
     const l = delivered.find((x) => x.leadId === id);
-    setForm((f) => ({ ...f, leadId: id, customerName: l ? l.customerName : f.customerName, mobile: l ? l.mobile : f.mobile, model: l ? l.interestedModel : f.model, variant: l ? l.variant : f.variant }));
+    setForm((f) => ({ ...f, leadId: id,
+      customerName: l ? l.customerName : f.customerName, mobile: l ? l.mobile : f.mobile,
+      model: l ? l.interestedModel : f.model, variant: l ? l.variant : f.variant,
+      payoutRate: (l && !rateTouched) ? suggestRate(l.interestedModel) : f.payoutRate }));
   };
+  const setModel = (e) => {
+    const model = e.target.value;
+    setForm((f) => ({ ...f, model, payoutRate: rateTouched ? f.payoutRate : suggestRate(model) }));
+  };
+  const setRate = (e) => { setRateTouched(true); setForm((f) => ({ ...f, payoutRate: e.target.value })); };
   const premium = Number(form.insuranceAmount) || 0;
   const rate = Number(form.payoutRate) || 0;
   const expected = Math.round(premium * (rate / 100));
@@ -144,11 +157,11 @@ function EntryDrawer({ row, masters, delivered = [], onClose, onSaved }) {
         <Field label="Insurer"><Input value={form.insuranceCompany} onChange={set("insuranceCompany")} /></Field>
         <Field label="Policy Number"><Input value={form.policyNumber} onChange={set("policyNumber")} /></Field>
         <Field label="Premium (₹)"><Input data-testid="ins-premium" type="number" value={form.insuranceAmount} onChange={set("insuranceAmount")} /></Field>
-        <Field label="Payout Rate (%)"><Input data-testid="ins-rate" type="number" value={form.payoutRate} onChange={set("payoutRate")} /></Field>
+        <Field label="Payout Rate (%)"><Input data-testid="ins-rate" type="number" value={form.payoutRate} onChange={setRate} /></Field>
         <Field label="Received Payout (₹)"><Input type="number" value={form.receivedPayout} onChange={set("receivedPayout")} /></Field>
         <Field label="Policy Date"><Input type="date" value={form.policyDate || ""} onChange={set("policyDate")} /></Field>
         <Field label="Insurance Executive"><Select value={form.insuranceExecutive} onChange={set("insuranceExecutive")}><option value="">—</option>{(masters?.executives || []).map((x) => <option key={x}>{x}</option>)}</Select></Field>
-        <Field label="Model"><Input value={form.model} onChange={set("model")} /></Field>
+        <Field label="Model"><Input value={form.model} onChange={setModel} /></Field>
         <div className="col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
       </div>
       <Card className="p-4 mt-4 bg-cobalt-tint/40 border-cobalt/20">
