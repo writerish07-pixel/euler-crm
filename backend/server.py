@@ -1055,10 +1055,22 @@ async def add_activity(lead_id: str, body: ActivityIn):
     return clean(doc)
 
 
-@api.get("/insurance", dependencies=[Depends(owner_only)])
-async def list_insurance(lead_id: Optional[str] = None):
+def _strip_payout_for_staff(entry: dict, is_owner: bool):
+    """Hide dealer payout economics (rate/expected/outstanding) from non-owner staff."""
+    if is_owner:
+        return entry
+    e = dict(entry)
+    for k in ("payoutRate", "expectedPayout", "payoutOutstanding"):
+        e.pop(k, None)
+    return e
+
+
+@api.get("/insurance")
+async def list_insurance(lead_id: Optional[str] = None, act=Depends(actor)):
     q = {"leadId": lead_id} if lead_id else {}
-    return [clean(i) for i in await db.insurance.find(q).sort("entryId", -1).to_list(1000)]
+    is_owner = act.get("role") == "owner"
+    return [_strip_payout_for_staff(clean(i), is_owner)
+            for i in await db.insurance.find(q).sort("entryId", -1).to_list(1000)]
 
 
 class InsuranceIn(BaseModel):
@@ -1097,9 +1109,12 @@ def _insurance_derive(body: dict):
             "payoutOutstanding": outstanding, "status": status}
 
 
-@api.post("/insurance", dependencies=[Depends(owner_only)])
+@api.post("/insurance")
 async def create_insurance(body: InsuranceIn, act=Depends(actor)):
+    is_owner = act.get("role") == "owner"
     data = body.model_dump()
+    if not is_owner:
+        data["payoutRate"] = 0   # staff never set the rate; server auto-fills from model
     data.update(_insurance_derive(data))
     data["entryId"] = await next_id("insurance", "INS26")
     if data.get("leadId"):
@@ -1111,7 +1126,7 @@ async def create_insurance(body: InsuranceIn, act=Depends(actor)):
     await write_audit(act, "create", "insurance", leadId=data.get("leadId", ""),
                       new={"entryId": data["entryId"], "premium": data.get("insuranceAmount"),
                            "payoutRate": data.get("payoutRate"), "expectedPayout": data.get("expectedPayout")})
-    return clean(data)
+    return _strip_payout_for_staff(clean(data), is_owner)
 
 
 @api.put("/insurance/{entry_id}", dependencies=[Depends(owner_only)])
@@ -1137,7 +1152,7 @@ async def delete_insurance(entry_id: str, act=Depends(actor)):
     return {"ok": True}
 
 
-@api.post("/insurance/{entry_id}/receipt", dependencies=[Depends(owner_only)])
+@api.post("/insurance/{entry_id}/receipt")
 async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(actor)):
     """Record insurer payout received against an entry; accrues receivedPayout + keeps a receipt history."""
     e = await db.insurance.find_one({"entryId": entry_id})
@@ -1159,7 +1174,7 @@ async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(acto
     await write_audit(act, "receipt", "insurance", leadId=e.get("leadId", ""),
                       old={"receivedPayout": ce.num(e.get("receivedPayout"))},
                       new={"receivedPayout": received, "payoutOutstanding": outstanding, "amount": ce.round2(body.amount)})
-    return clean(await db.insurance.find_one({"entryId": entry_id}))
+    return _strip_payout_for_staff(clean(await db.insurance.find_one({"entryId": entry_id})), act.get("role") == "owner")
 
 
 # ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)

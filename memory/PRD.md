@@ -149,3 +149,12 @@ User: staff must not see the dealer payout %/expected; owner manages the rate.
 - Standalone "Insurance Payouts" page + sidebar link now Owner-only (App.js route P(...,true), Layout.js ownerOnly).
 - Insurance API locked Owner-only: GET/POST/PUT/DELETE /api/insurance + POST /api/insurance/{id}/receipt → 403 for Executive (verified), 200 for Owner. Prevents API-level payout leakage.
 - Preview change — user must REDEPLOY to push to production (euler-connect.emergent.host).
+
+## Iteration 16 (2026-06) — Insurance page: staff record received, payout stays owner-only
+User wants staff to use the Insurance Payouts page to enter amounts received against leads, WITHOUT seeing the dealer payout rate/expected (owner's cut).
+- Restored /insurance page + sidebar for all roles (removed owner-only from App.js route + Layout.js nav).
+- Backend server-side split (`_strip_payout_for_staff`): GET /insurance, POST /insurance, POST /insurance/{id}/receipt now open to staff but STRIP payoutRate/expectedPayout/payoutOutstanding for non-owner. PUT + DELETE remain owner-only.
+- Staff-created entries: backend forces payoutRate=0 then auto-derives from model (49%/36.5%) — staff never set/see the rate; owner sees full economics.
+- Frontend Insurance.js role-aware (useAuth): staff columns = Customer/Insurer/Premium/Received/Status; hidden Rate%/Expected/Outstanding + edit/delete + expected in subtitle; EntryDrawer hides rate field + summary card; PayoutReceiptModal hides outstanding, lists all entries, button "Record Received".
+- Lead-drawer Insurance tab stays Owner-only (unchanged).
+- Verified: curl (staff stripped, owner full, staff can create+receipt) + screenshot (staff UI). Preview only — REDEPLOY to push to production.
