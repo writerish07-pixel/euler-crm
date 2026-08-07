@@ -498,6 +498,116 @@ def compute_scheme_claim_shares(s, scheme_rows, approvals=None):
     return out
 
 
+def additional_discount_choices():
+    return [0, 1000, 2000, 3000, 5000, 7500, 10000, 15000, 20000, 25000, 30000, 40000, 50000]
+
+
+def build_scheme_amount_choices(dealer_share, company_share, total_max):
+    max_amt = round2(total_max)
+    out = set()
+
+    def add(v):
+        n = round2(v)
+        if n < 0:
+            return
+        if max_amt > 0 and n > max_amt + 0.009:
+            return
+        out.add(n)
+    add(0)
+    if max_amt > 0:
+        add(dealer_share)
+        add(company_share)
+        add(max_amt)
+        if max_amt >= 10000:
+            add(round2(max_amt / 2))
+    return sorted(out)
+
+
+FAMILY_LABELS = {
+    "hiload": "HiLoad / Hi-Load",
+    "hicity": "HiCity",
+    "hirange": "Hirange / Neo HiRange / High Range",
+    "turbo": "Turbo / Turbo Max",
+    "storm": "Storm",
+}
+
+
+def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows):
+    """Which scheme offer fields are allowed for Model+Variant on a booking date (port of getSchemeOfferRulesForVehicle_)."""
+    master = get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows)
+    rules = {}
+    model_disp = str(model or "").strip() or "selected model"
+    variant_disp = str(variant or "").strip()
+    month = scheme_month_from_date(booking_date)
+    master_keys = list(master.keys())
+    family = normalize_scheme_model_key(model, variant)
+    family_label = FAMILY_LABELS.get(family, model_disp)
+    for key in OFFER_KEYS:
+        label = COMPONENT_POLICY[key]["label"]
+        if key == "additionalDiscount":
+            add_choices = additional_discount_choices()
+            rules[key] = {"key": key, "label": label, "allowed": True,
+                          "maxAmount": add_choices[-1], "choices": add_choices,
+                          "hint": f"Dealer-funded — type any amount (max \u20b9{add_choices[-1]})"}
+            continue
+        m = master.get(key)
+        if not m:
+            note = (f"Not available for {model_disp}" + (f" / {variant_disp}" if variant_disp else "") + " in Scheme Master") \
+                if master_keys else \
+                (f"No Scheme Master row for {family_label} in {month}. Check Scheme Month = {month} and Status = Active.")
+            rules[key] = {"key": key, "label": label, "allowed": False,
+                          "maxAmount": 0, "choices": [0], "hint": note}
+            continue
+        total = num(m.get("totalBenefit"))
+        if not total or total <= 0:
+            total = round2(num(m.get("dealerShare")) + num(m.get("companyShare")))
+        if total <= 0:
+            rules[key] = {"key": key, "label": label, "allowed": False, "maxAmount": 0,
+                          "choices": [0], "hint": f"Scheme Master total is \u20b90 for {label} on this model"}
+            continue
+        dealer = round2(num(m.get("dealerShare")))
+        company = round2(num(m.get("companyShare")))
+        max_amt = round2(total)
+        rules[key] = {"key": key, "label": label, "allowed": True, "maxAmount": max_amt,
+                      "dealerShare": dealer, "companyShare": company,
+                      "choices": build_scheme_amount_choices(dealer, company, max_amt),
+                      "hint": f"Enter amount up to \u20b9{max_amt} (Scheme Master {m.get('label', '')} \u00b7 {month})"}
+    return {"schemeMonth": month, "model": model_disp, "variant": variant_disp,
+            "modelFamily": family, "matchedComponents": master_keys, "rules": rules}
+
+
+def validate_scheme_offers(model, variant, booking_date, offers, scheme_rows):
+    """Port of validateSchemeOffersForVehicle_ — returns list of error lines (empty = OK)."""
+    ctx = get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
+    lines = []
+    model_disp = ctx["model"]
+    variant_part = f" / {ctx['variant']}" if ctx["variant"] else ""
+    has_master = len(ctx["matchedComponents"]) > 0
+    for key, val in (offers or {}).items():
+        rule = ctx["rules"].get(key)
+        if not rule:
+            continue
+        amt = round2(num(val))
+        if amt < 0:
+            lines.append(f"\u2022 {rule['label']}: amount cannot be negative")
+            continue
+        if key == "additionalDiscount":
+            if rule.get("maxAmount") is not None and amt > num(rule["maxAmount"]) + 0.01:
+                lines.append(f"\u2022 {rule['label']}: \u20b9{amt} exceeds maximum \u20b9{rule['maxAmount']}")
+            continue
+        if amt <= 0:
+            continue
+        if not has_master:
+            continue
+        if not rule["allowed"] or not (num(rule["maxAmount"]) > 0):
+            lines.append(f"\u2022 {rule['label']}: not in Scheme Master for {model_disp}{variant_part} — enter 0")
+            continue
+        if amt > num(rule["maxAmount"]) + 0.01:
+            lines.append(f"\u2022 {rule['label']}: \u20b9{amt} exceeds Scheme Master max \u20b9{rule['maxAmount']}")
+    return lines
+
+
+
 def compute_full_commercials(s, scheme_rows=None):
     """Convenience: returns totals + margin + claim (+ scheme share-split when scheme rows given)."""
     totals = compute_commercial_totals(s)

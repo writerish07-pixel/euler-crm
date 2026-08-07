@@ -220,55 +220,82 @@ function Prev({ label, v, highlight }) {
 /* -------------------------------------------------- Scheme */
 function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
   const locked = !actions.canScheme;
+  const [rules, setRules] = useState(null);
   const [form, setForm] = useState(() => {
     const f = { benefitMode: lead.benefitMode || "Full Benefit", oemExtraSupportReceived: lead.oemExtraSupportReceived || 0, oemExtraSupportPassed: lead.oemExtraSupportPassed || 0, customerBenefitPassed: lead.customerBenefitPassed || 0 };
     SCHEME_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
     return f;
   });
-  // Partial-benefit per-component breakup (how much of each OEM offer is passed to customer)
-  const OEM_KEYS = SCHEME_FIELDS.filter(([k]) => k !== "additionalDiscount");
   const [breakup, setBreakup] = useState(() => {
     let b = {};
     try { b = lead.benefitPassedBreakup ? JSON.parse(lead.benefitPassedBreakup) : {}; } catch { b = {}; }
     return b;
   });
+  useEffect(() => { get(`/leads/${lead.leadId}/scheme-rules`).then(setRules).catch(() => setRules({ rules: {} })); }, [lead.leadId]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const setBk = (k) => (e) => setBreakup((b) => ({ ...b, [k]: e.target.value }));
 
+  // Only components available in Scheme Master for this model/variant are shown (additionalDiscount is always dealer-funded)
+  const r = rules?.rules || {};
+  const rulesReady = !!rules;
+  const visibleFields = SCHEME_FIELDS.filter(([k]) => k === "additionalDiscount" || (r[k] ? r[k].allowed : rulesReady ? false : true));
+  const hiddenFields = SCHEME_FIELDS.filter(([k]) => k !== "additionalDiscount" && r[k] && !r[k].allowed);
+  const oemVisible = visibleFields.filter(([k]) => k !== "additionalDiscount");
+
   const save = async () => {
     const payload = {
-      consumerDiscount: +form.consumerDiscount, exchangeBonus: +form.exchangeBonus, loyaltyBonus: +form.loyaltyBonus,
-      referralBonus: +form.referralBonus, dsaDiscount: +form.dsaDiscount, additionalDiscount: +form.additionalDiscount,
       benefitMode: form.benefitMode, customerBenefitPassed: +form.customerBenefitPassed,
       oemExtraSupportReceived: +form.oemExtraSupportReceived, oemExtraSupportPassed: +form.oemExtraSupportPassed,
     };
+    // send 0 for any component not shown so stale amounts get cleared
+    SCHEME_FIELDS.forEach(([k]) => {
+      const shown = k === "additionalDiscount" || (r[k] ? r[k].allowed : true);
+      payload[k] = shown ? (+form[k] || 0) : 0;
+    });
     if (form.benefitMode === "Partial Benefit") {
       const clean = {};
-      OEM_KEYS.forEach(([k]) => { if (+breakup[k]) clean[k] = +breakup[k]; });
+      oemVisible.forEach(([k]) => { if (+breakup[k]) clean[k] = +breakup[k]; });
       payload.benefitPassedBreakup = JSON.stringify(clean);
     } else {
       payload.benefitPassedBreakup = "";
     }
-    await put(`/leads/${lead.leadId}/scheme`, payload);
-    toast.success("Scheme updated");
-    onSaved();
+    try {
+      await put(`/leads/${lead.leadId}/scheme`, payload);
+      toast.success("Scheme updated");
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Scheme validation failed");
+    }
   };
   return (
     <div>
       {locked && <StepLock text="This lead is not Active — scheme is read-only." />}
+      {rules && (
+        <div className="text-xs text-ink-soft mb-3" data-testid="scheme-month-note">
+          Scheme Master · <span className="font-semibold text-ink">{rules.model} {rules.variant}</span> · {rules.schemeMonth}
+          {oemVisible.length === 0 && <span className="text-amber-700"> — no OEM scheme components for this model/variant this month</span>}
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-3">
-        {SCHEME_FIELDS.map(([k, label]) => (
-          <Field key={k} label={label}><Input data-testid={`scheme-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} /></Field>
+        {visibleFields.map(([k, label]) => (
+          <Field key={k} label={r[k]?.maxAmount ? `${label} (max ${inr(r[k].maxAmount)})` : label}>
+            <Input data-testid={`scheme-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} />
+          </Field>
         ))}
         <Field label="Benefit Mode"><Select data-testid="benefit-mode" value={form.benefitMode} onChange={set("benefitMode")} disabled={locked}>{(masters?.benefitModes || ["Full Benefit","Partial Benefit","No Benefit"]).map((m) => <option key={m}>{m}</option>)}</Select></Field>
         <Field label="OEM Extra Support Received"><Input type="number" value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} disabled={locked} /></Field>
         <Field label="OEM Extra Support Passed"><Input type="number" value={form.oemExtraSupportPassed} onChange={set("oemExtraSupportPassed")} disabled={locked} /></Field>
       </div>
-      {form.benefitMode === "Partial Benefit" && (
+      {hiddenFields.length > 0 && (
+        <div className="text-[11px] text-ink-faint mt-2" data-testid="scheme-unavailable-note">
+          Not available for this model/variant: {hiddenFields.map(([, l]) => l).join(", ")}
+        </div>
+      )}
+      {form.benefitMode === "Partial Benefit" && oemVisible.length > 0 && (
         <Card className="p-4 mt-4 bg-cobalt-tint/30 border-cobalt/20">
           <div className="text-xs font-semibold text-ink mb-2">Partial Benefit — amount of each OEM offer passed to customer</div>
           <div className="grid grid-cols-3 gap-3">
-            {OEM_KEYS.map(([k, label]) => (
+            {oemVisible.map(([k, label]) => (
               <Field key={k} label={`${label} (max ${inr(+form[k] || 0)})`}>
                 <Input data-testid={`breakup-${k}`} type="number" value={breakup[k] ?? ""} onChange={setBk(k)} disabled={locked} />
               </Field>
@@ -349,9 +376,13 @@ function DeliveryTab({ lead, actions = {}, delivery, onSaved }) {
   const toggle = (k) => setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" }));
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
-    await put(`/leads/${lead.leadId}/delivery`, form);
-    toast.success("Delivery status updated");
-    onSaved();
+    try {
+      await put(`/leads/${lead.leadId}/delivery`, form);
+      toast.success("Delivery status updated");
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Delivery update failed");
+    }
   };
   const alreadyDelivered = actions.isDelivered;
   const canMarkDelivered = actions.canDeliver;   // active + booked + not delivered
@@ -567,9 +598,29 @@ function BookingModal({ lead, onClose, onDone }) {
 
 function CloseModal({ lead, onClose, onDone }) {
   const [reason, setReason] = useState("");
-  const submit = async () => { await post(`/leads/${lead.leadId}/close`, { closeReason: reason }); toast.success("Lead closed"); onDone(); };
+  const [rc, setRc] = useState(lead.rcStatus === "Yes" || lead.rcStatus === "Done" ? "Done" : "");
+  const [plate, setPlate] = useState(lead.numberPlate || "");
+  const delivered = (lead.deliveryStatus || "").toLowerCase() === "delivered" || (lead.currentStatus || "").toLowerCase() === "delivered";
+  const submit = async () => {
+    if (!reason.trim()) return toast.error("Close Reason is required");
+    try {
+      await post(`/leads/${lead.leadId}/close`, { closeReason: reason, rc, numberPlate: plate });
+      toast.success("Lead closed");
+      onDone();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Close failed");
+    }
+  };
   return (
     <MiniModal title="Close Lead" onClose={onClose} onSubmit={submit} submitLabel="Close Lead" danger testid="confirm-close-btn">
+      {delivered && (
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <Field label="RC">
+            <Select data-testid="close-rc" value={rc} onChange={(e) => setRc(e.target.value)}><option value="">Not yet</option><option value="Done">Done</option></Select>
+          </Field>
+          <Field label="Number Plate"><Input data-testid="close-plate" value={plate} onChange={(e) => setPlate(e.target.value)} /></Field>
+        </div>
+      )}
       <Field label="Close Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Delivered & settled" /></Field>
     </MiniModal>
   );

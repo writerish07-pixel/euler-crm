@@ -99,9 +99,35 @@ def lead_actions(lead):
         "canPayment": active,                             # customer payment requires Active
         "canFinanceReceipt": not_archived,               # finance receipt allowed after close
         "canDeliver": active and booked and not delivered,# delivery stage: exclude delivered
-        "canClose": active and not delivered,             # close stage: exclude delivered / non-active
+        "canClose": active,                               # close: RC+plate captured here (delivered) or lost-lead close
         "isBooked": booked, "isDelivered": delivered, "isActive": active,
     }
+
+
+def _yes_or_done(v):
+    return str(v or "").strip().lower() in ("yes", "y", "done", "true", "1")
+
+
+def _validate_delivery_ready(lead, body):
+    """Port of validateDeliveryReady_ + isDeliveryEligible_ (outstanding must be cleared)."""
+    errs = []
+    if not _yes_or_done(body.insurance):
+        errs.append("Set Insurance to Yes before marking delivered.")
+    if not str(body.insurerName or "").strip():
+        errs.append("Enter the insurer name before delivery.")
+    if not _yes_or_done(body.registration):
+        errs.append("Set Registration to Yes before marking delivered.")
+    if not _yes_or_done(body.invoice):
+        errs.append("Set Invoice to Yes before marking delivered.")
+    if not str(body.invoiceNumber or "").strip():
+        errs.append("Enter the invoice number before delivery.")
+    if not str(body.chassisNumber or "").strip():
+        errs.append("Enter the chassis number before delivery.")
+    if not _yes_or_done(body.pdi):
+        errs.append("Set PDI to Yes before marking delivered.")
+    if ce.num(lead.get("customerOutstanding")) > 0.01:
+        errs.append(f"Customer outstanding must be cleared (₹{ce.round2(ce.num(lead.get('customerOutstanding')))}) before delivery.")
+    return errs
 
 
 def _require_action(lead, key, verb):
@@ -161,6 +187,9 @@ async def recompute_lead(lead_id):
     total_received = ce.round2(agg[0]["total"]) if agg else 0.0
     customer_payable = totals["customerPayable"]
     customer_outstanding = ce.round2(max(0.0, customer_payable - total_received)) if customer_payable > 0 else 0.0
+    oem_extra_recv = max(0.0, ce.num(lead.get("oemExtraSupportReceived")))
+    oem_extra_pass = max(0.0, min(ce.num(lead.get("oemExtraSupportPassed")), oem_extra_recv))
+    oem_extra_retained = ce.round2(max(0.0, oem_extra_recv - oem_extra_pass))
     updates = {
         "grossVehicleCost": totals["grossVehicleCost"],
         "customerPayable": customer_payable,
@@ -175,6 +204,7 @@ async def recompute_lead(lead_id):
         "oemClaimCompanyShare": shares["eligibleTotal"],
         "schemeCompanyTotal": shares["displayTotal"],
         "dealerSchemeRetained": income["retainedIncomeTotal"],
+        "oemExtraSupportRetained": oem_extra_retained,
         "dealerMarginNetExGst": margin["marginNetExGst"],
         "lastUpdated": now_iso(),
     }
@@ -266,6 +296,8 @@ class DeliveryIn(BaseModel):
 
 class CloseIn(BaseModel):
     closeReason: str = ""
+    rc: str = ""
+    numberPlate: str = ""
 
 
 class ActivityIn(BaseModel):
@@ -413,6 +445,14 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None):
 
 @api.post("/leads")
 async def create_lead(body: LeadIn):
+    # Duplicate mobile guard (port of LeadService create: block reused 10-digit mobile)
+    import re as _re
+    mob = _re.sub(r"\D", "", body.mobile or "")
+    if len(mob) >= 10:
+        last10 = mob[-10:]
+        existing = await db.leads.find_one({"mobile": {"$regex": last10 + "$"}})
+        if existing:
+            raise HTTPException(409, f"Mobile already used by lead {existing.get('leadId')} ({existing.get('customerName')}).")
     lead_id = await next_id("lead", "LD26")
     doc = {
         "leadId": lead_id,
@@ -516,6 +556,16 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn):
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
+@api.get("/leads/{lead_id}/scheme-rules")
+async def scheme_rules(lead_id: str):
+    lead = await get_lead_or_404(lead_id)
+    scheme_rows = await get_scheme_rows()
+    model = lead.get("interestedModel") or ""
+    variant = lead.get("variant") or ""
+    booking_date = lead.get("bookingDate") or today()
+    return ce.get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
+
+
 @api.put("/leads/{lead_id}/scheme")
 async def set_scheme(lead_id: str, body: SchemeIn):
     lead = await get_lead_or_404(lead_id)
@@ -523,6 +573,14 @@ async def set_scheme(lead_id: str, body: SchemeIn):
     payload = body.model_dump()
     if payload.get("benefitPassedBreakup") is None:
         payload.pop("benefitPassedBreakup", None)
+    # Validate offers against Scheme Master availability + max caps (port of validateSchemeOffersForVehicle_)
+    scheme_rows = await get_scheme_rows()
+    offers = {k: payload.get(k, 0) for k in ce.OFFER_KEYS}
+    errors = ce.validate_scheme_offers(
+        lead.get("interestedModel") or "", lead.get("variant") or "",
+        lead.get("bookingDate") or today(), offers, scheme_rows)
+    if errors:
+        raise HTTPException(422, "Please fix these scheme fields:\n" + "\n".join(errors))
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
     return clean(await db.leads.find_one({"leadId": lead_id}))
@@ -531,11 +589,29 @@ async def set_scheme(lead_id: str, body: SchemeIn):
 @api.post("/leads/{lead_id}/close")
 async def close_lead(lead_id: str, body: CloseIn):
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canClose", "closing (delivered or non-active leads cannot be closed here)")
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+    _require_action(lead, "canClose", "closing (only Active leads)")
+    if not str(body.closeReason or "").strip():
+        raise HTTPException(422, "Close Reason is required to close a lead.")
+    # RC + Number Plate mandatory when closing a DELIVERED lead (port of validateCloseLeadRcFields_)
+    if _is_delivered(lead):
+        rc = body.rc or lead.get("rcStatus")
+        plate = body.numberPlate or lead.get("numberPlate")
+        errs = []
+        if not _yes_or_done(rc):
+            errs.append("Set RC to Yes/Done before closing the lead.")
+        if not str(plate or "").strip():
+            errs.append("Enter the number plate before closing the lead.")
+        if errs:
+            raise HTTPException(422, "Cannot close lead:\n" + "\n".join("• " + e for e in errs))
+    close_updates = {
         "accountStatus": "Closed", "closedDate": today(), "closeReason": body.closeReason,
         "finalOutstanding": lead.get("customerOutstanding", 0), "lastUpdated": now_iso(),
-    }})
+    }
+    if body.rc:
+        close_updates["rcStatus"] = body.rc
+    if body.numberPlate:
+        close_updates["numberPlate"] = body.numberPlate
+    await db.leads.update_one({"leadId": lead_id}, {"$set": close_updates})
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -764,6 +840,9 @@ async def mark_delivery(lead_id: str, body: DeliveryIn):
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
     if delivered and not _is_delivered(lead):
         _require_action(lead, "canDeliver", "delivery (not booked/active)")
+        errs = _validate_delivery_ready(lead, body)
+        if errs:
+            raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
     doc = {"leadId": lead_id, "customerName": lead.get("customerName"), **body.model_dump(),
            "deliveryId": f"DL{uuid.uuid4().hex[:8]}"}
     await db.deliveries.update_one({"leadId": lead_id}, {"$set": doc}, upsert=True)
@@ -824,6 +903,7 @@ async def list_activities(lead_id: Optional[str] = None):
 @api.post("/leads/{lead_id}/activities")
 async def add_activity(lead_id: str, body: ActivityIn):
     lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canScheme", "logging activity (only Active leads)")
     doc = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": today(),
         "time": datetime.now(timezone.utc).strftime("%H:%M"), **body.model_dump(),
@@ -1109,7 +1189,7 @@ async def dealer_earnings_report():
         if lid:
             ins_by_lead[lid] = ce.round2(ins_by_lead.get(lid, 0) + ce.num(e.get("expectedPayout")))
     by_month = {}
-    components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0}
+    components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0, "OEM Extra Support": 0.0}
     totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "total": 0.0, "count": 0}
     for l in leads:
         snap = lead_to_snapshot(l)
@@ -1117,7 +1197,9 @@ async def dealer_earnings_report():
         income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
         scheme = income["retainedIncomeTotal"]
         insurance = ins_by_lead.get(l.get("leadId"), 0)
-        other = 0.0
+        oem_recv = max(0.0, ce.num(l.get("oemExtraSupportReceived")))
+        oem_pass = max(0.0, min(ce.num(l.get("oemExtraSupportPassed")), oem_recv))
+        other = ce.round2(max(0.0, oem_recv - oem_pass))   # OEM Extra Support retained
         total = ce.round2(margin + scheme + insurance + other)
         month = str(l.get("deliveryDate") or l.get("bookingDate") or "")[:7] or "Unknown"
         m = by_month.setdefault(month, {"key": month, "margin": 0.0, "scheme": 0.0,
@@ -1129,6 +1211,7 @@ async def dealer_earnings_report():
         components["Dealer Margin"] += margin
         components["Scheme Retained"] += scheme
         components["Insurance Income"] += insurance
+        components["OEM Extra Support"] += other
 
     months = sorted(by_month.values(), key=lambda x: x["key"], reverse=True)
     for m in months:

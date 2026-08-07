@@ -70,3 +70,26 @@ User's "Euler company CRM" was built on **Google Sheets + Apps Script (~27,000 l
 ## Iteration 7 (2026-06) — Company board restyled to original
 - Rebuilt public /share (Share.js) to EXACTLY match the original portal's company board using the original assets/css/share.css verbatim: dark navy (#07111f) gradient + grid bg, Syne + Instrument Sans fonts, cyan/lime/warm accents, gradient brand "Euler Motors / Bookings & Retail", live pill, glass KPI cards (Active Bookings, Retail MTD, New Bookings, Today), Active Bookings + Retail lists (date/name/model/badge), model chips, refresh footer.
 - Expanded GET /api/share/dashboard to also return todayBookings, recentBookings[], recentRetail[] (name/model/variant/date). Still public, no auth.
+
+## Iteration 8-9 (2026-06) — Faithful re-port of original Apps Script logic (scheme + workflow)
+Source of truth: user's original `final fix` .gs codebase (27k lines). Read & mirrored: Config.gs (COMMERCIAL constants/component policy — confirmed already-matching), LeadPickerService (PICKER_STAGE), CommercialEngineService, SchemeMasterService (share split + scheme rules), BusinessRulesService, PaymentService, DeliveryService, BookingService, LeadService, and grepped Claim/OemClaim/Insurance/ExtraIncome/Finance services.
+
+### Step-eligibility gating (LeadPickerService PICKER_STAGE + requireActiveLead_)
+- Backend `lead_actions()` + `_require_action()` in server.py enforce: Booking excludes booked/delivered; Price/Scheme/Payment/Activity require Active; Delivery excludes already-delivered; Close requires Active (RC+plate captured here for delivered leads). Finance receipt allowed until Archived.
+- `GET /leads/{id}/360` returns `actions{}`; convert-booking/scheme/price/payment/delivery/close/activity all guard server-side (409/422).
+- Frontend LeadDrawer hides Convert-to-Booking once booked ("Booked ✓" badge), hides/disables Close appropriately, StepLock notices + disabled saves on non-Active tabs, delivered toggle locked once delivered.
+
+### Scheme share-split engine (commercial.py) — company-share-FIRST
+- Ported schemeShareSplitFor_, getSchemeSharesForLead_, model/variant matchers & aliases (Turbo Max→turbo, Hi-Load→hiload, HiCity/Hirange XR/TR), scheme_month_from_date, buildSchemeAmountChoices, getSchemeOfferRulesForVehicle_, validateSchemeOffersForVehicle_.
+- OEM claimable = OEM **company share** (capped company-first), NOT raw offer sum. `recompute_lead` now sets companyOutstanding=eligible company share, dealerSchemeRetained (=company-unpassed − dealer-passed), oemExtraSupportRetained.
+- `GET /leads/{id}/scheme-rules`: Scheme tab shows ONLY components available in Scheme Master for that model/variant/month; unavailable are hidden (+note) and rejected 422 server-side; caps enforced. Partial-Benefit per-component breakup (benefitPassedBreakup JSON).
+- `/claims` register uses per-component company share; dealer-earnings report computed LIVE = margin + scheme retained + insurance income + OEM extra support retained.
+
+### Other original rules mirrored
+- Delivery mark-delivered requires full checklist (Insurance+Insurer, Registration, Invoice+Invoice#, Chassis, PDI) AND cleared customer outstanding (isDeliveryEligible_) → 422 otherwise.
+- Close requires a Close Reason; closing a DELIVERED lead also requires RC=Done + Number Plate (validateCloseLeadRcFields_).
+- Lead create blocks duplicate 10-digit mobile (409).
+- Tested: iteration_8 + iteration_9 (13/13 backend pytest PASS + full frontend Playwright). Baseline intact (10 leads; LD26000005 remains Booked from iter8).
+
+### Not ported (Apps-Script infra, N/A to React+FastAPI stack)
+Locking, Dialogs UI, SyncEngine internals, SelfHealing/Backup/CrashReport/HealthCheck/PerformanceMonitor/VersionManagement/TransactionLog, DataStore/SheetLayout — these are Google-Sheets runtime concerns replaced by MongoDB + FastAPI.
