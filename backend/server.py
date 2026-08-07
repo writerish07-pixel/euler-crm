@@ -1713,7 +1713,68 @@ async def list_claims():
                 "claimReference": (existing or {}).get("claimReference", ""),
                 "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
             })
+    # Manual claims (OEM incentives etc.) entered directly — merged into the register
+    for m in await db.claims.find({"manual": True}).to_list(2000):
+        elig = ce.round2(ce.num(m.get("eligibleClaim") if m.get("eligibleClaim") is not None else m.get("claimAmount")))
+        result.append({
+            "claimId": m.get("claimId"), "leadId": m.get("leadId", ""),
+            "customer": m.get("customer", ""), "model": m.get("model", ""), "variant": "",
+            "bookingDate": "", "component": m.get("component") or m.get("claimType") or "Manual Claim",
+            "componentKey": m.get("componentKey"), "claimAmount": ce.round2(ce.num(m.get("claimAmount"))),
+            "eligibleClaim": elig,
+            "approvalStatus": m.get("claimStatus", "Submitted"),
+            "claimStatus": m.get("claimStatus", "Submitted"),
+            "receivedAmount": ce.round2(ce.num(m.get("receivedAmount"))),
+            "claimReference": m.get("claimReference", ""),
+            "submittedDate": m.get("submittedDate", ""), "approvedDate": m.get("approvedDate", ""),
+            "ageingDays": _claim_ageing_days(m.get("submittedDate", ""), m.get("claimStatus", "")),
+            "manual": True, "oemCompany": m.get("oemCompany", ""), "note": m.get("note", ""),
+        })
     return result
+
+
+class ManualClaimIn(BaseModel):
+    claimType: str = "OEM Incentive"
+    oemCompany: str = ""
+    leadId: str = ""
+    customer: str = ""
+    model: str = ""
+    claimAmount: float = 0
+    submittedDate: str = ""
+    claimReference: str = ""
+    note: str = ""
+
+
+@api.post("/claims/manual")
+async def create_manual_claim(body: ManualClaimIn, act=Depends(actor)):
+    """Manually record a claim (e.g. OEM incentive received as a claim). Both Owner and staff can add.
+    Appears in the claim register; received amounts are recorded later via /claims/receipt."""
+    if body.claimAmount <= 0:
+        raise HTTPException(422, "Enter a valid claim amount")
+    cid = f"MCLM{uuid.uuid4().hex[:10].upper()}"
+    customer, model = body.customer, body.model
+    if body.leadId and not customer:
+        lead = await db.leads.find_one({"leadId": body.leadId})
+        if lead:
+            customer = lead.get("customerName", "")
+            model = model or lead.get("interestedModel", "")
+    doc = {
+        "claimId": cid, "manual": True, "componentKey": cid,
+        "leadId": body.leadId, "customer": customer, "model": model,
+        "claimType": body.claimType, "oemCompany": body.oemCompany,
+        "component": body.claimType,
+        "claimAmount": ce.round2(body.claimAmount), "eligibleClaim": ce.round2(body.claimAmount),
+        "claimStatus": "Submitted", "receivedAmount": 0.0,
+        "claimReference": body.claimReference, "note": body.note,
+        "submittedDate": body.submittedDate or today(), "approvedDate": "",
+        "receipts": [], "createdAt": now_iso(),
+    }
+    await db.claims.insert_one(dict(doc))
+    await gsheets.append("claims", {**doc, "customer": customer, "model": model})
+    await write_audit(act, "create", "claim", leadId=body.leadId, claimId=cid,
+                      new={"claimType": body.claimType, "oemCompany": body.oemCompany,
+                           "claimAmount": doc["claimAmount"], "manual": True})
+    return clean(doc)
 
 
 class ClaimSettleIn(BaseModel):
@@ -1735,14 +1796,16 @@ async def settle_claim(body: ClaimSettleIn, act=Depends(actor)):
         payload["submittedDate"] = existing.get("submittedDate") or today()
     if body.claimStatus in ("Approved", "Received") and not payload.get("approvedDate"):
         payload["approvedDate"] = existing.get("approvedDate") or today()
-    doc = {"claimId": f"CLM-{body.leadId}-{body.componentKey}", **payload}
+    doc = {"claimId": existing.get("claimId") or f"CLM-{body.leadId}-{body.componentKey}", **payload}
+    if existing.get("manual"):
+        doc["manual"] = True
     await db.claims.update_one(
         {"leadId": body.leadId, "componentKey": body.componentKey},
         {"$set": doc}, upsert=True,
     )
     lead = await db.leads.find_one({"leadId": body.leadId}) or {}
-    await gsheets.append("claims", {**doc, "customer": lead.get("customerName", ""),
-                                    "model": lead.get("interestedModel", ""), "claimAmount": body.receivedAmount})
+    await gsheets.append("claims", {**doc, "customer": existing.get("customer") or lead.get("customerName", ""),
+                                    "model": existing.get("model") or lead.get("interestedModel", ""), "claimAmount": body.receivedAmount})
     await write_audit(act, "settle", "claim", leadId=body.leadId, claimId=doc["claimId"],
                       old={"claimStatus": existing.get("claimStatus"), "receivedAmount": existing.get("receivedAmount")},
                       new={"claimStatus": body.claimStatus, "receivedAmount": body.receivedAmount,
@@ -1751,7 +1814,7 @@ async def settle_claim(body: ClaimSettleIn, act=Depends(actor)):
 
 
 class ClaimReceiptIn(BaseModel):
-    leadId: str
+    leadId: str = ""
     componentKey: str
     amount: float
     date: str = ""
@@ -1760,36 +1823,45 @@ class ClaimReceiptIn(BaseModel):
 
 @api.post("/claims/receipt")
 async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor)):
-    """Record OEM money received against ONE claim component; accrues receivedAmount + keeps a receipt history."""
+    """Record OEM money received against ONE claim (scheme component or manual claim);
+    accrues receivedAmount + keeps a receipt history."""
     if body.amount <= 0:
         raise HTTPException(422, "Enter a valid receipt amount")
-    # eligible company share for this component (recomputed live)
-    lead = await get_lead_or_404(body.leadId)
-    scheme_rows = await get_scheme_rows()
-    shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
-    eligible = ce.round2(ce.num(shares["eligibleByComponent"].get(body.componentKey)))
     existing = await db.claims.find_one({"leadId": body.leadId, "componentKey": body.componentKey}) or {}
+    if existing.get("manual"):
+        # Manual claim: eligible is the stored claim amount; no scheme recompute / lead lookup
+        eligible = ce.round2(ce.num(existing.get("eligibleClaim") if existing.get("eligibleClaim") is not None else existing.get("claimAmount")))
+        customer, model = existing.get("customer", ""), existing.get("model", "")
+    else:
+        # Derived scheme claim: eligible company share recomputed live
+        lead = await get_lead_or_404(body.leadId)
+        scheme_rows = await get_scheme_rows()
+        shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
+        eligible = ce.round2(ce.num(shares["eligibleByComponent"].get(body.componentKey)))
+        customer, model = lead.get("customerName", ""), lead.get("interestedModel", "")
     received = ce.round2(ce.num(existing.get("receivedAmount")) + body.amount)
     status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
     submitted = existing.get("submittedDate") or (body.date or today())
     approved = existing.get("approvedDate") or (body.date or today())
+    claim_id = existing.get("claimId") or f"CLM-{body.leadId}-{body.componentKey}"
     receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
                "reference": body.reference, "recordedAt": now_iso()}
+    setdoc = {"claimId": claim_id, "leadId": body.leadId,
+              "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
+              "claimReference": body.reference or existing.get("claimReference", ""),
+              "eligibleClaim": eligible, "submittedDate": submitted, "approvedDate": approved,
+              "lastUpdated": now_iso()}
+    if existing.get("manual"):
+        setdoc["manual"] = True
     await db.claims.update_one(
         {"leadId": body.leadId, "componentKey": body.componentKey},
-        {"$set": {"claimId": f"CLM-{body.leadId}-{body.componentKey}", "leadId": body.leadId,
-                  "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
-                  "claimReference": body.reference or existing.get("claimReference", ""),
-                  "eligibleClaim": eligible, "submittedDate": submitted, "approvedDate": approved,
-                  "lastUpdated": now_iso()},
-         "$push": {"receipts": receipt}},
+        {"$set": setdoc, "$push": {"receipts": receipt}},
         upsert=True,
     )
-    await gsheets.append("claims", {"claimId": f"CLM-{body.leadId}-{body.componentKey}", "leadId": body.leadId,
-                                    "customer": lead.get("customerName", ""), "model": lead.get("interestedModel", ""),
+    await gsheets.append("claims", {"claimId": claim_id, "leadId": body.leadId,
+                                    "customer": customer, "model": model,
                                     "claimStatus": status, "receivedAmount": received, "claimAmount": body.amount})
-    await write_audit(act, "receipt", "claim", leadId=body.leadId,
-                      claimId=f"CLM-{body.leadId}-{body.componentKey}",
+    await write_audit(act, "receipt", "claim", leadId=body.leadId, claimId=claim_id,
                       old={"receivedAmount": ce.num(existing.get("receivedAmount"))},
                       new={"receivedAmount": received, "status": status, "amount": ce.round2(body.amount)})
     return {"ok": True, "receivedAmount": received, "status": status}

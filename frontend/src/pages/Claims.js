@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { HandCoins } from "lucide-react";
+import { HandCoins, Plus } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card } from "../components/ui";
@@ -9,24 +9,34 @@ export default function Claims() {
   const [rows, setRows] = useState([]);
   const [active, setActive] = useState(null);
   const [receipt, setReceipt] = useState(false);
+  const [manual, setManual] = useState(false);
+  const [leads, setLeads] = useState([]);
   const load = useCallback(() => get("/claims").then(setRows), []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(); get("/leads").then(setLeads); }, [load]);
 
   const eligible = rows.reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
   const outstandingRows = rows.filter((r) => Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0) > 0.01);
 
   return (
     <div>
-      <PageHeader title="OEM Claim Register" subtitle={`${rows.length} claimable components · ${inr(eligible)} eligible`}
-        actions={<Button data-testid="record-claim-receipt-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Claim Received</Button>} />
+      <PageHeader title="OEM Claim Register" subtitle={`${rows.length} claims · ${inr(eligible)} eligible`}
+        actions={<div className="flex items-center gap-2">
+          <Button variant="secondary" data-testid="add-manual-claim-btn" onClick={() => setManual(true)}><Plus size={16} /> Add Manual Claim</Button>
+          <Button data-testid="record-claim-receipt-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Claim Received</Button>
+        </div>} />
       <Table
         rowKey="claimId"
         onRowClick={setActive}
         columns={[
-          { key: "leadId", label: "Lead", mono: true },
-          { key: "customer", label: "Customer", render: (r) => <span className="font-semibold">{r.customer}</span> },
-          { key: "model", label: "Vehicle" },
-          { key: "component", label: "Component", render: (r) => <Badge tone="bg-violet-50 text-violet-700 ring-violet-600/20">{r.component}</Badge> },
+          { key: "leadId", label: "Lead", mono: true, render: (r) => r.leadId || "—" },
+          { key: "customer", label: "Customer", render: (r) => <span className="font-semibold">{r.customer || "—"}</span> },
+          { key: "model", label: "Vehicle", render: (r) => r.model || "—" },
+          { key: "component", label: "Component", render: (r) => (
+            <div className="flex items-center gap-1.5">
+              <Badge tone="bg-violet-50 text-violet-700 ring-violet-600/20">{r.component}</Badge>
+              {r.manual && <Badge tone="bg-blue-50 text-blue-700 ring-blue-600/20">Manual</Badge>}
+            </div>
+          )},
           { key: "claimAmount", label: "Claim Amount", align: "right", mono: true, render: (r) => inr(r.claimAmount) },
           { key: "eligibleClaim", label: "Eligible", align: "right", mono: true, render: (r) => <span className="text-emerald-600 font-semibold">{inr(r.eligibleClaim)}</span> },
           { key: "receivedAmount", label: "Received", align: "right", mono: true, render: (r) => inr(r.receivedAmount) },
@@ -37,10 +47,57 @@ export default function Claims() {
           { key: "ageingDays", label: "Ageing", align: "right", render: (r) => r.ageingDays ? <Badge tone={r.ageingDays > 30 ? "bg-red-50 text-red-700 ring-red-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>{r.ageingDays}d</Badge> : "—" },
         ]}
         rows={rows}
-        empty="No claimable scheme components — apply schemes on booked leads first"
+        empty="No claims yet — apply schemes on booked leads, or click Add Manual Claim"
       />
       {active && <SettleModal claim={active} onClose={() => setActive(null)} onDone={() => { setActive(null); load(); }} />}
       {receipt && <ClaimReceiptModal rows={outstandingRows} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />}
+      {manual && <ManualClaimModal leads={leads} onClose={() => setManual(false)} onDone={() => { setManual(false); load(); }} />}
+    </div>
+  );
+}
+
+const CLAIM_TYPES = ["OEM Incentive", "Warranty Claim", "Scheme Support", "Target Incentive", "Other"];
+function ManualClaimModal({ leads, onClose, onDone }) {
+  const [form, setForm] = useState({ claimType: "OEM Incentive", oemCompany: "", leadId: "", customer: "", model: "", claimAmount: "", submittedDate: "", claimReference: "", note: "" });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const pickLead = (e) => {
+    const id = e.target.value;
+    const l = leads.find((x) => x.leadId === id);
+    setForm((f) => ({ ...f, leadId: id, customer: l ? l.customerName : f.customer, model: l ? l.interestedModel : f.model }));
+  };
+  const submit = async () => {
+    if (!form.claimAmount || +form.claimAmount <= 0) return toast.error("Enter a valid claim amount");
+    try {
+      await post("/claims/manual", { ...form, claimAmount: +form.claimAmount });
+      toast.success("Manual claim added to register");
+      onDone();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+  };
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
+      <Card className="relative w-full max-w-xl p-6 animate-fade-up">
+        <h3 className="font-heading text-lg font-bold text-ink mb-1">Add Manual Claim</h3>
+        <p className="text-xs text-ink-soft mb-4">Record a claim manually (e.g. an OEM incentive). It joins the register; record money later via "Record Claim Received".</p>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Claim Type"><Select data-testid="manual-claim-type" value={form.claimType} onChange={set("claimType")}>{CLAIM_TYPES.map((t) => <option key={t}>{t}</option>)}</Select></Field>
+          <Field label="OEM / Company"><Input data-testid="manual-claim-oem" value={form.oemCompany} onChange={set("oemCompany")} placeholder="e.g. Euler Motors" /></Field>
+          <Field label="Linked Lead (optional)">
+            <Select data-testid="manual-claim-lead" value={form.leadId} onChange={pickLead}>
+              <option value="">— None —</option>
+              {leads.map((l) => <option key={l.leadId} value={l.leadId}>{l.leadId} · {l.customerName}</option>)}
+            </Select>
+          </Field>
+          <Field label="Customer"><Input data-testid="manual-claim-customer" value={form.customer} onChange={set("customer")} /></Field>
+          <Field label="Claim Amount (₹) *"><Input data-testid="manual-claim-amount" type="number" value={form.claimAmount} onChange={set("claimAmount")} /></Field>
+          <Field label="Submitted Date"><Input data-testid="manual-claim-date" type="date" value={form.submittedDate} onChange={set("submittedDate")} /></Field>
+          <div className="col-span-2"><Field label="Reference / Note"><Input data-testid="manual-claim-ref" value={form.claimReference} onChange={set("claimReference")} placeholder="Reference / UTR / note" /></Field></div>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button data-testid="save-manual-claim-btn" onClick={submit}>Add to Register</Button>
+        </div>
+      </Card>
     </div>
   );
 }

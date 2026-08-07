@@ -158,3 +158,12 @@ User wants staff to use the Insurance Payouts page to enter amounts received aga
 - Frontend Insurance.js role-aware (useAuth): staff columns = Customer/Insurer/Premium/Received/Status; hidden Rate%/Expected/Outstanding + edit/delete + expected in subtitle; EntryDrawer hides rate field + summary card; PayoutReceiptModal hides outstanding, lists all entries, button "Record Received".
 - Lead-drawer Insurance tab stays Owner-only (unchanged).
 - Verified: curl (staff stripped, owner full, staff can create+receipt) + screenshot (staff UI). Preview only — REDEPLOY to push to production.
+
+## Iteration 17 (2026-06) — Manual OEM-incentive claim entry
+User: manually record claims (e.g. OEM incentive received as a claim); both Owner and staff can add; receive against it later.
+- Backend: POST /api/claims/manual (ManualClaimIn: claimType/oemCompany/leadId/customer/model/claimAmount/submittedDate/claimReference/note). Stored in db.claims with manual=True, claimId=MCLM…, componentKey=claimId, eligibleClaim=claimAmount, status Submitted. Audited + gsheet append.
+- list_claims now merges manual claims alongside derived scheme claims (Manual flag).
+- record_claim_receipt made manual-aware: if claim doc is manual, uses stored eligibleClaim (no lead/scheme recompute); leadId optional (""). Partial→Received computed vs claimAmount. settle_claim preserves manual flag + MCLM claimId.
+- Frontend Claims.js: "Add Manual Claim" button + ManualClaimModal (testids manual-claim-type/oem/lead/customer/amount/date/ref, save-manual-claim-btn); "Manual" badge in register; lead picker autofills customer/model; register shows manual + derived together.
+- Verified: curl (create→register→partial 5000→full 15000 Received) + screenshot (staff add via UI, Manual badge, ₹12,000). Baseline cleaned (all manual test claims removed).
+- Preview only — REDEPLOY to production.
