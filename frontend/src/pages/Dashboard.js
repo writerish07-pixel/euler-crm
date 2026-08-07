@@ -64,6 +64,7 @@ export default function Dashboard() {
             <div className="space-y-3">
               <Row label="Customer Outstanding" value={d.outstanding.customer} tone="text-red-600" />
               <Row label="Company Outstanding (OEM)" value={d.outstanding.company} tone="text-amber-600" />
+              <Row label="Finance Outstanding" value={k.financeOutstanding || 0} tone="text-violet-600" />
               <div className="border-t border-line pt-3">
                 <Row label="Total Outstanding" value={d.outstanding.total} tone="text-ink" bold />
               </div>
@@ -72,6 +73,8 @@ export default function Dashboard() {
           <div className="grid grid-cols-2 gap-4">
             <MiniStat label="Today Leads" value={k.todayLeads} icon={Users} />
             <MiniStat label="Pending Del." value={k.pendingDeliveries} icon={Truck} />
+            <MiniStat label="Follow-ups Due" value={k.followupDue || 0} icon={ClipboardCheck} testid="kpi-followup-due" />
+            <MiniStat label="Follow-ups Overdue" value={k.followupOverdue || 0} icon={AlertCircle} testid="kpi-followup-overdue" />
           </div>
         </div>
       </div>
@@ -106,9 +109,9 @@ function Row({ label, value, tone, bold }) {
   );
 }
 
-function MiniStat({ label, value, icon: Icon }) {
+function MiniStat({ label, value, icon: Icon, testid }) {
   return (
-    <Card className="p-4">
+    <Card className="p-4" data-testid={testid}>
       <Icon size={16} className="text-ink-faint" />
       <div className="mt-2 font-heading text-xl font-extrabold text-ink tabular">{value}</div>
       <div className="text-xs text-ink-faint">{label}</div>

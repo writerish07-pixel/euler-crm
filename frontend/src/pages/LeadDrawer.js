@@ -8,7 +8,7 @@ import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../comp
 const CHARGE_FIELDS = [
   ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
   ["accessoriesAmount", "Accessories"], ["handlingCharges", "Handling"], ["trc", "TRC"],
-  ["fastag", "Fastag"], ["extendedWarranty", "Ext. Warranty"], ["otherCharges", "Other"],
+  ["fastag", "Fastag"], ["extendedWarranty", "Ext. Warranty"], ["rsaAmc", "RSA / AMC"], ["otherCharges", "Other"],
 ];
 const SCHEME_FIELDS = [
   ["consumerDiscount", "Consumer Discount"], ["exchangeBonus", "Exchange Bonus"],
@@ -162,6 +162,7 @@ function PriceStructure({ lead, actions = {}, onSaved }) {
       exShowroom: +form.exShowroom, accessories: +form.accessoriesAmount, insurance: +form.insuranceAmount,
       registrationRto: +form.rto, fastag: +form.fastag, handlingCharges: +form.handlingCharges, trc: +form.trc,
       extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
+      rsaAmc: +form.rsaAmc,
       tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
       consumerDiscount: lead.consumerDiscount, exchangeBonus: lead.exchangeBonus, loyaltyBonus: lead.loyaltyBonus,
       referralBonus: lead.referralBonus, dsaDiscount: lead.dsaDiscount, additionalDiscount: lead.additionalDiscount,
@@ -175,6 +176,7 @@ function PriceStructure({ lead, actions = {}, onSaved }) {
       exShowroom: +form.exShowroom, rto: +form.rto, insuranceAmount: +form.insuranceAmount,
       accessoriesAmount: +form.accessoriesAmount, handlingCharges: +form.handlingCharges, trc: +form.trc,
       fastag: +form.fastag, extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
+      rsaAmc: +form.rsaAmc,
       tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
     });
     toast.success("Price structure saved");
@@ -311,8 +313,53 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
           <Prev label="Dealer Scheme Retained" v={c.dealerSchemeRetained ?? c.dealerRetained} />
         </div>
       </Card>
+      <ExtraIncomeCard lead={lead} locked={locked} onSaved={onSaved} />
       <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save} disabled={locked}>Update Scheme</Button></div>
     </div>
+  );
+}
+
+const EXTRA_INCOME_FIELDS = [
+  ["documentationIncome", "Documentation"], ["warrantyIncome", "Warranty"],
+  ["rsaIncome", "RSA"], ["referralIncome", "Referral"],
+];
+function ExtraIncomeCard({ lead, locked, onSaved }) {
+  const [form, setForm] = useState(() => {
+    const f = {};
+    EXTRA_INCOME_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
+    return f;
+  });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const total = EXTRA_INCOME_FIELDS.reduce((s, [k]) => s + (Number(form[k]) || 0), 0);
+  const save = async () => {
+    try {
+      await put(`/leads/${lead.leadId}/extra-income`, {
+        documentationIncome: +form.documentationIncome, warrantyIncome: +form.warrantyIncome,
+        rsaIncome: +form.rsaIncome, referralIncome: +form.referralIncome,
+      });
+      toast.success("Dealer extra income saved");
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Save failed");
+    }
+  };
+  return (
+    <Card className="p-4 mt-4 bg-emerald-50/40 border-emerald-200" data-testid="extra-income-card">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs font-semibold text-ink">Dealer Extra Income (folds into Dealer Earnings)</div>
+        <div className="text-xs text-ink-soft">Total <span className="font-mono font-semibold text-emerald-700">{inr(total)}</span></div>
+      </div>
+      <div className="grid grid-cols-4 gap-3">
+        {EXTRA_INCOME_FIELDS.map(([k, label]) => (
+          <Field key={k} label={label}>
+            <Input data-testid={`extra-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} />
+          </Field>
+        ))}
+      </div>
+      <div className="flex justify-end mt-3">
+        <Button variant="secondary" data-testid="save-extra-income-btn" onClick={save} disabled={locked} className="!py-1 !px-3 text-xs">Save Extra Income</Button>
+      </div>
+    </Card>
   );
 }
 
@@ -472,14 +519,20 @@ function EditLeadModal({ lead, masters, onClose, onSaved }) {
 }
 
 /* -------------------------------------------------- Insurance (from lead) */
+const suggestInsRate = (model) => {
+  const s = String(model || "").toLowerCase();
+  return (s.includes("storm") || s.includes("turbo")) ? 49 : 36.5;
+};
 function InsuranceTab({ lead, masters }) {
   const [entries, setEntries] = useState([]);
+  const [rateTouched, setRateTouched] = useState(false);
   const [form, setForm] = useState({
     insuranceCompany: lead.insurerName || "", policyNumber: "",
-    insuranceAmount: lead.insuranceAmount || 0, payoutRate: 0, receivedPayout: 0,
-    insuranceExecutive: lead.executive || "",
+    insuranceAmount: lead.insuranceAmount || 0, payoutRate: suggestInsRate(lead.interestedModel),
+    receivedPayout: 0, insuranceExecutive: lead.executive || "",
   });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const setRate = (e) => { setRateTouched(true); setForm((f) => ({ ...f, payoutRate: e.target.value })); };
   const load = useCallback(() => get("/insurance", { lead_id: lead.leadId }).then(setEntries), [lead.leadId]);
   useEffect(() => { load(); }, [load]);
 
@@ -509,8 +562,11 @@ function InsuranceTab({ lead, masters }) {
           <Field label="Policy Number"><Input value={form.policyNumber} onChange={set("policyNumber")} /></Field>
           <Field label="Executive"><Select value={form.insuranceExecutive} onChange={set("insuranceExecutive")}><option value="">—</option>{(masters?.executives || []).map((x) => <option key={x}>{x}</option>)}</Select></Field>
           <Field label="Premium (₹)"><Input data-testid="lead-ins-premium" type="number" value={form.insuranceAmount} onChange={set("insuranceAmount")} /></Field>
-          <Field label="Payout Rate (%)"><Input data-testid="lead-ins-rate" type="number" value={form.payoutRate} onChange={set("payoutRate")} /></Field>
+          <Field label="Payout Rate (%)"><Input data-testid="lead-ins-rate" type="number" value={form.payoutRate} onChange={setRate} /></Field>
           <Field label="Received (₹)"><Input type="number" value={form.receivedPayout} onChange={set("receivedPayout")} /></Field>
+        </div>
+        <div className="text-[11px] text-ink-faint mt-1" data-testid="lead-ins-rate-hint">
+          Auto-filled {suggestInsRate(lead.interestedModel)}% for {lead.interestedModel || "this model"} ({/storm|turbo/i.test(lead.interestedModel || "") ? "Storm/Turbo" : "other models"}) — editable.
         </div>
         <div className="flex items-center justify-between mt-3">
           <div className="text-sm text-ink-soft">Expected payout <span className="font-mono font-semibold text-cobalt">{inr(expected)}</span></div>

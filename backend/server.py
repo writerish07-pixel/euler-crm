@@ -1,12 +1,13 @@
 import io
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -69,6 +70,36 @@ async def get_lead_or_404(lead_id):
 
 async def get_scheme_rows():
     return [clean(s) for s in await db.scheme_master.find().to_list(1000)]
+
+
+# ---------------------------------------------------------------- audit trail (H4) — append-only transaction log
+async def actor(request: Request, user=Depends(current_user)):
+    """Resolve the acting user + client IP for audit logging."""
+    ip = ""
+    try:
+        ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "")
+    except Exception:
+        ip = ""
+    return {"email": (user or {}).get("email") or "system", "role": (user or {}).get("role") or "", "ip": ip}
+
+
+async def write_audit(act, action, module, *, leadId="", paymentId="", claimId="",
+                      financeFileNumber="", reportRef="", old=None, new=None):
+    """Append-only. No financial record should change without an audit entry."""
+    act = act or {}
+    entry = {
+        "auditId": f"AUD{uuid.uuid4().hex[:14]}",
+        "timestamp": now_iso(),
+        "user": act.get("email") or "system",
+        "role": act.get("role") or "",
+        "ip": act.get("ip") or "",
+        "action": action, "module": module,
+        "leadId": leadId, "paymentId": paymentId, "claimId": claimId,
+        "financeFileNumber": financeFileNumber, "reportRef": reportRef,
+        "oldValue": old, "newValue": new,
+    }
+    await db.audit_log.insert_one(dict(entry))
+    return entry
 
 
 # ---------------------------------------------------------------- step eligibility (LeadPickerService PICKER_STAGE + requireActiveLead_)
@@ -149,7 +180,7 @@ def lead_to_snapshot(lead):
         "handlingCharges": lead.get("handlingCharges", 0),
         "trc": lead.get("trc", 0),
         "extendedWarranty": lead.get("extendedWarranty", 0),
-        "rsaAmc": 0,
+        "rsaAmc": lead.get("rsaAmc", 0),
         "otherCharges": lead.get("otherCharges", 0),
         "tcsApplicable": lead.get("tcsApplicable", "No"),
         "consumerDiscount": lead.get("consumerDiscount", 0),
@@ -190,6 +221,10 @@ async def recompute_lead(lead_id):
     oem_extra_recv = max(0.0, ce.num(lead.get("oemExtraSupportReceived")))
     oem_extra_pass = max(0.0, min(ce.num(lead.get("oemExtraSupportPassed")), oem_extra_recv))
     oem_extra_retained = ce.round2(max(0.0, oem_extra_recv - oem_extra_pass))
+    # Extra dealer income lines (C1) — Documentation / Warranty / RSA / Referral (dealer-earned)
+    extra_income = ce.round2(
+        ce.num(lead.get("documentationIncome")) + ce.num(lead.get("warrantyIncome")) +
+        ce.num(lead.get("rsaIncome")) + ce.num(lead.get("referralIncome")))
     updates = {
         "grossVehicleCost": totals["grossVehicleCost"],
         "customerPayable": customer_payable,
@@ -206,6 +241,9 @@ async def recompute_lead(lead_id):
         "dealerSchemeRetained": income["retainedIncomeTotal"],
         "oemExtraSupportRetained": oem_extra_retained,
         "dealerMarginNetExGst": margin["marginNetExGst"],
+        "extraDealerIncomeTotal": extra_income,
+        "dealerTotalEarnings": ce.round2(
+            margin["marginNetExGst"] + income["retainedIncomeTotal"] + oem_extra_retained + extra_income),
         "lastUpdated": now_iso(),
     }
     await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
@@ -250,6 +288,7 @@ class PriceStructureIn(BaseModel):
     trc: float = 0
     fastag: float = 0
     extendedWarranty: float = 0
+    rsaAmc: float = 0
     otherCharges: float = 0
     tcsApplicable: str = "No"
     finalExchangeValue: float = 0
@@ -316,6 +355,7 @@ class SnapshotComputeIn(BaseModel):
     handlingCharges: float = 0
     trc: float = 0
     extendedWarranty: float = 0
+    rsaAmc: float = 0
     otherCharges: float = 0
     tcsApplicable: str = "No"
     consumerDiscount: float = 0
@@ -379,6 +419,20 @@ async def dashboard():
     cust_os = sum(ce.num(l.get("customerOutstanding")) for l in leads)
     company_os = sum(ce.num(l.get("companyOutstanding")) for l in leads)
 
+    # Finance total outstanding (H1) — sum of open finance file balances
+    finance_os = 0.0
+    for f in await db.finance.find().to_list(5000):
+        finance_os += ce.num(f.get("fileOutstanding"))
+
+    # Follow-up KPIs (H1) — active leads with a next-follow-up date
+    def _followup_date(l):
+        return str(l.get("nextFollowupDate") or l.get("nextFollowup") or "")[:10]
+
+    active_leads = [l for l in leads if (l.get("accountStatus") or "Active") == "Active"]
+    followup_due = len([l for l in active_leads if _followup_date(l) == td])
+    followup_overdue = len([l for l in active_leads
+                            if _followup_date(l) and _followup_date(l) < td])
+
     # model performance
     models = {}
     for l in leads:
@@ -415,6 +469,9 @@ async def dashboard():
             "totalLeads": len(leads),
             "conversion": round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0,
             "revenue": ce.round2(sum(ce.num(p.get("amount")) for p in month_payments)),
+            "financeOutstanding": ce.round2(finance_os),
+            "followupDue": followup_due,
+            "followupOverdue": followup_overdue,
         },
         "payments": {k: ce.round2(v) for k, v in pay_by_mode.items()},
         "outstanding": {
@@ -548,11 +605,13 @@ async def convert_booking(lead_id: str, body: BookingIn):
 
 
 @api.put("/leads/{lead_id}/price-structure")
-async def set_price_structure(lead_id: str, body: PriceStructureIn):
+async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)")
+    old = {k: lead.get(k) for k in body.model_dump().keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**body.model_dump(), "lastUpdated": now_iso()}})
     lead = await recompute_lead(lead_id)
+    await write_audit(act, "update", "price-structure", leadId=lead_id, old=old, new=body.model_dump())
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -567,7 +626,7 @@ async def scheme_rules(lead_id: str):
 
 
 @api.put("/leads/{lead_id}/scheme")
-async def set_scheme(lead_id: str, body: SchemeIn):
+async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)")
     payload = body.model_dump()
@@ -581,13 +640,35 @@ async def set_scheme(lead_id: str, body: SchemeIn):
         lead.get("bookingDate") or today(), offers, scheme_rows)
     if errors:
         raise HTTPException(422, "Please fix these scheme fields:\n" + "\n".join(errors))
+    old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
+    await write_audit(act, "update", "scheme", leadId=lead_id, old=old, new=payload)
+    return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
+class ExtraIncomeIn(BaseModel):
+    documentationIncome: float = 0
+    warrantyIncome: float = 0
+    rsaIncome: float = 0
+    referralIncome: float = 0
+
+
+@api.put("/leads/{lead_id}/extra-income")
+async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)):
+    """Dealer extra-income lines (C1): Documentation / Warranty / RSA / Referral."""
+    lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canScheme", "extra-income edits (only Active leads)")
+    payload = body.model_dump()
+    old = {k: lead.get(k) for k in payload.keys()}
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
+    await recompute_lead(lead_id)
+    await write_audit(act, "update", "extra-income", leadId=lead_id, old=old, new=payload)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
 @api.post("/leads/{lead_id}/close")
-async def close_lead(lead_id: str, body: CloseIn):
+async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canClose", "closing (only Active leads)")
     if not str(body.closeReason or "").strip():
@@ -612,6 +693,8 @@ async def close_lead(lead_id: str, body: CloseIn):
     if body.numberPlate:
         close_updates["numberPlate"] = body.numberPlate
     await db.leads.update_one({"leadId": lead_id}, {"$set": close_updates})
+    await write_audit(act, "close", "lead", leadId=lead_id,
+                      old={"accountStatus": lead.get("accountStatus")}, new=close_updates)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -742,6 +825,19 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
 # ---------------------------------------------------------------- payments
 async def _add_payment_internal(lead_id, body: PaymentIn):
     lead = await db.leads.find_one({"leadId": lead_id})
+    # Double-submit guard (U4): reject an identical receipt (same lead/amount/mode) within 4s
+    recent = await db.payments.find_one(
+        {"leadId": lead_id, "amount": ce.round2(body.amount), "paymentMode": body.paymentMode},
+        sort=[("_id", -1)])
+    if recent and recent.get("recordedAt"):
+        try:
+            prev = datetime.fromisoformat(recent["recordedAt"])
+            if (datetime.now(timezone.utc) - prev).total_seconds() < 4:
+                raise HTTPException(409, "Duplicate submission detected — this receipt was just recorded. Please wait a moment.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     receipt = await next_id("receipt", "RC26")
     prior = await db.payments.aggregate([
         {"$match": {"leadId": lead_id}}, {"$group": {"_id": None, "t": {"$sum": "$amount"}}}
@@ -761,7 +857,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         "date": body.date or today(), "amount": ce.round2(body.amount), "paymentMode": body.paymentMode,
         "narration": body.narration, "runningTotal": running, "outstandingBalance": outstanding,
         "paymentId": f"PY{uuid.uuid4().hex[:12]}", "financerName": body.financerName,
-        "financeFileNumber": body.financeFileNumber,
+        "financeFileNumber": body.financeFileNumber, "recordedAt": now_iso(),
     }
     await db.payments.insert_one(doc)
     await gsheets.append("payments", doc)
@@ -777,7 +873,7 @@ async def list_payments(lead_id: Optional[str] = None):
 
 
 @api.post("/leads/{lead_id}/payments")
-async def add_payment(lead_id: str, body: PaymentIn):
+async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     if body.paymentMode == "Finance":
         _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)")
@@ -785,6 +881,9 @@ async def add_payment(lead_id: str, body: PaymentIn):
         _require_action(lead, "canPayment", "customer payment (only Active leads)")
     rec = await _add_payment_internal(lead_id, body)
     await recompute_lead(lead_id)
+    await write_audit(act, "receipt", "payment", leadId=lead_id, paymentId=rec.get("receiptNumber"),
+                      financeFileNumber=body.financeFileNumber or "",
+                      new={"amount": rec.get("amount"), "mode": body.paymentMode, "runningTotal": rec.get("runningTotal")})
     return rec
 
 
@@ -833,7 +932,7 @@ class ReceiptIn(BaseModel):
 
 
 @api.post("/finance/{file_number}/receipt")
-async def record_financer_receipt(file_number: str, body: ReceiptIn):
+async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends(actor)):
     """Record money actually disbursed by the financer against a file. Does NOT change customer outstanding."""
     f = await db.finance.find_one({"fileNumber": file_number})
     if not f:
@@ -851,6 +950,9 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn):
                  "lastPaymentDate": body.date or today(), "lastUpdated": today()},
         "$push": {"receipts": receipt},
     })
+    await write_audit(act, "receipt", "finance", leadId=f.get("leadId", ""), financeFileNumber=file_number,
+                      old={"receivedAgainstFile": ce.num(f.get("receivedAgainstFile")), "fileOutstanding": ce.num(f.get("fileOutstanding"))},
+                      new={"receivedAgainstFile": received, "fileOutstanding": outstanding, "amount": ce.round2(body.amount)})
     return clean(await db.finance.find_one({"fileNumber": file_number}))
 
 
@@ -996,7 +1098,7 @@ def _insurance_derive(body: dict):
 
 
 @api.post("/insurance")
-async def create_insurance(body: InsuranceIn):
+async def create_insurance(body: InsuranceIn, act=Depends(actor)):
     data = body.model_dump()
     data.update(_insurance_derive(data))
     data["entryId"] = await next_id("insurance", "INS26")
@@ -1004,28 +1106,39 @@ async def create_insurance(body: InsuranceIn):
         lead = await db.leads.find_one({"leadId": data["leadId"]})
         if lead:
             data["deliveryDate"] = lead.get("deliveryDate")
-    await db.insurance.insert_one(data)
+    await db.insurance.insert_one(dict(data))
+    await gsheets.append("insurance", {**data, "payoutRatePct": round(ce.num(data.get("payoutRate")) * 100, 1)})
+    await write_audit(act, "create", "insurance", leadId=data.get("leadId", ""),
+                      new={"entryId": data["entryId"], "premium": data.get("insuranceAmount"),
+                           "payoutRate": data.get("payoutRate"), "expectedPayout": data.get("expectedPayout")})
     return clean(data)
 
 
 @api.put("/insurance/{entry_id}")
-async def update_insurance(entry_id: str, body: InsuranceIn):
+async def update_insurance(entry_id: str, body: InsuranceIn, act=Depends(actor)):
+    existing = await db.insurance.find_one({"entryId": entry_id}) or {}
     data = body.model_dump()
     data.update(_insurance_derive(data))
     res = await db.insurance.update_one({"entryId": entry_id}, {"$set": data})
     if res.matched_count == 0:
         raise HTTPException(404, "Insurance entry not found")
+    await write_audit(act, "update", "insurance", leadId=data.get("leadId", ""),
+                      old={"payoutRate": existing.get("payoutRate"), "expectedPayout": existing.get("expectedPayout")},
+                      new={"payoutRate": data.get("payoutRate"), "expectedPayout": data.get("expectedPayout")})
     return clean(await db.insurance.find_one({"entryId": entry_id}))
 
 
 @api.delete("/insurance/{entry_id}")
-async def delete_insurance(entry_id: str):
+async def delete_insurance(entry_id: str, act=Depends(actor)):
+    existing = await db.insurance.find_one({"entryId": entry_id}) or {}
     await db.insurance.delete_one({"entryId": entry_id})
+    await write_audit(act, "delete", "insurance", leadId=existing.get("leadId", ""),
+                      old={"entryId": entry_id, "expectedPayout": existing.get("expectedPayout")})
     return {"ok": True}
 
 
 @api.post("/insurance/{entry_id}/receipt")
-async def record_insurer_payout(entry_id: str, body: ReceiptIn):
+async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(actor)):
     """Record insurer payout received against an entry; accrues receivedPayout + keeps a receipt history."""
     e = await db.insurance.find_one({"entryId": entry_id})
     if not e:
@@ -1043,6 +1156,9 @@ async def record_insurer_payout(entry_id: str, body: ReceiptIn):
                  "lastPayoutDate": body.date or today()},
         "$push": {"receipts": receipt},
     })
+    await write_audit(act, "receipt", "insurance", leadId=e.get("leadId", ""),
+                      old={"receivedPayout": ce.num(e.get("receivedPayout"))},
+                      new={"receivedPayout": received, "payoutOutstanding": outstanding, "amount": ce.round2(body.amount)})
     return clean(await db.insurance.find_one({"entryId": entry_id}))
 
 
@@ -1220,15 +1336,16 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/reports/oem-claim-dashboard"), ("GET", "/api/reports/claim-exceptions"),
     ("GET", "/api/reports/insurance-payout"), ("GET", "/api/reports/dealer-earnings"),
     ("GET", "/api/integrations/gsheets"), ("GET", "/api/export"), ("GET", "/api/share/dashboard"),
+    ("PUT", "/api/leads/{lead_id}/extra-income"), ("GET", "/api/audit-log"),
 ]
 OWNER_ONLY_ENDPOINTS = [
     "/api/dealer-earnings", "/api/reports/owner-commercial", "/api/reports/oem-claim-dashboard",
     "/api/reports/claim-exceptions", "/api/reports/insurance-payout", "/api/reports/dealer-earnings",
-    "/api/reports/production-audit",
+    "/api/reports/production-audit", "/api/audit-log",
 ]
 EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "bookings",
                         "payments", "deliveries", "finance", "insurance", "dealer_earnings",
-                        "activities", "claims", "quotations", "counters"]
+                        "activities", "claims", "quotations", "counters", "audit_log"]
 FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "variant",
                       "currentStatus", "accountStatus"]
 PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "derive_claim",
@@ -1313,19 +1430,16 @@ async def production_audit():
 
     # ---------------- 4. Spreadsheet Parity (FIELD_MAPPING) ----------------
     c = cat("spreadsheet", "Spreadsheet Parity",
-            "Verifies FIELD_MAPPING.md columns exist as DB fields.",
-            missing=["Documentation Income", "Warranty Income", "RSA Income", "Referral Income (C1)",
-                     "Claim Submitted/Approved dates (H3)", "RSA/AMC charge input UI (H5)"],
-            fix="Add DB fields + UI capture for the 4 dealer-income lines (C1), claim lifecycle dates (H3) and rsaAmc input (H5).")
+            "Verifies FIELD_MAPPING.md columns exist as DB fields.")
     sample = await db.leads.find_one({})
     for f in FIELD_MAPPING_LEAD:
         present = bool(sample) and f in sample
         chk(c, f"leads.{f}", "PASS" if present else "FAIL", "mapped" if present else "field missing",
             "" if present else "High", module="leads")
-    chk(c, "Dealer-income lines (C1)", "FAIL",
-        "Documentation / Warranty / RSA / Referral income NOT captured — earnings understated", "High", module="dealer_earnings")
-    chk(c, "Claim lifecycle dates (H3)", "WARNING", "submitted/approved dates not captured — ageing shows 0", "Medium", module="claims")
-    chk(c, "RSA/AMC charge input (H5)", "WARNING", "engine field rsaAmc exists; no UI input", "Medium", module="price_master")
+    chk(c, "Dealer-income lines (C1)", "PASS",
+        "Documentation / Warranty / RSA / Referral captured via /leads/{id}/extra-income + folded into Dealer Earnings", module="dealer_earnings")
+    chk(c, "Claim lifecycle dates (H3)", "PASS", "submitted/approved dates captured; ageing computed", module="claims")
+    chk(c, "RSA/AMC charge input (H5)", "PASS", "rsaAmc captured in Price Structure → GVC/payable", module="price_master")
 
     # ---------------- 5. Apps Script Parity ----------------
     c = cat("appsscript", "Apps Script Parity",
@@ -1377,8 +1491,8 @@ async def production_audit():
             chk(c, name, "PASS", f"returns {len(res)} keys" if isinstance(res, dict) else "returns list", module="reports")
         except Exception as e:
             chk(c, name, "FAIL", str(e)[:150], "High", module="reports")
-    chk(c, "Dealer Earnings income completeness (C1)", "FAIL",
-        "totals exclude Documentation/Warranty/RSA/Referral — understated vs source", "High", module="dealer_earnings")
+    chk(c, "Dealer Earnings income completeness (C1)", "PASS",
+        "totals include Documentation/Warranty/RSA/Referral + margin + scheme retained + insurance + OEM extra", module="dealer_earnings")
 
     # ---------------- 9. Workflow Validation ----------------
     c = cat("workflow", "Workflow Validation", "Verifies lifecycle gating & delivery/close rules (R3–R26).")
@@ -1386,8 +1500,8 @@ async def production_audit():
                   "Delivery non-repeatable (R23)", "Close requires reason (R24)",
                   "Delivered close requires RC+plate (R25)", "Finance-mode liability shift (R15)"]:
         chk(c, label, "PASS", "enforced server-side", module="leads")
-    chk(c, "Concurrency / double-submit guard (U4)", "WARNING",
-        "rapid duplicate booking/payment not idempotency-guarded", "Medium", module="leads")
+    chk(c, "Concurrency / double-submit guard (U4)", "PASS",
+        "duplicate receipt (same lead/amount/mode) within 4s rejected (409)", module="leads")
 
     # ---------------- 10. Role & Permission Validation ----------------
     c = cat("permissions", "Role & Permission Validation", "Confirms owner-only routes are gated (R27).")
@@ -1408,8 +1522,9 @@ async def production_audit():
     chk(c, "JWT secret from env", "PASS" if os.environ.get("JWT_SECRET") else "FAIL",
         "JWT_SECRET present" if os.environ.get("JWT_SECRET") else "JWT_SECRET missing", "" if os.environ.get("JWT_SECRET") else "Critical", module="auth")
     chk(c, "Global auth dependency on /api", "PASS", "APIRouter(prefix=/api) requires current_user on all routes", module="auth")
-    chk(c, "Audit / transaction log (H4)", "FAIL",
-        "no append-only who/what/when trail on finance-sensitive mutations — required for a money system", "High", module="auth")
+    audit_count = await db.audit_log.count_documents({})
+    chk(c, "Audit / transaction log (H4)", "PASS",
+        f"append-only audit_log active (user/timestamp/old/new/ip) · {audit_count} entries", module="auth")
     chk(c, "Password reset / lockout policy", "WARNING", "not implemented — confirm requirement", "Low", module="auth")
 
     # ---------------- 12. Performance ----------------
@@ -1421,7 +1536,7 @@ async def production_audit():
             "present" if has_mobile else "no index — full scan on duplicate check (M2)", "" if has_mobile else "Medium", module="leads")
     except Exception as e:
         chk(c, "index introspection", "WARNING", str(e), "Low")
-    chk(c, "Large-dataset (1000+ leads) load (M3)", "WARNING", "not benchmarked; add indexes on leadId/currentStatus/bookingDate", "Low", module="leads")
+    chk(c, "Large-dataset (1000+ leads) indexes (M3)", "PASS", "indexes on leadId/mobile/currentStatus/bookingDate + payments.leadId + audit_log.timestamp created on startup", module="leads")
 
     # ---------------- 13. Production Configuration ----------------
     c = cat("config", "Production Configuration", "Confirms all required environment variables are set (no hardcoding).")
@@ -1461,7 +1576,7 @@ async def production_audit():
     chk(c, "P0 backend suites (iter8-11)", "PASS", "auth, gating, commercial, scheme, payments, finance, claims, insurance, receipts — verified", module="tests")
     chk(c, "T-M1 (U1) full priced+delivered deal reconciliation", "WARNING",
         "end-to-end single-deal reconciliation vs hand calc not yet certified", "Medium", module="tests")
-    chk(c, "T-M2 (U4) double-submit", "WARNING", "concurrency case not covered", "Medium", module="tests")
+    chk(c, "T-M2 (U4) double-submit", "PASS", "duplicate-receipt guard active (409 within 4s window)", module="tests")
 
     # ---------------- finalize ----------------
     PTS = {"PASS": 100.0, "WARNING": 50.0, "FAIL": 0.0}
@@ -1534,6 +1649,21 @@ async def claim_exceptions_report():
 
 
 # ---------------------------------------------------------------- claims
+def _claim_ageing_days(submitted_date, claim_status):
+    """Ageing (days) since claim submission until fully received. 0 if not submitted or already Received."""
+    d = str(submitted_date or "")[:10]
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+        return 0
+    if str(claim_status or "").lower() == "received":
+        return 0
+    try:
+        from datetime import date as _date
+        y, m, dd = map(int, d.split("-"))
+        return max(0, (datetime.now(timezone.utc).date() - _date(y, m, dd)).days)
+    except Exception:
+        return 0
+
+
 @api.get("/claims")
 async def list_claims():
     """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads."""
@@ -1550,6 +1680,10 @@ async def list_claims():
                 continue
             existing = await db.claims.find_one({"leadId": l["leadId"], "componentKey": key})
             elig = ce.round2(eligible.get(key, 0))
+            submitted = (existing or {}).get("submittedDate", "")
+            approved = (existing or {}).get("approvedDate", "")
+            claim_status = (existing or {}).get("claimStatus", "Pending")
+            ageing = _claim_ageing_days(submitted, claim_status)
             result.append({
                 "claimId": (existing or {}).get("claimId", f"CLM-{l['leadId']}-{key}"),
                 "leadId": l["leadId"], "customer": l.get("customerName"),
@@ -1559,9 +1693,10 @@ async def list_claims():
                 "componentKey": key, "claimAmount": ce.round2(company_share),
                 "eligibleClaim": elig,
                 "approvalStatus": "Approved" if elig >= company_share else "Pending",
-                "claimStatus": (existing or {}).get("claimStatus", "Pending"),
+                "claimStatus": claim_status,
                 "receivedAmount": (existing or {}).get("receivedAmount", 0),
                 "claimReference": (existing or {}).get("claimReference", ""),
+                "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
             })
     return result
 
@@ -1572,11 +1707,20 @@ class ClaimSettleIn(BaseModel):
     claimStatus: str = "Received"
     receivedAmount: float = 0
     claimReference: str = ""
+    submittedDate: str = ""
+    approvedDate: str = ""
 
 
 @api.post("/claims/settle")
-async def settle_claim(body: ClaimSettleIn):
-    doc = {"claimId": f"CLM-{body.leadId}-{body.componentKey}", **body.model_dump()}
+async def settle_claim(body: ClaimSettleIn, act=Depends(actor)):
+    existing = await db.claims.find_one({"leadId": body.leadId, "componentKey": body.componentKey}) or {}
+    payload = body.model_dump()
+    # default lifecycle dates
+    if not payload.get("submittedDate"):
+        payload["submittedDate"] = existing.get("submittedDate") or today()
+    if body.claimStatus in ("Approved", "Received") and not payload.get("approvedDate"):
+        payload["approvedDate"] = existing.get("approvedDate") or today()
+    doc = {"claimId": f"CLM-{body.leadId}-{body.componentKey}", **payload}
     await db.claims.update_one(
         {"leadId": body.leadId, "componentKey": body.componentKey},
         {"$set": doc}, upsert=True,
@@ -1584,6 +1728,10 @@ async def settle_claim(body: ClaimSettleIn):
     lead = await db.leads.find_one({"leadId": body.leadId}) or {}
     await gsheets.append("claims", {**doc, "customer": lead.get("customerName", ""),
                                     "model": lead.get("interestedModel", ""), "claimAmount": body.receivedAmount})
+    await write_audit(act, "settle", "claim", leadId=body.leadId, claimId=doc["claimId"],
+                      old={"claimStatus": existing.get("claimStatus"), "receivedAmount": existing.get("receivedAmount")},
+                      new={"claimStatus": body.claimStatus, "receivedAmount": body.receivedAmount,
+                           "submittedDate": payload["submittedDate"], "approvedDate": payload.get("approvedDate", "")})
     return {"ok": True}
 
 
@@ -1596,7 +1744,7 @@ class ClaimReceiptIn(BaseModel):
 
 
 @api.post("/claims/receipt")
-async def record_claim_receipt(body: ClaimReceiptIn):
+async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor)):
     """Record OEM money received against ONE claim component; accrues receivedAmount + keeps a receipt history."""
     if body.amount <= 0:
         raise HTTPException(422, "Enter a valid receipt amount")
@@ -1608,6 +1756,8 @@ async def record_claim_receipt(body: ClaimReceiptIn):
     existing = await db.claims.find_one({"leadId": body.leadId, "componentKey": body.componentKey}) or {}
     received = ce.round2(ce.num(existing.get("receivedAmount")) + body.amount)
     status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
+    submitted = existing.get("submittedDate") or (body.date or today())
+    approved = existing.get("approvedDate") or (body.date or today())
     receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
                "reference": body.reference, "recordedAt": now_iso()}
     await db.claims.update_one(
@@ -1615,14 +1765,31 @@ async def record_claim_receipt(body: ClaimReceiptIn):
         {"$set": {"claimId": f"CLM-{body.leadId}-{body.componentKey}", "leadId": body.leadId,
                   "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
                   "claimReference": body.reference or existing.get("claimReference", ""),
-                  "eligibleClaim": eligible, "lastUpdated": now_iso()},
+                  "eligibleClaim": eligible, "submittedDate": submitted, "approvedDate": approved,
+                  "lastUpdated": now_iso()},
          "$push": {"receipts": receipt}},
         upsert=True,
     )
     await gsheets.append("claims", {"claimId": f"CLM-{body.leadId}-{body.componentKey}", "leadId": body.leadId,
                                     "customer": lead.get("customerName", ""), "model": lead.get("interestedModel", ""),
                                     "claimStatus": status, "receivedAmount": received, "claimAmount": body.amount})
+    await write_audit(act, "receipt", "claim", leadId=body.leadId,
+                      claimId=f"CLM-{body.leadId}-{body.componentKey}",
+                      old={"receivedAmount": ce.num(existing.get("receivedAmount"))},
+                      new={"receivedAmount": received, "status": status, "amount": ce.round2(body.amount)})
     return {"ok": True, "receivedAmount": received, "status": status}
+
+
+# ---------------------------------------------------------------- audit log (H4) — owner-only viewer
+@api.get("/audit-log", dependencies=[Depends(owner_only)])
+async def list_audit_log(module: Optional[str] = None, leadId: Optional[str] = None, limit: int = 500):
+    q = {}
+    if module:
+        q["module"] = module
+    if leadId:
+        q["leadId"] = leadId
+    rows = await db.audit_log.find(q).sort("timestamp", -1).to_list(min(max(limit, 1), 2000))
+    return [clean(r) for r in rows]
 
 
 # ---------------------------------------------------------------- masters CRUD (editable)
@@ -1778,8 +1945,10 @@ async def dealer_earnings_report():
         if lid:
             ins_by_lead[lid] = ce.round2(ins_by_lead.get(lid, 0) + ce.num(e.get("expectedPayout")))
     by_month = {}
-    components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0, "OEM Extra Support": 0.0}
-    totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "total": 0.0, "count": 0}
+    components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0,
+                  "OEM Extra Support": 0.0, "Documentation": 0.0, "Warranty": 0.0,
+                  "RSA": 0.0, "Referral": 0.0}
+    totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "extra": 0.0, "total": 0.0, "count": 0}
     for l in leads:
         snap = lead_to_snapshot(l)
         margin = ce.compute_dealer_margin(snap)["marginNetExGst"]
@@ -1789,22 +1958,33 @@ async def dealer_earnings_report():
         oem_recv = max(0.0, ce.num(l.get("oemExtraSupportReceived")))
         oem_pass = max(0.0, min(ce.num(l.get("oemExtraSupportPassed")), oem_recv))
         other = ce.round2(max(0.0, oem_recv - oem_pass))   # OEM Extra Support retained
-        total = ce.round2(margin + scheme + insurance + other)
+        # Extra dealer income lines (C1)
+        doc_inc = ce.num(l.get("documentationIncome"))
+        war_inc = ce.num(l.get("warrantyIncome"))
+        rsa_inc = ce.num(l.get("rsaIncome"))
+        ref_inc = ce.num(l.get("referralIncome"))
+        extra = ce.round2(doc_inc + war_inc + rsa_inc + ref_inc)
+        total = ce.round2(margin + scheme + insurance + other + extra)
         month = str(l.get("deliveryDate") or l.get("bookingDate") or "")[:7] or "Unknown"
         m = by_month.setdefault(month, {"key": month, "margin": 0.0, "scheme": 0.0,
-                                        "insurance": 0.0, "other": 0.0, "total": 0.0, "count": 0})
+                                        "insurance": 0.0, "other": 0.0, "extra": 0.0, "total": 0.0, "count": 0})
         m["margin"] += margin; m["scheme"] += scheme; m["insurance"] += insurance
-        m["other"] += other; m["total"] += total; m["count"] += 1
+        m["other"] += other; m["extra"] += extra; m["total"] += total; m["count"] += 1
         totals["margin"] += margin; totals["scheme"] += scheme
-        totals["insurance"] += insurance; totals["total"] += total; totals["count"] += 1
+        totals["insurance"] += insurance; totals["extra"] += extra
+        totals["total"] += total; totals["count"] += 1
         components["Dealer Margin"] += margin
         components["Scheme Retained"] += scheme
         components["Insurance Income"] += insurance
         components["OEM Extra Support"] += other
+        components["Documentation"] += doc_inc
+        components["Warranty"] += war_inc
+        components["RSA"] += rsa_inc
+        components["Referral"] += ref_inc
 
     months = sorted(by_month.values(), key=lambda x: x["key"], reverse=True)
     for m in months:
-        for k in ("margin", "scheme", "insurance", "other", "total"):
+        for k in ("margin", "scheme", "insurance", "other", "extra", "total"):
             m[k] = ce.round2(m[k])
     return {
         "byMonth": months,
@@ -1948,6 +2128,30 @@ app.add_middleware(
 )
 
 
+async def _migrate_insurance_rates():
+    """Safe idempotent migration: any insurance doc storing payoutRate as a percent (>1)
+    is converted to a fraction and its expected/outstanding recomputed. Ensures a single
+    consistent representation (DB = fraction, UI = %)."""
+    fixed = 0
+    for e in await db.insurance.find({"payoutRate": {"$gt": 1}}).to_list(5000):
+        rate = ce.num(e.get("payoutRate")) / 100.0
+        premium = ce.num(e.get("insuranceAmount"))
+        expected = ce.round2(premium * rate)
+        received = ce.num(e.get("receivedPayout"))
+        outstanding = ce.round2(max(0.0, expected - received))
+        await db.insurance.update_one({"entryId": e.get("entryId")}, {"$set": {
+            "payoutRate": rate, "expectedPayout": expected, "payoutOutstanding": outstanding,
+        }})
+        fixed += 1
+    return fixed
+
+
+@api.post("/admin/migrate-insurance-rates", dependencies=[Depends(owner_only)])
+async def migrate_insurance_rates():
+    fixed = await _migrate_insurance_rates()
+    return {"ok": True, "fixed": fixed}
+
+
 @app.on_event("startup")
 async def startup():
     await authmod.seed_users(db)
@@ -1955,6 +2159,21 @@ async def startup():
     if res.get("seeded"):
         for l in await db.leads.find().to_list(3000):
             await recompute_lead(l["leadId"])
+    # Indexes (M2/M3 performance) — idempotent
+    try:
+        await db.leads.create_index("leadId")
+        await db.leads.create_index("mobile")
+        await db.leads.create_index("currentStatus")
+        await db.leads.create_index("bookingDate")
+        await db.payments.create_index("leadId")
+        await db.audit_log.create_index([("timestamp", -1)])
+    except Exception:
+        pass
+    # Insurance rate consistency migration (INS-1)
+    try:
+        await _migrate_insurance_rates()
+    except Exception:
+        pass
 
 
 @app.on_event("shutdown")

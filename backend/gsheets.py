@@ -23,6 +23,9 @@ SYNC_MAP = {
                                         "invoiceNumber", "chassisNumber", "numberPlate"]),
     "claims": ("Scheme Claim Register", ["claimId", "leadId", "customer", "model", "component",
                                          "claimAmount", "claimStatus", "receivedAmount", "claimReference"]),
+    "insurance": ("Insurance Register", ["entryId", "leadId", "customerName", "insuranceCompany",
+                                         "policyNumber", "insuranceAmount", "payoutRatePct",
+                                         "expectedPayout", "receivedPayout", "payoutOutstanding", "status"]),
 }
 
 _service = None

@@ -32,6 +32,9 @@ export default function Claims() {
           { key: "receivedAmount", label: "Received", align: "right", mono: true, render: (r) => inr(r.receivedAmount) },
           { key: "outstanding", label: "Outstanding", align: "right", mono: true, render: (r) => { const o = Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0); return <span className={o > 0.01 ? "text-red-600 font-semibold" : ""}>{inr(Math.max(0, o))}</span>; } },
           { key: "claimStatus", label: "Status", render: (r) => <Badge>{r.claimStatus}</Badge> },
+          { key: "submittedDate", label: "Submitted", render: (r) => r.submittedDate ? fmtDate(r.submittedDate) : "—" },
+          { key: "approvedDate", label: "Approved", render: (r) => r.approvedDate ? fmtDate(r.approvedDate) : "—" },
+          { key: "ageingDays", label: "Ageing", align: "right", render: (r) => r.ageingDays ? <Badge tone={r.ageingDays > 30 ? "bg-red-50 text-red-700 ring-red-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>{r.ageingDays}d</Badge> : "—" },
         ]}
         rows={rows}
         empty="No claimable scheme components — apply schemes on booked leads first"
@@ -87,10 +90,10 @@ function ClaimReceiptModal({ rows, onClose, onDone }) {
 }
 
 function SettleModal({ claim, onClose, onDone }) {
-  const [form, setForm] = useState({ claimStatus: claim.claimStatus || "Submitted", receivedAmount: claim.receivedAmount || claim.eligibleClaim || 0, claimReference: claim.claimReference || "" });
+  const [form, setForm] = useState({ claimStatus: claim.claimStatus || "Submitted", receivedAmount: claim.receivedAmount || claim.eligibleClaim || 0, claimReference: claim.claimReference || "", submittedDate: claim.submittedDate || "", approvedDate: claim.approvedDate || "" });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
-    await post("/claims/settle", { leadId: claim.leadId, componentKey: claim.componentKey, claimStatus: form.claimStatus, receivedAmount: +form.receivedAmount, claimReference: form.claimReference });
+    await post("/claims/settle", { leadId: claim.leadId, componentKey: claim.componentKey, claimStatus: form.claimStatus, receivedAmount: +form.receivedAmount, claimReference: form.claimReference, submittedDate: form.submittedDate, approvedDate: form.approvedDate });
     toast.success("Claim updated");
     onDone();
   };
@@ -103,6 +106,8 @@ function SettleModal({ claim, onClose, onDone }) {
         <div className="grid grid-cols-2 gap-3">
           <Field label="Claim Status"><Select data-testid="claim-status" value={form.claimStatus} onChange={set("claimStatus")}>{["Pending","Submitted","Approved","Received","Rejected"].map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Received Amount"><Input type="number" value={form.receivedAmount} onChange={set("receivedAmount")} /></Field>
+          <Field label="Submitted Date"><Input data-testid="claim-submitted-date" type="date" value={form.submittedDate} onChange={set("submittedDate")} /></Field>
+          <Field label="Approved Date"><Input data-testid="claim-approved-date" type="date" value={form.approvedDate} onChange={set("approvedDate")} /></Field>
           <div className="col-span-2"><Field label="Claim Reference / UTR"><Input value={form.claimReference} onChange={set("claimReference")} /></Field></div>
         </div>
         <div className="flex justify-end gap-2 mt-5">

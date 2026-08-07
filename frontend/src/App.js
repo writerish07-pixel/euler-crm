@@ -26,6 +26,7 @@ import OwnerCommercialReport from "./pages/OwnerCommercialReport";
 import OemClaimDashboard from "./pages/OemClaimDashboard";
 import ClaimExceptions from "./pages/ClaimExceptions";
 import ERPProductionAudit from "./pages/ERPProductionAudit";
+import AuditLog from "./pages/AuditLog";
 
 function Protected({ children, ownerOnly }) {
   const { user } = useAuth();
@@ -61,6 +62,7 @@ function AppRoutes() {
       <Route path="/oem-claim-dashboard" element={P(<OemClaimDashboard />, true)} />
       <Route path="/claim-exceptions" element={P(<ClaimExceptions />, true)} />
       <Route path="/erp-audit" element={P(<ERPProductionAudit />, true)} />
+      <Route path="/audit-log" element={P(<AuditLog />, true)} />
       <Route path="/price-master" element={P(<PriceMaster />)} />
       <Route path="/settings" element={P(<Settings />)} />
       <Route path="*" element={<Navigate to="/" replace />} />

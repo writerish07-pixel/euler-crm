@@ -11,18 +11,33 @@ export default function EarningsReport() {
   if (!d) return <div className="text-ink-faint text-sm">Loading report…</div>;
 
   const chart = [...d.byMonth].reverse().map((m) => ({
-    month: m.key, Margin: m.margin, Scheme: m.scheme, Insurance: m.insurance, Other: m.other,
+    month: m.key, Margin: m.margin, Scheme: m.scheme, Insurance: m.insurance, Other: m.other, Extra: m.extra || 0,
   }));
 
   return (
     <div>
-      <PageHeader title="Dealer Earnings Report" subtitle="Owner · monthly margin, scheme retained & insurance income" />
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <PageHeader title="Dealer Earnings Report" subtitle="Owner · monthly margin, scheme retained, insurance & extra income" />
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         <StatCard label="Total Earnings" value={compactInr(d.totals.total)} icon={Coins} tone="text-amber-600" />
         <StatCard label="Dealer Margin" value={compactInr(d.totals.margin)} icon={TrendingUp} tone="text-cobalt" />
         <StatCard label="Scheme Retained" value={compactInr(d.totals.scheme)} icon={Layers} tone="text-emerald-600" />
         <StatCard label="Insurance Income" value={compactInr(d.totals.insurance)} icon={ShieldCheck} tone="text-violet-600" />
+        <StatCard label="Extra Income" value={compactInr(d.totals.extra || 0)} icon={Coins} tone="text-teal-600" />
       </div>
+
+      {d.components?.length > 0 && (
+        <Card className="p-4 mb-6" data-testid="earnings-components">
+          <h3 className="font-heading font-bold text-ink text-sm mb-3">Income Components (all deals)</h3>
+          <div className="flex flex-wrap gap-x-8 gap-y-2">
+            {d.components.map((cmp) => (
+              <div key={cmp.label} className="text-sm">
+                <span className="text-ink-soft">{cmp.label}: </span>
+                <span className="font-mono font-semibold text-ink">{inr(cmp.amount)}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <Card className="p-5 mb-6">
         <h3 className="font-heading font-bold text-ink mb-4">Monthly Earnings Breakdown</h3>
@@ -36,6 +51,7 @@ export default function EarningsReport() {
               <Bar dataKey="Margin" stackId="a" fill="#1D4ED8" />
               <Bar dataKey="Scheme" stackId="a" fill="#059669" />
               <Bar dataKey="Insurance" stackId="a" fill="#7C3AED" />
+              <Bar dataKey="Extra" stackId="a" fill="#0D9488" />
               <Bar dataKey="Other" stackId="a" fill="#A1A1AA" radius={[6, 6, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -50,6 +66,7 @@ export default function EarningsReport() {
           { key: "margin", label: "Margin", align: "right", mono: true, render: (r) => inr(r.margin) },
           { key: "scheme", label: "Scheme Retained", align: "right", mono: true, render: (r) => inr(r.scheme) },
           { key: "insurance", label: "Insurance", align: "right", mono: true, render: (r) => inr(r.insurance) },
+          { key: "extra", label: "Extra", align: "right", mono: true, render: (r) => inr(r.extra || 0) },
           { key: "other", label: "Other", align: "right", mono: true, render: (r) => inr(r.other) },
           { key: "total", label: "Total", align: "right", mono: true, render: (r) => <span className="font-bold text-amber-600">{inr(r.total)}</span> },
         ]}
