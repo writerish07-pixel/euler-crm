@@ -28,6 +28,9 @@ SYNC_MAP = {
                                          "expectedPayout", "receivedPayout", "payoutOutstanding", "status"]),
 }
 
+MASTERS_TAB = "Masters"
+MASTERS_HEADER = ["Category", "Value", "Status"]
+
 _service = None
 _status = {"enabled": False, "reason": "not configured", "email": None}
 _health = {"lastWriteOk": None, "lastWriteAt": None, "lastError": None, "writes": 0, "failures": 0}
@@ -158,6 +161,41 @@ def _backfill_sync(datasets):
             _append_many(tab, rows)
         result[entity] = {"appended": len(rows), "skipped": skipped}
     return result
+
+
+def _sync_masters_sync(rows):
+    """Full mirror (not append) — Masters is a small, user-editable list where
+    deletes must actually disappear from the sheet, unlike the append-only
+    transactional tabs. Clears the tab and rewrites header + all rows."""
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    _service.spreadsheets().values().clear(
+        spreadsheetId=sheet_id, range=f"'{MASTERS_TAB}'!A1:Z10000", body={},
+    ).execute()
+    values = [MASTERS_HEADER] + [[r.get("category", ""), r.get("value", ""), r.get("status", "Active")] for r in rows]
+    _service.spreadsheets().values().update(
+        spreadsheetId=sheet_id, range=f"'{MASTERS_TAB}'!A1",
+        valueInputOption="USER_ENTERED", body={"values": values},
+    ).execute()
+
+
+async def sync_masters(rows):
+    """Mirror the full current masters_list to the sheet. No-op if sync disabled
+    or the Masters tab doesn't exist yet (create it once manually, like other tabs)."""
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return False
+    try:
+        await asyncio.to_thread(_sync_masters_sync, rows)
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
+        return True
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return False
 
 
 async def backfill(datasets):

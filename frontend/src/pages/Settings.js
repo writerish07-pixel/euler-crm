@@ -1,9 +1,17 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, Button, Field, Input, Select, Badge, Table } from "../components/ui";
+
+const MASTER_LIST_CATEGORIES = [
+  ["executives", "Executives"],
+  ["financers", "Financers"],
+  ["leadSources", "Lead Sources"],
+  ["priorities", "Priorities"],
+  ["activityTypes", "Activity Types"],
+];
 
 export default function Settings() {
   const { isOwner } = useAuth();
@@ -89,6 +97,8 @@ export default function Settings() {
         </div>
       </Card>
 
+      {isOwner && <MastersListCard gsEnabled={gs?.enabled} />}
+
       {isOwner && (
         <Card className="p-5">
           <h3 className="font-heading font-bold text-ink mb-3">User Accounts <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
@@ -112,5 +122,67 @@ export default function Settings() {
         </Card>
       )}
     </div>
+  );
+}
+
+function MastersListCard({ gsEnabled }) {
+  const [rows, setRows] = useState([]);
+  const [newValue, setNewValue] = useState(() => Object.fromEntries(MASTER_LIST_CATEGORIES.map(([k]) => [k, ""])));
+  const load = useCallback(() => get("/masters-list").then(setRows).catch(() => {}), []);
+  useEffect(() => { load(); }, [load]);
+
+  const byCategory = (cat) => rows.filter((r) => r.category === cat);
+
+  const addValue = async (cat) => {
+    const value = (newValue[cat] || "").trim();
+    if (!value) return;
+    try {
+      await post("/masters-list", { category: cat, value });
+      setNewValue((f) => ({ ...f, [cat]: "" }));
+      toast.success(`Added to ${cat}`);
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Failed to add");
+    }
+  };
+  const removeValue = async (id) => {
+    try { await del(`/masters-list/${id}`); toast.success("Removed"); load(); }
+    catch (e) { toast.error(e.response?.data?.detail || "Failed to remove"); }
+  };
+
+  return (
+    <Card className="p-5 mb-6">
+      <div className="flex items-center gap-2 mb-1">
+        <ListPlus size={16} className="text-cobalt" />
+        <h3 className="font-heading font-bold text-ink">Master Lists <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
+      </div>
+      <p className="text-xs text-ink-soft mb-4">
+        Executives, Financers, Lead Sources, Priorities & Activity Types shown across the app's dropdowns.
+        {gsEnabled ? " Changes sync to the \"Masters\" tab in your Google Sheet." : " Google Sheet sync is not connected — changes stay in the app only."}
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        {MASTER_LIST_CATEGORIES.map(([cat, label]) => (
+          <div key={cat}>
+            <div className="text-xs font-semibold text-ink-soft mb-2">{label}</div>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {byCategory(cat).map((r) => (
+                <span key={r.id} data-testid={`master-value-${cat}-${r.value}`}
+                  className="inline-flex items-center gap-1.5 text-xs bg-slate-50 ring-1 ring-slate-200 rounded-full px-2.5 py-1">
+                  {r.value}
+                  <button onClick={() => removeValue(r.id)} className="text-red-400 hover:text-red-600"><Trash2 size={12} /></button>
+                </span>
+              ))}
+              {!byCategory(cat).length && <span className="text-xs text-ink-faint">None yet</span>}
+            </div>
+            <div className="flex gap-2">
+              <Input data-testid={`master-add-${cat}`} placeholder={`Add ${label.toLowerCase()}…`}
+                value={newValue[cat]} onChange={(e) => setNewValue((f) => ({ ...f, [cat]: e.target.value }))}
+                onKeyDown={(e) => e.key === "Enter" && addValue(cat)} className="!py-1.5 text-sm" />
+              <Button variant="secondary" className="!py-1.5 !px-2.5" onClick={() => addValue(cat)}><Plus size={14} /></Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
