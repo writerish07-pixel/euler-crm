@@ -325,10 +325,16 @@ function normalizeSchemeComponentKey_(key, label) {
     dsa: 'dsaDiscount',
     dsabonus: 'dsaDiscount',
     rtoinsurancebenefit: 'rtoInsuranceBenefit',
-    freertofreeinsurance: 'rtoInsuranceBenefit'
+    freertofreeinsurance: 'rtoInsuranceBenefit',
+    // Aug'26 circular splits the old combined "Free RTO + Free Insurance" into
+    // two separate entitlement components with their own ₹ amounts.
+    rtobenefit: 'rtoBenefit',
+    rtobenefitsupto: 'rtoBenefit',
+    insurancebenefit: 'insuranceBenefit',
+    insurancebenefitsupto: 'insuranceBenefit'
   };
   if (known[low]) return known[low];
-  if (/^(consumerDiscount|exchangeBonus|loyaltyBonus|referralBonus|dsaDiscount|rtoInsuranceBenefit|additionalDiscount)$/.test(k)) {
+  if (/^(consumerDiscount|exchangeBonus|loyaltyBonus|referralBonus|dsaDiscount|rtoInsuranceBenefit|rtoBenefit|insuranceBenefit|additionalDiscount)$/.test(k)) {
     return k;
   }
   var fromLabel = String(label || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -638,6 +644,13 @@ function schemeShareSplitFor_(model, variant, bookingDate, offers) {
   var snap = offers || {};
   var master = getSchemeSharesForLead_(model, variant, bookingDate);
 
+  // Entitlement-based components: auto-claimed from the Scheme Master's own
+  // share whenever a row exists for the model/variant/month, regardless of
+  // what staff typed as an offer amount. 'rtoInsuranceBenefit' is the
+  // pre-Aug'26 combined component; the Aug'26 circular splits it into
+  // 'rtoBenefit' + 'insuranceBenefit', each with its own ₹ amount.
+  var AUTO_ENTITLEMENT_KEYS_ = ['rtoInsuranceBenefit', 'rtoBenefit', 'insuranceBenefit'];
+
   var byComponent = {};
   var dealerTotal = 0;
   var companyTotal = 0;
@@ -646,12 +659,13 @@ function schemeShareSplitFor_(model, variant, bookingDate, offers) {
     var m = master[key];
     if (!m) return;
     var actual = num_(actualAmt);
-    if (!forceInclude && actual <= 0 && key !== 'rtoInsuranceBenefit') return;
+    var isAuto = AUTO_ENTITLEMENT_KEYS_.indexOf(key) >= 0;
+    if (!forceInclude && actual <= 0 && !isAuto) return;
 
     var company = Number(m.companyShare) || 0;
     var dealer = Number(m.dealerShare) || 0;
 
-    if (key === 'rtoInsuranceBenefit') {
+    if (isAuto) {
       // Entitlement-based: company share from circular when product qualifies
       company = Number(m.companyShare) || 0;
       dealer = Number(m.dealerShare) || 0;
@@ -692,10 +706,13 @@ function schemeShareSplitFor_(model, variant, bookingDate, offers) {
     }
   }
 
-  // Free RTO + Insurance entitlement from master (even if not typed as an offer line)
-  if (master.rtoInsuranceBenefit && Number(master.rtoInsuranceBenefit.companyShare) > 0) {
-    addPart('rtoInsuranceBenefit', master.rtoInsuranceBenefit.totalBenefit, true);
-  }
+  // Entitlement components from master (even if not typed as an offer line)
+  AUTO_ENTITLEMENT_KEYS_.forEach(function (key) {
+    var m = master[key];
+    if (m && Number(m.companyShare) > 0) {
+      addPart(key, m.totalBenefit, true);
+    }
+  });
 
   return {
     dealerTotal: dealerTotal,
@@ -736,7 +753,14 @@ function mapLeadToIncentiveCategory_(model, variant) {
   var m = normalizeSchemeModelKey_(model, variant);
   if (m === 'storm') return 'Storm';
   if (m === 'turbo') return 'Turbo';
-  if (m === 'hiload' || m === 'hicity' || m === 'hirange') return '3WC';
+  // Aug'26 Manpower Incentive Power Drive circular (EM/08-2026/001) splits
+  // HiCity and Hirange into their own categories — previously both were
+  // folded into '3WC' along with HiLoad. Incentive Master rows are looked
+  // up by category + Scheme Month, so July rows (still filed under '3WC')
+  // are unaffected.
+  if (m === 'hicity') return 'Hi-City (SR & TR)';
+  if (m === 'hirange') return 'HiRange';
+  if (m === 'hiload') return '3WC';
   // default passenger-ish
   return 'Pax';
 }
@@ -1083,4 +1107,146 @@ function menuReseedJuly2026Schemes() {
   var irows = readIncentiveMasterRows_().filter(function (r) { return r.schemeMonth === '2026-07'; });
   if (!irows.length) seedJuly2026IncentiveMaster_(inc, CRM.INCENTIVE_MASTER.COLS);
   ui.alert('July 2026 Scheme Master + Incentive Master seeded.');
+}
+
+/**
+ * Aug'26 "Freedom From Fuel" circular (EM/08-2026/001, 8 Aug – 31 Aug 2026).
+ * Appends rows to Scheme Master WITHOUT touching July's rows — July bookings
+ * keep resolving against July's rates, August bookings resolve against these.
+ *
+ * Splits the old combined "Free RTO + Free Insurance" (rtoInsuranceBenefit)
+ * into two separate entitlement components with their own ₹ amounts:
+ * 'rtoBenefit' and 'insuranceBenefit' (both auto-claimed, see
+ * schemeShareSplitFor_ AUTO_ENTITLEMENT_KEYS_ — not typed as an offer).
+ *
+ * Exchange Benefit / DSA / Referral are explicitly zeroed for August (the
+ * circular is silent on them) rather than omitted, so Scheme Update still
+ * shows a clear "not in Scheme Master" error if someone tries to enter one,
+ * instead of silently falling back to July's rate.
+ */
+function seedAug2026SchemeMaster_(sheet, cols, startRow) {
+  cols = cols || CRM.SCHEME_MASTER.COLS;
+  var month = '2026-08';
+  var from = '2026-08-08';
+  var to = '2026-08-31';
+  var ref = 'EM/08-2026/001';
+  var note = 'Freedom From Fuel — August 2026';
+  var zeroNote = "Not part of Aug'26 circular — zeroed per confirmation";
+  // [model, variant, componentKey, componentLabel, dealer, company, notes]
+  var rowsSpec = [
+    // HiLoad (Non-GBT)
+    ['HiLoad', 'Non-GBT', 'consumerDiscount', 'Consumer Scheme', 5000, 0, note],
+    ['HiLoad', 'Non-GBT', 'loyaltyBonus', 'Loyalty', 0, 10000, note],
+    ['HiLoad', 'Non-GBT', 'insuranceBenefit', 'Insurance Benefits Up to', 0, 10000, note],
+    ['HiLoad', 'Non-GBT', 'exchangeBonus', 'Exchange Benefit', 0, 0, zeroNote],
+    ['HiLoad', 'Non-GBT', 'dsaDiscount', 'DSA', 0, 0, zeroNote],
+    ['HiLoad', 'Non-GBT', 'referralBonus', 'Referral', 0, 0, zeroNote],
+    // HiCity (XR)
+    ['HiCity', 'XR', 'consumerDiscount', 'Consumer Scheme', 0, 25000, note],
+    ['HiCity', 'XR', 'loyaltyBonus', 'Loyalty', 0, 10000, note],
+    ['HiCity', 'XR', 'rtoBenefit', 'RTO Benefits Up to', 0, 10000, note],
+    ['HiCity', 'XR', 'insuranceBenefit', 'Insurance Benefits Up to', 0, 10000, note],
+    ['HiCity', 'XR', 'exchangeBonus', 'Exchange Benefit', 0, 0, zeroNote],
+    ['HiCity', 'XR', 'dsaDiscount', 'DSA', 0, 0, zeroNote],
+    ['HiCity', 'XR', 'referralBonus', 'Referral', 0, 0, zeroNote],
+    // Hirange (XR)
+    ['Hirange', 'XR', 'consumerDiscount', 'Consumer Scheme', 0, 25000, note],
+    ['Hirange', 'XR', 'loyaltyBonus', 'Loyalty', 0, 10000, note],
+    ['Hirange', 'XR', 'rtoBenefit', 'RTO Benefits Up to', 0, 10000, note],
+    ['Hirange', 'XR', 'insuranceBenefit', 'Insurance Benefits Up to', 0, 10000, note],
+    ['Hirange', 'XR', 'exchangeBonus', 'Exchange Benefit', 0, 0, zeroNote],
+    ['Hirange', 'XR', 'dsaDiscount', 'DSA', 0, 0, zeroNote],
+    ['Hirange', 'XR', 'referralBonus', 'Referral', 0, 0, zeroNote],
+    // Hirange (TR)
+    ['Hirange', 'TR', 'consumerDiscount', 'Consumer Scheme', 0, 25000, note],
+    ['Hirange', 'TR', 'loyaltyBonus', 'Loyalty', 0, 10000, note],
+    ['Hirange', 'TR', 'rtoBenefit', 'RTO Benefits Up to', 0, 10000, note],
+    ['Hirange', 'TR', 'insuranceBenefit', 'Insurance Benefits Up to', 0, 10000, note],
+    ['Hirange', 'TR', 'exchangeBonus', 'Exchange Benefit', 0, 0, zeroNote],
+    ['Hirange', 'TR', 'dsaDiscount', 'DSA', 0, 0, zeroNote],
+    ['Hirange', 'TR', 'referralBonus', 'Referral', 0, 0, zeroNote],
+    // Storm
+    ['Storm', '', 'loyaltyBonus', 'Loyalty', 0, 10000, note],
+    ['Storm', '', 'insuranceBenefit', 'Insurance Benefits Up to', 0, 30000, note],
+    ['Storm', '', 'consumerDiscount', 'Consumer Scheme', 0, 0, zeroNote],
+    ['Storm', '', 'exchangeBonus', 'Exchange Benefit', 0, 0, zeroNote],
+    ['Storm', '', 'dsaDiscount', 'DSA', 0, 0, zeroNote],
+    ['Storm', '', 'referralBonus', 'Referral', 0, 0, zeroNote],
+    // Turbo
+    ['Turbo', '', 'loyaltyBonus', 'Loyalty', 0, 10000, note],
+    ['Turbo', '', 'insuranceBenefit', 'Insurance Benefits Up to', 10000, 10000, note],
+    ['Turbo', '', 'consumerDiscount', 'Consumer Scheme', 0, 0, zeroNote],
+    ['Turbo', '', 'exchangeBonus', 'Exchange Benefit', 0, 0, zeroNote],
+    ['Turbo', '', 'dsaDiscount', 'DSA', 0, 0, zeroNote],
+    ['Turbo', '', 'referralBonus', 'Referral', 0, 0, zeroNote]
+  ];
+
+  var out = rowsSpec.map(function (r) {
+    var dealer = Number(r[4]) || 0;
+    var company = Number(r[5]) || 0;
+    return [month, from, to, ref, r[0], r[1], r[3], r[2], dealer, company, dealer + company, 'Active', r[6]];
+  });
+  var row = startRow || (sheet.getLastRow() + 1);
+  sheet.getRange(row, 1, out.length, cols.length).setValues(out);
+  sheet.getRange(row, 9, out.length, 3).setNumberFormat('#,##0');
+  return out.length;
+}
+
+/** Manpower Incentive Power Drive (EM/08-2026/001). HiCity/Hirange now their
+ * own categories — see mapLeadToIncentiveCategory_. */
+function seedAug2026IncentiveMaster_(sheet, cols, startRow) {
+  cols = cols || CRM.INCENTIVE_MASTER.COLS;
+  var month = '2026-08';
+  var from = '2026-08-08';
+  var to = '2026-08-31';
+  var ref = 'EM/08-2026/001';
+  var notes = 'Manpower Incentive Power Drive — Aug\'26. Min 2 retails/TSM to qualify; ' +
+    'max ₹25,000/TSM/month; verified by ASM/RM.';
+  var rows = [
+    [month, from, to, ref, '3WC', 2000, 2, 25000, 'Active', notes],
+    [month, from, to, ref, 'Hi-City (SR & TR)', 2000, 2, 25000, 'Active', notes],
+    [month, from, to, ref, 'HiRange', 2000, 2, 25000, 'Active', notes],
+    [month, from, to, ref, 'Storm', 5000, 2, 25000, 'Active', notes],
+    [month, from, to, ref, 'Turbo', 3500, 2, 25000, 'Active', notes]
+  ];
+  var row = startRow || (sheet.getLastRow() + 1);
+  sheet.getRange(row, 1, rows.length, cols.length).setValues(rows);
+  sheet.getRange(row, 6, rows.length, 3).setNumberFormat('#,##0');
+  return rows.length;
+}
+
+/** Menu: append Aug'26 Scheme Master + Incentive Master rows (idempotent — run once). */
+function menuSeedAugust2026Schemes() {
+  if (typeof isSpreadsheetOwner_ === 'function' && !isSpreadsheetOwner_()) {
+    SpreadsheetApp.getUi().alert('Only spreadsheet owner can seed scheme masters.');
+    return;
+  }
+  var ui = SpreadsheetApp.getUi();
+  var res = ui.alert(
+    "Seed Aug'26 Freedom From Fuel scheme?",
+    "Appends August 2026 Scheme Master + Incentive Master rows (EM/08-2026/001) without " +
+    "touching July's rows. Exchange/DSA/Referral are zeroed for August. Safe to run once.\nContinue?",
+    ui.ButtonSet.YES_NO
+  );
+  if (res !== ui.Button.YES) return;
+
+  var sheet = ensureSchemeMasterSheet_();
+  var existing = readSchemeMasterRows_().filter(function (r) { return r.circularRef === 'EM/08-2026/001'; });
+  var smAdded = 0;
+  if (existing.length) {
+    ui.alert("Aug 2026 Scheme Master rows already exist (" + existing.length + "). Skipping — " +
+      "clear rows with Circular Ref EM/08-2026/001 manually first if you want to reseed.");
+  } else {
+    smAdded = seedAug2026SchemeMaster_(sheet, CRM.SCHEME_MASTER.COLS);
+  }
+
+  var inc = ensureIncentiveMasterSheet_();
+  // readIncentiveMasterRows_ doesn't expose Circular Ref — match on Scheme Month instead.
+  var incExisting = readIncentiveMasterRows_().filter(function (r) { return r.schemeMonth === '2026-08'; });
+  var imAdded = 0;
+  if (!incExisting.length) {
+    imAdded = seedAug2026IncentiveMaster_(inc, CRM.INCENTIVE_MASTER.COLS);
+  }
+
+  ui.alert("Aug'26 scheme seed done: " + smAdded + " Scheme Master rows, " + imAdded + " Incentive Master rows added.");
 }
