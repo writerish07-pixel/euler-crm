@@ -11,7 +11,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import commercial as ce
 import seed as seeder
@@ -270,6 +270,33 @@ class LeadIn(BaseModel):
     remarks: str = ""
     financeRequired: str = "No"
     exchangeRequired: str = "No"
+    nextFollowupDate: Optional[str] = None
+
+
+class LeadUpdateIn(BaseModel):
+    """PATCH-style partial update for PUT /leads/{lead_id}. Every field is Optional
+    with no non-null default, so (a) exclude_unset=True only ever picks up keys the
+    client actually sent, and (b) Swagger's auto-generated example body is all-null
+    instead of LeadIn's fake 'string'/0/'New' placeholders. extra='forbid' rejects
+    any field not in this explicit allowlist — leadId, createdDate, accountStatus,
+    and every system-calculated financial field are structurally absent here, so
+    they can never be set through this endpoint, not just filtered out."""
+    model_config = ConfigDict(extra="forbid")
+    customerName: Optional[str] = None
+    mobile: Optional[str] = None
+    altMobile: Optional[str] = None
+    village: Optional[str] = None
+    city: Optional[str] = None
+    leadSource: Optional[str] = None
+    interestedModel: Optional[str] = None
+    variant: Optional[str] = None
+    executive: Optional[str] = None
+    currentStatus: Optional[str] = None
+    priority: Optional[str] = None
+    budget: Optional[float] = None
+    remarks: Optional[str] = None
+    financeRequired: Optional[str] = None
+    exchangeRequired: Optional[str] = None
     nextFollowupDate: Optional[str] = None
 
 
@@ -627,11 +654,79 @@ async def customer_360(lead_id: str):
     }
 
 
+# System/calculated fields a lead document carries that must never be settable
+# through PUT /leads/{lead_id} — set at creation (create_lead) and/or maintained
+# by recompute_lead() and the booking/delivery/close/payment/scheme endpoints.
+# LeadUpdateIn already doesn't declare any of these (extra="forbid" rejects them
+# outright); this set is a second, independent line of defense in the handler
+# itself so the guarantee doesn't rely solely on the Pydantic model staying in sync.
+LEAD_SYSTEM_FIELDS = {
+    "leadId", "createdDate", "accountStatus", "deliveryStatus", "lastUpdated",
+    "outstandingAmount", "customerOutstanding", "companyOutstanding", "totalReceived",
+    "customerPayable", "grossVehicleCost", "totalDiscount", "consumerDiscount", "exchangeBonus",
+    "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount", "exShowroom", "rto",
+    "insuranceAmount", "accessoriesAmount", "handlingCharges", "trc", "fastag", "extendedWarranty",
+    "otherCharges", "bookingAmount", "oemSchemeAmount", "dealerSchemeAmount", "oemClaimCompanyShare",
+    "schemeCompanyTotal", "dealerSchemeRetained", "oemExtraSupportRetained", "dealerMarginNetExGst",
+    "extraDealerIncomeTotal", "dealerTotalEarnings",
+}
+
+# The literal placeholder Swagger/OpenAPI "Try it out" fills into required-string
+# fields when the user hasn't typed a real value. Never a plausible real value for
+# any lead field, so it's rejected outright rather than persisted as data.
+_SWAGGER_STRING_PLACEHOLDER = "string"
+
+
+async def _validate_lead_update_choices(payload):
+    """Best-effort validation against master data (requirement: enum/master-list
+    fields validated where appropriate). Skips validation for a category if its
+    master list is empty, rather than blocking on a misconfigured/empty list."""
+    errors = []
+    checks = [("leadSource", "leadSources", "Lead Sources"), ("executive", "executives", "Executives"),
+              ("priority", "priorities", "Priorities")]
+    for field, category, label in checks:
+        val = payload.get(field)
+        if not val:
+            continue
+        allowed = await _masters_list_values(category)
+        if allowed and val not in allowed:
+            errors.append(f"{field} '{val}' is not in the {label} master list")
+    if payload.get("currentStatus") and payload["currentStatus"] not in seeder.MASTERS["statuses"]:
+        errors.append(f"currentStatus '{payload['currentStatus']}' is not a recognized status")
+    for field in ("financeRequired", "exchangeRequired"):
+        val = payload.get(field)
+        if val is not None and val not in ("Yes", "No"):
+            errors.append(f"{field} must be 'Yes' or 'No', got '{val}'")
+    return errors
+
+
 @api.put("/leads/{lead_id}")
-async def update_lead(lead_id: str, body: LeadIn):
-    await get_lead_or_404(lead_id)
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {**body.model_dump(exclude_unset=True), "lastUpdated": now_iso()}})
+async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
+    """Partial update: only fields present in the request body are touched — every
+    other field on the lead (including system/financial fields, which aren't even
+    part of this model) is left exactly as it was. See LEAD_SYSTEM_FIELDS."""
+    lead = await get_lead_or_404(lead_id)
+    payload = body.model_dump(exclude_unset=True)
+    payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
+
+    placeholder_fields = [k for k, v in payload.items()
+                          if isinstance(v, str) and v.strip().lower() == _SWAGGER_STRING_PLACEHOLDER]
+    if placeholder_fields:
+        raise HTTPException(422, f"Refusing to save placeholder value \"string\" for: {', '.join(placeholder_fields)}. "
+                                  f"Remove the field from the request instead of leaving Swagger's example value.")
+
+    errors = await _validate_lead_update_choices(payload)
+    if errors:
+        raise HTTPException(422, "; ".join(errors))
+
+    if not payload:
+        return clean(lead)
+
+    old = {k: lead.get(k) for k in payload.keys()}
+    payload["lastUpdated"] = now_iso()
+    await db.leads.update_one({"leadId": lead_id}, {"$set": payload})
     await recompute_lead(lead_id)
+    await write_audit(act, "update", "lead", leadId=lead_id, old=old, new={k: v for k, v in payload.items() if k != "lastUpdated"})
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
