@@ -1,4 +1,6 @@
 node_modules/
+__pycache__/
+*.pyc
 .DS_Store
 Thumbs.db
 *.log
@@ -8,6 +10,8 @@ Thumbs.db
 .idea/
 *.env
 credentials.json
+*credentials*.json
 *.pem
 *.key
 .credentials
+backend/gsheets_credentials.json

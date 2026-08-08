@@ -337,6 +337,9 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
 const EXTRA_INCOME_FIELDS = [
   ["documentationIncome", "Documentation"], ["warrantyIncome", "Warranty"],
   ["rsaIncome", "RSA"], ["referralIncome", "Referral"],
+  ["otherIncome", "Other Income"], ["customerInsuranceBenefitPassed", "Cust. Insurance Benefit Passed"],
+  ["financeIncentive", "Finance Incentive"], ["accessoriesMargin", "Accessories Margin"],
+  ["exchangeMargin", "Exchange Margin"], ["campaignIncentive", "Campaign Incentive"],
 ];
 function ExtraIncomeCard({ lead, locked, onSaved }) {
   const [form, setForm] = useState(() => {
@@ -348,10 +351,9 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
   const total = EXTRA_INCOME_FIELDS.reduce((s, [k]) => s + (Number(form[k]) || 0), 0);
   const save = async () => {
     try {
-      await put(`/leads/${lead.leadId}/extra-income`, {
-        documentationIncome: +form.documentationIncome, warrantyIncome: +form.warrantyIncome,
-        rsaIncome: +form.rsaIncome, referralIncome: +form.referralIncome,
-      });
+      const payload = {};
+      EXTRA_INCOME_FIELDS.forEach(([k]) => (payload[k] = +form[k] || 0));
+      await put(`/leads/${lead.leadId}/extra-income`, payload);
       toast.success("Dealer extra income saved");
       onSaved();
     } catch (e) {

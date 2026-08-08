@@ -221,10 +221,13 @@ async def recompute_lead(lead_id):
     oem_extra_recv = max(0.0, ce.num(lead.get("oemExtraSupportReceived")))
     oem_extra_pass = max(0.0, min(ce.num(lead.get("oemExtraSupportPassed")), oem_extra_recv))
     oem_extra_retained = ce.round2(max(0.0, oem_extra_recv - oem_extra_pass))
-    # Extra dealer income lines (C1) — Documentation / Warranty / RSA / Referral (dealer-earned)
+    # Extra dealer income lines (C1) — full port of DEALER_EARNINGS_MANUAL_COLS_ (10 lines)
     extra_income = ce.round2(
         ce.num(lead.get("documentationIncome")) + ce.num(lead.get("warrantyIncome")) +
-        ce.num(lead.get("rsaIncome")) + ce.num(lead.get("referralIncome")))
+        ce.num(lead.get("rsaIncome")) + ce.num(lead.get("referralIncome")) +
+        ce.num(lead.get("otherIncome")) + ce.num(lead.get("customerInsuranceBenefitPassed")) +
+        ce.num(lead.get("financeIncentive")) + ce.num(lead.get("accessoriesMargin")) +
+        ce.num(lead.get("exchangeMargin")) + ce.num(lead.get("campaignIncentive")))
     updates = {
         "grossVehicleCost": totals["grossVehicleCost"],
         "customerPayable": customer_payable,
@@ -421,8 +424,16 @@ async def dashboard():
 
     # Finance total outstanding (H1) — sum of open finance file balances
     finance_os = 0.0
+    finance_pending_files = []
     for f in await db.finance.find().to_list(5000):
-        finance_os += ce.num(f.get("fileOutstanding"))
+        os_amt = ce.num(f.get("fileOutstanding"))
+        finance_os += os_amt
+        if os_amt > 0 and f.get("status") != "Received":
+            finance_pending_files.append(clean(f))
+    finance_overdue = await _enrich_finance_with_delivery(finance_pending_files)
+    finance_overdue = [f for f in finance_overdue if f.get("overdue")]
+    finance_overdue_count = len(finance_overdue)
+    finance_overdue_amount = ce.round2(sum(ce.num(f.get("fileOutstanding")) for f in finance_overdue))
 
     # Follow-up KPIs (H1) — active leads with a next-follow-up date
     def _followup_date(l):
@@ -470,6 +481,8 @@ async def dashboard():
             "conversion": round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0,
             "revenue": ce.round2(sum(ce.num(p.get("amount")) for p in month_payments)),
             "financeOutstanding": ce.round2(finance_os),
+            "financeOverdueCount": finance_overdue_count,
+            "financeOverdueAmount": finance_overdue_amount,
             "followupDue": followup_due,
             "followupOverdue": followup_overdue,
         },
@@ -670,11 +683,20 @@ class ExtraIncomeIn(BaseModel):
     warrantyIncome: float = 0
     rsaIncome: float = 0
     referralIncome: float = 0
+    otherIncome: float = 0
+    customerInsuranceBenefitPassed: float = 0
+    financeIncentive: float = 0
+    accessoriesMargin: float = 0
+    exchangeMargin: float = 0
+    campaignIncentive: float = 0
 
 
 @api.put("/leads/{lead_id}/extra-income")
 async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)):
-    """Dealer extra-income lines (C1): Documentation / Warranty / RSA / Referral."""
+    """Dealer extra-income lines (C1, full port of DEALER_EARNINGS_MANUAL_COLS_):
+    Documentation / Warranty / RSA / Referral / Other / Customer Insurance Benefit
+    Passed / Finance Incentive / Accessories Margin / Exchange Margin / Campaign
+    Incentive. Never affects Customer Payable / Outstanding."""
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "extra-income edits (only Active leads)")
     payload = body.model_dump()
@@ -933,13 +955,47 @@ async def _upsert_finance_file(lead_id, body: PaymentIn):
         })
 
 
+FINANCE_RECEIPT_SLA_DAYS = 2  # port of FinanceService.gs getFinanceReceiptSlaDays_ (CRM.FINANCE_REGISTER.RECEIPT_SLA_DAYS)
+
+
+async def _enrich_finance_with_delivery(files):
+    """Port of enrichFinanceFilesWithDelivery_: overdue = days since delivery > SLA
+    (files with no known delivery date are never overdue — SLA clock hasn't started)."""
+    sla = FINANCE_RECEIPT_SLA_DAYS
+    today_d = today()
+    out = []
+    for f in files:
+        lead_id = str(f.get("leadId") or "").strip()
+        delivery_date = ""
+        if lead_id:
+            d = await db.deliveries.find_one({"leadId": lead_id}) or {}
+            delivery_date = str(d.get("deliveryDate") or "")[:10]
+            if not delivery_date:
+                lead = await db.leads.find_one({"leadId": lead_id}) or {}
+                delivery_date = str(lead.get("deliveryDate") or "")[:10]
+        row = dict(f)
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", delivery_date):
+            days = _claim_ageing_days(delivery_date, "Pending")  # days since delivery, running
+            row["deliveryDate"] = delivery_date
+            row["daysSinceDelivery"] = days
+            row["overdue"] = days > sla
+        else:
+            row["deliveryDate"] = ""
+            row["daysSinceDelivery"] = ""
+            row["overdue"] = False
+        out.append(row)
+    return out
+
+
 @api.get("/finance")
 async def list_finance(view: str = "all"):
     files = [clean(f) for f in await db.finance.find().to_list(1000)]
+    pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
     if view == "pending":
-        files = [f for f in files if ce.num(f.get("fileOutstanding")) > 0]
-    elif view == "overdue":
-        files = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
+        return pending
+    if view == "overdue":
+        enriched = await _enrich_finance_with_delivery(pending)
+        return [f for f in enriched if f.get("overdue")]
     return files
 
 
@@ -1022,7 +1078,62 @@ async def mark_delivery(lead_id: str, body: DeliveryIn):
             "deliveryDate": body.deliveryDate or today(), "delivered": "Yes",
             "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
         })
+        await _upsert_incentive_register_on_delivery(lead_id, body.deliveryDate or today())
     return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
+async def _upsert_incentive_register_on_delivery(lead_id, delivery_date):
+    """Port of upsertIncentiveRegisterOnDelivery_: on Mark Delivered, create a
+    Pending Incentive Register row from the Incentive Master rate for the lead's
+    model/variant/delivery-month. Skips if a row already exists for this lead."""
+    if await db.incentive_register.find_one({"leadId": lead_id}):
+        return None
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead:
+        return None
+    model = lead.get("interestedModel") or ""
+    variant = lead.get("variant") or ""
+    incentive_rows = [clean(r) for r in await db.incentive_master.find().to_list(1000)]
+    rate = ce.get_incentive_rate_for_lead(model, variant, delivery_date, incentive_rows)
+    if not rate:
+        return None
+    cat = ce.map_lead_to_incentive_category(model, variant)
+    remarks = f"Rate from Incentive Master. Min retails: {rate.get('minRetails') or 0}"
+    if rate.get("maxSlab"):
+        remarks += f"; Max slab: {rate.get('maxSlab')}"
+    doc = {
+        "incentiveId": f"INC{uuid.uuid4().hex[:8]}",
+        "schemeMonth": rate.get("schemeMonth") or ce.scheme_month_from_date(delivery_date),
+        "executive": lead.get("executive") or "",
+        "leadId": lead_id, "bookingId": lead.get("bookingId") or "",
+        "model": model, "variant": variant, "productCategory": cat,
+        "deliveryDate": delivery_date, "incentiveAmount": ce.num(rate.get("incentivePerRetail")),
+        "status": "Pending", "paidDate": "", "remarks": remarks,
+        "lastUpdated": now_iso(),
+    }
+    await db.incentive_register.insert_one(doc)
+    return doc
+
+
+@api.get("/incentive-register")
+async def list_incentive_register():
+    return [clean(r) for r in await db.incentive_register.find().to_list(2000)]
+
+
+class IncentivePayIn(BaseModel):
+    paidDate: str = ""
+
+
+@api.put("/incentive-register/{incentive_id}/pay", dependencies=[Depends(owner_only)])
+async def mark_incentive_paid(incentive_id: str, body: IncentivePayIn, act=Depends(actor)):
+    existing = await db.incentive_register.find_one({"incentiveId": incentive_id})
+    if not existing:
+        raise HTTPException(404, "Incentive Register row not found")
+    updates = {"status": "Paid", "paidDate": body.paidDate or today(), "lastUpdated": now_iso()}
+    await db.incentive_register.update_one({"incentiveId": incentive_id}, {"$set": updates})
+    await write_audit(act, "update", "incentive_register", leadId=existing.get("leadId", ""),
+                      old={"status": existing.get("status")}, new=updates)
+    return clean(await db.incentive_register.find_one({"incentiveId": incentive_id}))
 
 
 # ---------------------------------------------------------------- price master
@@ -1264,6 +1375,12 @@ async def owner_commercial_report():
             pending_claims += 1
             pending_value = ce.round2(pending_value + r["companyClaim"])
     scheme_roi = ce.round2((oem_cost / total_disc) * 100) if total_disc > 0 else 0
+    ageing_sum, ageing_count = 0, 0
+    for c in await db.claims.find({"submittedDate": {"$exists": True, "$nin": ["", None]}}).to_list(5000):
+        d = _claim_ageing_days(c.get("submittedDate", ""), c.get("claimStatus", ""), c.get("approvedDate", ""))
+        ageing_sum += d
+        ageing_count += 1
+    avg_ageing = ce.round2(ageing_sum / ageing_count) if ageing_count else 0
     by_exec = {}
     for r in rows:
         e = by_exec.setdefault(r["executive"], {"executive": r["executive"], "bookings": 0,
@@ -1281,6 +1398,7 @@ async def owner_commercial_report():
         "claimPosition": {
             "pendingClaims": pending_claims, "pendingValue": pending_value,
             "receivedValue": received_value, "schemeRoiPct": scheme_roi,
+            "avgClaimAgeingDays": avg_ageing,
         },
         "averages": {
             "avgDiscountPerBooking": ce.round2(total_disc / n) if n else 0,
@@ -1376,8 +1494,8 @@ OWNER_ONLY_ENDPOINTS = [
     "/api/reports/claim-exceptions", "/api/reports/insurance-payout", "/api/reports/dealer-earnings",
     "/api/reports/production-audit", "/api/audit-log",
 ]
-EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "bookings",
-                        "payments", "deliveries", "finance", "insurance", "dealer_earnings",
+EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "incentive_register",
+                        "bookings", "payments", "deliveries", "finance", "insurance", "dealer_earnings",
                         "activities", "claims", "quotations", "counters", "audit_log"]
 FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "variant",
                       "currentStatus", "accountStatus"]
@@ -1470,9 +1588,19 @@ async def production_audit():
         chk(c, f"leads.{f}", "PASS" if present else "FAIL", "mapped" if present else "field missing",
             "" if present else "High", module="leads")
     chk(c, "Dealer-income lines (C1)", "PASS",
-        "Documentation / Warranty / RSA / Referral captured via /leads/{id}/extra-income + folded into Dealer Earnings", module="dealer_earnings")
-    chk(c, "Claim lifecycle dates (H3)", "PASS", "submitted/approved dates captured; ageing computed", module="claims")
+        "All 10 DEALER_EARNINGS_MANUAL_COLS_ lines (Documentation/Warranty/RSA/Referral/Other/"
+        "Customer Insurance Benefit Passed/Finance Incentive/Accessories Margin/Exchange Margin/"
+        "Campaign Incentive) captured via /leads/{id}/extra-income + folded into Dealer Earnings", module="dealer_earnings")
+    chk(c, "Claim lifecycle dates + ageing (H3)", "PASS",
+        "submitted/approved dates captured; per-claim ageing freezes at turnaround time on Received "
+        "(not reset to 0); Owner Commercial Report exposes aggregate Average Claim Ageing", module="claims")
     chk(c, "RSA/AMC charge input (H5)", "PASS", "rsaAmc captured in Price Structure → GVC/payable", module="price_master")
+    chk(c, "RTO/Insurance scheme entitlement (C-NEW-1)", "PASS",
+        "rtoInsuranceBenefit / rtoBenefit / insuranceBenefit auto-claimed from Scheme Master "
+        "(entitlement-based, not staff-typed) into OEM claim + dealer earnings", module="commercial")
+    chk(c, "Finance overdue SLA (H-NEW-3)", "PASS",
+        "days-since-delivery > 2-day SLA drives /finance?view=overdue and dashboard financeOverdueCount/Amount, "
+        "not just any pending balance", module="finance")
 
     # ---------------- 5. Apps Script Parity ----------------
     c = cat("appsscript", "Apps Script Parity",
@@ -1682,17 +1810,25 @@ async def claim_exceptions_report():
 
 
 # ---------------------------------------------------------------- claims
-def _claim_ageing_days(submitted_date, claim_status):
-    """Ageing (days) since claim submission until fully received. 0 if not submitted or already Received."""
+def _claim_ageing_days(submitted_date, claim_status, end_date=""):
+    """Days from claim submission to resolution (turnaround time), or to today while
+    still pending. Port of OemClaimService.gs computeClaimAgeing_: end = received ||
+    approved || now — once Received, ageing freezes at the actual turnaround time
+    instead of resetting to 0."""
     d = str(submitted_date or "")[:10]
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
-        return 0
-    if str(claim_status or "").lower() == "received":
         return 0
     try:
         from datetime import date as _date
         y, m, dd = map(int, d.split("-"))
-        return max(0, (datetime.now(timezone.utc).date() - _date(y, m, dd)).days)
+        start = _date(y, m, dd)
+        e = str(end_date or "")[:10]
+        if str(claim_status or "").lower() == "received" and re.match(r"^\d{4}-\d{2}-\d{2}$", e):
+            ey, em, ed = map(int, e.split("-"))
+            end = _date(ey, em, ed)
+        else:
+            end = datetime.now(timezone.utc).date()
+        return max(0, (end - start).days)
     except Exception:
         return 0
 
@@ -1716,7 +1852,7 @@ async def list_claims():
             submitted = (existing or {}).get("submittedDate", "")
             approved = (existing or {}).get("approvedDate", "")
             claim_status = (existing or {}).get("claimStatus", "Pending")
-            ageing = _claim_ageing_days(submitted, claim_status)
+            ageing = _claim_ageing_days(submitted, claim_status, approved)
             result.append({
                 "claimId": (existing or {}).get("claimId", f"CLM-{l['leadId']}-{key}"),
                 "leadId": l["leadId"], "customer": l.get("customerName"),
@@ -1745,7 +1881,7 @@ async def list_claims():
             "receivedAmount": ce.round2(ce.num(m.get("receivedAmount"))),
             "claimReference": m.get("claimReference", ""),
             "submittedDate": m.get("submittedDate", ""), "approvedDate": m.get("approvedDate", ""),
-            "ageingDays": _claim_ageing_days(m.get("submittedDate", ""), m.get("claimStatus", "")),
+            "ageingDays": _claim_ageing_days(m.get("submittedDate", ""), m.get("claimStatus", ""), m.get("approvedDate", "")),
             "manual": True, "oemCompany": m.get("oemCompany", ""), "note": m.get("note", ""),
         })
     return result
@@ -2052,7 +2188,9 @@ async def dealer_earnings_report():
     by_month = {}
     components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0,
                   "OEM Extra Support": 0.0, "Documentation": 0.0, "Warranty": 0.0,
-                  "RSA": 0.0, "Referral": 0.0}
+                  "RSA": 0.0, "Referral": 0.0, "Other Income": 0.0,
+                  "Customer Insurance Benefit Passed": 0.0, "Finance Incentive": 0.0,
+                  "Accessories Margin": 0.0, "Exchange Margin": 0.0, "Campaign Incentive": 0.0}
     totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "extra": 0.0, "total": 0.0, "count": 0}
     for l in leads:
         snap = lead_to_snapshot(l)
@@ -2063,12 +2201,19 @@ async def dealer_earnings_report():
         oem_recv = max(0.0, ce.num(l.get("oemExtraSupportReceived")))
         oem_pass = max(0.0, min(ce.num(l.get("oemExtraSupportPassed")), oem_recv))
         other = ce.round2(max(0.0, oem_recv - oem_pass))   # OEM Extra Support retained
-        # Extra dealer income lines (C1)
+        # Extra dealer income lines (C1) — full port of DEALER_EARNINGS_MANUAL_COLS_
         doc_inc = ce.num(l.get("documentationIncome"))
         war_inc = ce.num(l.get("warrantyIncome"))
         rsa_inc = ce.num(l.get("rsaIncome"))
         ref_inc = ce.num(l.get("referralIncome"))
-        extra = ce.round2(doc_inc + war_inc + rsa_inc + ref_inc)
+        other_inc = ce.num(l.get("otherIncome"))
+        cust_ins_inc = ce.num(l.get("customerInsuranceBenefitPassed"))
+        fin_inc = ce.num(l.get("financeIncentive"))
+        acc_margin = ce.num(l.get("accessoriesMargin"))
+        exch_margin = ce.num(l.get("exchangeMargin"))
+        camp_inc = ce.num(l.get("campaignIncentive"))
+        extra = ce.round2(doc_inc + war_inc + rsa_inc + ref_inc + other_inc +
+                          cust_ins_inc + fin_inc + acc_margin + exch_margin + camp_inc)
         total = ce.round2(margin + scheme + insurance + other + extra)
         month = str(l.get("deliveryDate") or l.get("bookingDate") or "")[:7] or "Unknown"
         m = by_month.setdefault(month, {"key": month, "margin": 0.0, "scheme": 0.0,
@@ -2086,6 +2231,12 @@ async def dealer_earnings_report():
         components["Warranty"] += war_inc
         components["RSA"] += rsa_inc
         components["Referral"] += ref_inc
+        components["Other Income"] += other_inc
+        components["Customer Insurance Benefit Passed"] += cust_ins_inc
+        components["Finance Incentive"] += fin_inc
+        components["Accessories Margin"] += acc_margin
+        components["Exchange Margin"] += exch_margin
+        components["Campaign Incentive"] += camp_inc
 
     months = sorted(by_month.values(), key=lambda x: x["key"], reverse=True)
     for m in months:
@@ -2288,6 +2439,7 @@ async def startup():
         await db.leads.create_index("bookingDate")
         await db.payments.create_index("leadId")
         await db.audit_log.create_index([("timestamp", -1)])
+        await db.incentive_register.create_index("leadId", unique=True)
     except Exception:
         pass
     # Insurance rate consistency migration (INS-1)

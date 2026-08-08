@@ -42,6 +42,7 @@ export default function OwnerCommercialReport() {
           <KVRow label="Pending Claim Value" value={inr(c.pendingValue)} tone="text-red-600" />
           <KVRow label="Received Claim Value" value={inr(c.receivedValue)} tone="text-emerald-600" />
           <KVRow label="Scheme ROI (OEM % of total discount)" value={`${c.schemeRoiPct}%`} />
+          <KVRow label="Average Claim Ageing (days)" value={c.avgClaimAgeingDays} />
           <KVRow label="Average Discount / Booking" value={inr(a.avgDiscountPerBooking)} />
           <KVRow label="Average Customer Payable" value={inr(a.avgCustomerPayable)} />
         </Card>
