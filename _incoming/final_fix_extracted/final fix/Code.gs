@@ -154,7 +154,8 @@ function buildMenu_() {
       .addItem('OEM Claim Dashboard',       'menuOemClaimDashboard')
       .addItem('Rebuild Claim Register',    'menuRebuildClaimRegister')
       .addItem('Scheme Master',             'menuOpenSchemeMaster')
-      .addItem('Incentive Master',          'menuOpenIncentiveMaster');
+      .addItem('Incentive Master',          'menuOpenIncentiveMaster')
+      .addItem('Seed Aug 2026 Schemes',     'menuSeedAugust2026Schemes');
     menu.addSubMenu(reports);
   }
 

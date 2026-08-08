@@ -65,6 +65,9 @@ export default function Dashboard() {
               <Row label="Customer Outstanding" value={d.outstanding.customer} tone="text-red-600" />
               <Row label="Company Outstanding (OEM)" value={d.outstanding.company} tone="text-amber-600" />
               <Row label="Finance Outstanding" value={k.financeOutstanding || 0} tone="text-violet-600" />
+              {k.financeOverdueCount > 0 && (
+                <Row label={`Finance Overdue (>2d, ${k.financeOverdueCount} files)`} value={k.financeOverdueAmount || 0} tone="text-red-600" />
+              )}
               <div className="border-t border-line pt-3">
                 <Row label="Total Outstanding" value={d.outstanding.total} tone="text-ink" bold />
               </div>

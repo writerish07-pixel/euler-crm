@@ -26,6 +26,13 @@ COMPONENT_POLICY = {
 OFFER_KEYS = ["consumerDiscount", "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount"]
 BENEFIT_MODES = ["Full Benefit", "Partial Benefit", "No Benefit"]
 
+# Entitlement-based scheme components: NOT typed as an offer amount by staff.
+# They are auto-claimed from the Scheme Master's own dealer/company share whenever
+# a row exists for the model/variant/month, regardless of what's on the lead
+# (port of the schemeShareSplitFor_ `forceInclude` branch for 'rtoInsuranceBenefit',
+# extended to the Aug'26 split RTO / Insurance benefit components).
+AUTO_SCHEME_COMPONENT_KEYS = ["rtoInsuranceBenefit", "rtoBenefit", "insuranceBenefit"]
+
 CHARGE_KEYS = ["exShowroom", "accessories", "insurance", "registrationRto", "fastag",
                "handlingCharges", "trc", "extendedWarranty", "rsaAmc", "otherCharges"]
 
@@ -215,6 +222,9 @@ SCHEME_COMPONENT_LABELS = {
     "referralBonus": "Referral",
     "dsaDiscount": "DSA",
     "additionalDiscount": "Additional Discount",
+    "rtoInsuranceBenefit": "Free RTO + Free Insurance",
+    "rtoBenefit": "RTO Benefit",
+    "insuranceBenefit": "Insurance Benefit",
 }
 
 
@@ -369,6 +379,21 @@ def scheme_share_split_for(model, variant, booking_date, offers, scheme_rows):
         by_component["additionalDiscount"] = {"actual": addl, "dealerShare": addl,
                                               "companyShare": 0.0, "label": "Additional Discount"}
         dealer_total = round2(dealer_total + addl)
+    # Entitlement-based components (Free RTO+Insurance / RTO Benefit / Insurance
+    # Benefit): auto-claimed at the Scheme Master's own share whenever a row
+    # exists, even though staff never typed an offer amount for them.
+    for auto_key in AUTO_SCHEME_COMPONENT_KEYS:
+        m = master.get(auto_key)
+        if not m or num(m.get("companyShare")) <= 0:
+            continue
+        company = round2(num(m.get("companyShare")))
+        dealer = round2(num(m.get("dealerShare")))
+        actual = round2(num(m.get("totalBenefit")) or (company + dealer))
+        by_component[auto_key] = {"actual": actual, "dealerShare": dealer,
+                                  "companyShare": company,
+                                  "label": m.get("label") or SCHEME_COMPONENT_LABELS.get(auto_key, auto_key)}
+        dealer_total = round2(dealer_total + dealer)
+        company_total = round2(company_total + company)
     return {"dealerTotal": dealer_total, "companyTotal": company_total,
             "byComponent": by_component, "schemeMonth": scheme_month_from_date(booking_date),
             "model": model, "variant": variant}
@@ -534,6 +559,41 @@ FAMILY_LABELS = {
 # Insurer payout rate of premium (InsuranceService.getSuggestedInsurancePayoutRate_)
 INSURANCE_RATE_STORM_TURBO = 0.49
 INSURANCE_RATE_OTHER = 0.365
+
+
+# ===========================================================================
+# INCENTIVE REGISTER — port of SchemeMasterService.gs mapLeadToIncentiveCategory_ /
+# getIncentiveRateForLead_ / upsertIncentiveRegisterOnDelivery_. Extended for the
+# Aug'26 Manpower Incentive Power Drive circular, which splits HiCity and HiRange
+# into their own categories (previously both folded into '3WC' with HiLoad).
+# ===========================================================================
+INCENTIVE_CATEGORY_LABELS = {
+    "hiload": "3WC",
+    "hicity": "Hi-City (SR & TR)",
+    "hirange": "HiRange",
+    "storm": "Storm",
+    "turbo": "Turbo",
+}
+
+
+def map_lead_to_incentive_category(model, variant=""):
+    fam = normalize_scheme_model_key(model, variant)
+    return INCENTIVE_CATEGORY_LABELS.get(fam, "Pax")
+
+
+def get_incentive_rate_for_lead(model, variant, delivery_date, incentive_rows):
+    """Active Incentive Master row for the lead's category + delivery month, or None."""
+    month = scheme_month_from_date(delivery_date)
+    cat = map_lead_to_incentive_category(model, variant)
+    for r in (incentive_rows or []):
+        if str(r.get("status") or "").lower() != "active":
+            continue
+        if _norm_month(r.get("schemeMonth")) != month:
+            continue
+        if str(r.get("productCategory") or "").strip().lower() != cat.lower():
+            continue
+        return r
+    return None
 
 
 def suggested_insurance_payout_rate(model, variant=""):

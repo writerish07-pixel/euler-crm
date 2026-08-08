@@ -193,6 +193,8 @@ var CRM = (function () {
     COMPONENTS: [
       { key: 'consumerDiscount', label: 'Consumer Scheme' },
       { key: 'rtoInsuranceBenefit', label: 'Free RTO + Free Insurance' },
+      { key: 'rtoBenefit', label: 'RTO Benefits Up to' },
+      { key: 'insuranceBenefit', label: 'Insurance Benefits Up to' },
       { key: 'exchangeBonus', label: 'Exchange Benefit' },
       { key: 'dsaDiscount', label: 'DSA' },
       { key: 'referralBonus', label: 'Referral' },

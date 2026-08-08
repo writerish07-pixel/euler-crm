@@ -140,7 +140,10 @@ function rebuildSchemeClaimRegister_() {
     exchangeBonus: 'Exchange Bonus',
     loyaltyBonus: 'Loyalty Bonus',
     referralBonus: 'Referral Bonus',
-    dsaDiscount: 'DSA Discount'
+    dsaDiscount: 'DSA Discount',
+    rtoInsuranceBenefit: 'Free RTO + Free Insurance',
+    rtoBenefit: 'RTO Benefits Up to',
+    insuranceBenefit: 'Insurance Benefits Up to'
   };
   var COMP_COL = {
     consumerDiscount: 'Consumer Discount',
