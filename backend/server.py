@@ -466,7 +466,7 @@ async def delete_master_list_value(item_id: str, act=Depends(actor)):
     return {"ok": True}
 
 
-@api.post("/admin/reseed")
+@api.post("/admin/reseed", dependencies=[Depends(owner_only)])
 async def reseed():
     res = await seeder.run_seed(db, force=True)
     for l in await db.leads.find().to_list(2000):
@@ -1034,6 +1034,12 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
 
 # ---------------------------------------------------------------- payments
 async def _add_payment_internal(lead_id, body: PaymentIn):
+    # Same guard record_financer_receipt/record_claim_receipt already have — this endpoint
+    # was missing it, which let a negative amount silently reduce runningTotal (the
+    # over-payment check below only ever fires on running > payable, never on a value
+    # that DECREASES running, so negative amounts sailed through undetected).
+    if body.amount <= 0:
+        raise HTTPException(422, "Enter a valid payment amount")
     lead = await db.leads.find_one({"leadId": lead_id})
     # Double-submit guard (U4): reject an identical receipt (same lead/amount/mode) within 4s
     recent = await db.payments.find_one(
@@ -2005,8 +2011,15 @@ def _claim_ageing_days(submitted_date, claim_status, end_date=""):
 
 @api.get("/claims")
 async def list_claims():
-    """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads."""
-    leads = await db.leads.find({"currentStatus": {"$regex": "book", "$options": "i"}}).to_list(2000)
+    """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads.
+
+    Status filter matches _owner_booking_metrics (shared by the Owner Commercial Report
+    and OEM Claim Dashboard) so a lead doesn't drop out of the Claim Register the moment
+    it's marked Delivered or moves through Finance Process — the OEM claim is still owed
+    to the dealer regardless of delivery status. Was previously "book" only, which caused
+    every claim to silently vanish from this register on delivery while the same money
+    remained visible in the Owner Commercial Report (a real, provable inconsistency)."""
+    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(2000)
     scheme_rows = await get_scheme_rows()
     result = []
     for l in leads:
@@ -2224,7 +2237,7 @@ class PriceRowIn(BaseModel):
     remarks: str = ""
 
 
-@api.post("/price-master")
+@api.post("/price-master", dependencies=[Depends(owner_only)])
 async def create_price_row(body: PriceRowIn):
     count = await db.price_master.count_documents({})
     doc = {"priceId": f"PM{count + 1:04d}", **body.model_dump()}
@@ -2232,7 +2245,7 @@ async def create_price_row(body: PriceRowIn):
     return clean(doc)
 
 
-@api.put("/price-master/{price_id}")
+@api.put("/price-master/{price_id}", dependencies=[Depends(owner_only)])
 async def update_price_row(price_id: str, body: PriceRowIn):
     res = await db.price_master.update_one({"priceId": price_id}, {"$set": body.model_dump()})
     if res.matched_count == 0:
@@ -2240,7 +2253,7 @@ async def update_price_row(price_id: str, body: PriceRowIn):
     return clean(await db.price_master.find_one({"priceId": price_id}))
 
 
-@api.delete("/price-master/{price_id}")
+@api.delete("/price-master/{price_id}", dependencies=[Depends(owner_only)])
 async def delete_price_row(price_id: str):
     await db.price_master.delete_one({"priceId": price_id})
     return {"ok": True}
@@ -2262,7 +2275,7 @@ class SchemeRowIn(BaseModel):
     notes: str = ""
 
 
-@api.post("/scheme-master")
+@api.post("/scheme-master", dependencies=[Depends(owner_only)])
 async def create_scheme_row(body: SchemeRowIn):
     count = await db.scheme_master.count_documents({})
     payload = body.model_dump()
@@ -2272,7 +2285,7 @@ async def create_scheme_row(body: SchemeRowIn):
     return clean(doc)
 
 
-@api.put("/scheme-master/{scheme_id}")
+@api.put("/scheme-master/{scheme_id}", dependencies=[Depends(owner_only)])
 async def update_scheme_row(scheme_id: str, body: SchemeRowIn):
     payload = body.model_dump()
     payload["totalBenefit"] = payload["totalBenefit"] or ce.round2(payload["dealerShare"] + payload["companyShare"])
@@ -2282,7 +2295,7 @@ async def update_scheme_row(scheme_id: str, body: SchemeRowIn):
     return clean(await db.scheme_master.find_one({"schemeId": scheme_id}))
 
 
-@api.delete("/scheme-master/{scheme_id}")
+@api.delete("/scheme-master/{scheme_id}", dependencies=[Depends(owner_only)])
 async def delete_scheme_row(scheme_id: str):
     await db.scheme_master.delete_one({"schemeId": scheme_id})
     return {"ok": True}
