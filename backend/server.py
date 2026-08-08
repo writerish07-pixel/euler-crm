@@ -377,10 +377,66 @@ async def root():
     return {"app": "Euler CRM", "status": "ok"}
 
 
+# Master lists editable from Settings → synced (full-mirror) to a "Masters" tab
+# in the Google Sheet. Defined in seed.py (kept separate from workflow-state
+# lists like statuses/paymentModes/benefitModes/claimStatuses, whose exact
+# string values are load-bearing throughout status-gating / commercial logic).
+EDITABLE_MASTER_CATEGORIES = seeder.EDITABLE_MASTER_CATEGORIES
+
+
+async def _masters_list_values(category):
+    rows = await db.masters_list.find({"category": category}).sort("value", 1).to_list(500)
+    return [r["value"] for r in rows]
+
+
 @api.get("/masters")
 async def masters():
     models = await db.price_master.distinct("model")
-    return {**seeder.MASTERS, "models": sorted([m for m in models if m])}
+    out = dict(seeder.MASTERS)
+    for cat in EDITABLE_MASTER_CATEGORIES:
+        vals = await _masters_list_values(cat)
+        if vals:
+            out[cat] = vals
+    return {**out, "models": sorted([m for m in models if m])}
+
+
+@api.get("/masters-list")
+async def list_masters_list():
+    return [clean(r) for r in await db.masters_list.find().sort("value", 1).to_list(2000)]
+
+
+class MasterListIn(BaseModel):
+    category: str
+    value: str
+
+
+@api.post("/masters-list", dependencies=[Depends(owner_only)])
+async def add_master_list_value(body: MasterListIn, act=Depends(actor)):
+    category = body.category.strip()
+    value = body.value.strip()
+    if category not in EDITABLE_MASTER_CATEGORIES:
+        raise HTTPException(422, f"'{category}' is not an editable master list")
+    if not value:
+        raise HTTPException(422, "Value is required")
+    existing = await db.masters_list.find_one({"category": category, "value": {"$regex": f"^{re.escape(value)}$", "$options": "i"}})
+    if existing:
+        raise HTTPException(409, f"'{value}' already exists in {category}")
+    doc = {"id": f"ML{uuid.uuid4().hex[:8]}", "category": category, "value": value, "status": "Active"}
+    await db.masters_list.insert_one(doc)
+    await write_audit(act, "create", "masters_list", new=doc)
+    await gsheets.sync_masters(await list_masters_list())
+    return clean(await db.masters_list.find_one({"id": doc["id"]}))
+
+
+@api.delete("/masters-list/{item_id}", dependencies=[Depends(owner_only)])
+async def delete_master_list_value(item_id: str, act=Depends(actor)):
+    existing = await db.masters_list.find_one({"id": item_id})
+    if not existing:
+        raise HTTPException(404, "Not found")
+    await db.masters_list.delete_one({"id": item_id})
+    await write_audit(act, "delete", "masters_list", old=existing)
+    await gsheets.sync_masters(await list_masters_list())
+    return {"ok": True}
 
 
 @api.post("/admin/reseed")
@@ -1496,7 +1552,7 @@ OWNER_ONLY_ENDPOINTS = [
 ]
 EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "incentive_register",
                         "bookings", "payments", "deliveries", "finance", "insurance", "dealer_earnings",
-                        "activities", "claims", "quotations", "counters", "audit_log"]
+                        "activities", "claims", "quotations", "counters", "audit_log", "masters_list"]
 FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "variant",
                       "currentStatus", "accountStatus"]
 PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "derive_claim",
@@ -2440,6 +2496,8 @@ async def startup():
         await db.payments.create_index("leadId")
         await db.audit_log.create_index([("timestamp", -1)])
         await db.incentive_register.create_index("leadId", unique=True)
+        await db.masters_list.create_index("id", unique=True)
+        await db.masters_list.create_index([("category", 1), ("value", 1)])
     except Exception:
         pass
     # Insurance rate consistency migration (INS-1)

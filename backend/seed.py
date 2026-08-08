@@ -1,6 +1,7 @@
 """Migrate Euler Master.xlsx (exported to euler_raw.json) into MongoDB collections."""
 import json
 import os
+import uuid
 from pathlib import Path
 
 DATA_FILE = Path(__file__).parent / "data" / "euler_raw.json"
@@ -435,8 +436,27 @@ async def run_seed(db, force=False):
             {"_id": "finance", "seq": 100},
             {"_id": "insurance", "seq": 100},
         ])
+    # Editable master lists (Executives / Financers / Lead Sources / Priorities /
+    # Activity Types) — config data, not a transaction, so it's seeded once from
+    # MASTERS and survives a sample-data go-live reset like price/scheme master.
+    if force or await db["masters_list"].count_documents({}) == 0:
+        if force:
+            await db["masters_list"].delete_many({})
+        ml_docs = []
+        for cat in EDITABLE_MASTER_CATEGORIES:
+            for val in MASTERS.get(cat, []):
+                ml_docs.append({"id": f"ML{uuid.uuid4().hex[:8]}", "category": cat, "value": val, "status": "Active"})
+        if ml_docs:
+            await db["masters_list"].insert_many(ml_docs)
+        result["masters_list"] = len(ml_docs)
     return {"seeded": True, "result": result}
 
+
+# Master lists a user may add/delete from Settings → synced to a "Masters" tab
+# in the Google Sheet. Deliberately excludes workflow-state lists (statuses,
+# paymentModes, benefitModes, claimStatuses) whose exact string values are
+# load-bearing throughout status-gating / commercial logic.
+EDITABLE_MASTER_CATEGORIES = ["executives", "financers", "leadSources", "priorities", "activityTypes"]
 
 MASTERS = {
     "leadSources": ["Walk-in", "WhatsApp", "Referral", "Website", "Phone", "Social Media", "Visit"],
