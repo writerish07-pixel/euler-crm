@@ -2224,9 +2224,6 @@ async def create_quotation(body: QuotationIn):
 
 
 # ---------------------------------------------------------------- startup
-app.include_router(auth_router)
-app.include_router(api)
-app.include_router(public)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
@@ -2255,6 +2252,25 @@ async def _migrate_insurance_rates():
 async def migrate_insurance_rates():
     fixed = await _migrate_insurance_rates()
     return {"ok": True, "fixed": fixed}
+
+
+@api.post("/admin/reset-transactions", dependencies=[Depends(owner_only)])
+async def reset_transactions(act=Depends(actor)):
+    """Owner-only go-live reset: permanently clears all transaction data (leads, bookings,
+    payments, deliveries, finance, insurance, claims, activities, earnings) and blocks the
+    sample-data re-seed. Master data (price/scheme/incentive) is preserved."""
+    counts = {}
+    for coll in ["leads", "bookings", "payments", "deliveries", "finance", "insurance",
+                 "claims", "activities", "dealer_earnings", "quotations"]:
+        r = await db[coll].delete_many({})
+        counts[coll] = r.deleted_count
+    await db["system"].update_one({"_id": "seed_state"},
+                                  {"$set": {"sampleCleared": True, "clearedAt": now_iso()}}, upsert=True)
+    await db["counters"].update_one({"_id": "lead"}, {"$set": {"seq": 0}}, upsert=True)
+    for c in ["receipt", "booking", "activity", "snapshot", "claim", "finance", "insurance"]:
+        await db["counters"].update_one({"_id": c}, {"$set": {"seq": 100}}, upsert=True)
+    await write_audit(act, "reset", "system", new={"clearedTransactions": counts})
+    return {"ok": True, "cleared": counts}
 
 
 @app.on_event("startup")
@@ -2314,3 +2330,9 @@ async def _backfill_booking_advances():
 @app.on_event("shutdown")
 async def shutdown():
     client.close()
+
+
+# Routers included LAST so every @api route above is registered
+app.include_router(auth_router)
+app.include_router(api)
+app.include_router(public)

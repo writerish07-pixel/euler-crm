@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { ShieldCheck, CheckCircle2, AlertTriangle, XCircle, RefreshCw, ChevronDown, ChevronRight, Wrench } from "lucide-react";
-import { get } from "../lib/api";
+import { ShieldCheck, CheckCircle2, AlertTriangle, XCircle, RefreshCw, ChevronDown, ChevronRight, Wrench, Eraser } from "lucide-react";
+import { toast } from "sonner";
+import { get, post } from "../lib/api";
 import { Card, PageHeader, Button } from "../components/ui";
 
 const ICON = { PASS: CheckCircle2, WARNING: AlertTriangle, FAIL: XCircle };
@@ -84,6 +85,16 @@ export default function ERPProductionAudit() {
   const [loading, setLoading] = useState(false);
   const run = () => { setLoading(true); get("/reports/production-audit").then(setD).finally(() => setLoading(false)); };
   useEffect(() => { run(); }, []);
+  const resetForGoLive = async () => {
+    if (!window.confirm("GO-LIVE RESET: permanently delete ALL leads, bookings, payments, deliveries, finance, insurance, claims and earnings so staff start from zero? Master price/scheme data is kept. This cannot be undone.")) return;
+    if (!window.confirm("Are you absolutely sure? All demo/sample transaction data will be erased.")) return;
+    try {
+      const r = await post("/admin/reset-transactions", {});
+      const total = Object.values(r.cleared || {}).reduce((s, n) => s + n, 0);
+      toast.success(`Go-live reset done — cleared ${total} records. CRM now starts fresh.`);
+      run();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Reset failed"); }
+  };
   if (!d) return <div className="text-ink-faint text-sm">Running production audit…</div>;
 
   const go = d.goLive;
@@ -91,7 +102,10 @@ export default function ERPProductionAudit() {
   return (
     <div data-testid="erp-production-audit">
       <PageHeader title="ERP Production Audit" subtitle="Owner · zero-tolerance certification vs the original spreadsheet + Apps Script"
-        actions={<Button data-testid="rerun-audit-btn" onClick={run} disabled={loading}><RefreshCw size={15} className={loading ? "animate-spin" : ""} /> Re-run</Button>} />
+        actions={<div className="flex items-center gap-2">
+          <Button variant="secondary" data-testid="reset-golive-btn" onClick={resetForGoLive} className="!text-red-600 hover:!bg-red-50"><Eraser size={15} /> Reset for Go-Live</Button>
+          <Button data-testid="rerun-audit-btn" onClick={run} disabled={loading}><RefreshCw size={15} className={loading ? "animate-spin" : ""} /> Re-run</Button>
+        </div>} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
         <Card className={`p-6 col-span-1 ${go ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200"}`} data-testid="audit-verdict">

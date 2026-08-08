@@ -182,3 +182,10 @@ User: manually record claims (e.g. OEM incentive received as a claim); both Owne
 ## Iteration 20 (2026-06) — Google Sheet full fresh reset
 - Wiped ALL data rows from the 6 synced registers (Lead/Booking/Payment/Delivery/Scheme Claim/Insurance), keeping headers only. Masters/dashboards untouched. Done live via service account (preview+production; no redeploy). Verified: 0 data rows in all registers.
 - NOTE: this cleared only the Google Sheet mirror, NOT the app's MongoDB (app still holds the 10 seeded leads). Future real CRM actions append fresh to the sheet.
+
+## Iteration 21 (2026-06) — App go-live reset (clear sample data, block re-seed)
+- Added owner-only POST /api/admin/reset-transactions: deletes all transaction collections (leads/bookings/payments/deliveries/finance/insurance/claims/activities/dealer_earnings/quotations), sets db.system {seed_state.sampleCleared:true}, resets counters (lead→0, others→100). Masters preserved.
+- seed.py run_seed now skips SAMPLE_TX collections when sampleCleared flag set → prevents re-seed on restart. Verified: reset→restart→leads stay 0, masters intact (69 price/33 scheme), fresh lead = LD26000001.
+- FIXED latent bug: app.include_router(api) was called BEFORE the admin endpoints were defined → they 404'd. Moved all include_router calls to end of server.py so every route registers.
+- Frontend: "Reset for Go-Live" button (data-testid reset-golive-btn) on ERP Production Audit page (owner-only, double-confirm) → calls the endpoint.
+- Preview DB cleared. PRODUCTION: user must redeploy (gets button + guard), then click "Reset for Go-Live" once on the production Audit page (separate DB; I can't touch it).

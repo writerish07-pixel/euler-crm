@@ -375,6 +375,9 @@ def build_dealer_earnings(raw):
     return out
 
 
+# Sample transaction collections that must NOT be re-seeded after a go-live reset
+SAMPLE_TX = {"leads", "payments", "bookings", "activities", "deliveries",
+             "insurance", "finance", "dealer_earnings"}
 BUILDERS = {
     "leads": build_leads,
     "price_master": build_price_master,
@@ -395,7 +398,13 @@ async def run_seed(db, force=False):
         return {"seeded": False, "reason": "data file missing"}
     raw = json.loads(DATA_FILE.read_text())
     result = {}
+    state = await db["system"].find_one({"_id": "seed_state"}) or {}
+    sample_cleared = bool(state.get("sampleCleared"))
     for coll, builder in BUILDERS.items():
+        # After a go-live reset, never re-seed the sample transaction data (masters still seed)
+        if sample_cleared and coll in SAMPLE_TX and not force:
+            result[coll] = "skipped (sample cleared for go-live)"
+            continue
         existing = await db[coll].count_documents({})
         if existing > 0 and not force:
             result[coll] = f"skipped ({existing} existing)"
