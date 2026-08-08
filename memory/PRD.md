@@ -178,3 +178,7 @@ User: manually record claims (e.g. OEM incentive received as a claim); both Owne
 - Deleted: Lead Register 7 test rows (LD11/12-Sita/13/14/15, ZZTEST, Dup Test, DELETE ME); Booking Register BK26000102/103 (LD6 test); Payment Ledger 11 rows (test amounts on LD2 + LD6 ₹5000s + Roshan/LD1 RC26000004 ₹5100 & RC26000101 ₹155000, per user "delete every new entry"); Scheme Claim Register all 15 (dup CLM + MCLM test); Insurance Register all 5 (TEST_INS).
 - Kept: LD26000001–010; BK26000001/002/003/101; genuine ₹5000 advances RC26000005(LD2)/006(LD3)/101(LD5).
 - Note: sync remains append-only — future real CRM entries will append going forward. Deleting sheet rows does NOT change the app's Mongo data (sheet is a mirror).
+
+## Iteration 20 (2026-06) — Google Sheet full fresh reset
+- Wiped ALL data rows from the 6 synced registers (Lead/Booking/Payment/Delivery/Scheme Claim/Insurance), keeping headers only. Masters/dashboards untouched. Done live via service account (preview+production; no redeploy). Verified: 0 data rows in all registers.
+- NOTE: this cleared only the Google Sheet mirror, NOT the app's MongoDB (app still holds the 10 seeded leads). Future real CRM actions append fresh to the sheet.
