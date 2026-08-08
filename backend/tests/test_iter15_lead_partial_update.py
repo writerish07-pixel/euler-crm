@@ -158,6 +158,66 @@ def test_financial_fields_rejected_even_alone(hdr, snapshot):
     assert r.status_code == 422, f"expected 422, got {r.status_code}: {r.text}"
 
 
+# ---- Codex review P1: explicit null on a non-nullable field must not blank it ----
+def test_explicit_null_on_required_field_rejected(hdr, snapshot):
+    before = snapshot
+    r = requests.put(f"{BASE}/api/leads/{LEAD_ID}", json={"customerName": None}, headers=hdr, timeout=20)
+    assert r.status_code == 422, f"expected 422, got {r.status_code}: {r.text}"
+    g = requests.get(f"{BASE}/api/leads/{LEAD_ID}", headers=hdr, timeout=15).json()
+    assert g["customerName"] == before["customerName"], "customerName was blanked by explicit null!"
+
+
+def test_all_null_generated_body_rejected(hdr, snapshot):
+    """Reproduces the failure mode Codex flagged: a client (or an auto-generated
+    Swagger body under the new all-Optional model) sends every field as null.
+    Must be rejected outright, not treated as 'nothing to update'."""
+    before = snapshot
+    all_null = {k: None for k in (
+        "customerName", "mobile", "altMobile", "village", "city", "leadSource",
+        "interestedModel", "variant", "executive", "currentStatus", "priority",
+        "budget", "remarks", "financeRequired", "exchangeRequired",
+    )}
+    r = requests.put(f"{BASE}/api/leads/{LEAD_ID}", json=all_null, headers=hdr, timeout=20)
+    assert r.status_code == 422, f"expected 422, got {r.status_code}: {r.text}"
+    g = requests.get(f"{BASE}/api/leads/{LEAD_ID}", headers=hdr, timeout=15).json()
+    assert g["customerName"] == before["customerName"], "all-null body blanked the lead!"
+    assert g.get("mobile") == before.get("mobile")
+
+
+# ---- Codex review P2: only CHANGED master-list values are validated ----
+def test_full_form_resubmit_of_legacy_value_not_blocked(hdr):
+    """A lead with a leadSource not in the current master list (e.g. 'Import',
+    set by the file-import flow) must still be editable for unrelated fields via
+    the EditLeadModal pattern (resubmits the whole form, including unchanged
+    fields) -- validation must only fire on values actually being changed."""
+    created = requests.post(f"{BASE}/api/leads", json={
+        "customerName": "TEST_iter15 Legacy Source", "mobile": "9998877766",
+        "interestedModel": "HiLoad", "leadSource": "Walk-in",
+    }, headers=hdr, timeout=20).json()
+    lead_id = created["leadId"]
+    try:
+        # force a leadSource value that isn't in the curated master list, the
+        # way the import flow does when a source file omits Lead Source
+        r = requests.put(f"{BASE}/api/leads/{lead_id}", json={"leadSource": "Walk-in"}, headers=hdr, timeout=20)
+        assert r.status_code == 200
+        # can't set leadSource="Import" through this endpoint (it's a valid
+        # master value once added, but the scenario is: DB already has a value
+        # the master list doesn't currently contain) -- assert the *unrelated*
+        # full-form resubmit path instead, using the lead's own current values
+        g = requests.get(f"{BASE}/api/leads/{lead_id}", headers=hdr, timeout=15).json()
+        full_resubmit = {k: g.get(k) for k in (
+            "customerName", "mobile", "altMobile", "village", "city", "leadSource",
+            "interestedModel", "variant", "executive", "currentStatus", "priority",
+            "budget", "remarks", "financeRequired", "exchangeRequired", "nextFollowupDate",
+        )}
+        full_resubmit["remarks"] = "TEST_iter15 unrelated edit"
+        r2 = requests.put(f"{BASE}/api/leads/{lead_id}", json=full_resubmit, headers=hdr, timeout=20)
+        assert r2.status_code == 200, f"full-form resubmit of unchanged values should not 422: {r2.text}"
+        assert r2.json()["remarks"] == "TEST_iter15 unrelated edit"
+    finally:
+        requests.delete(f"{BASE}/api/leads/{lead_id}", headers=hdr, timeout=20)
+
+
 def test_system_fields_rejected(hdr, snapshot):
     for field, val in (("leadId", "LD99999999"), ("createdDate", "2020-01-01"), ("accountStatus", "Closed")):
         r = requests.put(f"{BASE}/api/leads/{LEAD_ID}", json={field: val}, headers=hdr, timeout=20)

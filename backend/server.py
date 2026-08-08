@@ -676,26 +676,40 @@ LEAD_SYSTEM_FIELDS = {
 # any lead field, so it's rejected outright rather than persisted as data.
 _SWAGGER_STRING_PLACEHOLDER = "string"
 
+# Only fields whose data-model representation is genuinely nullable may be
+# cleared with an explicit JSON null. Every other LeadUpdateIn field was a
+# non-nullable str/float in the original LeadIn (default "" or 0, never None),
+# so exclude_unset=True can't distinguish "client wants to blank this out" from
+# "client (or a generated/all-null body) sent null for a field it never meant to
+# touch" -- reject null for those instead of silently blanking a required field.
+LEAD_NULLABLE_FIELDS = {"nextFollowupDate"}
 
-async def _validate_lead_update_choices(payload):
+
+async def _validate_lead_update_choices(payload, lead):
     """Best-effort validation against master data (requirement: enum/master-list
-    fields validated where appropriate). Skips validation for a category if its
-    master list is empty, rather than blocking on a misconfigured/empty list."""
+    fields validated where appropriate). Only validates values the client is
+    actually CHANGING (differs from what's already stored on the lead) -- leads
+    with a legacy/historical value not in the current master list (e.g. leadSource
+    "Import" from a file import) must still be editable for unrelated fields;
+    resubmitting the same value isn't a new value to validate. Skips validation
+    for a category if its master list is empty, rather than blocking on a
+    misconfigured/empty list."""
     errors = []
     checks = [("leadSource", "leadSources", "Lead Sources"), ("executive", "executives", "Executives"),
               ("priority", "priorities", "Priorities")]
     for field, category, label in checks:
         val = payload.get(field)
-        if not val:
+        if not val or val == lead.get(field):
             continue
         allowed = await _masters_list_values(category)
         if allowed and val not in allowed:
             errors.append(f"{field} '{val}' is not in the {label} master list")
-    if payload.get("currentStatus") and payload["currentStatus"] not in seeder.MASTERS["statuses"]:
-        errors.append(f"currentStatus '{payload['currentStatus']}' is not a recognized status")
+    status_val = payload.get("currentStatus")
+    if status_val and status_val != lead.get("currentStatus") and status_val not in seeder.MASTERS["statuses"]:
+        errors.append(f"currentStatus '{status_val}' is not a recognized status")
     for field in ("financeRequired", "exchangeRequired"):
         val = payload.get(field)
-        if val is not None and val not in ("Yes", "No"):
+        if val is not None and val != lead.get(field) and val not in ("Yes", "No"):
             errors.append(f"{field} must be 'Yes' or 'No', got '{val}'")
     return errors
 
@@ -709,13 +723,18 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
     payload = body.model_dump(exclude_unset=True)
     payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
 
+    null_fields = [k for k, v in payload.items() if v is None and k not in LEAD_NULLABLE_FIELDS]
+    if null_fields:
+        raise HTTPException(422, f"null is not allowed for: {', '.join(null_fields)}. "
+                                  f"Omit the field to leave it unchanged, or provide a real value.")
+
     placeholder_fields = [k for k, v in payload.items()
                           if isinstance(v, str) and v.strip().lower() == _SWAGGER_STRING_PLACEHOLDER]
     if placeholder_fields:
         raise HTTPException(422, f"Refusing to save placeholder value \"string\" for: {', '.join(placeholder_fields)}. "
                                   f"Remove the field from the request instead of leaving Swagger's example value.")
 
-    errors = await _validate_lead_update_choices(payload)
+    errors = await _validate_lead_update_choices(payload, lead)
     if errors:
         raise HTTPException(422, "; ".join(errors))
 
