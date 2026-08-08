@@ -167,3 +167,8 @@ User: manually record claims (e.g. OEM incentive received as a claim); both Owne
 - Frontend Claims.js: "Add Manual Claim" button + ManualClaimModal (testids manual-claim-type/oem/lead/customer/amount/date/ref, save-manual-claim-btn); "Manual" badge in register; lead picker autofills customer/model; register shows manual + derived together.
 - Verified: curl (create→register→partial 5000→full 15000 Received) + screenshot (staff add via UI, Manual badge, ₹12,000). Baseline cleaned (all manual test claims removed).
 - Preview only — REDEPLOY to production.
+
+## Iteration 18 (2026-06) — Booking-advance self-heal + Owner delete-lead
+- **Booking amount not reducing outstanding (production):** root cause = seeded Booked leads carry bookingAmount but the matching "Booking advance" payment was only backfilled in the preview DB, not production. Added idempotent startup `_backfill_booking_advances()`: for any lead with bookingAmount>0 and ZERO payments, records a "Booking advance (backfill)" payment + recomputes → Customer Outstanding = Payable − Received. Self-heals production on redeploy. (Confirmed: booking amount reduces Outstanding, NOT Customer Payable — standard billing.)
+- **Owner delete-lead:** DELETE /api/leads/{id} (owner-only) cascade-deletes lead + payments/bookings/deliveries/finance/insurance/claims/activities/dealer_earnings; audited. Frontend: owner-only red "Delete" button in Lead drawer header (confirm dialog → closes drawer + reloads list). Verified: exec 403, owner cascade + 404 after, baseline stays 10 leads.
+- Preview only — REDEPLOY to production (also pushes the booking-advance self-heal).

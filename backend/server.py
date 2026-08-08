@@ -604,6 +604,24 @@ async def convert_booking(lead_id: str, body: BookingIn):
     return {"bookingId": booking_id, "snapshotId": snapshot_id, "lead": clean(await db.leads.find_one({"leadId": lead_id}))}
 
 
+@api.delete("/leads/{lead_id}", dependencies=[Depends(owner_only)])
+async def delete_lead(lead_id: str, act=Depends(actor)):
+    """Owner-only. Permanently delete a wrongly-posted lead and all its related records."""
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+    counts = {}
+    for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims", "activities", "dealer_earnings"]:
+        r = await db[coll].delete_many({"leadId": lead_id})
+        counts[coll] = r.deleted_count
+    await db.leads.delete_one({"leadId": lead_id})
+    await write_audit(act, "delete", "lead", leadId=lead_id,
+                      old={"customerName": lead.get("customerName"), "mobile": lead.get("mobile"),
+                           "currentStatus": lead.get("currentStatus"), "customerPayable": lead.get("customerPayable")},
+                      new={"cascadeDeleted": counts})
+    return {"ok": True, "deleted": {"lead": 1, **counts}}
+
+
 @api.put("/leads/{lead_id}/price-structure")
 async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
@@ -2261,6 +2279,36 @@ async def startup():
         await _migrate_insurance_rates()
     except Exception:
         pass
+    # Self-heal: booked leads whose booking advance was never recorded as a payment
+    # (so Customer Outstanding wasn't reduced). Idempotent.
+    try:
+        await _backfill_booking_advances()
+    except Exception:
+        pass
+
+
+async def _backfill_booking_advances():
+    """For any lead with bookingAmount>0 and NO payments recorded, create the booking-advance
+    receipt so Customer Outstanding is reduced. Idempotent (skips leads that already have payments)."""
+    healed = 0
+    for l in await db.leads.find({"bookingAmount": {"$gt": 0}}).to_list(5000):
+        lid = l["leadId"]
+        ba = ce.num(l.get("bookingAmount"))
+        if ba <= 0:
+            continue
+        has_advance = await db.payments.find_one(
+            {"leadId": lid, "narration": {"$regex": "booking advance", "$options": "i"}})
+        received = await db.payments.aggregate([
+            {"$match": {"leadId": lid}}, {"$group": {"_id": None, "t": {"$sum": "$amount"}}}]).to_list(1)
+        total_received = ce.num(received[0]["t"]) if received else 0.0
+        if has_advance or total_received > 0:
+            continue
+        await _add_payment_internal(lid, PaymentIn(
+            amount=ba, paymentMode=l.get("lastPaymentMode") or "Cash",
+            date=l.get("bookingDate") or today(), narration="Booking advance (backfill)"))
+        await recompute_lead(lid)
+        healed += 1
+    return healed
 
 
 @app.on_event("shutdown")

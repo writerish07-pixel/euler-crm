@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { ArrowRightLeft, Wallet, XCircle, Pencil } from "lucide-react";
-import { get, post, put } from "../lib/api";
+import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2 } from "lucide-react";
+import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -56,6 +56,19 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
         <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
+        {isOwner && (
+          <Button variant="secondary" data-testid="delete-lead-btn"
+            onClick={async () => {
+              if (!window.confirm(`Permanently DELETE lead ${lead.leadId} (${lead.customerName}) and all its bookings, payments, claims, insurance & delivery records? This cannot be undone.`)) return;
+              try {
+                await del(`/leads/${lead.leadId}`);
+                toast.success(`Lead ${lead.leadId} deleted`);
+                onClose();
+                onChanged && onChanged();
+              } catch (e) { toast.error(e?.response?.data?.detail || "Delete failed"); }
+            }}
+            className="!py-1 !px-2.5 text-xs !text-red-600 hover:!bg-red-50"><Trash2 size={13} /> Delete</Button>
+        )}
         <div className="ml-auto text-right">
           <div className="text-xs text-ink-faint">Outstanding</div>
           <div className={`font-mono font-bold ${lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{inr(lead.customerOutstanding)}</div>
