@@ -213,6 +213,7 @@ def derive_claim(s, approvals=None):
 # CommercialEngineService.gs (computeSchemeIncomeBreakdown_, computeSchemeClaimShares_)
 # ===========================================================================
 import re
+from datetime import datetime, timezone
 
 # component key -> master label used for byComponent output
 SCHEME_COMPONENT_LABELS = {
@@ -313,9 +314,25 @@ def _norm_month(value):
 
 
 def get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows):
-    """Active scheme rows for a lead model/variant on a booking date -> map componentKey -> shares."""
-    month = scheme_month_from_date(booking_date)
-    iso = str(booking_date or "")[:10]
+    """Active scheme rows for a lead model/variant on a booking date -> map componentKey -> shares.
+
+    booking_date falls back to today's date when empty (e.g. Scheme applied before Booking,
+    which the API allows since canScheme only requires an Active lead, not a Booked one) so the
+    effective date is always deterministic. Previously an empty booking_date produced iso="",
+    which silently disabled the effectiveFrom/effectiveTo window check below (`iso and ...`
+    short-circuited to False) -- every active Scheme Master row for the model, from every
+    circular month, was treated as "in window" and merged by componentKey. That was harmless
+    when a component's key stayed the same across months (the later month simply overwrote the
+    earlier one), but broke silently when a component's key changed between circulars (e.g. July's
+    combined 'rtoInsuranceBenefit' vs August's split 'rtoBenefit'+'insuranceBenefit') -- the merge
+    doesn't overwrite distinct keys, it adds them, double-claiming the same entitlement. Falling
+    back to today's date makes Scheme-before-Booking and Scheme-after-Booking resolve to the
+    identical Scheme Master rows for the same business date."""
+    effective_date = str(booking_date or "")[:10]
+    if not effective_date:
+        effective_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    month = scheme_month_from_date(effective_date)
+    iso = effective_date
     exact, in_window, any_family = {}, {}, {}
     for r in (scheme_rows or []):
         if str(r.get("status") or "").lower() != "active":
