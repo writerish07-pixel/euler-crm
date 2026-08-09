@@ -1,0 +1,26 @@
+# Render Blueprint. The repo has NO root package.json — the frontend is a
+# Create React App under frontend/ with a yarn.lock. A Render service whose Root
+# Directory is left unset runs npm at the repo root, finds nothing to build and
+# fails with npm's usage output (the "--workspaces" line seen in the build log).
+# Pinning rootDir here removes that ambiguity.
+services:
+  - type: web
+    name: euler-crm
+    runtime: static
+    rootDir: frontend
+    buildCommand: yarn install --frozen-lockfile && yarn build
+    staticPublishPath: build
+    pullRequestPreviewsEnabled: false
+    envVars:
+      # Public API base only. CRA inlines REACT_APP_* into the browser bundle,
+      # so no secret may ever be placed here.
+      - key: REACT_APP_BACKEND_URL
+        value: https://euler-crm-api.onrender.com
+      - key: NODE_VERSION
+        value: "22"
+    routes:
+      # SPA: every client-side route must fall back to index.html or a refresh
+      # on /leads, /bookings, /payments etc. returns a Render 404.
+      - type: rewrite
+        source: /*
+        destination: /index.html
