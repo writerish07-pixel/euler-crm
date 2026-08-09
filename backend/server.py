@@ -285,6 +285,15 @@ async def recompute_lead(lead_id):
     }
     await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
     merged = {**lead, **updates}
+    # The Lead Register is the dealership's primary register and must reflect the
+    # lead's CURRENT commercial state. recompute_lead runs after every mutation that
+    # can change it (booking, price structure, scheme, payment, delivery, close), so
+    # this is the one place that guarantees the row never goes stale. Previously the
+    # lead row was only pushed on create / manual PUT / import, so a lead booked and
+    # delivered through the normal workflow stayed frozen at its creation values
+    # (status New, ex-showroom 0, payable 0) even though every other register was
+    # correct. Upsert on leadId, so this updates the existing row rather than adding one.
+    await sheet_sync("leads", clean(dict(merged)))
     # GS-5: Dealer Earnings and Exchange previously had no Sheet destination at all.
     # Both are keyed on leadId, so these are upserts — one row per lead, kept current
     # on every commercial recompute rather than appended each time.
