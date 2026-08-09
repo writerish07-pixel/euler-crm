@@ -841,10 +841,81 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
     return clean(updated)
 
 
+async def _price_master_row(model, variant):
+    """Authoritative Price Master lookup, keyed on model + variant exactly as the
+    Price Master defines them (case/whitespace-insensitive, active rows only).
+    Returns None when there is no matching row — the caller must refuse to book
+    rather than fall back to zero."""
+    m = str(model or "").strip()
+    v = str(variant or "").strip()
+    if not m:
+        return None
+    rows = await db.price_master.find({"model": {"$regex": f"^{re.escape(m)}$", "$options": "i"}}).to_list(500)
+    active = [r for r in rows if str(r.get("status") or "active").lower() == "active"] or rows
+    if v:
+        exact = [r for r in active if str(r.get("variant") or "").strip().lower() == v.lower()]
+        if exact:
+            return exact[0]
+        return None          # variant was specified but has no Price Master row
+    return active[0] if len(active) == 1 else None
+
+
+def _price_structure_from_master(row):
+    """Map a Price Master row onto the lead's price-structure fields."""
+    return {
+        "exShowroom": ce.num(row.get("exShowroom")),
+        "rto": ce.num(row.get("rto")),
+        "insuranceAmount": ce.num(row.get("insurance")),
+        "accessoriesAmount": ce.num(row.get("accessories")),
+        "handlingCharges": ce.num(row.get("handlingCharges")),
+        "trc": ce.num(row.get("trc")),
+        "fastag": ce.num(row.get("fastag")),
+        "extendedWarranty": ce.num(row.get("extendedWarranty")),
+        "otherCharges": ce.num(row.get("otherCharges")),
+        "tcsApplicable": row.get("tcsApplicable") or "No",
+    }
+
+
+@api.get("/leads/{lead_id}/price-preview")
+async def price_preview(lead_id: str):
+    """What Price Master resolves to for this lead's model/variant, before booking.
+    Lets the UI show the real commercial structure (or a precise 'not found')
+    instead of discovering it only at booking time."""
+    lead = await get_lead_or_404(lead_id)
+    model, variant = lead.get("interestedModel"), lead.get("variant")
+    row = await _price_master_row(model, variant)
+    if not row:
+        return {"found": False, "model": model, "variant": variant,
+                "message": f"Price Master entry not found for: Model = {model or '(none)'}, "
+                           f"Variant = {variant or '(none)'}"}
+    return {"found": True, "model": model, "variant": variant,
+            "priceId": row.get("priceId"), "priceStructure": _price_structure_from_master(row)}
+
+
 @api.post("/leads/{lead_id}/convert-booking")
 async def convert_booking(lead_id: str, body: BookingIn):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canBook", "conversion to booking")
+    # A booking is only valid once its commercial structure is resolved. If the lead
+    # has no price structure yet, load it from the authoritative Price Master. If the
+    # vehicle has no Price Master row, refuse the booking with a precise message
+    # rather than persisting a commercially empty booking (ex-showroom 0, GVC 0).
+    if ce.num(lead.get("exShowroom")) <= 0:
+        row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
+        if not row:
+            raise HTTPException(422,
+                f"Price Master entry not found for: Model = {lead.get('interestedModel') or '(none)'}, "
+                f"Variant = {lead.get('variant') or '(none)'}. Add the vehicle to Price Master, or "
+                f"correct the model/variant on the lead, then book again.")
+        await db.leads.update_one({"leadId": lead_id},
+                                  {"$set": {**_price_structure_from_master(row), "lastUpdated": now_iso()}})
+        await recompute_lead(lead_id)
+        lead = await db.leads.find_one({"leadId": lead_id})
+        if ce.num(lead.get("grossVehicleCost")) <= 0:
+            raise HTTPException(422,
+                f"Price Master row {row.get('priceId')} for {lead.get('interestedModel')}/"
+                f"{lead.get('variant')} produced a zero vehicle cost. Correct the Price Master entry "
+                f"before booking.")
     booking_id = await next_id("booking", "BK26")
     snapshot_id = await next_id("snapshot", "SN26")
     bdate = body.bookingDate or today()
