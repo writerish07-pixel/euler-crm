@@ -13,6 +13,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, ConfigDict, Field
 
 import commercial as ce
@@ -27,6 +28,13 @@ client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="Euler CRM API")
+_finance_index_status = {
+    "status": "UNKNOWN",
+    "ready": False,
+    "reason": "startup has not run",
+    "checkedAt": None,
+    "auditCounts": {},
+}
 
 auth_router = authmod.build_router(db)
 current_user = auth_router.current_user
@@ -1255,17 +1263,28 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         room = ce.round2(max(0.0, payable - (running - body.amount)))
         raise HTTPException(422, f"Amount ₹{ce.round2(body.amount)} exceeds the balance. Customer payable is ₹{payable}; only ₹{room} can still be collected.")
     outstanding = ce.round2(max(0.0, payable - running)) if payable > 0 else 0.0
+    finance_file_number = body.financeFileNumber
+    if body.paymentMode == "Finance":
+        finance_file_number = await _resolve_finance_file_for_payment(lead_id, body)
     doc = {
         "receiptNumber": receipt, "leadId": lead_id, "customerName": lead.get("customerName") if lead else "",
         "date": body.date or today(), "amount": ce.round2(body.amount), "paymentMode": body.paymentMode,
         "narration": body.narration, "runningTotal": running, "outstandingBalance": outstanding,
         "paymentId": f"PY{uuid.uuid4().hex[:12]}", "financerName": body.financerName,
-        "financeFileNumber": body.financeFileNumber, "recordedAt": now_iso(),
+        "financeFileNumber": finance_file_number, "recordedAt": now_iso(),
     }
-    await db.payments.insert_one(doc)
+    try:
+        await db.payments.insert_one(doc)
+    except Exception:
+        if body.paymentMode == "Finance":
+            await db.finance.delete_one({
+                "leadId": lead_id, "fileNumber": finance_file_number,
+                "sanctionedAmount": 0.0, "receivedAgainstFile": 0.0, "receipts": []
+            })
+        raise
     await sheet_sync("payments", doc)
-    if body.paymentMode == "Finance" and body.financeFileNumber:
-        await _upsert_finance_file(lead_id, body)
+    if body.paymentMode == "Finance":
+        await _upsert_finance_file(lead_id, body, finance_file_number)
     return clean(doc)
 
 
@@ -1285,38 +1304,79 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor)):
     rec = await _add_payment_internal(lead_id, body)
     await recompute_lead(lead_id)
     await write_audit(act, "receipt", "payment", leadId=lead_id, paymentId=rec.get("receiptNumber"),
-                      financeFileNumber=body.financeFileNumber or "",
+                      financeFileNumber=rec.get("financeFileNumber") or "",
                       new={"amount": rec.get("amount"), "mode": body.paymentMode, "runningTotal": rec.get("runningTotal")})
     return rec
 
 
 # ---------------------------------------------------------------- finance
-async def _upsert_finance_file(lead_id, body: PaymentIn):
+async def _resolve_finance_file_for_payment(lead_id, body: PaymentIn):
+    if not (body.financerName or "").strip():
+        raise HTTPException(422, "Financer is required for Finance payments")
+    supplied = (body.financeFileNumber or "").strip()
+    by_lead = await db.finance.find_one({"leadId": lead_id})
+    if supplied:
+        by_file = await db.finance.find_one({"fileNumber": supplied})
+        if by_file and by_file.get("leadId") != lead_id:
+            raise HTTPException(422, "Finance file number already belongs to another lead")
+        if by_lead and by_lead.get("fileNumber") != supplied:
+            raise HTTPException(422, "Lead already has a different finance file number")
+        return supplied
+    if by_lead:
+        return by_lead.get("fileNumber")
+    file_number = await next_id("finance", "FN26")
+    try:
+        res = await db.finance.find_one_and_update(
+            {"leadId": lead_id},
+            {"$setOnInsert": {
+                "fileNumber": file_number, "leadId": lead_id,
+                "customerName": (await db.leads.find_one({"leadId": lead_id}) or {}).get("customerName", ""),
+                "financer": body.financerName, "sanctionedAmount": 0.0,
+                "receivedAgainstFile": 0.0, "fileOutstanding": 0.0,
+                "status": "Pending", "receipts": [], "lastUpdated": today(),
+            }},
+            upsert=True, return_document=True)
+        return res.get("fileNumber")
+    except DuplicateKeyError:
+        existing = await db.finance.find_one({"leadId": lead_id})
+        if existing:
+            return existing.get("fileNumber")
+        raise HTTPException(409, "Could not resolve finance file; please retry")
+
+
+async def _upsert_finance_file(lead_id, body: PaymentIn, finance_file_number: str):
     """A Finance-mode entry on a lead = amount the FINANCER is now liable to disburse.
     It accrues the file's committed amount; the customer's outstanding already dropped
     by this amount (recompute counts Finance payments). Actual disbursement is booked
     separately via POST /finance/{file}/receipt and never re-touches customer outstanding."""
     lead = await db.leads.find_one({"leadId": lead_id})
-    existing = await db.finance.find_one({"fileNumber": body.financeFileNumber})
+    existing = await db.finance.find_one({"fileNumber": finance_file_number})
+    if existing and existing.get("leadId") != lead_id:
+        raise HTTPException(422, "Finance file number already belongs to another lead")
     if existing:
         committed = ce.round2(ce.num(existing.get("sanctionedAmount")) + body.amount)
         received = ce.num(existing.get("receivedAgainstFile"))
         outstanding = ce.round2(max(0.0, committed - received))
-        await db.finance.update_one({"fileNumber": body.financeFileNumber}, {"$set": {
+        await db.finance.update_one({"fileNumber": finance_file_number, "leadId": lead_id}, {"$set": {
             "sanctionedAmount": committed, "fileOutstanding": outstanding, "financer": body.financerName or existing.get("financer"),
             "status": "Received" if outstanding <= 0 else ("Partial" if received > 0 else "Pending"),
             "lastUpdated": today(),
         }})
     else:
         committed = ce.round2(body.amount)
-        await db.finance.insert_one({
-            "fileNumber": body.financeFileNumber, "leadId": lead_id,
-            "customerName": lead.get("customerName") if lead else "", "financer": body.financerName,
-            "sanctionedAmount": committed, "receivedAgainstFile": 0.0,
-            "fileOutstanding": committed, "status": "Pending", "receipts": [],
-            "lastUpdated": today(),
-        })
-    await sync_finance_file(body.financeFileNumber)
+        try:
+            await db.finance.insert_one({
+                "fileNumber": finance_file_number, "leadId": lead_id,
+                "customerName": lead.get("customerName") if lead else "", "financer": body.financerName,
+                "sanctionedAmount": committed, "receivedAgainstFile": 0.0,
+                "fileOutstanding": committed, "status": "Pending", "receipts": [],
+                "lastUpdated": today(),
+            })
+        except DuplicateKeyError:
+            await _upsert_finance_file(lead_id, body, (await db.finance.find_one({"leadId": lead_id}))["fileNumber"])
+            return
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {"financeRequired": "Yes", "lastUpdated": now_iso()}})
+    await sync_finance_file(finance_file_number)
 
 
 async def sync_finance_file(file_number):
@@ -2958,6 +3018,7 @@ def _config_diagnostics():
         "googleCredentialSource": cred["credential_source"],
         "gsheetIdPresent": cred["gsheet_id_present"],
         "sheetSyncEnabled": bool(cred["credential_found"] and cred["gsheet_id_present"]),
+        "financeIndexes": dict(_finance_index_status),
     }
 
 
@@ -2968,8 +3029,91 @@ async def config_check():
     return _config_diagnostics()
 
 
+
+async def _audit_finance_integrity_for_unique_indexes():
+    findings = {}
+    findings["financePaymentsWithoutRegister"] = await db.payments.aggregate([
+        {"$match": {"paymentMode": "Finance", "financeFileNumber": {"$nin": [None, ""]}}},
+        {"$lookup": {"from": "finance", "localField": "financeFileNumber", "foreignField": "fileNumber", "as": "financeFile"}},
+        {"$match": {"financeFile": {"$size": 0}}},
+        {"$project": {"_id": 0, "receiptNumber": 1, "leadId": 1, "financeFileNumber": 1}},
+    ]).to_list(1000)
+    findings["financeRegisterWithoutPayments"] = await db.finance.aggregate([
+        {"$lookup": {"from": "payments", "localField": "fileNumber", "foreignField": "financeFileNumber", "as": "payments"}},
+        {"$match": {"payments": {"$size": 0}}},
+        {"$project": {"_id": 0, "fileNumber": 1, "leadId": 1}},
+    ]).to_list(1000)
+    findings["duplicateFinanceLeadIds"] = await db.finance.aggregate([
+        {"$match": {"leadId": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$leadId", "count": {"$sum": 1}, "files": {"$push": "$fileNumber"}}},
+        {"$match": {"count": {"$gt": 1}}},
+    ]).to_list(1000)
+    findings["duplicateFinanceFileNumbers"] = await db.finance.aggregate([
+        {"$match": {"fileNumber": {"$nin": [None, ""]}}},
+        {"$group": {"_id": "$fileNumber", "count": {"$sum": 1}, "leadIds": {"$push": "$leadId"}}},
+        {"$match": {"count": {"$gt": 1}}},
+    ]).to_list(1000)
+    findings["financeNoLeadsWithFinancePayments"] = await db.payments.aggregate([
+        {"$match": {"paymentMode": "Finance"}},
+        {"$lookup": {"from": "leads", "localField": "leadId", "foreignField": "leadId", "as": "lead"}},
+        {"$unwind": "$lead"},
+        {"$match": {"lead.financeRequired": {"$ne": "Yes"}}},
+        {"$project": {"_id": 0, "receiptNumber": 1, "leadId": 1, "financeFileNumber": 1}},
+    ]).to_list(1000)
+    findings["financePaymentsWithBlankFileNumber"] = await db.payments.find(
+        {"paymentMode": "Finance", "financeFileNumber": {"$in": [None, ""]}},
+        {"_id": 0, "receiptNumber": 1, "leadId": 1}
+    ).to_list(1000)
+    logging.info("FINANCE_INTEGRITY_AUDIT: %s", {k: len(v) for k, v in findings.items()})
+    return findings
+
+
+async def _ensure_finance_unique_indexes():
+    global _finance_index_status
+    _finance_index_status = {
+        "status": "CHECKING",
+        "ready": False,
+        "reason": "finance uniqueness audit/index check in progress",
+        "checkedAt": now_iso(),
+        "auditCounts": {},
+    }
+    findings = await _audit_finance_integrity_for_unique_indexes()
+    counts = {k: len(v) for k, v in findings.items()}
+    if findings["duplicateFinanceLeadIds"] or findings["duplicateFinanceFileNumbers"]:
+        _finance_index_status = {
+            "status": "ERROR",
+            "ready": False,
+            "reason": "duplicate finance leadIds/fileNumbers found; unique indexes not created",
+            "checkedAt": now_iso(),
+            "auditCounts": counts,
+        }
+        logging.error("FINANCE_UNIQUE_INDEX_SKIPPED: duplicate finance records found: %s", findings)
+        return findings
+    try:
+        await db.finance.create_index("leadId", unique=True, partialFilterExpression={"leadId": {"$type": "string", "$gt": ""}})
+        await db.finance.create_index("fileNumber", unique=True, partialFilterExpression={"fileNumber": {"$type": "string", "$gt": ""}})
+    except Exception as e:
+        _finance_index_status = {
+            "status": "ERROR",
+            "ready": False,
+            "reason": f"finance unique index creation failed ({type(e).__name__})",
+            "checkedAt": now_iso(),
+            "auditCounts": counts,
+        }
+        logging.exception("FINANCE_UNIQUE_INDEX_ERROR: finance unique index creation failed")
+        return findings
+    _finance_index_status = {
+        "status": "HEALTHY",
+        "ready": True,
+        "reason": "finance unique indexes verified",
+        "checkedAt": now_iso(),
+        "auditCounts": counts,
+    }
+    return findings
+
 @app.on_event("startup")
 async def startup():
+    global _finance_index_status
     cfg = _config_diagnostics()
     if cfg["missingRequired"]:
         logging.warning("CONFIG: missing required environment variables: %s", ", ".join(cfg["missingRequired"]))
@@ -2997,6 +3141,17 @@ async def startup():
         await db.masters_list.create_index([("category", 1), ("value", 1)])
     except Exception:
         pass
+    try:
+        await _ensure_finance_unique_indexes()
+    except Exception as e:
+        _finance_index_status = {
+            "status": "ERROR",
+            "ready": False,
+            "reason": f"finance uniqueness audit failed ({type(e).__name__})",
+            "checkedAt": now_iso(),
+            "auditCounts": {},
+        }
+        logging.exception("FINANCE_UNIQUE_INDEX_AUDIT_ERROR: finance uniqueness audit failed")
     # Insurance rate consistency migration (INS-1)
     try:
         await _migrate_insurance_rates()
