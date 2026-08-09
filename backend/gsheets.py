@@ -286,6 +286,66 @@ def _init():
                    "reason": f"credential at {path} could not be loaded ({type(e).__name__})"}
 
 
+def classify_google_error(e):
+    """Map a Google client exception to a precise, SAFE diagnosis.
+
+    status() previously collapsed every failure into "cannot access sheet -- share it
+    with the service account email", which is wrong for most causes and actively
+    misleading when the sheet IS shared. In particular a revoked or replaced
+    service-account key fails at the OAuth token exchange (invalid_grant / Invalid
+    JWT Signature) before any Sheets call is made, and has nothing to do with sharing.
+
+    Returns (code, reason). Never includes key material, tokens or credential JSON --
+    only the HTTP status, Google's own reason category, and actionable guidance."""
+    status_code = getattr(getattr(e, "resp", None), "status", None)
+    try:
+        status_code = int(status_code)
+    except (TypeError, ValueError):
+        status_code = None
+    low = str(e).lower()
+
+    if "invalid_grant" in low or "invalid jwt signature" in low:
+        return ("credential_rejected",
+                "Google rejected the service-account key (invalid_grant / Invalid JWT "
+                "Signature). The key has been revoked, deleted or replaced in Google Cloud, "
+                "or the JSON belongs to a different/disabled service account. This is NOT a "
+                "sharing problem -- install a current key for this service account as the "
+                "Render Secret File gsheets_credentials.json.")
+    if "invalid_client" in low or "unauthorized_client" in low:
+        return ("credential_invalid",
+                "Google rejected the service-account client (invalid_client / "
+                "unauthorized_client): the credential does not correspond to an active "
+                "service account.")
+    if status_code == 401:
+        return ("unauthenticated",
+                "Google returned 401 Unauthenticated -- the credential was not accepted. "
+                "Check that the service-account key is current.")
+    if status_code == 403:
+        if "has not been used" in low or "is disabled" in low or "accessnotconfigured" in low:
+            return ("api_disabled",
+                    "Google returned 403: the required API is not enabled for this project. "
+                    "Enable the Google Sheets API in Google Cloud.")
+        if "quota" in low or "rate limit" in low:
+            return ("quota_exceeded",
+                    "Google returned 403 for quota/rate limits. Transient -- retry shortly.")
+        return ("permission_denied",
+                "Google returned 403 Permission Denied for this spreadsheet. Share it with "
+                "the service account email as Editor.")
+    if status_code == 404:
+        return ("spreadsheet_not_found",
+                "Google returned 404 -- no spreadsheet with the configured GSHEET_ID is "
+                "visible to this service account. Check GSHEET_ID.")
+    if status_code == 429:
+        return ("quota_exceeded",
+                "Google returned 429 -- read/write quota exceeded. Transient -- retry shortly.")
+    if status_code and status_code >= 500:
+        return ("google_unavailable",
+                f"Google returned {status_code} -- transient Google-side error. Retry shortly.")
+    return ("unknown_error",
+            f"Unexpected error contacting Google Sheets ({type(e).__name__}); "
+            f"status {status_code if status_code is not None else 'n/a'}.")
+
+
 def status():
     global _status
     if _service is None:
@@ -295,12 +355,15 @@ def status():
                 **credential_diagnostics(), "health": _health}
     sheet_id = os.environ.get("GSHEET_ID", "")
     try:
-        _service.spreadsheets().get(spreadsheetId=sheet_id, fields="properties.title").execute()
+        meta = _service.spreadsheets().get(spreadsheetId=sheet_id, fields="properties.title").execute()
         _status["canRead"] = True
-    except Exception:
+        _status["spreadsheetTitle"] = (meta.get("properties") or {}).get("title", "")
+        _status.pop("errorCode", None)
+    except Exception as e:
+        code, reason = classify_google_error(e)
         _status.update({"enabled": False, "canRead": False, "canWrite": False,
-                        "reason": "cannot access sheet — share it with the service account email"})
-        return {**_status, "spreadsheetId": sheet_id, "health": _health}
+                        "errorCode": code, "reason": reason})
+        return {**_status, "spreadsheetId": sheet_id, **credential_diagnostics(), "health": _health}
     try:
         _service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": []}).execute()
         _status.update({"enabled": True, "canWrite": True, "reason": "connected (read + write)"})
@@ -308,11 +371,17 @@ def status():
         code = getattr(getattr(e, "resp", None), "status", None)
         msg = str(e)
         if str(code) == "400" or "at least one request" in msg:
+            # 400 "Must specify at least one request" means the write PASSED permission
+            # and only failed body validation => Editor access confirmed.
             _status.update({"enabled": True, "canWrite": True, "reason": "connected (read + write)"})
+            _status.pop("errorCode", None)
         else:
-            _status.update({"enabled": False, "canWrite": False,
-                            "reason": "read-only — share the sheet with the service account email as EDITOR to enable syncing"})
-    return {**_status, "spreadsheetId": sheet_id, "health": _health}
+            ecode, ereason = classify_google_error(e)
+            _status.update({"enabled": False, "canWrite": False, "errorCode": ecode,
+                            "reason": ("read-only — share the sheet with the service account email "
+                                       "as EDITOR to enable syncing")
+                            if ecode == "permission_denied" else ereason})
+    return {**_status, "spreadsheetId": sheet_id, **credential_diagnostics(), "health": _health}
 
 
 # ---------------------------------------------------------------- header mapping (GS-1)
