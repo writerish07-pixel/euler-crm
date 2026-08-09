@@ -15,3 +15,10 @@ credentials.json
 *.key
 .credentials
 backend/gsheets_credentials.json
+
+# Frontend build-time config: these contain ONLY the public API URL (CRA inlines
+# REACT_APP_* into the browser bundle, so a secret could never live here anyway).
+# They must be committed or the production build compiles an undefined API base.
+!frontend/.env.production
+!frontend/.env.development
+frontend/build/

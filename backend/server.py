@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import io
 import os
 import re
@@ -2849,8 +2850,42 @@ async def reset_transactions(act=Depends(actor)):
     return {"ok": True, "cleared": counts}
 
 
+def _config_diagnostics():
+    """Names + presence only — never values. Logged once at startup so a
+    misconfigured deploy is obvious without ever exposing a secret."""
+    required = ["MONGO_URL", "DB_NAME", "JWT_SECRET"]
+    optional = ["GSHEET_ID", "CORS_ORIGINS"]
+    missing = [k for k in required if not os.environ.get(k, "").strip()]
+    cred = gsheets.credential_diagnostics()
+    return {
+        "required": {k: bool(os.environ.get(k, "").strip()) for k in required},
+        "optional": {k: bool(os.environ.get(k, "").strip()) for k in optional},
+        "missingRequired": missing,
+        "googleCredentialFound": cred["credential_found"],
+        "googleCredentialSource": cred["credential_source"],
+        "gsheetIdPresent": cred["gsheet_id_present"],
+        "sheetSyncEnabled": bool(cred["credential_found"] and cred["gsheet_id_present"]),
+    }
+
+
+@api.get("/admin/config-check", dependencies=[Depends(owner_only)])
+async def config_check():
+    """Owner-only startup/runtime configuration health. Reports which settings are
+    PRESENT, never their values."""
+    return _config_diagnostics()
+
+
 @app.on_event("startup")
 async def startup():
+    cfg = _config_diagnostics()
+    if cfg["missingRequired"]:
+        logging.warning("CONFIG: missing required environment variables: %s", ", ".join(cfg["missingRequired"]))
+    if not cfg["sheetSyncEnabled"]:
+        logging.warning("CONFIG: Google Sheet sync is DISABLED (credentialFound=%s, gsheetId=%s). "
+                        "Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.",
+                        cfg["googleCredentialFound"], cfg["gsheetIdPresent"])
+    else:
+        logging.info("CONFIG: Google Sheet sync enabled (credential source: %s)", cfg["googleCredentialSource"])
     await authmod.seed_users(db)
     res = await seeder.run_seed(db)
     if res.get("seeded"):
