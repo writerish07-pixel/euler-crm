@@ -1405,6 +1405,16 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor)):
 
 
 # ---------------------------------------------------------------- finance
+FINANCE_FILE_PATTERN = re.compile(r"^FN26\d{6}$")
+
+
+def is_legacy_finance_file_number(file_number):
+    """A finance file number that predates the FN26 contract (e.g. the live '55').
+    Historical records keep their number — renumbering them would break every
+    payment and sheet row that references them."""
+    return bool(str(file_number or "").strip()) and not FINANCE_FILE_PATTERN.match(str(file_number).strip())
+
+
 async def _resolve_finance_file_for_payment(lead_id, body: PaymentIn):
     if not (body.financerName or "").strip():
         raise HTTPException(422, "Financer is required for Finance payments")
@@ -1416,6 +1426,14 @@ async def _resolve_finance_file_for_payment(lead_id, body: PaymentIn):
             raise HTTPException(422, "Finance file number already belongs to another lead")
         if by_lead and by_lead.get("fileNumber") != supplied:
             raise HTTPException(422, "Lead already has a different finance file number")
+        # A NEW file must follow the numbering contract. Staff are never required to
+        # invent one — leaving the field blank generates FN26xxxxxx. This is what let
+        # a hand-typed "55" into production and made the Finance Register unkeyable.
+        # An EXISTING record keeps whatever number it already has (legacy support).
+        if not by_file and not FINANCE_FILE_PATTERN.match(supplied):
+            raise HTTPException(422,
+                f"'{supplied}' is not a valid Finance File Number. Leave the field blank and "
+                f"the system will generate one (FN26xxxxxx), or enter an existing file number.")
         return supplied
     if by_lead:
         return by_lead.get("fileNumber")
