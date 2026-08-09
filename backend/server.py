@@ -4,7 +4,8 @@ import io
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 from typing import Optional, List
 
@@ -66,8 +67,8 @@ async def sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
     updates it instead of appending a duplicate.
     """
     res = await gsheets.sync(entity, doc)
-    if res.get("operation") == "skipped":
-        return res  # sync disabled — nothing to log
+    if res.get("operation") in ("skipped", "blocked"):
+        return res  # sync disabled or env-write-blocked — nothing to log/retry
     eid = entity_id or str(doc.get(gsheets.SYNC_MAP.get(entity, ("", "", []))[1], "") or "")
     key = {"entityType": entity, "entityId": eid}
     entry = {
@@ -1375,8 +1376,18 @@ async def _upsert_finance_file(lead_id, body: PaymentIn, finance_file_number: st
         except DuplicateKeyError:
             await _upsert_finance_file(lead_id, body, (await db.finance.find_one({"leadId": lead_id}))["fileNumber"])
             return
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {"financeRequired": "Yes", "lastUpdated": now_iso()}})
+    # DEFECT C fix: mirror the authoritative finance linkage onto the lead so the
+    # Lead Register (which maps financerName/financeFileNumber as lead columns) is never
+    # stale. recompute_lead runs right after this and pushes the lead row to the sheet.
+    fin = await db.finance.find_one({"fileNumber": finance_file_number})
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "financeRequired": "Yes",
+        "financerName": (fin or {}).get("financer") or body.financerName or "",
+        "financeFileNumber": finance_file_number,
+        "lastUpdated": now_iso(),
+    }})
     await sync_finance_file(finance_file_number)
+    await rebuild_finance_views()
 
 
 async def sync_finance_file(file_number):
@@ -1436,6 +1447,66 @@ async def list_finance(view: str = "all"):
     return files
 
 
+# --- Derived Finance Pending / Overdue sheet tabs (DEFECT B) -----------------
+# These were legacy Apps-Script report tabs the migrated app never maintained, so
+# they stayed frozen ("Pending: 0") while the Finance Register held live open files.
+# We now rebuild them deterministically from the authoritative Finance Register +
+# Delivery Tracker on every finance-affecting event, matching the workbook's format.
+FINANCE_PENDING_TITLE = "Finance Pending — open files awaiting financer payment (SLA: 2 days after delivery)"
+FINANCE_OVERDUE_TITLE = "Finance Overdue — files past 2-day SLA"
+FINANCE_PENDING_HEADER = ["File Number", "Lead ID", "Customer", "Financer", "Sanctioned Amount",
+                          "Received", "File Outstanding", "Status", "Delivery Date",
+                          "Days Since Delivery", "Due By", "Overdue", "Last Payment Date"]
+FINANCE_OVERDUE_HEADER = ["File Number", "Lead ID", "Customer", "Financer", "Sanctioned Amount",
+                          "File Outstanding", "Status", "Delivery Date", "Days Since Delivery", "Due By"]
+
+
+def _finance_due_by(delivery_date: str) -> str:
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", str(delivery_date or "")):
+        y, m, d = map(int, delivery_date.split("-"))
+        return (date(y, m, d) + timedelta(days=FINANCE_RECEIPT_SLA_DAYS)).isoformat()
+    return ""
+
+
+async def rebuild_finance_views():
+    """Rebuild the derived Finance Pending & Finance Overdue sheet tabs. No-op if
+    Sheets sync is disabled. Full-mirror (clear+write) so closed/received files
+    correctly disappear rather than lingering."""
+    files = [clean(f) for f in await db.finance.find().to_list(2000)]
+    pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
+    enriched = await _enrich_finance_with_delivery(pending)
+    overdue = [f for f in enriched if f.get("overdue")]
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    total_out = ce.round2(sum(ce.num(f.get("fileOutstanding")) for f in pending))
+
+    p_rows = [[
+        f.get("fileNumber"), f.get("leadId"), f.get("customerName"), f.get("financer"),
+        ce.num(f.get("sanctionedAmount")), ce.num(f.get("receivedAgainstFile")), ce.num(f.get("fileOutstanding")),
+        f.get("status"), f.get("deliveryDate") or "",
+        f.get("daysSinceDelivery") if f.get("daysSinceDelivery") != "" else "",
+        _finance_due_by(f.get("deliveryDate")), "Yes" if f.get("overdue") else "No", f.get("lastUpdated") or "",
+    ] for f in enriched]
+    pending_values = [[FINANCE_PENDING_TITLE],
+                      [f"Refreshed: {ts} | Pending: {len(pending)} | Overdue: {len(overdue)} | Total Outstanding: ₹{total_out}"],
+                      FINANCE_PENDING_HEADER]
+    pending_values += p_rows or [["No pending finance files."]]
+
+    o_rows = [[
+        f.get("fileNumber"), f.get("leadId"), f.get("customerName"), f.get("financer"),
+        ce.num(f.get("sanctionedAmount")), ce.num(f.get("fileOutstanding")), f.get("status"),
+        f.get("deliveryDate") or "", f.get("daysSinceDelivery") if f.get("daysSinceDelivery") != "" else "",
+        _finance_due_by(f.get("deliveryDate")),
+    ] for f in overdue]
+    overdue_values = [[FINANCE_OVERDUE_TITLE],
+                      [f"Refreshed: {ts} | Overdue: {len(overdue)}"],
+                      FINANCE_OVERDUE_HEADER]
+    overdue_values += o_rows or [["No overdue finance files. ✔"]]
+
+    ok_p = await gsheets.overwrite_report_tab(gsheets.FINANCE_PENDING_TAB, pending_values)
+    ok_o = await gsheets.overwrite_report_tab(gsheets.FINANCE_OVERDUE_TAB, overdue_values)
+    return {"pending": len(pending), "overdue": len(overdue), "syncedPending": ok_p, "syncedOverdue": ok_o}
+
+
 class ReceiptIn(BaseModel):
     amount: float
     date: str = ""
@@ -1464,6 +1535,8 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
     await write_audit(act, "receipt", "finance", leadId=f.get("leadId", ""), financeFileNumber=file_number,
                       old={"receivedAgainstFile": ce.num(f.get("receivedAgainstFile")), "fileOutstanding": ce.num(f.get("fileOutstanding"))},
                       new={"receivedAgainstFile": received, "fileOutstanding": outstanding, "amount": ce.round2(body.amount)})
+    await sync_finance_file(file_number)
+    await rebuild_finance_views()
     return clean(await db.finance.find_one({"fileNumber": file_number}))
 
 
@@ -1516,6 +1589,7 @@ async def mark_delivery(lead_id: str, body: DeliveryIn):
             "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
         })
         await _upsert_incentive_register_on_delivery(lead_id, body.deliveryDate or today())
+        await rebuild_finance_views()
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -2664,6 +2738,21 @@ async def gsheets_retry(limit: int = 100):
     return {"ok": True, "retried": retried, "recovered": recovered, "stillFailing": still_failing}
 
 
+@api.get("/integrations/gsheets/inventory", dependencies=[Depends(owner_only)])
+async def gsheets_inventory():
+    """Phase 2/3: read-only contract of the LIVE workbook. Enumerates every tab, its
+    header row + column headers, a source-of-truth classification, and (for tabs the
+    CRM syncs) the resolved column→field mapping, sync direction and authoritative
+    entity. Generated from the actual sheet — never writes."""
+    return await asyncio.to_thread(gsheets.inventory)
+
+
+@api.get("/integrations/gsheets/env-safety", dependencies=[Depends(owner_only)])
+async def gsheets_env_safety():
+    """Phase 1: preview/production isolation status."""
+    return gsheets.env_safety()
+
+
 @api.get("/integrations/gsheets/reconcile", dependencies=[Depends(owner_only)])
 async def gsheets_reconcile():
     """CRM vs Google Sheet reconciliation. Read-only: compares CRM record counts and
@@ -2676,8 +2765,10 @@ async def gsheets_reconcile():
         "leads": await db.leads.find().to_list(5000),
         "bookings": await db.bookings.find().to_list(5000),
         "payments": await db.payments.find().to_list(5000),
+        "deliveries": await db.deliveries.find().to_list(5000),
         "claims": await db.claims.find().to_list(5000),
         "finance": await db.finance.find().to_list(5000),
+        "insurance": await db.insurance.find().to_list(5000),
     }
     report, mismatches = {}, []
     for entity, docs in datasets.items():
@@ -2692,22 +2783,44 @@ async def gsheets_reconcile():
             if id_field not in mapping:
                 report[entity] = {"tab": tab, "error": f"ID header '{id_field}' not found", "crmCount": len(crm_ids)}
                 continue
-            sheet_ids = await asyncio.to_thread(gsheets._read_id_column, tab, mapping[id_field], hr)
+            sheet_id_list = await asyncio.to_thread(gsheets._read_id_column_list, tab, mapping[id_field], hr)
         except Exception as e:
             report[entity] = {"tab": tab, "error": str(e)[:200], "crmCount": len(crm_ids)}
             continue
+        sheet_ids = set(sheet_id_list)
+        # Counter, not list.count() per element — the latter is O(n^2) and this runs
+        # over every ID column in the workbook (thousands of rows x 7 entities).
+        dupes = sorted(i for i, n in Counter(sheet_id_list).items() if n > 1)
         missing_in_sheet = sorted(crm_ids - sheet_ids)
+        missing_in_app = sorted(sheet_ids - crm_ids)
         report[entity] = {"tab": tab, "crmCount": len(crm_ids), "sheetCount": len(sheet_ids),
-                          "missingInSheet": len(missing_in_sheet),
-                          "duplicateIdsInSheet": 0}
+                          "missingInSheet": len(missing_in_sheet), "missingInApp": len(missing_in_app),
+                          "duplicateIdsInSheet": len(dupes)}
         for mid in missing_in_sheet[:50]:
-            mismatches.append({"entity": entity, "id": mid, "field": id_field,
-                               "crmValue": mid, "sheetValue": "<absent>",
-                               "expected": "row present in sheet", "actual": "missing",
+            mismatches.append({"entity": entity, "id": mid, "field": id_field, "tab": tab,
+                               "appValue": mid, "sheetValue": "<absent>",
+                               "expected": "row present in sheet", "issue": "MISSING_IN_SHEET",
                                "severity": "HIGH"})
+        for mid in missing_in_app[:50]:
+            mismatches.append({"entity": entity, "id": mid, "field": id_field, "tab": tab,
+                               "appValue": "<absent>", "sheetValue": mid,
+                               "expected": "row present in app DB", "issue": "MISSING_IN_APP",
+                               "severity": "MEDIUM"})
+        for did in dupes[:50]:
+            mismatches.append({"entity": entity, "id": did, "field": id_field, "tab": tab,
+                               "issue": "DUPLICATE_ID", "severity": "HIGH"})
+    # Orphan check: finance file references a lead that is not in the CRM lead set.
+    lead_ids = {str(d.get("leadId", "") or "").strip() for d in datasets["leads"] if d.get("leadId")}
+    for f in datasets["finance"]:
+        lid = str(f.get("leadId", "") or "").strip()
+        if lid and lid not in lead_ids:
+            mismatches.append({"entity": "finance", "id": f.get("fileNumber"), "field": "leadId", "tab": "Finance Register",
+                               "issue": "ORPHAN_REFERENCE", "appValue": lid,
+                               "expected": "leadId present in Lead Register", "severity": "HIGH"})
     unresolved = await db.sheet_sync_log.count_documents({"status": {"$ne": "OK"}})
     return {"ok": True, "entities": report, "mismatches": mismatches,
-            "unresolvedSyncLogEntries": unresolved,
+            "mismatchCount": len(mismatches),
+            "unresolvedSyncLogEntries": unresolved, "envSafety": gsheets.env_safety(),
             "verdict": "CLEAN" if not mismatches and unresolved == 0 else "DIFFERENCES FOUND"}
 
 
@@ -2721,7 +2834,12 @@ async def gsheets_backfill():
                    "deliveryDate": l.get("deliveryDate"), "delivered": "Yes",
                    "invoiceNumber": l.get("invoiceNumber", ""), "chassisNumber": l.get("chassisNumber", ""),
                    "numberPlate": l.get("numberPlate", "")} for l in delivered]
-    return await gsheets.backfill({"leads": leads, "bookings": bookings, "payments": payments, "deliveries": deliveries})
+    result = await gsheets.backfill({"leads": leads, "bookings": bookings, "payments": payments, "deliveries": deliveries})
+    # Rebuild derived Finance Pending / Overdue tabs from the now-synced registers.
+    fin_views = await rebuild_finance_views()
+    if isinstance(result, dict):
+        result["financeViews"] = fin_views
+    return result
 
 
 # ---------------------------------------------------------------- owner reports

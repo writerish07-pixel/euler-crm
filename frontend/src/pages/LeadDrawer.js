@@ -388,6 +388,9 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
   const add = async () => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
+    // The backend requires a financer on Finance receipts (it is what resolves/creates the
+    // finance file). Ask for it here so staff get a clear prompt instead of a raw 422.
+    if (isFinance && !form.financerName) return toast.error("Select a Financer for a Finance receipt");
     const saved = await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount });
     const file = saved?.financeFileNumber ? ` · Finance File ${saved.financeFileNumber}` : "";
     toast.success(`Receipt added · ${inr(+form.amount)}${file}`);

@@ -95,7 +95,10 @@ function SyncBadge() {
   if (!s) return null;
   const failed = s.enabled && s.health?.lastWriteOk === false;
   let tone, dot, label, title;
-  if (failed) {
+  if (s.envSafety?.writeBlocked) {
+    tone = "bg-sky-50 text-sky-700 ring-sky-600/20"; dot = "bg-sky-500"; label = "Preview · Writes Blocked";
+    title = s.envSafety.blockReason || "Preview is isolated from the production Google Sheet — writes are blocked by design.";
+  } else if (failed) {
     tone = "bg-red-50 text-red-700 ring-red-600/20"; dot = "bg-red-500"; label = "Sync Error";
     title = `Last sheet write failed: ${s.health?.lastError || "unknown"}`;
   } else if (s.enabled && s.canWrite) {
