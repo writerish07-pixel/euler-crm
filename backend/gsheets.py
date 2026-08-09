@@ -199,16 +199,75 @@ def _col_letter(idx0):
     return s
 
 
+# Where the service-account JSON may live, in priority order. Render Secret Files are
+# mounted read-only at /etc/secrets/<filename>, which is why an unset
+# GSHEET_CREDENTIALS_PATH previously produced "credentials JSON not found" on Render
+# even though the secret file was correctly configured — the old resolver looked at
+# nothing else. The credential is never committed; these are runtime locations only.
+_SECRET_FILE_NAME = "gsheets_credentials.json"
+_CRED_CANDIDATES = [
+    ("env:GSHEET_CREDENTIALS_PATH", lambda: os.environ.get("GSHEET_CREDENTIALS_PATH", "").strip()),
+    ("render-secret-file", lambda: f"/etc/secrets/{_SECRET_FILE_NAME}"),
+    ("backend-local", lambda: str(Path(__file__).resolve().parent / _SECRET_FILE_NAME)),
+    ("repo-root-local", lambda: str(Path(__file__).resolve().parent.parent / _SECRET_FILE_NAME)),
+]
+
+
+def resolve_credentials_path():
+    """First existing, readable credential file. Returns (path, source_label) or
+    (None, None). Only ever returns a PATH — never file contents."""
+    for label, getter in _CRED_CANDIDATES:
+        try:
+            raw = getter()
+        except Exception:
+            continue
+        if not raw:
+            continue
+        try:
+            pth = Path(raw)
+            if pth.is_file():
+                return str(pth), label
+        except (OSError, ValueError):
+            continue
+    return None, None
+
+
+def credential_diagnostics():
+    """Safe, loggable credential state. Never includes JSON contents or the key."""
+    path, source = resolve_credentials_path()
+    checked = []
+    for label, getter in _CRED_CANDIDATES:
+        try:
+            raw = getter()
+        except Exception:
+            raw = ""
+        if raw:
+            checked.append({"source": label, "path": str(raw), "exists": Path(raw).is_file()})
+    return {
+        "credential_found": bool(path),
+        "credential_source": source,
+        "credential_path": path,
+        "gsheet_id_present": bool(os.environ.get("GSHEET_ID", "").strip()),
+        "candidates_checked": checked,
+    }
+
+
 def _init():
     global _service, _status
-    path = os.environ.get("GSHEET_CREDENTIALS_PATH", "")
-    sheet_id = os.environ.get("GSHEET_ID", "")
-    if not path or not Path(path).exists():
-        _status = {"enabled": False, "reason": "credentials JSON not found — add the service account key to enable sync", "email": None}
+    path, source = resolve_credentials_path()
+    sheet_id = os.environ.get("GSHEET_ID", "").strip()
+    if not path:
+        tried = ", ".join(f"{lbl}" for lbl, _ in _CRED_CANDIDATES)
+        _status = {"enabled": False, "email": None, "credentialFound": False, "credentialSource": None,
+                   "reason": f"credentials JSON not found — looked at: {tried}. On Render add a Secret "
+                             f"File named {_SECRET_FILE_NAME} (mounted at /etc/secrets/{_SECRET_FILE_NAME}) "
+                             f"or set GSHEET_CREDENTIALS_PATH."}
         _service = None
         return
     if not sheet_id:
-        _status = {"enabled": False, "reason": "GSHEET_ID missing", "email": None}
+        _status = {"enabled": False, "email": None, "credentialFound": True, "credentialSource": source,
+                   "reason": "GSHEET_ID missing"}
+        _service = None
         return
     try:
         from google.oauth2 import service_account
@@ -217,10 +276,14 @@ def _init():
         info = json.loads(Path(path).read_text())
         creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
         _service = build("sheets", "v4", credentials=creds, cache_discovery=False)
-        _status = {"enabled": True, "reason": "connected", "email": info.get("client_email")}
+        _status = {"enabled": True, "reason": "connected", "email": info.get("client_email"),
+                   "credentialFound": True, "credentialSource": source}
     except Exception as e:
+        # Deliberately does NOT interpolate the file contents — only the exception type
+        # and the resolved PATH, so a malformed key can never be echoed into logs.
         _service = None
-        _status = {"enabled": False, "reason": f"init failed: {e}", "email": None}
+        _status = {"enabled": False, "email": None, "credentialFound": True, "credentialSource": source,
+                   "reason": f"credential at {path} could not be loaded ({type(e).__name__})"}
 
 
 def status():
@@ -228,7 +291,8 @@ def status():
     if _service is None:
         _init()
     if _service is None:
-        return {**_status, "spreadsheetId": os.environ.get("GSHEET_ID", ""), "health": _health}
+        return {**_status, "spreadsheetId": os.environ.get("GSHEET_ID", ""),
+                **credential_diagnostics(), "health": _health}
     sheet_id = os.environ.get("GSHEET_ID", "")
     try:
         _service.spreadsheets().get(spreadsheetId=sheet_id, fields="properties.title").execute()
@@ -498,7 +562,8 @@ def preflight():
     if _service is None:
         _init()
     if _service is None or not _status.get("enabled"):
-        return {"enabled": False, "reason": _status.get("reason", "sync disabled"), "tabs": {}}
+        return {"enabled": False, "reason": _status.get("reason", "sync disabled"),
+                **credential_diagnostics(), "tabs": {}}
     invalidate_header_cache()
     out = {}
     for entity, spec in SYNC_MAP.items():
@@ -519,7 +584,8 @@ def preflight():
             "missingHeaders": missing,
             "willSync": id_field in mapping,
         }
-    return {"enabled": True, "spreadsheetId": os.environ.get("GSHEET_ID", ""), "tabs": out,
+    return {"enabled": True, "spreadsheetId": os.environ.get("GSHEET_ID", ""),
+            **credential_diagnostics(), "tabs": out,
             "intentionallyUnmapped": INTENTIONALLY_UNMAPPED}
 
 
