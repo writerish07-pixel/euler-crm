@@ -686,12 +686,14 @@ async def create_lead(body: LeadIn):
         "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(),
     }
     await db.leads.insert_one(doc)
-    await db.activities.insert_one({
+    _act_doc = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": today(),
         "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Note",
         "discussion": "Lead created from CRM", "executive": body.executive,
         "customerName": body.customerName, "mobile": body.mobile, "model": body.interestedModel,
-    })
+    }
+    await db.activities.insert_one(dict(_act_doc))
+    await sheet_sync("activities", _act_doc)
     await sheet_sync("leads", doc)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
@@ -847,12 +849,14 @@ async def convert_booking(lead_id: str, body: BookingIn):
         await _add_payment_internal(lead_id, PaymentIn(
             amount=body.bookingAmount, paymentMode=body.paymentMode, date=bdate,
             narration="Booking advance"))
-    await db.activities.insert_one({
+    _bk_act = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": bdate,
         "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Booking",
         "discussion": "Booking converted.", "executive": lead.get("executive"),
         "customerName": lead.get("customerName"), "mobile": lead.get("mobile"), "model": lead.get("interestedModel"),
-    })
+    }
+    await db.activities.insert_one(dict(_bk_act))
+    await sheet_sync("activities", _bk_act)
     await recompute_lead(lead_id)
     return {"bookingId": booking_id, "snapshotId": snapshot_id, "lead": clean(await db.leads.find_one({"leadId": lead_id}))}
 
@@ -1441,6 +1445,7 @@ async def add_activity(lead_id: str, body: ActivityIn):
         "customerName": lead.get("customerName"), "mobile": lead.get("mobile"), "model": lead.get("interestedModel"),
     }
     await db.activities.insert_one(doc)
+    await sheet_sync("activities", doc)
     return clean(doc)
 
 
@@ -2461,14 +2466,15 @@ async def gsheets_reconcile():
         spec = gsheets.SYNC_MAP.get(entity)
         if not spec:
             continue
-        tab, id_field, fields = spec
+        tab, id_field, fields = spec[0], spec[1], spec[2]
         crm_ids = {str(d.get(id_field, "") or "").strip() for d in docs if d.get(id_field)}
         try:
-            mapping, missing = gsheets._resolve_columns(tab, fields, use_cache=False)
+            hr = gsheets._header_row_for(entity, tab)
+            mapping, missing = gsheets._resolve_columns(tab, fields, use_cache=False, header_row=hr)
             if id_field not in mapping:
                 report[entity] = {"tab": tab, "error": f"ID header '{id_field}' not found", "crmCount": len(crm_ids)}
                 continue
-            sheet_ids = await asyncio.to_thread(gsheets._read_id_column, tab, mapping[id_field])
+            sheet_ids = await asyncio.to_thread(gsheets._read_id_column, tab, mapping[id_field], hr)
         except Exception as e:
             report[entity] = {"tab": tab, "error": str(e)[:200], "crmCount": len(crm_ids)}
             continue

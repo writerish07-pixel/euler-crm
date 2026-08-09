@@ -35,61 +35,116 @@ def _tab(env_key, default):
 
 
 SYNC_MAP = {
+    # entity -> (tab, stable ID field, CRM fields we own, header row hint)
+    # Tab names and header rows are overridable by env var. header_row=None means
+    # auto-detect (the row carrying the most text labels in the first few rows).
+    # Verified against Euler Master (2).xlsx: the Lead Register's real database
+    # header row is row 3 starting at column J — rows 1-2 are the SEARCH/helper
+    # area, which we never touch.
     "leads": (_tab("GSHEET_TAB_LEADS", "Lead Register"), "leadId",
-              ["leadId", "createdDate", "customerName", "mobile", "leadSource",
-               "interestedModel", "variant", "executive", "currentStatus"]),
+              ["leadId", "createdDate", "customerName", "mobile", "altMobile", "village", "city",
+               "leadSource", "interestedModel", "variant", "executive", "currentStatus", "priority",
+               "budget", "nextFollowupDate", "bookingDate", "bookingAmount", "financeRequired",
+               "exchangeRequired", "deliveryStatus", "deliveryDate", "outstandingAmount", "remarks",
+               "lastUpdated", "accountStatus", "exShowroom", "rto", "insuranceAmount",
+               "accessoriesAmount", "handlingCharges", "trc", "fastag", "extendedWarranty",
+               "otherCharges", "grossVehicleCost", "customerPayable", "financerName",
+               "financeFileNumber", "lastPaymentMode", "totalReceived", "consumerDiscount",
+               "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount",
+               "totalDiscount", "oemSchemeAmount", "dealerSchemeAmount", "customerOutstanding",
+               "companyOutstanding", "insurerName", "invoiceNumber", "chassisNumber", "numberPlate",
+               "dealerTotalEarnings"], 3),
+    "activities": (_tab("GSHEET_TAB_ACTIVITIES", "Activity Log"), "activityId",
+                   ["activityId", "leadId", "date", "time", "activityType", "discussion",
+                    "executive", "customerName", "mobile", "model"], None),
     "bookings": (_tab("GSHEET_TAB_BOOKINGS", "Booking Register"), "bookingId",
-                 ["bookingId", "leadId", "customerName", "bookingDate", "model",
-                  "variant", "bookingAmount", "paymentMode", "bookingStatus"]),
+                 ["bookingId", "leadId", "customerName", "bookingDate", "model", "variant",
+                  "bookingAmount", "financeRequired", "exchangeRequired", "snapshotId",
+                  "bookingStatus", "createdDate", "amountReceived", "paymentMode"], None),
     "payments": (_tab("GSHEET_TAB_PAYMENTS", "Payment Ledger"), "receiptNumber",
-                 ["receiptNumber", "paymentId", "leadId", "customerName", "date", "amount",
-                  "paymentMode", "narration", "runningTotal", "outstandingBalance"]),
+                 ["receiptNumber", "leadId", "customerName", "date", "amount", "paymentMode",
+                  "narration", "runningTotal", "outstandingBalance", "paymentId",
+                  "financerName", "financeFileNumber"], None),
     "deliveries": (_tab("GSHEET_TAB_DELIVERIES", "Delivery Tracker"), "leadId",
-                   ["leadId", "customerName", "deliveryDate", "delivered",
-                    "invoiceNumber", "chassisNumber", "numberPlate"]),
+                   ["leadId", "customerName", "insurance", "registration", "invoice", "accessories",
+                    "rc", "numberPlate", "pdi", "delivered", "deliveryDate", "insurerName",
+                    "invoiceNumber", "chassisNumber"], None),
     "claims": (_tab("GSHEET_TAB_CLAIMS", "Scheme Claim Register"), "claimId",
-               ["claimId", "leadId", "customer", "model", "component",
-                "claimAmount", "claimStatus", "receivedAmount", "claimReference"]),
+               ["claimId", "leadId", "customer", "model", "variant", "bookingDate", "component",
+                "componentKey", "eligibleClaim", "claimAmount", "receivedAmount", "claimStatus",
+                "claimReference", "submittedDate", "approvedDate"], None),
     "insurance": (_tab("GSHEET_TAB_INSURANCE", "Insurance Register"), "entryId",
-                  ["entryId", "leadId", "customerName", "insuranceCompany",
-                   "policyNumber", "insuranceAmount", "payoutRatePct",
-                   "expectedPayout", "receivedPayout", "payoutOutstanding", "status"]),
-    # GS-5 — previously had no Sheet destination at all.
+                  ["entryId", "leadId", "customerName", "mobile", "model", "variant",
+                   "insuranceCompany", "policyNumber", "insuranceAmount", "payoutRatePct",
+                   "expectedPayout", "receivedPayout", "payoutOutstanding", "status"], None),
     "finance": (_tab("GSHEET_TAB_FINANCE", "Finance Register"), "financeFileNumber",
                 ["financeFileNumber", "leadId", "customerName", "financerName",
-                 "committedAmount", "disbursedAmount", "financeOutstanding", "status"]),
-    "exchange": (_tab("GSHEET_TAB_EXCHANGE", "Exchange Register"), "leadId",
-                 ["leadId", "customerName", "exchangeRequired", "finalExchangeValue",
-                  "exchangeBonus", "exchangeMargin"]),
-    "dealer_earnings": (_tab("GSHEET_TAB_DEALER_EARNINGS", "Dealer Earnings"), "leadId",
-                        ["leadId", "customerName", "model", "dealerMarginNetExGst",
-                         "dealerSchemeRetained", "customerInsuranceBenefitPassed",
+                 "committedAmount", "disbursedAmount", "financeOutstanding", "status"], None),
+    "dealer_earnings": (_tab("GSHEET_TAB_DEALER_EARNINGS", "Dealer Earnings Register"), "leadId",
+                        ["leadId", "bookingId", "customerName", "executive", "model", "variant",
+                         "bookingDate", "deliveryDate", "invoiceNumber", "customerPayable",
+                         "oemEligible", "customerSchemeBenefitPassed", "dealerSchemeRetained",
+                         "insurancePayout", "customerInsuranceBenefitPassed", "dealerInsuranceIncome",
                          "financeIncentive", "accessoriesMargin", "exchangeMargin",
-                         "documentationIncome", "warrantyIncome", "rsaIncome",
-                         "referralIncome", "campaignIncentive", "otherIncome",
-                         "oemExtraSupportRetained", "extraDealerIncomeTotal",
-                         "dealerTotalEarnings"]),
+                         "documentationIncome", "warrantyIncome", "rsaIncome", "referralIncome",
+                         "campaignIncentive", "otherIncome", "dealerTotalEarnings",
+                         "dealerMarginNetExGst", "oemExtraSupportRetained"], None),
 }
 
-# Header aliases for the few CRM fields whose natural sheet header does not
-# normalise to the same token. Normalisation (lowercase, strip non-alphanumerics)
-# already matches e.g. "Customer Name" <-> customerName, "Lead ID" <-> leadId.
+# Entities the CRM computes but which have NO destination in the existing workbook.
+# Per the integration rule we do NOT create a tab for them — they are recorded here as
+# intentionally unmapped. Exchange values still reach the sheet via the Dealer Earnings
+# Register ("Exchange Margin") and the Lead Register ("Exchange Bonus"/"Exchange Required").
+INTENTIONALLY_UNMAPPED = {
+    "exchange": "No Exchange Register tab exists in the workbook; exchange data is carried by "
+                "Lead Register (Exchange Required / Exchange Bonus) and Dealer Earnings Register "
+                "(Exchange Margin). No tab is created.",
+}
+
+# Explicit, approved aliases: CRM field -> the ACTUAL header text in Euler Master (2).xlsx.
+# Normalisation (lowercase, strip non-alphanumerics) already resolves the majority
+# (e.g. "Customer Name"<->customerName, "BookingID"<->bookingId, "RTO"<->rto).
+# Only genuinely different wording is listed. No fuzzy matching is used anywhere.
 HEADER_ALIASES = {
-    "payoutRatePct": ["payout rate", "payout rate %", "payoutrate", "payout %"],
-    "interestedModel": ["model", "interested model"],
-    "customer": ["customer name", "customer"],
-    "customerName": ["customer name", "customer"],
-    "date": ["payment date", "date", "receipt date"],
+    # Lead Register
+    "altMobile": ["alternate mobile"],
+    "dsaDiscount": ["dsa bonus", "dsa discount"],
+    "dealerTotalEarnings": ["dealer earnings", "total dealer earnings"],
+    "nextFollowupDate": ["next follow-up date", "next followup date"],
+    # Booking Register
+    "model": ["vehicle model", "model", "interested model"],
+    "interestedModel": ["interested model", "vehicle model", "model"],
+    "snapshotId": ["commercialsnapshotid", "commercial snapshot id"],
+    "createdDate": ["created date"],
+    "amountReceived": ["amount received"],
+    # Payment Ledger
+    "date": ["date", "payment date", "receipt date"],
     "amount": ["amount", "payment amount", "receipt amount"],
-    "dealerMarginNetExGst": ["dealer margin", "dealer margin net ex gst", "dealer margin (net ex gst)"],
-    "dealerSchemeRetained": ["dealer scheme retained", "scheme retained"],
-    "customerInsuranceBenefitPassed": ["dealer insurance income", "customer insurance benefit passed"],
-    "extraDealerIncomeTotal": ["extra dealer income", "extra income total"],
-    "dealerTotalEarnings": ["dealer total earnings", "total earnings"],
-    "financeFileNumber": ["finance file number", "file number", "finance file no"],
-    "committedAmount": ["committed amount", "finance committed"],
-    "disbursedAmount": ["disbursed amount", "finance disbursed"],
-    "financeOutstanding": ["finance outstanding", "outstanding"],
+    # Finance Register — headers differ substantially from CRM field names
+    "financeFileNumber": ["file number", "finance file number"],
+    "financerName": ["financer", "financer name"],
+    "committedAmount": ["sanctioned amount"],
+    "disbursedAmount": ["received against file"],
+    "financeOutstanding": ["file outstanding"],
+    # Insurance Register
+    "insuranceCompany": ["insurance company"],
+    "payoutRatePct": ["payout rate %", "payout rate"],
+    # Scheme Claim Register
+    "claimReference": ["claim reference number", "claim reference"],
+    "submittedDate": ["claim submitted date"],
+    "approvedDate": ["claim approved date"],
+    "customer": ["customer", "customer name"],
+    # Dealer Earnings Register — note "Customer Insurance Benefit Passed" (S) and
+    # "Dealer Insurance Income" (T) are DIFFERENT columns and must not be conflated.
+    "customerInsuranceBenefitPassed": ["customer insurance benefit passed"],
+    "dealerInsuranceIncome": ["dealer insurance income"],
+    "oemEligible": ["oem eligible scheme"],
+    "customerSchemeBenefitPassed": ["customer scheme benefit passed"],
+    "insurancePayout": ["insurance payout"],
+    "dealerSchemeRetained": ["dealer scheme retained"],
+    "dealerMarginNetExGst": ["dealer margin net (ex gst)", "dealer margin net ex gst"],
+    "oemExtraSupportRetained": ["oem extra support retained"],
+    "rsaIncome": ["rsa income"],
 }
 
 MASTERS_TAB = _tab("GSHEET_TAB_MASTERS", "Masters")
@@ -167,22 +222,47 @@ def status():
 
 
 # ---------------------------------------------------------------- header mapping (GS-1)
-def _read_header_row(tab):
+def _header_row_for(entity, tab):
+    """Which sheet row carries this tab's real header labels.
+    Env override GSHEET_HEADERROW_<ENTITY> wins; then the per-entity hint; then
+    auto-detect by picking the row (of the first 5) with the most text labels.
+    The Lead Register's real database header is row 3 — rows 1-2 are the
+    SEARCH/helper area, which the CRM must never write into."""
+    env = os.environ.get(f"GSHEET_HEADERROW_{entity.upper()}", "").strip()
+    if env.isdigit():
+        return int(env)
+    hint = SYNC_MAP.get(entity, (None, None, None, None))[3] if entity in SYNC_MAP else None
+    if hint:
+        return int(hint)
     sheet_id = os.environ.get("GSHEET_ID", "")
     res = _service.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range=f"'{tab}'!1:1").execute()
+        spreadsheetId=sheet_id, range=f"'{tab}'!1:5").execute()
+    rows = res.get("values", [])
+    best, best_n = 1, -1
+    for i, row in enumerate(rows, start=1):
+        n = sum(1 for c in row if isinstance(c, str) and c.strip())
+        if n > best_n:
+            best_n, best = n, i
+    return best
+
+
+def _read_header_row(tab, header_row=1):
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    res = _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=f"'{tab}'!{header_row}:{header_row}").execute()
     vals = res.get("values", [])
     return vals[0] if vals else []
 
 
-def _resolve_columns(tab, fields, use_cache=True):
+def _resolve_columns(tab, fields, use_cache=True, header_row=1):
     """Map each CRM field -> 0-based column index using the tab's ACTUAL headers.
     Returns (mapping, missing_fields). Never guesses a position."""
-    if use_cache and tab in _header_cache:
-        headers = _header_cache[tab]
+    ck = (tab, header_row)
+    if use_cache and ck in _header_cache:
+        headers = _header_cache[ck]
     else:
-        headers = _read_header_row(tab)
-        _header_cache[tab] = headers
+        headers = _read_header_row(tab, header_row)
+        _header_cache[ck] = headers
     by_norm = {}
     for i, h in enumerate(headers):
         n = _norm(h)
@@ -205,13 +285,14 @@ def _resolve_columns(tab, fields, use_cache=True):
 
 def invalidate_header_cache(tab=None):
     if tab:
-        _header_cache.pop(tab, None)
+        for k in [k for k in _header_cache if k[0] == tab]:
+            _header_cache.pop(k, None)
     else:
         _header_cache.clear()
 
 
 # ---------------------------------------------------------------- upsert (GS-2/GS-3)
-def _find_row_by_id(tab, id_col_idx, id_value):
+def _find_row_by_id(tab, id_col_idx, id_value, start_row=2):
     """Return the 1-based sheet row number holding id_value in the ID column, else None."""
     sheet_id = os.environ.get("GSHEET_ID", "")
     letter = _col_letter(id_col_idx)
@@ -219,6 +300,8 @@ def _find_row_by_id(tab, id_col_idx, id_value):
         spreadsheetId=sheet_id, range=f"'{tab}'!{letter}:{letter}").execute()
     target = str(id_value).strip()
     for i, row in enumerate(res.get("values", []), start=1):
+        if i < start_row:
+            continue          # never match inside the header/helper area above the table
         if row and str(row[0]).strip() == target:
             return i
     return None
@@ -247,10 +330,11 @@ def _formula_cells(tab, row_num, mapping):
 
 def _upsert_sync(entity, doc):
     """Header-mapped, ID-keyed upsert. Returns a structured result dict."""
-    tab, id_field, fields = SYNC_MAP[entity]
+    tab, id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
     sheet_id = os.environ.get("GSHEET_ID", "")
+    header_row = _header_row_for(entity, tab)
 
-    mapping, missing = _resolve_columns(tab, fields)
+    mapping, missing = _resolve_columns(tab, fields, header_row=header_row)
     if id_field in missing:
         # Without the ID column we cannot be idempotent — refuse rather than guess.
         invalidate_header_cache(tab)
@@ -267,7 +351,7 @@ def _upsert_sync(entity, doc):
         return {"ok": False, "operation": "refused", "tab": tab,
                 "error": f"record has no value for stable ID field '{id_field}'"}
 
-    row_num = _find_row_by_id(tab, mapping[id_field], id_value)
+    row_num = _find_row_by_id(tab, mapping[id_field], id_value, start_row=header_row + 1)
 
     if row_num:
         protected = _formula_cells(tab, row_num, mapping)
@@ -346,23 +430,26 @@ def preflight():
         return {"enabled": False, "reason": _status.get("reason", "sync disabled"), "tabs": {}}
     invalidate_header_cache()
     out = {}
-    for entity, (tab, id_field, fields) in SYNC_MAP.items():
+    for entity, spec in SYNC_MAP.items():
+        tab, id_field, fields = spec[0], spec[1], spec[2]
         try:
-            headers = _read_header_row(tab)
+            hr = _header_row_for(entity, tab)
+            headers = _read_header_row(tab, hr)
         except Exception as e:
             out[entity] = {"tab": tab, "tabFound": False, "error": str(e)[:300],
                            "note": "tab not found or unreadable — CRM will not write here"}
             continue
-        mapping, missing = _resolve_columns(tab, fields, use_cache=False)
+        mapping, missing = _resolve_columns(tab, fields, use_cache=False, header_row=hr)
         out[entity] = {
-            "tab": tab, "tabFound": True, "idField": id_field,
+            "tab": tab, "tabFound": True, "idField": id_field, "headerRow": hr,
             "idColumnResolved": id_field in mapping,
             "sheetHeaders": headers,
             "resolved": {f: _col_letter(i) for f, i in sorted(mapping.items(), key=lambda kv: kv[1])},
             "missingHeaders": missing,
             "willSync": id_field in mapping,
         }
-    return {"enabled": True, "spreadsheetId": os.environ.get("GSHEET_ID", ""), "tabs": out}
+    return {"enabled": True, "spreadsheetId": os.environ.get("GSHEET_ID", ""), "tabs": out,
+            "intentionallyUnmapped": INTENTIONALLY_UNMAPPED}
 
 
 # ---------------------------------------------------------------- masters (unchanged)
@@ -381,6 +468,14 @@ def _sync_masters_sync(rows):
 
 
 async def sync_masters(rows):
+    """DISABLED BY DEFAULT. The existing workbook's Masters tab uses a
+    column-per-category layout (col A header "Lead Sources" with values beneath),
+    NOT the Category|Value|Status shape this mirror writes. Running it would clear
+    A1:Z10000 and destroy the dealership's existing Masters structure, which the
+    integration rules forbid. Set GSHEET_SYNC_MASTERS=1 only after the Masters tab
+    has been confirmed to match this shape."""
+    if os.environ.get("GSHEET_SYNC_MASTERS", "").strip() not in ("1", "true", "yes"):
+        return False
     global _service
     if _service is None:
         _init()
@@ -434,16 +529,16 @@ async def backfill(datasets):
 _init()
 
 
-def _read_id_column(tab, id_col_idx):
+def _read_id_column(tab, id_col_idx, header_row=1):
     """All non-empty values in a tab's ID column (used by the reconciliation report)."""
     sheet_id = os.environ.get("GSHEET_ID", "")
     letter = _col_letter(id_col_idx)
     res = _service.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"'{tab}'!{letter}:{letter}").execute()
     out = set()
-    for i, row in enumerate(res.get("values", [])):
-        if i == 0:
-            continue  # header
+    for i, row in enumerate(res.get("values", []), start=1):
+        if i <= header_row:
+            continue  # header/helper area
         if row and str(row[0]).strip():
             out.add(str(row[0]).strip())
     return out
