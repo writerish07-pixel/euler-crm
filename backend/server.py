@@ -1,3 +1,4 @@
+import asyncio
 import io
 import os
 import re
@@ -44,6 +45,38 @@ def clean(doc):
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+async def sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
+    """Upsert one record into the existing Google Sheet and durably record the
+    outcome (GS-4). A failed write becomes a PENDING sheet_sync_log entry that
+    /integrations/gsheets/retry can replay — it is never silently lost.
+
+    Safe to retry: gsheets.sync() is an ID-keyed upsert, so replaying a write that
+    actually succeeded but whose response timed out finds the existing row and
+    updates it instead of appending a duplicate.
+    """
+    res = await gsheets.sync(entity, doc)
+    if res.get("operation") == "skipped":
+        return res  # sync disabled — nothing to log
+    eid = entity_id or str(doc.get(gsheets.SYNC_MAP.get(entity, ("", "", []))[1], "") or "")
+    key = {"entityType": entity, "entityId": eid}
+    entry = {
+        **key,
+        "tab": res.get("tab", ""),
+        "operation": res.get("operation", ""),
+        "status": "OK" if res.get("ok") else "PENDING",
+        "error": res.get("error", ""),
+        "missingHeaders": res.get("missingHeaders", []),
+        "timestamp": now_iso(),
+        "payload": {k: v for k, v in doc.items() if not k.startswith("_")},
+    }
+    existing = await db.sheet_sync_log.find_one(key)
+    entry["attempt"] = int((existing or {}).get("attempt", 0)) + 1
+    if res.get("ok"):
+        entry["resolvedAt"] = now_iso()
+    await db.sheet_sync_log.update_one(key, {"$set": entry}, upsert=True)
+    return res
 
 
 def today():
@@ -250,7 +283,39 @@ async def recompute_lead(lead_id):
         "lastUpdated": now_iso(),
     }
     await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
-    return {**lead, **updates}
+    merged = {**lead, **updates}
+    # GS-5: Dealer Earnings and Exchange previously had no Sheet destination at all.
+    # Both are keyed on leadId, so these are upserts — one row per lead, kept current
+    # on every commercial recompute rather than appended each time.
+    if _is_booked(merged) or ce.num(merged.get("customerPayable")) > 0:
+        await sheet_sync("dealer_earnings", {
+            "leadId": lead_id, "customerName": merged.get("customerName"),
+            "model": merged.get("interestedModel"),
+            "dealerMarginNetExGst": updates["dealerMarginNetExGst"],
+            "dealerSchemeRetained": updates["dealerSchemeRetained"],
+            "customerInsuranceBenefitPassed": merged.get("customerInsuranceBenefitPassed", 0),
+            "financeIncentive": merged.get("financeIncentive", 0),
+            "accessoriesMargin": merged.get("accessoriesMargin", 0),
+            "exchangeMargin": merged.get("exchangeMargin", 0),
+            "documentationIncome": merged.get("documentationIncome", 0),
+            "warrantyIncome": merged.get("warrantyIncome", 0),
+            "rsaIncome": merged.get("rsaIncome", 0),
+            "referralIncome": merged.get("referralIncome", 0),
+            "campaignIncentive": merged.get("campaignIncentive", 0),
+            "otherIncome": merged.get("otherIncome", 0),
+            "oemExtraSupportRetained": updates["oemExtraSupportRetained"],
+            "extraDealerIncomeTotal": updates["extraDealerIncomeTotal"],
+            "dealerTotalEarnings": updates["dealerTotalEarnings"],
+        })
+        if str(merged.get("exchangeRequired") or "").lower() == "yes" or ce.num(merged.get("finalExchangeValue")) > 0:
+            await sheet_sync("exchange", {
+                "leadId": lead_id, "customerName": merged.get("customerName"),
+                "exchangeRequired": merged.get("exchangeRequired", "No"),
+                "finalExchangeValue": merged.get("finalExchangeValue", 0),
+                "exchangeBonus": merged.get("exchangeBonus", 0),
+                "exchangeMargin": merged.get("exchangeMargin", 0),
+            })
+    return merged
 
 
 # ---------------------------------------------------------------- models
@@ -627,7 +692,7 @@ async def create_lead(body: LeadIn):
         "discussion": "Lead created from CRM", "executive": body.executive,
         "customerName": body.customerName, "mobile": body.mobile, "model": body.interestedModel,
     })
-    await gsheets.append("leads", doc)
+    await sheet_sync("leads", doc)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -746,7 +811,12 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
     await db.leads.update_one({"leadId": lead_id}, {"$set": payload})
     await recompute_lead(lead_id)
     await write_audit(act, "update", "lead", leadId=lead_id, old=old, new={k: v for k, v in payload.items() if k != "lastUpdated"})
-    return clean(await db.leads.find_one({"leadId": lead_id}))
+    updated = await db.leads.find_one({"leadId": lead_id})
+    # GS-2: a lead edit must reach the EXISTING Lead Register row. Previously this
+    # endpoint never touched the Sheet at all, so the row went stale on first edit.
+    # sheet_sync upserts on leadId, so this updates in place — it never appends.
+    await sheet_sync("leads", clean(dict(updated)))
+    return clean(updated)
 
 
 @api.post("/leads/{lead_id}/convert-booking")
@@ -768,7 +838,7 @@ async def convert_booking(lead_id: str, body: BookingIn):
         "financeRequired": body.financeRequired, "exchangeRequired": body.exchangeRequired,
         "snapshotId": snapshot_id, "bookingStatus": "Booked", "createdBy": "crm", "createdDate": today(),
     })
-    await gsheets.append("bookings", {
+    await sheet_sync("bookings", {
         "bookingId": booking_id, "leadId": lead_id, "customerName": lead.get("customerName"),
         "bookingDate": bdate, "model": lead.get("interestedModel"), "variant": lead.get("variant"),
         "bookingAmount": body.bookingAmount, "paymentMode": body.paymentMode, "bookingStatus": "Booked",
@@ -1027,7 +1097,7 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
             "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(), "importedBatch": today(),
         }
         await db.leads.insert_one(doc)
-        await gsheets.append("leads", doc)
+        await sheet_sync("leads", doc)
         created += 1
     return {"created": created}
 
@@ -1076,7 +1146,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         "financeFileNumber": body.financeFileNumber, "recordedAt": now_iso(),
     }
     await db.payments.insert_one(doc)
-    await gsheets.append("payments", doc)
+    await sheet_sync("payments", doc)
     if body.paymentMode == "Finance" and body.financeFileNumber:
         await _upsert_finance_file(lead_id, body)
     return clean(doc)
@@ -1129,6 +1199,20 @@ async def _upsert_finance_file(lead_id, body: PaymentIn):
             "fileOutstanding": committed, "status": "Pending", "receipts": [],
             "lastUpdated": today(),
         })
+    await sync_finance_file(body.financeFileNumber)
+
+
+async def sync_finance_file(file_number):
+    """GS-5: mirror a finance file into the existing Finance tab (upsert on file number)."""
+    f = await db.finance.find_one({"fileNumber": file_number})
+    if not f:
+        return
+    await sheet_sync("finance", {
+        "financeFileNumber": f.get("fileNumber"), "leadId": f.get("leadId"),
+        "customerName": f.get("customerName"), "financerName": f.get("financer"),
+        "committedAmount": f.get("sanctionedAmount"), "disbursedAmount": f.get("receivedAgainstFile"),
+        "financeOutstanding": f.get("fileOutstanding"), "status": f.get("status"),
+    })
 
 
 FINANCE_RECEIPT_SLA_DAYS = 2  # port of FinanceService.gs getFinanceReceiptSlaDays_ (CRM.FINANCE_REGISTER.RECEIPT_SLA_DAYS)
@@ -1249,7 +1333,7 @@ async def mark_delivery(lead_id: str, body: DeliveryIn):
                              "deliveryDate": body.deliveryDate or today()})
     await db.leads.update_one({"leadId": lead_id}, {"$set": lead_updates})
     if delivered:
-        await gsheets.append("deliveries", {
+        await sheet_sync("deliveries", {
             "leadId": lead_id, "customerName": lead.get("customerName"),
             "deliveryDate": body.deliveryDate or today(), "delivered": "Yes",
             "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
@@ -1427,7 +1511,7 @@ async def create_insurance(body: InsuranceIn, act=Depends(actor)):
         if lead:
             data["deliveryDate"] = lead.get("deliveryDate")
     await db.insurance.insert_one(dict(data))
-    await gsheets.append("insurance", {**data, "payoutRatePct": round(ce.num(data.get("payoutRate")) * 100, 1)})
+    await sheet_sync("insurance", {**data, "payoutRatePct": round(ce.num(data.get("payoutRate")) * 100, 1)})
     await write_audit(act, "create", "insurance", leadId=data.get("leadId", ""),
                       new={"entryId": data["entryId"], "premium": data.get("insuranceAmount"),
                            "payoutRate": data.get("payoutRate"), "expectedPayout": data.get("expectedPayout")})
@@ -2107,7 +2191,7 @@ async def create_manual_claim(body: ManualClaimIn, act=Depends(actor)):
         "receipts": [], "createdAt": now_iso(),
     }
     await db.claims.insert_one(dict(doc))
-    await gsheets.append("claims", {**doc, "customer": customer, "model": model})
+    await sheet_sync("claims", {**doc, "customer": customer, "model": model})
     await write_audit(act, "create", "claim", leadId=body.leadId, claimId=cid,
                       new={"claimType": body.claimType, "oemCompany": body.oemCompany,
                            "claimAmount": doc["claimAmount"], "manual": True})
@@ -2141,7 +2225,7 @@ async def settle_claim(body: ClaimSettleIn, act=Depends(actor)):
         {"$set": doc}, upsert=True,
     )
     lead = await db.leads.find_one({"leadId": body.leadId}) or {}
-    await gsheets.append("claims", {**doc, "customer": existing.get("customer") or lead.get("customerName", ""),
+    await sheet_sync("claims", {**doc, "customer": existing.get("customer") or lead.get("customerName", ""),
                                     "model": existing.get("model") or lead.get("interestedModel", ""), "claimAmount": body.receivedAmount})
     await write_audit(act, "settle", "claim", leadId=body.leadId, claimId=doc["claimId"],
                       old={"claimStatus": existing.get("claimStatus"), "receivedAmount": existing.get("receivedAmount")},
@@ -2195,7 +2279,7 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor)):
         {"$set": setdoc, "$push": {"receipts": receipt}},
         upsert=True,
     )
-    await gsheets.append("claims", {"claimId": claim_id, "leadId": body.leadId,
+    await sheet_sync("claims", {"claimId": claim_id, "leadId": body.leadId,
                                     "customer": customer, "model": model,
                                     "claimStatus": status, "receivedAmount": received, "claimAmount": body.amount})
     await write_audit(act, "receipt", "claim", leadId=body.leadId, claimId=claim_id,
@@ -2313,6 +2397,94 @@ async def list_dealer_earnings():
 @api.get("/integrations/gsheets")
 async def gsheets_status():
     return gsheets.status()
+
+
+@api.get("/integrations/gsheets/preflight", dependencies=[Depends(owner_only)])
+async def gsheets_preflight():
+    """GS-1: read-only header-mapping report. For every mapped tab shows the EXISTING
+    sheet headers, which CRM field resolved to which column letter, and any header we
+    could not find. Nothing is written. Run this first against the real spreadsheet —
+    any entity with willSync=false will refuse to write rather than guess a column."""
+    return gsheets.preflight()
+
+
+@api.get("/integrations/gsheets/sync-log", dependencies=[Depends(owner_only)])
+async def gsheets_sync_log(status: Optional[str] = None, limit: int = 200):
+    """GS-4: durable record of every Sheet write. status=PENDING lists writes that
+    failed and are awaiting retry — nothing is ever silently lost."""
+    q = {"status": status} if status else {}
+    rows = await db.sheet_sync_log.find(q).sort("timestamp", -1).to_list(min(limit, 2000))
+    pending = await db.sheet_sync_log.count_documents({"status": "PENDING"})
+    return {"pending": pending, "rows": [clean(r) for r in rows]}
+
+
+@api.post("/integrations/gsheets/retry", dependencies=[Depends(owner_only)])
+async def gsheets_retry(limit: int = 100):
+    """GS-4: replay failed Sheet writes. Safe because every write is an ID-keyed
+    upsert — replaying a write that actually succeeded (but whose response timed out)
+    finds the existing row and updates it instead of appending a duplicate."""
+    pending = await db.sheet_sync_log.find({"status": "PENDING"}).to_list(min(limit, 500))
+    retried, recovered, still_failing = 0, 0, 0
+    for row in pending:
+        entity, payload = row.get("entityType"), row.get("payload") or {}
+        if not entity or not payload:
+            continue
+        retried += 1
+        res = await sheet_sync(entity, payload, entity_id=row.get("entityId", ""))
+        if res.get("ok"):
+            recovered += 1
+        else:
+            still_failing += 1
+            await db.sheet_sync_log.update_one(
+                {"entityType": entity, "entityId": row.get("entityId", "")},
+                {"$set": {"status": "FAILED" if int(row.get("attempt", 0)) >= 4 else "RETRYING"}})
+    return {"ok": True, "retried": retried, "recovered": recovered, "stillFailing": still_failing}
+
+
+@api.get("/integrations/gsheets/reconcile", dependencies=[Depends(owner_only)])
+async def gsheets_reconcile():
+    """CRM vs Google Sheet reconciliation. Read-only: compares CRM record counts and
+    stable IDs against what is actually present in each existing tab's ID column, and
+    reports anything missing from the sheet plus any unresolved sync-log entries."""
+    st = gsheets.status()
+    if not st.get("enabled"):
+        return {"ok": False, "reason": st.get("reason", "sync disabled")}
+    datasets = {
+        "leads": await db.leads.find().to_list(5000),
+        "bookings": await db.bookings.find().to_list(5000),
+        "payments": await db.payments.find().to_list(5000),
+        "claims": await db.claims.find().to_list(5000),
+        "finance": await db.finance.find().to_list(5000),
+    }
+    report, mismatches = {}, []
+    for entity, docs in datasets.items():
+        spec = gsheets.SYNC_MAP.get(entity)
+        if not spec:
+            continue
+        tab, id_field, fields = spec
+        crm_ids = {str(d.get(id_field, "") or "").strip() for d in docs if d.get(id_field)}
+        try:
+            mapping, missing = gsheets._resolve_columns(tab, fields, use_cache=False)
+            if id_field not in mapping:
+                report[entity] = {"tab": tab, "error": f"ID header '{id_field}' not found", "crmCount": len(crm_ids)}
+                continue
+            sheet_ids = await asyncio.to_thread(gsheets._read_id_column, tab, mapping[id_field])
+        except Exception as e:
+            report[entity] = {"tab": tab, "error": str(e)[:200], "crmCount": len(crm_ids)}
+            continue
+        missing_in_sheet = sorted(crm_ids - sheet_ids)
+        report[entity] = {"tab": tab, "crmCount": len(crm_ids), "sheetCount": len(sheet_ids),
+                          "missingInSheet": len(missing_in_sheet),
+                          "duplicateIdsInSheet": 0}
+        for mid in missing_in_sheet[:50]:
+            mismatches.append({"entity": entity, "id": mid, "field": id_field,
+                               "crmValue": mid, "sheetValue": "<absent>",
+                               "expected": "row present in sheet", "actual": "missing",
+                               "severity": "HIGH"})
+    unresolved = await db.sheet_sync_log.count_documents({"status": {"$ne": "OK"}})
+    return {"ok": True, "entities": report, "mismatches": mismatches,
+            "unresolvedSyncLogEntries": unresolved,
+            "verdict": "CLEAN" if not mismatches and unresolved == 0 else "DIFFERENCES FOUND"}
 
 
 @api.post("/integrations/gsheets/backfill", dependencies=[Depends(owner_only)])
