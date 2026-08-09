@@ -647,18 +647,105 @@ function ActivityTab({ lead, activities, masters, onSaved }) {
 /* -------------------------------------------------- Modals */
 function BookingModal({ lead, onClose, onDone }) {
   const [form, setForm] = useState({ bookingAmount: lead.bookingAmount || 5000, paymentMode: "UPI", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No" });
+  // Commercial gate: a booking may only be confirmed once the backend has resolved
+  // the vehicle against Price Master. All figures below come from the API — nothing
+  // is calculated or defaulted in React, so there is no path to a silent zero.
+  const [preview, setPreview] = useState(undefined); // undefined = loading
+  const [previewError, setPreviewError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  useEffect(() => {
+    let alive = true;
+    get(`/leads/${lead.leadId}/price-preview`)
+      .then((d) => { if (alive) setPreview(d); })
+      .catch((e) => { if (alive) { setPreview(null); setPreviewError(e?.response?.data?.detail || "Could not reach the pricing service."); } });
+    return () => { alive = false; };
+  }, [lead.leadId]);
+
+  const priced = Number(lead.exShowroom) > 0;           // already has a price structure
+  const canBook = priced || (preview && preview.found === true);
+  const loading = preview === undefined;
+  const ps = (preview && preview.priceStructure) || {};
+  const charges = ["rto", "insuranceAmount", "accessoriesAmount", "handlingCharges", "trc", "fastag", "extendedWarranty", "otherCharges"];
+  const gvc = Number(ps.exShowroom || 0) + charges.reduce((t, k) => t + Number(ps[k] || 0), 0);
+
   const submit = async () => {
-    await post(`/leads/${lead.leadId}/convert-booking`, {
-      bookingAmount: +form.bookingAmount, paymentMode: form.paymentMode, executive: lead.executive,
-      financeRequired: form.financeRequired, exchangeRequired: form.exchangeRequired,
-    });
-    toast.success("Converted to Booking");
-    onDone();
+    if (!canBook || busy) return;
+    setBusy(true);
+    try {
+      const res = await post(`/leads/${lead.leadId}/convert-booking`, {
+        bookingAmount: +form.bookingAmount, paymentMode: form.paymentMode, executive: lead.executive,
+        financeRequired: form.financeRequired, exchangeRequired: form.exchangeRequired,
+      });
+      // Report the ACTUAL backend sync state, never an assumption from a 200.
+      let sync = "Pending";
+      try {
+        const log = await get("/integrations/gsheets/sync-log", { status: "PENDING" });
+        sync = Number(log?.pending) === 0 ? "Synced" : "Pending";
+      } catch { sync = "Unknown"; }
+      setResult({ booking: res, lead: res.lead || {}, sync });
+      toast.success("Booking confirmed");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Booking failed");
+      setBusy(false);
+    }
   };
+
+  if (result) {
+    const l = result.lead || {};
+    const rows = [
+      ["Price Loaded", Number(l.exShowroom) > 0],
+      ["Customer Payable Calculated", Number(l.customerPayable) > 0],
+      ["Booking Created", Boolean(result.booking?.bookingId)],
+    ];
+    return (
+      <MiniModal title="Booking Confirmed" onClose={onDone} onSubmit={onDone} submitLabel="Done" testid="booking-done-btn">
+        <div className="space-y-1.5 text-sm" data-testid="booking-summary">
+          {rows.map(([label, ok]) => (
+            <div key={label} className="flex justify-between"><span className="text-ink-soft">{label}</span><span>{ok ? "✓" : "—"}</span></div>
+          ))}
+          <div className="flex justify-between"><span className="text-ink-soft">Google Sheet Sync</span><span data-testid="booking-sync-status">{result.sync}</span></div>
+          <div className="border-t border-line mt-2 pt-2 flex justify-between font-semibold">
+            <span>Customer Payable</span><span>{inr(l.customerPayable)}</span>
+          </div>
+          <div className="flex justify-between"><span className="text-ink-soft">Booking ID</span><span>{result.booking?.bookingId || "—"}</span></div>
+        </div>
+      </MiniModal>
+    );
+  }
+
   return (
-    <MiniModal title="Convert to Booking" onClose={onClose} onSubmit={submit} submitLabel="Confirm Booking" testid="confirm-booking-btn">
-      <p className="text-xs text-ink-soft mb-3">Books without locking price. Set the Price Structure afterwards to compute payable & outstanding.</p>
+    <MiniModal title="Convert to Booking" onClose={onClose} onSubmit={submit} submitLabel={busy ? "Booking…" : "Confirm Booking"} testid="confirm-booking-btn" submitDisabled={!canBook || loading || busy}>
+      {loading && <p className="text-xs text-ink-soft mb-3" data-testid="price-loading">Loading price from Price Master…</p>}
+
+      {!loading && preview && preview.found === false && (
+        <div className="mb-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" data-testid="price-error">
+          {preview.message || `Price Master entry not found for ${lead.interestedModel || "—"} / ${lead.variant || "—"}.`}
+          {" "}Please select a valid vehicle or update Price Master.
+        </div>
+      )}
+      {!loading && preview === null && (
+        <div className="mb-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" data-testid="price-error">{previewError}</div>
+      )}
+
+      {!loading && preview && preview.found && (
+        <div className="mb-3 rounded-lg border border-line bg-paper px-3 py-2 text-sm" data-testid="price-preview">
+          <div className="font-semibold text-ink mb-1">{lead.interestedModel} · {lead.variant}</div>
+          <div className="flex justify-between"><span className="text-ink-soft">Ex-Showroom</span><span>{inr(ps.exShowroom)}</span></div>
+          <div className="flex justify-between"><span className="text-ink-soft">RTO</span><span>{inr(ps.rto)}</span></div>
+          <div className="flex justify-between"><span className="text-ink-soft">Insurance</span><span>{inr(ps.insuranceAmount)}</span></div>
+          <div className="flex justify-between"><span className="text-ink-soft">Other Charges</span><span>{inr(gvc - Number(ps.exShowroom || 0) - Number(ps.rto || 0) - Number(ps.insuranceAmount || 0))}</span></div>
+          <div className="border-t border-line mt-1 pt-1 flex justify-between font-semibold"><span>Gross Vehicle Cost</span><span data-testid="preview-gvc">{inr(gvc)}</span></div>
+          <p className="text-xs text-ink-faint mt-1">Scheme benefits and final Customer Payable are computed by the backend on booking.</p>
+        </div>
+      )}
+
+      {priced && preview && preview.found === false && (
+        <p className="text-xs text-ink-soft mb-3">This lead already has a saved price structure, so booking is still allowed.</p>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="Advance Amount (₹)"><Input data-testid="booking-amount" type="number" value={form.bookingAmount} onChange={set("bookingAmount")} /></Field>
         <Field label="Payment Mode"><Select value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
@@ -699,7 +786,7 @@ function CloseModal({ lead, onClose, onDone }) {
   );
 }
 
-function MiniModal({ title, children, onClose, onSubmit, submitLabel, danger, testid }) {
+function MiniModal({ title, children, onClose, onSubmit, submitLabel, danger, testid, submitDisabled }) {
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
@@ -708,7 +795,7 @@ function MiniModal({ title, children, onClose, onSubmit, submitLabel, danger, te
         {children}
         <div className="flex justify-end gap-2 mt-5">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button variant={danger ? "danger" : "primary"} data-testid={testid} onClick={onSubmit}>{submitLabel}</Button>
+          <Button variant={danger ? "danger" : "primary"} data-testid={testid} onClick={onSubmit} disabled={submitDisabled}>{submitLabel}</Button>
         </div>
       </Card>
     </div>
