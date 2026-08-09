@@ -1,7 +1,17 @@
 import axios from "axios";
 
+// CRA inlines REACT_APP_* at build time. If the production build is made without
+// frontend/.env.production the value is undefined and every call silently goes to
+// "undefined/api" — surface that immediately instead of shipping a broken bundle.
 const BASE = process.env.REACT_APP_BACKEND_URL;
-export const api = axios.create({ baseURL: `${BASE}/api` });
+if (!BASE) {
+  // eslint-disable-next-line no-console
+  console.error(
+    "REACT_APP_BACKEND_URL is not set. The app cannot reach the API. " +
+      "Set it in frontend/.env.production (or the host's build environment) and rebuild."
+  );
+}
+export const api = axios.create({ baseURL: `${BASE || ""}/api` });
 
 export const TOKEN_KEY = "euler_token";
 
