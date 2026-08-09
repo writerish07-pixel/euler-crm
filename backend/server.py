@@ -242,6 +242,31 @@ def lead_to_snapshot(lead):
     }
 
 
+# Scheme components the Dealer Earnings Register keeps a dedicated "… Retained"
+# column for, mapped to the componentKey compute_scheme_income_breakdown emits.
+RETAINED_COMPONENT_COLUMNS = {
+    "consumerRetained": "consumerDiscount",
+    "exchangeRetained": "exchangeBonus",
+    "loyaltyRetained": "loyaltyBonus",
+    "referralRetained": "referralBonus",
+    "dsaRetained": "dsaDiscount",
+}
+
+
+def _retained_component_fields(retained_by_component):
+    """Break the already-computed retainedByComponent map out into the per-component
+    fields the Dealer Earnings Register has columns for, plus a human-readable
+    breakup string. Components absent from the map retain 0.0 — a real value, not a
+    blank — because "no retention on this component" is a meaningful commercial fact."""
+    out = {}
+    for field, key in RETAINED_COMPONENT_COLUMNS.items():
+        out[field] = ce.round2(ce.num(retained_by_component.get(key)))
+    out["schemeRetainedBreakup"] = "; ".join(
+        f"{k}={ce.round2(ce.num(v))}" for k, v in sorted(retained_by_component.items())
+    )
+    return out
+
+
 async def recompute_lead(lead_id):
     """Recompute all derived commercial + payment fields for a lead and persist."""
     lead = await db.leads.find_one({"leadId": lead_id})
@@ -287,6 +312,16 @@ async def recompute_lead(lead_id):
         "dealerSchemeRetained": income["retainedIncomeTotal"],
         "oemExtraSupportRetained": oem_extra_retained,
         "dealerMarginNetExGst": margin["marginNetExGst"],
+        # Persist the two margin components the Dealer Earnings Register has columns for.
+        # compute_dealer_margin already returns them; only the net figure was being stored,
+        # so "Dealer Margin Gross (Incl GST)" and "Dealer Margin GST (5%)" had no source.
+        "dealerMarginGrossInclGst": margin["marginGrossInclGst"],
+        "dealerMarginGst": margin["marginGst"],
+        # Per-component scheme retention. compute_scheme_income_breakdown already returns
+        # retainedByComponent; only the total was persisted, leaving the register's
+        # Consumer/Exchange/Loyalty/Referral/DSA Retained columns without a source.
+        # These are NOT a second calculation — they are the same numbers, broken out.
+        **_retained_component_fields(income.get("retainedByComponent") or {}),
         "extraDealerIncomeTotal": extra_income,
         "dealerTotalEarnings": ce.round2(
             margin["marginNetExGst"] + income["retainedIncomeTotal"] + oem_extra_retained + extra_income),
@@ -325,6 +360,33 @@ async def recompute_lead(lead_id):
             "oemExtraSupportRetained": updates["oemExtraSupportRetained"],
             "extraDealerIncomeTotal": updates["extraDealerIncomeTotal"],
             "dealerTotalEarnings": updates["dealerTotalEarnings"],
+            # Columns that already had a value in Mongo but no Sheet mapping.
+            "variant": merged.get("variant", ""),
+            "bookingDate": merged.get("bookingDate", ""),
+            "deliveryDate": merged.get("deliveryDate", ""),
+            "invoiceNumber": merged.get("invoiceNumber", ""),
+            "executive": merged.get("executive", ""),
+            "leadSource": merged.get("leadSource", ""),
+            "customerPayable": updates["customerPayable"],
+            "insuranceStatus": merged.get("insuranceStatus", ""),
+            "remarks": merged.get("remarks", ""),
+            "createdBy": merged.get("createdBy", "crm"),
+            "modifiedBy": merged.get("lastUpdatedBy", ""),
+            # "Current Stage" is the lead's lifecycle position, already tracked as
+            # currentStatus — the register just names the column differently.
+            "currentStage": merged.get("currentStatus", ""),
+            "lastUpdated": updates["lastUpdated"],
+            "timestamp": updates["lastUpdated"],
+            "oemExtraSupportReceived": oem_extra_recv,
+            "oemExtraSupportPassed": oem_extra_pass,
+            "dealerMarginGrossInclGst": updates["dealerMarginGrossInclGst"],
+            "dealerMarginGst": updates["dealerMarginGst"],
+            "consumerRetained": updates["consumerRetained"],
+            "exchangeRetained": updates["exchangeRetained"],
+            "loyaltyRetained": updates["loyaltyRetained"],
+            "referralRetained": updates["referralRetained"],
+            "dsaRetained": updates["dsaRetained"],
+            "schemeRetainedBreakup": updates["schemeRetainedBreakup"],
         })
         # Derived OEM claims must also reach the existing Scheme Claim Register.
         # They are keyed on the same stable claimId GET /claims exposes, so this is an
@@ -344,6 +406,30 @@ async def recompute_lead(lead_id):
                 "receivedAmount": (_ex or {}).get("receivedAmount", 0),
                 "claimStatus": (_ex or {}).get("claimStatus", "Pending"),
                 "claimReference": (_ex or {}).get("claimReference", ""),
+                # Claim Register columns that already had a source but no mapping.
+                "bookingId": (await db.bookings.find_one({"leadId": lead_id}) or {}).get("bookingId", ""),
+                "schemeMonth": ce.scheme_month_from_date(merged.get("bookingDate", "")),
+                "executive": merged.get("executive", ""),
+                "consumerDiscount": ce.num(merged.get("consumerDiscount")),
+                "exchangeBonus": ce.num(merged.get("exchangeBonus")),
+                "loyaltyBonus": ce.num(merged.get("loyaltyBonus")),
+                "referralBonus": ce.num(merged.get("referralBonus")),
+                "dsaDiscount": ce.num(merged.get("dsaDiscount")),
+                "additionalDiscount": ce.num(merged.get("additionalDiscount")),
+                "totalDiscount": updates["totalDiscount"],
+                "dealerDiscount": updates["dealerSchemeAmount"],
+                "oemDiscount": updates["oemSchemeAmount"],
+                "claimRequired": "Yes" if ce.round2(_amt) > 0 else "No",
+                "ageingDays": _claim_ageing_days(
+                    (_ex or {}).get("submittedDate") or merged.get("deliveryDate", ""),
+                    (_ex or {}).get("claimStatus", "Pending")),
+                # How this claim row came to exist: derived from the Scheme Master split,
+                # versus a manually raised claim. Distinguishable today, never recorded.
+                "source": "Manual" if (_ex or {}).get("manual") else "Derived (Scheme Master)",
+                # DSA is the one component whose claim needs explicit approval.
+                "dsaApproval": (_ex or {}).get("approvalStatus", "") if _key == "dsaDiscount" else "",
+                "claimReceivedDate": (_ex or {}).get("claimReceivedDate", ""),
+                "claimRemarks": (_ex or {}).get("claimRemarks", ""),
             })
         if str(merged.get("exchangeRequired") or "").lower() == "yes" or ce.num(merged.get("finalExchangeValue")) > 0:
             await sheet_sync("exchange", {
@@ -848,6 +934,9 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
 
     old = {k: lead.get(k) for k in payload.keys()}
     payload["lastUpdated"] = now_iso()
+    # Lead Register "Last Updated By": the acting user was already resolved for the
+    # audit log, but was never written onto the lead, so the column had no source.
+    payload["lastUpdatedBy"] = act.get("email", "")
     await db.leads.update_one({"leadId": lead_id}, {"$set": payload})
     await recompute_lead(lead_id)
     await write_audit(act, "update", "lead", leadId=lead_id, old=old, new={k: v for k, v in payload.items() if k != "lastUpdated"})
@@ -1093,6 +1182,11 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor)):
     close_updates = {
         "accountStatus": "Closed", "closedDate": today(), "closeReason": body.closeReason,
         "finalOutstanding": lead.get("customerOutstanding", 0), "lastUpdated": now_iso(),
+        # Lead Register has "Closed By" and "Close Timestamp" columns. The acting user
+        # and the moment of closure were both already known here — they were simply
+        # never recorded, so an audited closure could not be attributed from the sheet.
+        "closedBy": act.get("email", ""), "closeTimestamp": now_iso(),
+        "lastUpdatedBy": act.get("email", ""),
     }
     if body.rc:
         close_updates["rcStatus"] = body.rc
@@ -1311,6 +1405,16 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor)):
 
 
 # ---------------------------------------------------------------- finance
+FINANCE_FILE_PATTERN = re.compile(r"^FN26\d{6}$")
+
+
+def is_legacy_finance_file_number(file_number):
+    """A finance file number that predates the FN26 contract (e.g. the live '55').
+    Historical records keep their number — renumbering them would break every
+    payment and sheet row that references them."""
+    return bool(str(file_number or "").strip()) and not FINANCE_FILE_PATTERN.match(str(file_number).strip())
+
+
 async def _resolve_finance_file_for_payment(lead_id, body: PaymentIn):
     if not (body.financerName or "").strip():
         raise HTTPException(422, "Financer is required for Finance payments")
@@ -1322,6 +1426,14 @@ async def _resolve_finance_file_for_payment(lead_id, body: PaymentIn):
             raise HTTPException(422, "Finance file number already belongs to another lead")
         if by_lead and by_lead.get("fileNumber") != supplied:
             raise HTTPException(422, "Lead already has a different finance file number")
+        # A NEW file must follow the numbering contract. Staff are never required to
+        # invent one — leaving the field blank generates FN26xxxxxx. This is what let
+        # a hand-typed "55" into production and made the Finance Register unkeyable.
+        # An EXISTING record keeps whatever number it already has (legacy support).
+        if not by_file and not FINANCE_FILE_PATTERN.match(supplied):
+            raise HTTPException(422,
+                f"'{supplied}' is not a valid Finance File Number. Leave the field blank and "
+                f"the system will generate one (FN26xxxxxx), or enter an existing file number.")
         return supplied
     if by_lead:
         return by_lead.get("fileNumber")
@@ -1693,6 +1805,13 @@ async def add_activity(lead_id: str, body: ActivityIn):
     }
     await db.activities.insert_one(doc)
     await sheet_sync("activities", doc)
+    # Lead Register "Last Activity" summarises the most recent activity on the lead.
+    # It is derived from the activity just logged, not separately entered.
+    summary = " · ".join(x for x in (body.activityType, (body.discussion or "").strip()) if x)
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "lastActivity": summary[:200], "lastUpdated": now_iso(),
+    }})
+    await recompute_lead(lead_id)
     return clean(doc)
 
 
@@ -2523,6 +2642,10 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor)):
               "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
               "claimReference": body.reference or existing.get("claimReference", ""),
               "eligibleClaim": eligible, "submittedDate": submitted, "approvedDate": approved,
+              # Claim Register has a "Claim Received Date" column; the date of the money
+              # actually arriving was recorded only inside the receipt history, never on
+              # the claim itself, so the register column had no source.
+              "claimReceivedDate": body.date or today(),
               "lastUpdated": now_iso()}
     if existing.get("manual"):
         setdoc["manual"] = True
