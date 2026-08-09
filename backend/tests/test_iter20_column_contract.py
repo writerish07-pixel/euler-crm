@@ -111,6 +111,72 @@ def test_fifty_columns_were_added():
     assert sum(len(v) for v in NEWLY_MAPPED.values()) == 50
 
 
+# --------------------------------------------------------------- phase 3
+# Columns that had no mapping AND no obvious camelCase field, but whose value the CRM
+# either already captured under a different name or can derive from data it holds.
+NEWLY_SOURCED = {
+    "leads": ["lastActivity", "lastUpdatedBy", "closedBy", "closeTimestamp"],
+    "activities": ["nextFollowup"],
+    "deliveries": ["feedback"],
+    "insurance": ["insuranceExecutive"],
+    "claims": ["source", "dsaApproval", "claimReceivedDate", "claimRemarks"],
+    "dealer_earnings": ["modifiedBy", "currentStage"],
+}
+
+
+@pytest.mark.parametrize("entity,fields", sorted(NEWLY_SOURCED.items()))
+def test_newly_sourced_columns_resolve_live(entity, fields):
+    tab = SYNC_MAP[entity][0]
+    declared = SYNC_MAP[entity][2]
+    assert [f for f in fields if f not in declared] == []
+    mapping, _ = resolve(tab, fields)
+    assert [f for f in fields if f not in mapping] == []
+
+
+def test_every_operational_column_is_either_mapped_or_declared_source_required():
+    """The contract's central promise: no operational column is silently unaccounted for.
+
+    Lead Register A:I is excluded — it is the staff search/helper area, owned by the
+    sheet, and is deliberately never written."""
+    unaccounted = []
+    for entity, spec in SYNC_MAP.items():
+        tab, fields = spec[0], spec[2]
+        _hr, headers = LIVE_HEADERS[tab]
+        mapping, _ = resolve(tab, fields)
+        owned = set(mapping.values())
+        for i, header in enumerate(headers):
+            if tab == "Lead Register" and i < 9:
+                continue                      # protected search/helper area
+            if not str(header).strip() or i in owned:
+                continue
+            if (tab, header) in gsheets.SOURCE_REQUIRED:
+                continue
+            unaccounted.append(f"{tab}!{_col_letter(i)} {header}")
+    assert unaccounted == [], f"operational columns with no classification: {unaccounted}"
+
+
+def test_source_required_entries_name_a_real_column_and_explain_themselves():
+    for (tab, column), spec in gsheets.SOURCE_REQUIRED.items():
+        _hr, headers = LIVE_HEADERS[tab]
+        assert column in headers, f"SOURCE_REQUIRED names a column not in {tab}: {column}"
+        assert spec["why"] and spec["needs"], f"{tab}/{column} must explain why and what is needed"
+
+
+def test_source_required_columns_are_not_silently_invented():
+    """A column with no source must stay blank — never filled with a placeholder."""
+    for (_tab, _column), spec in gsheets.SOURCE_REQUIRED.items():
+        assert spec["field"] not in ("", None)
+
+
+def test_preflight_reports_source_required(monkeypatch):
+    """The gap must stay visible in the API, not just in a comment."""
+    monkeypatch.setattr(gsheets, "_service", None)
+    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=False))
+    rep = gsheets.preflight()
+    assert rep["enabled"] is False        # not connected here, but the shape is asserted below
+    assert isinstance(gsheets.SOURCE_REQUIRED, dict) and gsheets.SOURCE_REQUIRED
+
+
 def test_lead_register_header_is_row_3_and_starts_at_column_J():
     """Rows 1-2 and columns A:I are the staff search/helper area — never written."""
     hr, headers = LIVE_HEADERS["Lead Register"]

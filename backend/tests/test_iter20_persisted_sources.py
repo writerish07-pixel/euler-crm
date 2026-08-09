@@ -149,3 +149,76 @@ async def test_recompute_is_idempotent_for_the_new_fields(client):
     for f in ("dealerMarginGrossInclGst", "dealerMarginGst", "consumerRetained",
               "loyaltyRetained", "dealerSchemeRetained", "dealerTotalEarnings"):
         assert before[f] == after[f], f"{f} drifted on recompute: {before[f]} -> {after[f]}"
+
+
+@pytest.mark.asyncio
+async def test_activity_updates_the_lead_last_activity_summary(client):
+    """Lead Register 'Last Activity' is derived from the most recent activity."""
+    lid = await booked(client, "9444400008")
+    r = await client.post(f"/api/leads/{lid}/activities",
+                          json={"activityType": "Call", "discussion": "Customer will visit Friday",
+                                "nextFollowup": "2026-08-15"})
+    assert r.status_code == 200, r.text
+    assert r.json()["nextFollowup"] == "2026-08-15"      # persisted on the activity itself
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert "Call" in lead["lastActivity"]
+    assert "Friday" in lead["lastActivity"]
+
+
+@pytest.mark.asyncio
+async def test_closure_records_who_and_when(client):
+    lid = await booked(client, "9444400009")
+    await client.post(f"/api/leads/{lid}/close", json={"closeReason": "Duplicate enquiry"})
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead["closedBy"] == "owner@euler.com"
+    assert lead["closeTimestamp"]
+    assert lead["lastUpdatedBy"] == "owner@euler.com"
+
+
+@pytest.mark.asyncio
+async def test_lead_edit_records_the_acting_user(client):
+    lid = await booked(client, "9444400010")
+    await client.put(f"/api/leads/{lid}", json={"city": "Jaipur"})
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead["lastUpdatedBy"] == "owner@euler.com"
+
+
+@pytest.mark.asyncio
+async def test_delivery_feedback_is_persisted(client):
+    lid = await booked(client, "9444400011")
+    await client.post(f"/api/leads/{lid}/payments", json={"amount": 335000, "paymentMode": "Cash"})
+    await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
+        "insurerName": "ABC", "invoiceNumber": "INV-21", "chassisNumber": "CH-21",
+        "delivered": "Yes", "feedback": "Very happy with the handover"})
+    d = await server.db.deliveries.find_one({"leadId": lid})
+    assert d["feedback"] == "Very happy with the handover"
+    assert d["deliveryId"]
+
+
+@pytest.mark.asyncio
+async def test_claim_receipt_records_the_received_date(client):
+    lid = await booked(client, "9444400012")
+    await client.put(f"/api/leads/{lid}/scheme",
+                     json={"consumerDiscount": 25000, "benefitMode": "Full Benefit"})
+    claims = [c for c in (await client.get("/api/claims")).json() if c["leadId"] == lid]
+    assert claims, "no derived claims"
+    key = claims[0]["componentKey"]
+    r = await client.post("/api/claims/receipt", json={
+        "leadId": lid, "componentKey": key, "amount": 1000, "date": "2026-08-20"})
+    assert r.status_code == 200, r.text
+    rec = await server.db.claims.find_one({"leadId": lid, "componentKey": key})
+    assert rec["claimReceivedDate"] == "2026-08-20"
+
+
+def test_source_required_columns_have_no_writer():
+    """These must stay blank rather than be invented. Asserted structurally: none of the
+    unmapped SOURCE_REQUIRED fields appears as a written key in server.py."""
+    import gsheets
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "server.py")).read()
+    for (_tab, _col), spec in gsheets.SOURCE_REQUIRED.items():
+        f = spec["field"]
+        if f == "claimRemarks":
+            continue          # mapped so a value flows once entered; still nothing writes it
+        assert f'"{f}":' not in src, f"{f} is declared SOURCE_REQUIRED but something writes it"

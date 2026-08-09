@@ -371,6 +371,10 @@ async def recompute_lead(lead_id):
             "insuranceStatus": merged.get("insuranceStatus", ""),
             "remarks": merged.get("remarks", ""),
             "createdBy": merged.get("createdBy", "crm"),
+            "modifiedBy": merged.get("lastUpdatedBy", ""),
+            # "Current Stage" is the lead's lifecycle position, already tracked as
+            # currentStatus — the register just names the column differently.
+            "currentStage": merged.get("currentStatus", ""),
             "lastUpdated": updates["lastUpdated"],
             "timestamp": updates["lastUpdated"],
             "oemExtraSupportReceived": oem_extra_recv,
@@ -419,6 +423,13 @@ async def recompute_lead(lead_id):
                 "ageingDays": _claim_ageing_days(
                     (_ex or {}).get("submittedDate") or merged.get("deliveryDate", ""),
                     (_ex or {}).get("claimStatus", "Pending")),
+                # How this claim row came to exist: derived from the Scheme Master split,
+                # versus a manually raised claim. Distinguishable today, never recorded.
+                "source": "Manual" if (_ex or {}).get("manual") else "Derived (Scheme Master)",
+                # DSA is the one component whose claim needs explicit approval.
+                "dsaApproval": (_ex or {}).get("approvalStatus", "") if _key == "dsaDiscount" else "",
+                "claimReceivedDate": (_ex or {}).get("claimReceivedDate", ""),
+                "claimRemarks": (_ex or {}).get("claimRemarks", ""),
             })
         if str(merged.get("exchangeRequired") or "").lower() == "yes" or ce.num(merged.get("finalExchangeValue")) > 0:
             await sheet_sync("exchange", {
@@ -923,6 +934,9 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
 
     old = {k: lead.get(k) for k in payload.keys()}
     payload["lastUpdated"] = now_iso()
+    # Lead Register "Last Updated By": the acting user was already resolved for the
+    # audit log, but was never written onto the lead, so the column had no source.
+    payload["lastUpdatedBy"] = act.get("email", "")
     await db.leads.update_one({"leadId": lead_id}, {"$set": payload})
     await recompute_lead(lead_id)
     await write_audit(act, "update", "lead", leadId=lead_id, old=old, new={k: v for k, v in payload.items() if k != "lastUpdated"})
@@ -1168,6 +1182,11 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor)):
     close_updates = {
         "accountStatus": "Closed", "closedDate": today(), "closeReason": body.closeReason,
         "finalOutstanding": lead.get("customerOutstanding", 0), "lastUpdated": now_iso(),
+        # Lead Register has "Closed By" and "Close Timestamp" columns. The acting user
+        # and the moment of closure were both already known here — they were simply
+        # never recorded, so an audited closure could not be attributed from the sheet.
+        "closedBy": act.get("email", ""), "closeTimestamp": now_iso(),
+        "lastUpdatedBy": act.get("email", ""),
     }
     if body.rc:
         close_updates["rcStatus"] = body.rc
@@ -1768,6 +1787,13 @@ async def add_activity(lead_id: str, body: ActivityIn):
     }
     await db.activities.insert_one(doc)
     await sheet_sync("activities", doc)
+    # Lead Register "Last Activity" summarises the most recent activity on the lead.
+    # It is derived from the activity just logged, not separately entered.
+    summary = " · ".join(x for x in (body.activityType, (body.discussion or "").strip()) if x)
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "lastActivity": summary[:200], "lastUpdated": now_iso(),
+    }})
+    await recompute_lead(lead_id)
     return clean(doc)
 
 
@@ -2598,6 +2624,10 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor)):
               "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
               "claimReference": body.reference or existing.get("claimReference", ""),
               "eligibleClaim": eligible, "submittedDate": submitted, "approvedDate": approved,
+              # Claim Register has a "Claim Received Date" column; the date of the money
+              # actually arriving was recorded only inside the receipt history, never on
+              # the claim itself, so the register column had no source.
+              "claimReceivedDate": body.date or today(),
               "lastUpdated": now_iso()}
     if existing.get("manual"):
         setdoc["manual"] = True

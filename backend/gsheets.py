@@ -58,10 +58,15 @@ SYNC_MAP = {
                # persisted on the lead by close_lead / mark_delivery; they simply had
                # no Sheet mapping, so the register showed blanks for closed leads.
                "closedDate", "closeReason", "finalOutstanding",
-               "insuranceStatus", "registrationStatus", "invoiceStatus", "rcStatus", "pdiStatus"], 3),
+               "insuranceStatus", "registrationStatus", "invoiceStatus", "rcStatus", "pdiStatus",
+               # Newly sourced: attribution and activity summary (see SOURCE_REQUIRED
+               # below for the Lead Register columns that still have no source).
+               "lastActivity", "lastUpdatedBy", "closedBy", "closeTimestamp"], 3),
     "activities": (_tab("GSHEET_TAB_ACTIVITIES", "Activity Log"), "activityId",
                    ["activityId", "leadId", "date", "time", "activityType", "discussion",
-                    "executive", "customerName", "mobile", "model"], None),
+                    "executive", "customerName", "mobile", "model",
+                    # Already captured by ActivityIn and stored via model_dump().
+                    "nextFollowup"], None),
     "bookings": (_tab("GSHEET_TAB_BOOKINGS", "Booking Register"), "bookingId",
                  ["bookingId", "leadId", "customerName", "bookingDate", "model", "variant",
                   "bookingAmount", "financeRequired", "exchangeRequired", "snapshotId",
@@ -74,7 +79,9 @@ SYNC_MAP = {
     "deliveries": (_tab("GSHEET_TAB_DELIVERIES", "Delivery Tracker"), "leadId",
                    ["leadId", "customerName", "insurance", "registration", "invoice", "accessories",
                     "rc", "numberPlate", "pdi", "delivered", "deliveryDate", "insurerName",
-                    "invoiceNumber", "chassisNumber", "deliveryId", "dealerTotalEarnings"], None),
+                    "invoiceNumber", "chassisNumber", "deliveryId", "dealerTotalEarnings",
+                    # Already captured by DeliveryIn and stored via model_dump().
+                    "feedback"], None),
     "claims": (_tab("GSHEET_TAB_CLAIMS", "Scheme Claim Register"), "claimId",
                ["claimId", "leadId", "customer", "model", "variant", "bookingDate", "component",
                 "componentKey", "eligibleClaim", "claimAmount", "receivedAmount", "claimStatus",
@@ -84,12 +91,16 @@ SYNC_MAP = {
                 "bookingId", "schemeMonth", "executive", "consumerDiscount", "exchangeBonus",
                 "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount",
                 "totalDiscount", "dealerDiscount", "oemDiscount", "claimRequired",
-                "ageingDays"], None),
+                "ageingDays",
+                # Newly sourced on the claim record itself.
+                "source", "dsaApproval", "claimReceivedDate", "claimRemarks"], None),
     "insurance": (_tab("GSHEET_TAB_INSURANCE", "Insurance Register"), "entryId",
                   ["entryId", "leadId", "customerName", "mobile", "model", "variant",
                    "insuranceCompany", "policyNumber", "insuranceAmount", "payoutRatePct",
                    "expectedPayout", "receivedPayout", "payoutOutstanding", "status",
-                   "policyDate", "deliveryDate", "lastUpdated", "remarks"], None),
+                   "policyDate", "deliveryDate", "lastUpdated", "remarks",
+                   # Already captured by InsuranceIn and stored via model_dump().
+                   "insuranceExecutive"], None),
     "finance": (_tab("GSHEET_TAB_FINANCE", "Finance Register"), "financeFileNumber",
                 ["financeFileNumber", "leadId", "customerName", "financerName",
                  "committedAmount", "disbursedAmount", "financeOutstanding", "status",
@@ -111,7 +122,9 @@ SYNC_MAP = {
                          "referralRetained", "dsaRetained", "schemeRetainedBreakup",
                          "oemExtraSupportReceived", "oemExtraSupportPassed",
                          "leadSource", "claimStatus", "insuranceStatus",
-                         "lastUpdated", "createdBy", "timestamp", "remarks"], None),
+                         "lastUpdated", "createdBy", "timestamp", "remarks",
+                         # Newly sourced: attribution + lifecycle position.
+                         "modifiedBy", "currentStage"], None),
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.
@@ -122,6 +135,46 @@ INTENTIONALLY_UNMAPPED = {
     "exchange": "No Exchange Register tab exists in the workbook; exchange data is carried by "
                 "Lead Register (Exchange Required / Exchange Bonus) and Dealer Earnings Register "
                 "(Exchange Margin). No tab is created.",
+}
+
+# Operational columns that exist in the workbook but have NO source of truth anywhere
+# in the CRM — no Mongo field, no computation, no frontend input. These are declared
+# explicitly rather than left silently blank, so nobody has to re-derive the finding.
+#
+# They are NOT filled with invented values. Each stays blank until the stated source is
+# built, and blank/null is preserved as meaningful ("not captured"), never coerced to 0
+# or "". `preflight()` reports them so the gap stays visible.
+SOURCE_REQUIRED = {
+    ("Lead Register", "Next Follow-up Time"): {
+        "field": "nextFollowupTime",
+        "why": "Only the follow-up DATE is captured (LeadIn.nextFollowupDate). There is no "
+               "time-of-day input anywhere in the frontend or API.",
+        "needs": "Add a time field to the lead follow-up UI and LeadIn, then map it.",
+    },
+    ("Activity Log", "Reminder"): {
+        "field": "reminder",
+        "why": "ActivityIn captures nextFollowup but has no reminder flag/mechanism; the CRM "
+               "sends no reminders, so there is nothing to record.",
+        "needs": "A reminder feature (opt-in flag + delivery). Until then the column stays blank.",
+    },
+    ("Scheme Claim Register", "Claim Remarks"): {
+        "field": "claimRemarks",
+        "why": "No free-text remark is captured on a claim; ClaimReceiptIn carries only a "
+               "reference. Mapped so a value flows once entered, but nothing writes it yet.",
+        "needs": "A remarks input on the claim screen.",
+    },
+    ("Dealer Earnings Register", "Team Leader"): {
+        "field": "teamLeader",
+        "why": "The CRM models executives as a flat list of names; there is no reporting "
+               "hierarchy, so a lead's team leader cannot be derived.",
+        "needs": "An executive -> team-leader mapping in master data.",
+    },
+    ("Dealer Earnings Register", "Colour"): {
+        "field": "colour",
+        "why": "Vehicle colour is not part of Price Master, the lead, or the booking. It is "
+               "not captured at any point in the lifecycle.",
+        "needs": "A colour field on Price Master or the booking, chosen at booking time.",
+    },
 }
 
 # Explicit, approved aliases: CRM field -> the ACTUAL header text in Euler Master (2).xlsx.
@@ -742,7 +795,8 @@ def preflight():
         }
     return {"enabled": True, "spreadsheetId": os.environ.get("GSHEET_ID", ""),
             **credential_diagnostics(), "tabs": out,
-            "intentionallyUnmapped": INTENTIONALLY_UNMAPPED}
+            "intentionallyUnmapped": INTENTIONALLY_UNMAPPED,
+            "sourceRequired": [{"tab": t, "column": c, **v} for (t, c), v in SOURCE_REQUIRED.items()]}
 
 
 # ---------------------------------------------------------------- masters (unchanged)

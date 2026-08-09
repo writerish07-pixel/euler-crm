@@ -20,24 +20,31 @@ Repo baseline `f92e1d2`. Every row below was derived by resolving the live heade
 | Column class | Count | Share |
 |---|---:|---:|
 | Derived | 627 | 59.4% |
-| App-authoritative | 171 | 16.2% |
+| App-authoritative | 234 | 22.2% |
 | Sheet-authoritative | 69 | 6.5% |
-| Legacy/unused | 67 | 6.3% |
 | Helper/navigation | 66 | 6.2% |
 | Audit/log | 56 | 5.3% |
+| Legacy/unused | 4 | 0.4% |
 | **TOTAL** | **1056** | 100% |
 
 - **Formula-driven cells:** 23 columns contain live formulas (mostly `=HYPERLINK` ID navigation)
 - **Currently populated:** 286 columns hold at least one value
-- **Columns with NO source of truth:** 728 — but these are **two different problems**:
-  - **67 in the 9 operational registers** — the real gap. Of these, **50 already have a computed
-    Mongo value and need only a `SYNC_MAP` + `HEADER_ALIASES` entry**; **17 have no source anywhere
-    in the codebase** and need new implementation. Traced per-column in `GOOGLE_SHEETS_REPAIR_PLAN.md` (P1-1).
-  - **661 in derived/report and helper tabs** — columns of legacy Apps-Script report tabs that no
-    longer refresh. They need a *rebuilder*, not a per-column source. See P2-1 / P2-2.
-- **Stale (derived tab behind lead data):** 391 columns across 47 tabs, all frozen at
-  `2026-08-08 17:16–17:17` while the newest lead write is `2026-08-09T19:27:48Z`. Only
-  **Finance Pending** and **Finance Overdue** are current — the two the CRM rebuilds.
+- **Columns with NO source of truth:** 665 — these are **two different problems**:
+  - **4 in the 9 operational registers.** Every other operational column is now either
+    mapped to a Mongo/computed source or explicitly declared in `gsheets.SOURCE_REQUIRED` with the
+    reason and the source that must be built. `test_iter20_column_contract.py` asserts that no
+    operational column is silently unaccounted for. (Was 67 before implementation.)
+  - **661 in derived/report and helper tabs** — legacy Apps-Script report columns that
+    no longer refresh. They need a *rebuilder*, not a per-column source. See P2-1 / P2-2 of the repair plan.
+- **Stale (derived tab behind lead data):** 391
+
+### Operational coverage after implementation
+
+| | Before | After |
+|---|---:|---:|
+| App-authoritative (mapped) columns | 171 | **234** |
+| Operational columns with no classification | 67 | **4** |
+| Declared `SOURCE_REQUIRED` (blank by design, reason recorded) | 0 | **5** |
 
 ### The 20 contract attributes
 
@@ -68,21 +75,21 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 ## Lead Register
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 3 · **columns:** 78
-- **Column classes:** App-authoritative × 56, Legacy/unused × 13, Helper/navigation × 9
+- **Column classes:** App-authoritative × 68, Helper/navigation × 9, Legacy/unused × 1
 - **Mongo source:** `db.leads` · **backend writers:** `create_lead, import_commit, recompute_lead, update_lead`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
 | Col | Header | Class | Mongo field | FE | Formula | CRM write | Sheet write | Preserve | Populated | Stale | No SoT |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| A | LD26000008 | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
-| B | 2026-07-04 | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
+| A | <helper area col A — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
+| B | <helper area col B — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
 | C | <helper area col C — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
 | D | <helper area col D — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
-| E | Phone | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
-| F | Hi-Load | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
-| G | XR (PV) | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
-| H | Payal | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
-| I | New | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
+| E | <helper area col E — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
+| F | <helper area col F — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
+| G | <helper area col G — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
+| H | <helper area col H — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
+| I | <helper area col I — masked> | Helper/navigation | `—` | — | no | NO | YES | YES | YES | no | NO (sheet/user owned) |
 | J | Lead ID | App-authoritative | `leadId` | yes | YES | YES | NO | YES (formula present) | YES | no | NO |
 | K | Created Date | App-authoritative | `createdDate` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | L | Customer Name | App-authoritative | `customerName` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
@@ -97,7 +104,7 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | U | Current Status | App-authoritative | `currentStatus` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | V | Priority | App-authoritative | `priority` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | W | Budget | App-authoritative | `budget` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| X | Last Activity | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| X | Last Activity | App-authoritative | `lastActivity` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | Y | Next Follow-up Date | App-authoritative | `nextFollowupDate` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | Z | Next Follow-up Time | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
 | AA | Booking Date | App-authoritative | `bookingDate` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
@@ -109,13 +116,13 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | AG | Outstanding Amount | App-authoritative | `outstandingAmount` | no | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | AH | Remarks | App-authoritative | `remarks` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | AI | Last Updated | App-authoritative | `lastUpdated` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| AJ | Last Updated By | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| AJ | Last Updated By | App-authoritative | `lastUpdatedBy` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | AK | Account Status | App-authoritative | `accountStatus` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| AL | Closed Date | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AM | Close Reason | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AN | Final Outstanding | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AO | Closed By | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AP | Close Timestamp | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| AL | Closed Date | App-authoritative | `closedDate` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AM | Close Reason | App-authoritative | `closeReason` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AN | Final Outstanding | App-authoritative | `finalOutstanding` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AO | Closed By | App-authoritative | `closedBy` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AP | Close Timestamp | App-authoritative | `closeTimestamp` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | AQ | Ex Showroom | App-authoritative | `exShowroom` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | AR | RTO | App-authoritative | `rto` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | AS | Insurance Amount | App-authoritative | `insuranceAmount` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
@@ -146,21 +153,21 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | BR | Invoice Number | App-authoritative | `invoiceNumber` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | BS | Chassis Number | App-authoritative | `chassisNumber` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | BT | Number Plate | App-authoritative | `numberPlate` | yes | YES | YES | NO | YES (formula present) | YES | no | NO |
-| BU | Insurance Status | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| BV | Registration Status | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| BW | Invoice Status | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| BX | RC Status | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| BY | PDI Status | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| BU | Insurance Status | App-authoritative | `insuranceStatus` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| BV | Registration Status | App-authoritative | `registrationStatus` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| BW | Invoice Status | App-authoritative | `invoiceStatus` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| BX | RC Status | App-authoritative | `rcStatus` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| BY | PDI Status | App-authoritative | `pdiStatus` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | BZ | Dealer Earnings | App-authoritative | `dealerTotalEarnings` | no | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 
-> ⚠️ **13 column(s) with no source of truth** in this tab: `X Last Activity`, `Z Next Follow-up Time`, `AJ Last Updated By`, `AL Closed Date`, `AM Close Reason`, `AN Final Outstanding`, `AO Closed By`, `AP Close Timestamp`, `BU Insurance Status`, `BV Registration Status`, `BW Invoice Status`, `BX RC Status`, `BY PDI Status`
+> ⚠️ **1 column(s) with no source of truth** in this tab: `Z Next Follow-up Time`
 
 ---
 
 ## Activity Log
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 1 · **columns:** 12
-- **Column classes:** App-authoritative × 10, Legacy/unused × 2
+- **Column classes:** App-authoritative × 11, Legacy/unused × 1
 - **Mongo source:** `db.activities` · **backend writers:** `add_activity, convert_booking, create_lead`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
@@ -172,21 +179,21 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | D | Time | App-authoritative | `time` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | E | Activity Type | App-authoritative | `activityType` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | F | Discussion | App-authoritative | `discussion` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| G | Next Follow-up | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| G | Next Follow-up | App-authoritative | `nextFollowup` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | H | Reminder | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
 | I | Executive | App-authoritative | `executive` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | J | Customer Name | App-authoritative | `customerName` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | K | Mobile | App-authoritative | `mobile` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | L | Model | App-authoritative | `model` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 
-> ⚠️ **2 column(s) with no source of truth** in this tab: `G Next Follow-up`, `H Reminder`
+> ⚠️ **1 column(s) with no source of truth** in this tab: `H Reminder`
 
 ---
 
 ## Booking Register
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 1 · **columns:** 17
-- **Column classes:** App-authoritative × 14, Legacy/unused × 3
+- **Column classes:** App-authoritative × 17
 - **Mongo source:** `db.bookings` · **backend writers:** `convert_booking`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
@@ -203,14 +210,12 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | I | Exchange Required | App-authoritative | `exchangeRequired` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | J | CommercialSnapshotID | App-authoritative | `snapshotId` | no | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | K | Booking Status | App-authoritative | `bookingStatus` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| L | Created By | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| L | Created By | App-authoritative | `createdBy` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | M | Created Date | App-authoritative | `createdDate` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| N | Last Updated | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| N | Last Updated | App-authoritative | `lastUpdated` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | O | Amount Received | App-authoritative | `amountReceived` | no | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | P | Payment Mode | App-authoritative | `paymentMode` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| Q | Dealer Earnings | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-
-> ⚠️ **3 column(s) with no source of truth** in this tab: `L Created By`, `N Last Updated`, `Q Dealer Earnings`
+| Q | Dealer Earnings | App-authoritative | `dealerTotalEarnings` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 
 ---
 
@@ -241,7 +246,7 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 ## Delivery Tracker
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 1 · **columns:** 17
-- **Column classes:** App-authoritative × 14, Legacy/unused × 3
+- **Column classes:** App-authoritative × 17
 - **Mongo source:** `db.deliveries` · **backend writers:** `mark_delivery`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
@@ -258,21 +263,19 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | I | PDI | App-authoritative | `pdi` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | J | Delivered | App-authoritative | `delivered` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | K | Delivery Date | App-authoritative | `deliveryDate` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| L | Feedback | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| M | Delivery ID | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| L | Feedback | App-authoritative | `feedback` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| M | Delivery ID | App-authoritative | `deliveryId` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | N | Insurer Name | App-authoritative | `insurerName` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | O | Invoice Number | App-authoritative | `invoiceNumber` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| P | Dealer Earnings | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| P | Dealer Earnings | App-authoritative | `dealerTotalEarnings` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | Q | Chassis Number | App-authoritative | `chassisNumber` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-
-> ⚠️ **3 column(s) with no source of truth** in this tab: `L Feedback`, `M Delivery ID`, `P Dealer Earnings`
 
 ---
 
 ## Finance Register
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 1 · **columns:** 10
-- **Column classes:** App-authoritative × 8, Legacy/unused × 2
+- **Column classes:** App-authoritative × 10
 - **Mongo source:** `db.finance` · **backend writers:** `sync_finance_file`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
@@ -286,10 +289,8 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | F | Received Against File | App-authoritative | `disbursedAmount` | no | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | G | File Outstanding | App-authoritative | `financeOutstanding` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | H | Status | App-authoritative | `status` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| I | Last Payment Date | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| J | Last Updated | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-
-> ⚠️ **2 column(s) with no source of truth** in this tab: `I Last Payment Date`, `J Last Updated`
+| I | Last Payment Date | App-authoritative | `lastPaymentDate` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| J | Last Updated | App-authoritative | `lastUpdated` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 
 ---
 
@@ -341,7 +342,7 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 ## Insurance Register
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 1 · **columns:** 19
-- **Column classes:** App-authoritative × 14, Legacy/unused × 5
+- **Column classes:** App-authoritative × 19
 - **Mongo source:** `db.insurance` · **backend writers:** `create_insurance`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
@@ -361,48 +362,46 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | L | Received Payout | App-authoritative | `receivedPayout` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | M | Payout Outstanding | App-authoritative | `payoutOutstanding` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | N | Status | App-authoritative | `status` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
-| O | Policy Date | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| P | Delivery Date | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| Q | Last Updated | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| R | Remarks | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| S | Insurance Executive | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-
-> ⚠️ **5 column(s) with no source of truth** in this tab: `O Policy Date`, `P Delivery Date`, `Q Last Updated`, `R Remarks`, `S Insurance Executive`
+| O | Policy Date | App-authoritative | `policyDate` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| P | Delivery Date | App-authoritative | `deliveryDate` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| Q | Last Updated | App-authoritative | `lastUpdated` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| R | Remarks | App-authoritative | `remarks` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| S | Insurance Executive | App-authoritative | `insuranceExecutive` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 
 ---
 
 ## Scheme Claim Register
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 1 · **columns:** 33
-- **Column classes:** Legacy/unused × 18, App-authoritative × 15
+- **Column classes:** App-authoritative × 33
 - **Mongo source:** `db.claims` · **backend writers:** `create_manual_claim, recompute_lead, record_claim_receipt, settle_claim`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
 | Col | Header | Class | Mongo field | FE | Formula | CRM write | Sheet write | Preserve | Populated | Stale | No SoT |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | A | Claim ID | App-authoritative | `claimId` | yes | YES | YES | NO | YES (formula present) | YES | no | NO |
-| B | Source | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| C | Booking ID | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| B | Source | App-authoritative | `source` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| C | Booking ID | App-authoritative | `bookingId` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | D | Lead ID | App-authoritative | `leadId` | yes | YES | YES | NO | YES (formula present) | YES | no | NO |
 | E | Customer | App-authoritative | `customer` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | F | Model | App-authoritative | `model` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | G | Variant | App-authoritative | `variant` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | H | Booking Date | App-authoritative | `bookingDate` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| I | Scheme Month | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| J | Executive | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| I | Scheme Month | App-authoritative | `schemeMonth` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| J | Executive | App-authoritative | `executive` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | K | Component | App-authoritative | `component` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | L | Component Key | App-authoritative | `componentKey` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| M | Consumer Discount | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| N | Exchange Bonus | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| O | Loyalty Bonus | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| P | Referral Bonus | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| Q | DSA Discount | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| R | Additional Discount | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| S | Total Discount | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| T | Dealer Discount | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| U | OEM Discount | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| V | DSA Approval | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| W | Claim Required | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| M | Consumer Discount | App-authoritative | `consumerDiscount` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| N | Exchange Bonus | App-authoritative | `exchangeBonus` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| O | Loyalty Bonus | App-authoritative | `loyaltyBonus` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| P | Referral Bonus | App-authoritative | `referralBonus` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| Q | DSA Discount | App-authoritative | `dsaDiscount` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| R | Additional Discount | App-authoritative | `additionalDiscount` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| S | Total Discount | App-authoritative | `totalDiscount` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| T | Dealer Discount | App-authoritative | `dealerDiscount` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| U | OEM Discount | App-authoritative | `oemDiscount` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| V | DSA Approval | App-authoritative | `dsaApproval` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| W | Claim Required | App-authoritative | `claimRequired` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | X | Eligible Claim | App-authoritative | `eligibleClaim` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | Y | Claim Amount | App-authoritative | `claimAmount` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | Z | Received Amount | App-authoritative | `receivedAmount` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
@@ -410,11 +409,9 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | AB | Claim Reference Number | App-authoritative | `claimReference` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | AC | Claim Submitted Date | App-authoritative | `submittedDate` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | AD | Claim Approved Date | App-authoritative | `approvedDate` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
-| AE | Claim Received Date | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AF | Claim Ageing (Days) | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AG | Claim Remarks | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-
-> ⚠️ **18 column(s) with no source of truth** in this tab: `B Source`, `C Booking ID`, `I Scheme Month`, `J Executive`, `M Consumer Discount`, `N Exchange Bonus`, `O Loyalty Bonus`, `P Referral Bonus`, `Q DSA Discount`, `R Additional Discount`, `S Total Discount`, `T Dealer Discount`, `U OEM Discount`, `V DSA Approval` …
+| AE | Claim Received Date | App-authoritative | `claimReceivedDate` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AF | Claim Ageing (Days) | App-authoritative | `ageingDays` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AG | Claim Remarks | App-authoritative | `claimRemarks` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 
 ---
 
@@ -609,7 +606,7 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 ## Dealer Earnings Register
 
 - **Tab class:** AUTHORITATIVE OPERATIONAL · **header row:** 1 · **columns:** 49
-- **Column classes:** App-authoritative × 28, Legacy/unused × 21
+- **Column classes:** App-authoritative × 47, Legacy/unused × 2
 - **Mongo source:** `db.leads (computed in recompute_lead)` · **backend writers:** `recompute_lead`
 - **On create:** append one row · **on update:** upsert by stable ID · **on close/delete:** row retained, status fields updated (no hard delete)
 
@@ -620,11 +617,11 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | C | Customer Name | App-authoritative | `customerName` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | D | Executive | App-authoritative | `executive` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | E | Team Leader | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| F | Lead Source | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| F | Lead Source | App-authoritative | `leadSource` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | G | Vehicle Model | App-authoritative | `model` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | H | Variant | App-authoritative | `variant` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | I | Colour | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| J | Current Stage | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| J | Current Stage | App-authoritative | `currentStage` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | K | Booking Date | App-authoritative | `bookingDate` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | L | Delivery Date | App-authoritative | `deliveryDate` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | M | Invoice Number | App-authoritative | `invoiceNumber` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
@@ -645,27 +642,27 @@ Each per-tab table below carries: column position, header, class, Mongo collecti
 | AB | Campaign Incentive | App-authoritative | `campaignIncentive` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | AC | Other Income | App-authoritative | `otherIncome` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 | AD | TOTAL DEALER EARNINGS | App-authoritative | `dealerTotalEarnings` | no | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| AE | Claim Status | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AF | Insurance Status | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AG | Last Updated | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AH | Created By | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AI | Modified By | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AJ | Timestamp | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AK | Remarks | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AL | Consumer Retained | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AM | Exchange Retained | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AN | Loyalty Retained | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AO | Referral Retained | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AP | DSA Retained | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AQ | Scheme Retained Breakup | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AR | Dealer Margin Gross (Incl GST) | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AS | Dealer Margin GST (5%) | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| AE | Claim Status | App-authoritative | `claimStatus` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AF | Insurance Status | App-authoritative | `insuranceStatus` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AG | Last Updated | App-authoritative | `lastUpdated` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AH | Created By | App-authoritative | `createdBy` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AI | Modified By | App-authoritative | `modifiedBy` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AJ | Timestamp | App-authoritative | `timestamp` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AK | Remarks | App-authoritative | `remarks` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AL | Consumer Retained | App-authoritative | `consumerRetained` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AM | Exchange Retained | App-authoritative | `exchangeRetained` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AN | Loyalty Retained | App-authoritative | `loyaltyRetained` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AO | Referral Retained | App-authoritative | `referralRetained` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AP | DSA Retained | App-authoritative | `dsaRetained` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AQ | Scheme Retained Breakup | App-authoritative | `schemeRetainedBreakup` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AR | Dealer Margin Gross (Incl GST) | App-authoritative | `dealerMarginGrossInclGst` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AS | Dealer Margin GST (5%) | App-authoritative | `dealerMarginGst` | no | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | AT | Dealer Margin Net (Ex GST) | App-authoritative | `dealerMarginNetExGst` | yes | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
-| AV | OEM Extra Support Received | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
-| AW | OEM Extra Support Passed To Customer | Legacy/unused | `—` | — | no | NO | YES | YES | no | no | YES — NO SOURCE OF TRUTH |
+| AV | OEM Extra Support Received | App-authoritative | `oemExtraSupportReceived` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
+| AW | OEM Extra Support Passed To Customer | App-authoritative | `oemExtraSupportPassed` | yes | no | YES | NO | NO (CRM overwrites) | no | no | NO |
 | AX | OEM Extra Support Retained | App-authoritative | `oemExtraSupportRetained` | no | no | YES | NO | NO (CRM overwrites) | YES | no | NO |
 
-> ⚠️ **21 column(s) with no source of truth** in this tab: `E Team Leader`, `F Lead Source`, `I Colour`, `J Current Stage`, `AE Claim Status`, `AF Insurance Status`, `AG Last Updated`, `AH Created By`, `AI Modified By`, `AJ Timestamp`, `AK Remarks`, `AL Consumer Retained`, `AM Exchange Retained`, `AN Loyalty Retained` …
+> ⚠️ **2 column(s) with no source of truth** in this tab: `E Team Leader`, `I Colour`
 
 ---
 
