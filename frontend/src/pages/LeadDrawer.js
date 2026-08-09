@@ -664,8 +664,10 @@ function BookingModal({ lead, onClose, onDone }) {
     return () => { alive = false; };
   }, [lead.leadId]);
 
-  const priced = Number(lead.exShowroom) > 0;           // already has a price structure
-  const canBook = priced || (preview && preview.found === true);
+  // STRICT PRODUCTION BOOKING MODE: a saved price structure is never sufficient on
+  // its own. Every booking requires a fresh Price Master hit for the lead's CURRENT
+  // model/variant, matching the backend's own revalidation.
+  const canBook = Boolean(preview && preview.found === true && Number(preview.priceStructure?.exShowroom) > 0);
   const loading = preview === undefined;
   const ps = (preview && preview.priceStructure) || {};
   const charges = ["rto", "insuranceAmount", "accessoriesAmount", "handlingCharges", "trc", "fastag", "extendedWarranty", "otherCharges"];
@@ -740,10 +742,6 @@ function BookingModal({ lead, onClose, onDone }) {
           <div className="border-t border-line mt-1 pt-1 flex justify-between font-semibold"><span>Gross Vehicle Cost</span><span data-testid="preview-gvc">{inr(gvc)}</span></div>
           <p className="text-xs text-ink-faint mt-1">Scheme benefits and final Customer Payable are computed by the backend on booking.</p>
         </div>
-      )}
-
-      {priced && preview && preview.found === false && (
-        <p className="text-xs text-ink-soft mb-3">This lead already has a saved price structure, so booking is still allowed.</p>
       )}
 
       <div className="grid grid-cols-2 gap-3">
