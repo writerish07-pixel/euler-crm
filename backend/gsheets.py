@@ -154,6 +154,36 @@ _service = None
 _status = {"enabled": False, "reason": "not configured", "email": None}
 _health = {"lastWriteOk": None, "lastWriteAt": None, "lastError": None, "writes": 0, "failures": 0}
 _header_cache = {}
+_headerrow_cache = {}
+_idrow_cache = {}   # (tab, header_row) -> {id_value: row_number}
+_formula_cache = {}  # (tab, row) -> set of formula-holding column indexes
+
+
+_RETRY_STATUSES = (429, 500, 503)
+
+
+def _with_retry(fn, attempts=4):
+    """Google Sheets enforces a per-minute read/write quota; a burst of dealership
+    activity legitimately returns 429. Retry with backoff instead of dropping the
+    write. Combined with the header/ID caches this keeps a normal lifecycle well
+    inside quota, and a genuine overload recovers instead of failing."""
+    import random
+    import time as _t
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as e:
+            code = getattr(getattr(e, "resp", None), "status", None)
+            try:
+                code = int(code)
+            except (TypeError, ValueError):
+                code = None
+            if code not in _RETRY_STATUSES or i == attempts - 1:
+                raise
+            last = e
+            _t.sleep(min(2 ** i, 8) + random.random())
+    raise last
 
 
 def _norm(s):
@@ -234,6 +264,8 @@ def _header_row_for(entity, tab):
     hint = SYNC_MAP.get(entity, (None, None, None, None))[3] if entity in SYNC_MAP else None
     if hint:
         return int(hint)
+    if entity in _headerrow_cache:
+        return _headerrow_cache[entity]
     sheet_id = os.environ.get("GSHEET_ID", "")
     res = _service.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"'{tab}'!1:5").execute()
@@ -243,13 +275,14 @@ def _header_row_for(entity, tab):
         n = sum(1 for c in row if isinstance(c, str) and c.strip())
         if n > best_n:
             best_n, best = n, i
+    _headerrow_cache[entity] = best
     return best
 
 
 def _read_header_row(tab, header_row=1):
     sheet_id = os.environ.get("GSHEET_ID", "")
-    res = _service.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range=f"'{tab}'!{header_row}:{header_row}").execute()
+    res = _with_retry(lambda: _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=f"'{tab}'!{header_row}:{header_row}").execute())
     vals = res.get("values", [])
     return vals[0] if vals else []
 
@@ -287,24 +320,42 @@ def invalidate_header_cache(tab=None):
     if tab:
         for k in [k for k in _header_cache if k[0] == tab]:
             _header_cache.pop(k, None)
+        for k in [k for k in _idrow_cache if k[0] == tab]:
+            _idrow_cache.pop(k, None)
+        for k in [k for k in _formula_cache if k[0] == tab]:
+            _formula_cache.pop(k, None)
     else:
         _header_cache.clear()
+        _idrow_cache.clear()
+        _headerrow_cache.clear()
+        _formula_cache.clear()
 
 
 # ---------------------------------------------------------------- upsert (GS-2/GS-3)
-def _find_row_by_id(tab, id_col_idx, id_value, start_row=2):
-    """Return the 1-based sheet row number holding id_value in the ID column, else None."""
+def _load_id_rows(tab, id_col_idx, start_row):
     sheet_id = os.environ.get("GSHEET_ID", "")
     letter = _col_letter(id_col_idx)
-    res = _service.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range=f"'{tab}'!{letter}:{letter}").execute()
-    target = str(id_value).strip()
+    res = _with_retry(lambda: _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=f"'{tab}'!{letter}:{letter}").execute())
+    out = {}
     for i, row in enumerate(res.get("values", []), start=1):
         if i < start_row:
-            continue          # never match inside the header/helper area above the table
-        if row and str(row[0]).strip() == target:
-            return i
-    return None
+            continue
+        if row and str(row[0]).strip():
+            out.setdefault(str(row[0]).strip(), i)
+    _idrow_cache[(tab, start_row)] = out
+    return out
+
+
+def _find_row_by_id(tab, id_col_idx, id_value, start_row=2):
+    """Return the 1-based sheet row number holding id_value in the ID column, else None."""
+    target = str(id_value).strip()
+    cache = _idrow_cache.get((tab, start_row))
+    if cache is not None and target in cache:
+        return cache[target]
+    # miss -> one refresh read (also primes the cache for the rest of this burst)
+    cache = _load_id_rows(tab, id_col_idx, start_row)
+    return cache.get(target)
 
 
 def _formula_cells(tab, row_num, mapping):
@@ -314,9 +365,12 @@ def _formula_cells(tab, row_num, mapping):
     idxs = sorted(mapping.values())
     if not idxs:
         return set()
+    ck = (tab, row_num)
+    if ck in _formula_cache:
+        return _formula_cache[ck]
     rng = f"'{tab}'!{_col_letter(idxs[0])}{row_num}:{_col_letter(idxs[-1])}{row_num}"
-    res = _service.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range=rng, valueRenderOption="FORMULA").execute()
+    res = _with_retry(lambda: _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=rng, valueRenderOption="FORMULA").execute())
     vals = (res.get("values") or [[]])
     row = vals[0] if vals else []
     protected = set()
@@ -325,6 +379,7 @@ def _formula_cells(tab, row_num, mapping):
         off = col_idx - base
         if off < len(row) and isinstance(row[off], str) and row[off].startswith("="):
             protected.add(col_idx)
+    _formula_cache[ck] = protected
     return protected
 
 
@@ -364,9 +419,9 @@ def _upsert_sync(entity, doc):
             data.append({"range": f"'{tab}'!{_col_letter(col_idx)}{row_num}",
                          "values": [[doc.get(f, "")]]})
         if data:
-            _service.spreadsheets().values().batchUpdate(
+            _with_retry(lambda: _service.spreadsheets().values().batchUpdate(
                 spreadsheetId=sheet_id,
-                body={"valueInputOption": "USER_ENTERED", "data": data}).execute()
+                body={"valueInputOption": "USER_ENTERED", "data": data}).execute())
         return {"ok": True, "operation": "updated", "tab": tab, "row": row_num,
                 "id": id_value, "cellsWritten": len(data),
                 "formulaCellsPreserved": len(protected), "missingHeaders": missing}
@@ -376,10 +431,26 @@ def _upsert_sync(entity, doc):
     row = [""] * width
     for f, col_idx in mapping.items():
         row[col_idx] = doc.get(f, "")
-    _service.spreadsheets().values().append(
+    resp = _with_retry(lambda: _service.spreadsheets().values().append(
         spreadsheetId=sheet_id, range=f"'{tab}'!A1",
         valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
-        body={"values": [row]}).execute()
+        body={"values": [row]}).execute())
+    # Learn the new row number from the append response so the ID cache stays warm —
+    # re-reading the whole ID column after every append is what burned the read quota.
+    new_row = None
+    try:
+        rng = (resp or {}).get("updates", {}).get("updatedRange", "")
+        m = re.search(r"![A-Z]+(\d+)", rng)
+        if m:
+            new_row = int(m.group(1))
+    except Exception:
+        new_row = None
+    ck = (tab, header_row + 1)
+    if new_row and ck in _idrow_cache:
+        _idrow_cache[ck][id_value] = new_row
+        _formula_cache.pop((tab, new_row), None)
+    else:
+        _idrow_cache.pop(ck, None)
     return {"ok": True, "operation": "appended", "tab": tab, "id": id_value,
             "cellsWritten": len(mapping), "missingHeaders": missing}
 
@@ -542,3 +613,32 @@ def _read_id_column(tab, id_col_idx, header_row=1):
         if row and str(row[0]).strip():
             out.add(str(row[0]).strip())
     return out
+
+
+def count_rows_for(entity, id_value):
+    """Actual number of rows in the live sheet whose ID column equals id_value.
+    Read-only. Used by the go-live verifier to prove idempotency against the real
+    spreadsheet rather than trusting an HTTP 200."""
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled")}
+    spec = SYNC_MAP.get(entity)
+    if not spec:
+        return {"ok": False, "reason": f"entity '{entity}' has no sheet destination"}
+    tab, id_field, fields = spec[0], spec[1], spec[2]
+    try:
+        hr = _header_row_for(entity, tab)
+        mapping, _ = _resolve_columns(tab, fields, use_cache=False, header_row=hr)
+        if id_field not in mapping:
+            return {"ok": False, "tab": tab, "reason": f"ID header '{id_field}' not resolvable"}
+        letter = _col_letter(mapping[id_field])
+        res = _service.spreadsheets().values().get(
+            spreadsheetId=os.environ.get("GSHEET_ID", ""), range=f"'{tab}'!{letter}:{letter}").execute()
+        target = str(id_value).strip()
+        rows = [i for i, r in enumerate(res.get("values", []), start=1)
+                if i > hr and r and str(r[0]).strip() == target]
+        return {"ok": True, "tab": tab, "idField": id_field, "headerRow": hr,
+                "column": letter, "count": len(rows), "rows": rows}
+    except Exception as e:
+        return {"ok": False, "tab": tab, "reason": str(e)[:200]}

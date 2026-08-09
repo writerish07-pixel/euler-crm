@@ -307,6 +307,25 @@ async def recompute_lead(lead_id):
             "extraDealerIncomeTotal": updates["extraDealerIncomeTotal"],
             "dealerTotalEarnings": updates["dealerTotalEarnings"],
         })
+        # Derived OEM claims must also reach the existing Scheme Claim Register.
+        # They are keyed on the same stable claimId GET /claims exposes, so this is an
+        # upsert — a claim later settled/receipted updates that same row.
+        for _key, _amt in shares["displayByComponent"].items():
+            if _amt <= 0:
+                continue
+            _ex = await db.claims.find_one({"leadId": lead_id, "componentKey": _key})
+            await sheet_sync("claims", {
+                "claimId": (_ex or {}).get("claimId", f"CLM-{lead_id}-{_key}"),
+                "leadId": lead_id, "customer": merged.get("customerName"),
+                "model": merged.get("interestedModel"), "variant": merged.get("variant"),
+                "bookingDate": merged.get("bookingDate", ""),
+                "component": ce.SCHEME_COMPONENT_LABELS.get(_key, _key), "componentKey": _key,
+                "eligibleClaim": ce.round2(shares["eligibleByComponent"].get(_key, 0)),
+                "claimAmount": ce.round2(_amt),
+                "receivedAmount": (_ex or {}).get("receivedAmount", 0),
+                "claimStatus": (_ex or {}).get("claimStatus", "Pending"),
+                "claimReference": (_ex or {}).get("claimReference", ""),
+            })
         if str(merged.get("exchangeRequired") or "").lower() == "yes" or ce.num(merged.get("finalExchangeValue")) > 0:
             await sheet_sync("exchange", {
                 "leadId": lead_id, "customerName": merged.get("customerName"),
@@ -2411,6 +2430,51 @@ async def gsheets_preflight():
     could not find. Nothing is written. Run this first against the real spreadsheet —
     any entity with willSync=false will refuse to write rather than guess a column."""
     return gsheets.preflight()
+
+
+@api.get("/integrations/gsheets/verify-lead/{lead_id}", dependencies=[Depends(owner_only)])
+async def gsheets_verify_lead(lead_id: str):
+    """Read-only: how many rows the LIVE sheet actually holds for this lead in each
+    transactional tab. Lets the go-live verifier prove idempotency against the real
+    spreadsheet instead of trusting an HTTP 200. Nothing is written."""
+    lead = await db.leads.find_one({"leadId": lead_id})
+    out = {"leadId": lead_id, "tabs": {}}
+    checks = [("leads", lead_id), ("activities", None), ("deliveries", lead_id),
+              ("dealer_earnings", lead_id), ("bookings", None), ("payments", None), ("claims", None)]
+    bookings = await db.bookings.find({"leadId": lead_id}).to_list(50)
+    payments = await db.payments.find({"leadId": lead_id}).to_list(200)
+    activities = await db.activities.find({"leadId": lead_id}).to_list(200)
+    scheme_rows = await get_scheme_rows()
+    claim_ids = []
+    if lead:
+        shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
+        for key, amt in shares["displayByComponent"].items():
+            if amt > 0:
+                existing = await db.claims.find_one({"leadId": lead_id, "componentKey": key})
+                claim_ids.append((existing or {}).get("claimId", f"CLM-{lead_id}-{key}"))
+    for entity, ident in checks:
+        if entity in ("leads", "deliveries", "dealer_earnings"):
+            ids = [lead_id]
+        elif entity == "bookings":
+            ids = [b.get("bookingId") for b in bookings]
+        elif entity == "payments":
+            ids = [p.get("receiptNumber") for p in payments]
+        elif entity == "activities":
+            ids = [a.get("activityId") for a in activities]
+        else:
+            ids = claim_ids
+        per = {}
+        for i in [x for x in ids if x]:
+            per[i] = await asyncio.to_thread(gsheets.count_rows_for, entity, i)
+        counts = [v.get("count") for v in per.values() if v.get("ok")]
+        out["tabs"][entity] = {
+            "crmRecords": len(ids),
+            "sheetRowsPerId": {k: v.get("count", v.get("reason")) for k, v in per.items()},
+            "maxRowsForAnyId": max(counts) if counts else 0,
+            "duplicates": any(c > 1 for c in counts),
+        }
+    out["anyDuplicates"] = any(t["duplicates"] for t in out["tabs"].values())
+    return out
 
 
 @api.get("/integrations/gsheets/sync-log", dependencies=[Depends(owner_only)])
