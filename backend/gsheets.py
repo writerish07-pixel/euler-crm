@@ -252,6 +252,31 @@ def credential_diagnostics():
     }
 
 
+# ---------------------------------------------------------------- environment write-safety (Phase 1)
+def env_safety():
+    """Preview/Production isolation control. Preview must never WRITE to the
+    production spreadsheet. Set ENVIRONMENT=preview and PRODUCTION_GSHEET_ID in the
+    preview env; production sets ENVIRONMENT=production. Reads are always allowed."""
+    env = os.environ.get("ENVIRONMENT", "").strip().lower()
+    prod_id = os.environ.get("PRODUCTION_GSHEET_ID", "").strip()
+    cur_id = os.environ.get("GSHEET_ID", "").strip()
+    is_preview = env in ("preview", "dev", "development", "test", "staging")
+    reason = None
+    if is_preview and prod_id and cur_id and cur_id == prod_id:
+        reason = "PREVIEW WRITE BLOCKED — PREVIEW IS POINTING TO PRODUCTION GOOGLE SHEET."
+    elif env == "production" and prod_id and cur_id and cur_id != prod_id:
+        reason = "PRODUCTION WRITE BLOCKED — PRODUCTION IS NOT POINTING TO THE PRODUCTION GOOGLE SHEET."
+    return {"environment": env or "unset", "isPreview": is_preview,
+            "spreadsheetId": cur_id, "productionSheetId": prod_id or None,
+            "pointingAtProduction": bool(prod_id and cur_id and cur_id == prod_id),
+            "writeBlocked": reason is not None, "blockReason": reason}
+
+
+def _write_blocked():
+    s = env_safety()
+    return s["blockReason"] if s["writeBlocked"] else None
+
+
 def _init():
     global _service, _status
     path, source = resolve_credentials_path()
@@ -381,7 +406,13 @@ def status():
                             "reason": ("read-only — share the sheet with the service account email "
                                        "as EDITOR to enable syncing")
                             if ecode == "permission_denied" else ereason})
-    return {**_status, "spreadsheetId": sheet_id, **credential_diagnostics(), "health": _health}
+    # Phase-1 environment write-safety overrides Google permission — a preview pointing
+    # at the production sheet must report canWrite=False regardless of Google access.
+    _es = env_safety()
+    if _es["writeBlocked"]:
+        _status.update({"canWrite": False, "reason": _es["blockReason"], "errorCode": "env_write_blocked"})
+    return {**_status, "spreadsheetId": sheet_id, "envSafety": _es,
+            **credential_diagnostics(), "health": _health}
 
 
 # ---------------------------------------------------------------- header mapping (GS-1)
@@ -599,6 +630,9 @@ async def sync(entity: str, doc: dict):
         _init()
     if _service is None or not _status.get("enabled"):
         return {"ok": True, "operation": "skipped", "reason": _status.get("reason", "sync disabled")}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "operation": "blocked", "error": blocked}
     if entity not in SYNC_MAP:
         return {"ok": False, "operation": "error", "error": f"unknown entity '{entity}'"}
     try:
@@ -687,6 +721,8 @@ async def sync_masters(rows):
         _init()
     if _service is None or not _status.get("enabled"):
         return False
+    if _write_blocked():
+        return False
     try:
         await asyncio.to_thread(_sync_masters_sync, rows)
         _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
@@ -699,6 +735,124 @@ async def sync_masters(rows):
         return False
 
 
+# ---------------------------------------------------------------- derived report tabs
+FINANCE_PENDING_TAB = _tab("GSHEET_TAB_FINANCE_PENDING", "Finance Pending")
+FINANCE_OVERDUE_TAB = _tab("GSHEET_TAB_FINANCE_OVERDUE", "Finance Overdue")
+
+
+def _overwrite_report_sync(tab, values):
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    _service.spreadsheets().values().clear(
+        spreadsheetId=sheet_id, range=f"'{tab}'!A1:Z10000", body={},
+    ).execute()
+    _service.spreadsheets().values().update(
+        spreadsheetId=sheet_id, range=f"'{tab}'!A1",
+        valueInputOption="USER_ENTERED", body={"values": values},
+    ).execute()
+
+
+async def overwrite_report_tab(tab, values):
+    """Full-mirror rewrite of a DERIVED report tab (e.g. Finance Pending / Overdue).
+    Safe because these tabs hold no source data — they are projections of the
+    authoritative registers and must reflect current state, never accumulate rows.
+    Returns True on success, False if sync is disabled or the write failed."""
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return False
+    if _write_blocked():
+        return False
+    try:
+        await asyncio.to_thread(_overwrite_report_sync, tab, values)
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
+        return True
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return False
+
+
+def _classify_tab(name):
+    n = name.lower()
+    if name in {SYNC_MAP[e][0] for e in SYNC_MAP}:
+        return "operational (app-authoritative mirror)"
+    if name in ("PRICE MASTER", "Scheme Master", "Incentive Master", "Masters", "Settings", "Quotation Schema", "Navigation Matrix", "RelationshipIndex"):
+        return "master / config (sheet-authoritative)"
+    if name in ("Finance Pending", "Finance Overdue", "Dashboard", "Dashboard Data") or n.startswith("mp —") \
+       or n.startswith("today's") or n.startswith("monthly") or n.startswith("payments —") \
+       or n.startswith("obs ") or n.startswith("pep ") or "analytics" in n or "report" in n \
+       or "dashboard" in n or "scorecard" in n or name in ("Active Bookings", "Pending Deliveries",
+       "Pending Follow-ups", "Outstanding Leads", "OEM Claim Dashboard", "Commercial Snapshot",
+       "Commercial Audit", "Booking Status History", "Vehicle Allocation", "Executive Scorecard",
+       "Dealer Daily Register", "Performance Log", "Transaction Log"):
+        return "derived / report (projection — rebuildable)"
+    if name in ("Activity Log",):
+        return "operational (app-authoritative mirror)"
+    if name in ("Migration Import Log", "Import Log", "Audit Log", "Backup Registry", "Crash Report"):
+        return "audit / log"
+    return "helper / other"
+
+
+def inventory():
+    """Read-only workbook contract. Enumerates all tabs + headers + classification,
+    and the CRM column mapping for synced tabs. Never writes."""
+    global _service
+    if _service is None:
+        _init()
+    if _service is None:
+        return {"ok": False, "reason": _status.get("reason", "not connected")}
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    meta = _service.spreadsheets().get(spreadsheetId=sheet_id,
+        fields="properties.title,sheets.properties(title,gridProperties)").execute()
+    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    # Batch-read first 5 rows of every tab to find headers efficiently.
+    ranges = [f"'{t}'!1:5" for t in titles]
+    batch = _service.spreadsheets().values().batchGet(spreadsheetId=sheet_id, ranges=ranges).execute()
+    # batchGet preserves order, so zip with titles is reliable.
+    tab_rows = [vr.get("values", []) for vr in batch.get("valueRanges", [])]
+    tab_to_entity = {SYNC_MAP[e][0]: e for e in SYNC_MAP}
+    tabs = []
+    totals = {"tabs": len(titles), "columns": 0, "mappedColumns": 0, "unmappedTabs": 0}
+    for title, rows in zip(titles, tab_rows):
+        best, bn = 1, -1
+        for i, r in enumerate(rows, start=1):
+            c = sum(1 for x in r if isinstance(x, str) and x.strip())
+            if c > bn:
+                bn, best = c, i
+        header = rows[best - 1] if len(rows) >= best else []
+        header = [h for h in header]
+        totals["columns"] += sum(1 for h in header if str(h).strip())
+        entity = tab_to_entity.get(title)
+        entry = {
+            "tab": title, "classification": _classify_tab(title), "headerRow": best,
+            "columnCount": sum(1 for h in header if str(h).strip()),
+            "headers": [{"col": _col_letter(i), "header": h} for i, h in enumerate(header) if str(h).strip()],
+        }
+        if entity:
+            spec = SYNC_MAP[entity]
+            id_field, fields = spec[1], spec[2]
+            try:
+                mapping, missing = _resolve_columns(title, fields, use_cache=False, header_row=best)
+                entry["crmEntity"] = entity
+                entry["idField"] = id_field
+                entry["syncDirection"] = "APP → SHEET (upsert by stable ID)"
+                entry["resolvedColumns"] = {f: _col_letter(i) for f, i in sorted(mapping.items(), key=lambda kv: kv[1])}
+                entry["missingHeaders"] = missing
+                entry["idColumnResolved"] = id_field in mapping
+                totals["mappedColumns"] += len(mapping)
+            except Exception as e:
+                entry["mappingError"] = str(e)[:200]
+        else:
+            totals["unmappedTabs"] += 1
+        tabs.append(entry)
+    return {"ok": True, "spreadsheetId": sheet_id,
+            "spreadsheetTitle": (meta.get("properties") or {}).get("title", ""),
+            "totals": totals, "envSafety": env_safety(), "tabs": tabs}
+
+
 async def backfill(datasets):
     """Bulk reconcile: upserts every supplied record. Idempotent by construction —
     existing IDs are updated in place, only genuinely new IDs append."""
@@ -708,6 +862,9 @@ async def backfill(datasets):
     st = status()
     if not st.get("enabled") or not st.get("canWrite"):
         return {"ok": False, "reason": st.get("reason", "sync not enabled"), "canWrite": st.get("canWrite", False)}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "canWrite": False, "writeBlocked": True}
     invalidate_header_cache()
     result = {}
     for entity, docs in datasets.items():
@@ -737,16 +894,21 @@ _init()
 
 def _read_id_column(tab, id_col_idx, header_row=1):
     """All non-empty values in a tab's ID column (used by the reconciliation report)."""
+    return set(_read_id_column_list(tab, id_col_idx, header_row))
+
+
+def _read_id_column_list(tab, id_col_idx, header_row=1):
+    """List (with duplicates) of non-empty ID-column values below the header row."""
     sheet_id = os.environ.get("GSHEET_ID", "")
     letter = _col_letter(id_col_idx)
     res = _service.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"'{tab}'!{letter}:{letter}").execute()
-    out = set()
+    out = []
     for i, row in enumerate(res.get("values", []), start=1):
         if i <= header_row:
             continue  # header/helper area
         if row and str(row[0]).strip():
-            out.add(str(row[0]).strip())
+            out.append(str(row[0]).strip())
     return out
 
 
