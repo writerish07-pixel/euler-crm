@@ -242,6 +242,31 @@ def lead_to_snapshot(lead):
     }
 
 
+# Scheme components the Dealer Earnings Register keeps a dedicated "… Retained"
+# column for, mapped to the componentKey compute_scheme_income_breakdown emits.
+RETAINED_COMPONENT_COLUMNS = {
+    "consumerRetained": "consumerDiscount",
+    "exchangeRetained": "exchangeBonus",
+    "loyaltyRetained": "loyaltyBonus",
+    "referralRetained": "referralBonus",
+    "dsaRetained": "dsaDiscount",
+}
+
+
+def _retained_component_fields(retained_by_component):
+    """Break the already-computed retainedByComponent map out into the per-component
+    fields the Dealer Earnings Register has columns for, plus a human-readable
+    breakup string. Components absent from the map retain 0.0 — a real value, not a
+    blank — because "no retention on this component" is a meaningful commercial fact."""
+    out = {}
+    for field, key in RETAINED_COMPONENT_COLUMNS.items():
+        out[field] = ce.round2(ce.num(retained_by_component.get(key)))
+    out["schemeRetainedBreakup"] = "; ".join(
+        f"{k}={ce.round2(ce.num(v))}" for k, v in sorted(retained_by_component.items())
+    )
+    return out
+
+
 async def recompute_lead(lead_id):
     """Recompute all derived commercial + payment fields for a lead and persist."""
     lead = await db.leads.find_one({"leadId": lead_id})
@@ -287,6 +312,16 @@ async def recompute_lead(lead_id):
         "dealerSchemeRetained": income["retainedIncomeTotal"],
         "oemExtraSupportRetained": oem_extra_retained,
         "dealerMarginNetExGst": margin["marginNetExGst"],
+        # Persist the two margin components the Dealer Earnings Register has columns for.
+        # compute_dealer_margin already returns them; only the net figure was being stored,
+        # so "Dealer Margin Gross (Incl GST)" and "Dealer Margin GST (5%)" had no source.
+        "dealerMarginGrossInclGst": margin["marginGrossInclGst"],
+        "dealerMarginGst": margin["marginGst"],
+        # Per-component scheme retention. compute_scheme_income_breakdown already returns
+        # retainedByComponent; only the total was persisted, leaving the register's
+        # Consumer/Exchange/Loyalty/Referral/DSA Retained columns without a source.
+        # These are NOT a second calculation — they are the same numbers, broken out.
+        **_retained_component_fields(income.get("retainedByComponent") or {}),
         "extraDealerIncomeTotal": extra_income,
         "dealerTotalEarnings": ce.round2(
             margin["marginNetExGst"] + income["retainedIncomeTotal"] + oem_extra_retained + extra_income),
@@ -325,6 +360,29 @@ async def recompute_lead(lead_id):
             "oemExtraSupportRetained": updates["oemExtraSupportRetained"],
             "extraDealerIncomeTotal": updates["extraDealerIncomeTotal"],
             "dealerTotalEarnings": updates["dealerTotalEarnings"],
+            # Columns that already had a value in Mongo but no Sheet mapping.
+            "variant": merged.get("variant", ""),
+            "bookingDate": merged.get("bookingDate", ""),
+            "deliveryDate": merged.get("deliveryDate", ""),
+            "invoiceNumber": merged.get("invoiceNumber", ""),
+            "executive": merged.get("executive", ""),
+            "leadSource": merged.get("leadSource", ""),
+            "customerPayable": updates["customerPayable"],
+            "insuranceStatus": merged.get("insuranceStatus", ""),
+            "remarks": merged.get("remarks", ""),
+            "createdBy": merged.get("createdBy", "crm"),
+            "lastUpdated": updates["lastUpdated"],
+            "timestamp": updates["lastUpdated"],
+            "oemExtraSupportReceived": oem_extra_recv,
+            "oemExtraSupportPassed": oem_extra_pass,
+            "dealerMarginGrossInclGst": updates["dealerMarginGrossInclGst"],
+            "dealerMarginGst": updates["dealerMarginGst"],
+            "consumerRetained": updates["consumerRetained"],
+            "exchangeRetained": updates["exchangeRetained"],
+            "loyaltyRetained": updates["loyaltyRetained"],
+            "referralRetained": updates["referralRetained"],
+            "dsaRetained": updates["dsaRetained"],
+            "schemeRetainedBreakup": updates["schemeRetainedBreakup"],
         })
         # Derived OEM claims must also reach the existing Scheme Claim Register.
         # They are keyed on the same stable claimId GET /claims exposes, so this is an
@@ -344,6 +402,23 @@ async def recompute_lead(lead_id):
                 "receivedAmount": (_ex or {}).get("receivedAmount", 0),
                 "claimStatus": (_ex or {}).get("claimStatus", "Pending"),
                 "claimReference": (_ex or {}).get("claimReference", ""),
+                # Claim Register columns that already had a source but no mapping.
+                "bookingId": (await db.bookings.find_one({"leadId": lead_id}) or {}).get("bookingId", ""),
+                "schemeMonth": ce.scheme_month_from_date(merged.get("bookingDate", "")),
+                "executive": merged.get("executive", ""),
+                "consumerDiscount": ce.num(merged.get("consumerDiscount")),
+                "exchangeBonus": ce.num(merged.get("exchangeBonus")),
+                "loyaltyBonus": ce.num(merged.get("loyaltyBonus")),
+                "referralBonus": ce.num(merged.get("referralBonus")),
+                "dsaDiscount": ce.num(merged.get("dsaDiscount")),
+                "additionalDiscount": ce.num(merged.get("additionalDiscount")),
+                "totalDiscount": updates["totalDiscount"],
+                "dealerDiscount": updates["dealerSchemeAmount"],
+                "oemDiscount": updates["oemSchemeAmount"],
+                "claimRequired": "Yes" if ce.round2(_amt) > 0 else "No",
+                "ageingDays": _claim_ageing_days(
+                    (_ex or {}).get("submittedDate") or merged.get("deliveryDate", ""),
+                    (_ex or {}).get("claimStatus", "Pending")),
             })
         if str(merged.get("exchangeRequired") or "").lower() == "yes" or ce.num(merged.get("finalExchangeValue")) > 0:
             await sheet_sync("exchange", {

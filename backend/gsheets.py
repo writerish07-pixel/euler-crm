@@ -53,14 +53,20 @@ SYNC_MAP = {
                "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount",
                "totalDiscount", "oemSchemeAmount", "dealerSchemeAmount", "customerOutstanding",
                "companyOutstanding", "insurerName", "invoiceNumber", "chassisNumber", "numberPlate",
-               "dealerTotalEarnings"], 3),
+               "dealerTotalEarnings",
+               # Closure + delivery-checklist columns. All of these were already
+               # persisted on the lead by close_lead / mark_delivery; they simply had
+               # no Sheet mapping, so the register showed blanks for closed leads.
+               "closedDate", "closeReason", "finalOutstanding",
+               "insuranceStatus", "registrationStatus", "invoiceStatus", "rcStatus", "pdiStatus"], 3),
     "activities": (_tab("GSHEET_TAB_ACTIVITIES", "Activity Log"), "activityId",
                    ["activityId", "leadId", "date", "time", "activityType", "discussion",
                     "executive", "customerName", "mobile", "model"], None),
     "bookings": (_tab("GSHEET_TAB_BOOKINGS", "Booking Register"), "bookingId",
                  ["bookingId", "leadId", "customerName", "bookingDate", "model", "variant",
                   "bookingAmount", "financeRequired", "exchangeRequired", "snapshotId",
-                  "bookingStatus", "createdDate", "amountReceived", "paymentMode"], None),
+                  "bookingStatus", "createdDate", "amountReceived", "paymentMode",
+                  "createdBy", "lastUpdated", "dealerTotalEarnings"], None),
     "payments": (_tab("GSHEET_TAB_PAYMENTS", "Payment Ledger"), "receiptNumber",
                  ["receiptNumber", "leadId", "customerName", "date", "amount", "paymentMode",
                   "narration", "runningTotal", "outstandingBalance", "paymentId",
@@ -68,18 +74,26 @@ SYNC_MAP = {
     "deliveries": (_tab("GSHEET_TAB_DELIVERIES", "Delivery Tracker"), "leadId",
                    ["leadId", "customerName", "insurance", "registration", "invoice", "accessories",
                     "rc", "numberPlate", "pdi", "delivered", "deliveryDate", "insurerName",
-                    "invoiceNumber", "chassisNumber"], None),
+                    "invoiceNumber", "chassisNumber", "deliveryId", "dealerTotalEarnings"], None),
     "claims": (_tab("GSHEET_TAB_CLAIMS", "Scheme Claim Register"), "claimId",
                ["claimId", "leadId", "customer", "model", "variant", "bookingDate", "component",
                 "componentKey", "eligibleClaim", "claimAmount", "receivedAmount", "claimStatus",
-                "claimReference", "submittedDate", "approvedDate"], None),
+                "claimReference", "submittedDate", "approvedDate",
+                # Already derivable from the lead / booking / scheme split — these were
+                # simply never mapped, which is why Scheme Month was blank on all 17 rows.
+                "bookingId", "schemeMonth", "executive", "consumerDiscount", "exchangeBonus",
+                "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount",
+                "totalDiscount", "dealerDiscount", "oemDiscount", "claimRequired",
+                "ageingDays"], None),
     "insurance": (_tab("GSHEET_TAB_INSURANCE", "Insurance Register"), "entryId",
                   ["entryId", "leadId", "customerName", "mobile", "model", "variant",
                    "insuranceCompany", "policyNumber", "insuranceAmount", "payoutRatePct",
-                   "expectedPayout", "receivedPayout", "payoutOutstanding", "status"], None),
+                   "expectedPayout", "receivedPayout", "payoutOutstanding", "status",
+                   "policyDate", "deliveryDate", "lastUpdated", "remarks"], None),
     "finance": (_tab("GSHEET_TAB_FINANCE", "Finance Register"), "financeFileNumber",
                 ["financeFileNumber", "leadId", "customerName", "financerName",
-                 "committedAmount", "disbursedAmount", "financeOutstanding", "status"], None),
+                 "committedAmount", "disbursedAmount", "financeOutstanding", "status",
+                 "lastPaymentDate", "lastUpdated"], None),
     "dealer_earnings": (_tab("GSHEET_TAB_DEALER_EARNINGS", "Dealer Earnings Register"), "leadId",
                         ["leadId", "bookingId", "customerName", "executive", "model", "variant",
                          "bookingDate", "deliveryDate", "invoiceNumber", "customerPayable",
@@ -88,7 +102,16 @@ SYNC_MAP = {
                          "financeIncentive", "accessoriesMargin", "exchangeMargin",
                          "documentationIncome", "warrantyIncome", "rsaIncome", "referralIncome",
                          "campaignIncentive", "otherIncome", "dealerTotalEarnings",
-                         "dealerMarginNetExGst", "oemExtraSupportRetained"], None),
+                         "dealerMarginNetExGst", "oemExtraSupportRetained",
+                         # Margin components and per-component scheme retention: both are
+                         # returned by commercial.py today and are now persisted on the lead
+                         # by recompute_lead, so they are mappings, not new calculations.
+                         "dealerMarginGrossInclGst", "dealerMarginGst",
+                         "consumerRetained", "exchangeRetained", "loyaltyRetained",
+                         "referralRetained", "dsaRetained", "schemeRetainedBreakup",
+                         "oemExtraSupportReceived", "oemExtraSupportPassed",
+                         "leadSource", "claimStatus", "insuranceStatus",
+                         "lastUpdated", "createdBy", "timestamp", "remarks"], None),
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.
@@ -145,6 +168,36 @@ HEADER_ALIASES = {
     "dealerMarginNetExGst": ["dealer margin net (ex gst)", "dealer margin net ex gst"],
     "oemExtraSupportRetained": ["oem extra support retained"],
     "rsaIncome": ["rsa income"],
+    # Margin components — the register spells out the GST treatment in the header.
+    "dealerMarginGrossInclGst": ["dealer margin gross (incl gst)", "dealer margin gross incl gst"],
+    "dealerMarginGst": ["dealer margin gst (5%)", "dealer margin gst"],
+    # OEM extra support: Received and Passed To Customer are DIFFERENT columns and must
+    # not collapse onto each other (same class of bug as the S/T insurance columns).
+    "oemExtraSupportReceived": ["oem extra support received"],
+    "oemExtraSupportPassed": ["oem extra support passed to customer"],
+    # Per-component scheme retention.
+    "consumerRetained": ["consumer retained"],
+    "exchangeRetained": ["exchange retained"],
+    "loyaltyRetained": ["loyalty retained"],
+    "referralRetained": ["referral retained"],
+    "dsaRetained": ["dsa retained"],
+    "schemeRetainedBreakup": ["scheme retained breakup"],
+    # Claim Register
+    "ageingDays": ["claim ageing (days)", "claim ageing days"],
+    "dealerDiscount": ["dealer discount"],
+    "oemDiscount": ["oem discount"],
+    "claimRequired": ["claim required"],
+    "schemeMonth": ["scheme month"],
+    # Delivery Tracker
+    "deliveryId": ["delivery id"],
+    # Shared audit-ish columns present on several registers.
+    "createdBy": ["created by"],
+    "lastUpdated": ["last updated"],
+    "lastPaymentDate": ["last payment date"],
+    "policyDate": ["policy date"],
+    "leadSource": ["lead source"],
+    "claimStatus": ["claim status"],
+    "insuranceStatus": ["insurance status"],
 }
 
 MASTERS_TAB = _tab("GSHEET_TAB_MASTERS", "Masters")
