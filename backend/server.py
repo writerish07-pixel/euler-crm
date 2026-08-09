@@ -900,22 +900,35 @@ async def convert_booking(lead_id: str, body: BookingIn):
     # has no price structure yet, load it from the authoritative Price Master. If the
     # vehicle has no Price Master row, refuse the booking with a precise message
     # rather than persisting a commercially empty booking (ex-showroom 0, GVC 0).
+    # STRICT PRODUCTION BOOKING MODE. Price Master is revalidated on every booking,
+    # immediately before persistence — a previously saved price structure is NOT
+    # sufficient on its own. If the lead's current model/variant has no Price Master
+    # row (e.g. the vehicle was changed after pricing, or the row was withdrawn), the
+    # booking is refused rather than persisting against stale commercial values.
+    row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
+    if not row:
+        raise HTTPException(422,
+            f"Price Master entry not found for: Model = {lead.get('interestedModel') or '(none)'}, "
+            f"Variant = {lead.get('variant') or '(none)'}. Add the vehicle to Price Master, or "
+            f"correct the model/variant on the lead, then book again.")
+    if ce.num(_price_structure_from_master(row).get("exShowroom")) <= 0:
+        raise HTTPException(422,
+            f"Price Master row {row.get('priceId')} for {lead.get('interestedModel')}/"
+            f"{lead.get('variant')} has a zero ex-showroom price. Correct the Price Master entry "
+            f"before booking.")
     if ce.num(lead.get("exShowroom")) <= 0:
-        row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
-        if not row:
-            raise HTTPException(422,
-                f"Price Master entry not found for: Model = {lead.get('interestedModel') or '(none)'}, "
-                f"Variant = {lead.get('variant') or '(none)'}. Add the vehicle to Price Master, or "
-                f"correct the model/variant on the lead, then book again.")
+        # Unpriced lead: adopt the authoritative structure, then recompute.
         await db.leads.update_one({"leadId": lead_id},
                                   {"$set": {**_price_structure_from_master(row), "lastUpdated": now_iso()}})
         await recompute_lead(lead_id)
         lead = await db.leads.find_one({"leadId": lead_id})
-        if ce.num(lead.get("grossVehicleCost")) <= 0:
-            raise HTTPException(422,
-                f"Price Master row {row.get('priceId')} for {lead.get('interestedModel')}/"
-                f"{lead.get('variant')} produced a zero vehicle cost. Correct the Price Master entry "
-                f"before booking.")
+    if ce.num(lead.get("grossVehicleCost")) <= 0 or ce.num(lead.get("customerPayable")) <= 0:
+        # Never persist a booking whose commercial calculation did not resolve.
+        raise HTTPException(422,
+            f"Commercial calculation did not resolve for {lead.get('interestedModel')}/"
+            f"{lead.get('variant')} (gross vehicle cost {ce.num(lead.get('grossVehicleCost'))}, "
+            f"customer payable {ce.num(lead.get('customerPayable'))}). Review the price structure "
+            f"before booking.")
     booking_id = await next_id("booking", "BK26")
     snapshot_id = await next_id("snapshot", "SN26")
     bdate = body.bookingDate or today()
