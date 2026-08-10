@@ -248,7 +248,27 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
     try { b = lead.benefitPassedBreakup ? JSON.parse(lead.benefitPassedBreakup) : {}; } catch { b = {}; }
     return b;
   });
-  useEffect(() => { get(`/leads/${lead.leadId}/scheme-rules`).then(setRules).catch(() => setRules({ rules: {} })); }, [lead.leadId]);
+  const [alloc, setAlloc] = useState({});
+  const loadRules = useCallback(() => {
+    get(`/leads/${lead.leadId}/scheme-rules`).then((r) => { setRules(r); setAlloc({}); })
+      .catch(() => setRules({ rules: {} }));
+  }, [lead.leadId]);
+  useEffect(() => { loadRules(); }, [loadRules]);
+  const saveAllocation = async () => {
+    // Send only what the user actually edited; the backend validates each amount
+    // against Scheme Master and recomputes every downstream figure.
+    const payload = {};
+    Object.entries(alloc).forEach(([k, v]) => { payload[k] = +v || 0; });
+    if (!Object.keys(payload).length) return toast.success("No allocation changes");
+    try {
+      await put(`/leads/${lead.leadId}/scheme-allocation`, { allocation: payload });
+      toast.success("Scheme allocation updated");
+      loadRules();
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Allocation validation failed");
+    }
+  };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const setBk = (k) => (e) => setBreakup((b) => ({ ...b, [k]: e.target.value }));
 
@@ -313,27 +333,56 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
           are still part of the scheme, and omitting them made the screen understate it
           (Turbo Aug'26 showed only Loyalty while the Claim Register carried Loyalty +
           Insurance Benefit). Read-only, straight from Scheme Master. */}
-      {(rules?.entitlements || []).length > 0 && (
-        <Card className="p-4 mt-4 bg-violet-50/50 border-violet-200" data-testid="scheme-entitlements">
+      {/* Dealer allocation, straight from the Scheme Allocation Engine. The screen
+          renders the backend's numbers and never recomputes scheme maths itself.
+          Only the customer-benefit amount is editable; Scheme Master values and the
+          OEM claimable share are fixed by the circular. */}
+      {(rules?.allocation?.components || []).length > 0 && (
+        <Card className="p-4 mt-4 bg-violet-50/50 border-violet-200" data-testid="scheme-allocation">
           <div className="flex items-center justify-between mb-2">
             <div className="text-xs font-semibold text-ink">
-              Automatic entitlements — claimed from OEM, not entered by staff
+              Scheme allocation — how much of each component the customer receives
             </div>
             <div className="text-xs text-ink-soft">
-              Company share total <span className="font-semibold text-ink">{inr(rules.entitlementCompanyTotal || 0)}</span>
+              Customer <span className="font-semibold text-ink">{inr(rules.allocation.totals.customerBenefit)}</span>
+              {" · "}Retained <span className="font-semibold text-ink">{inr(rules.allocation.totals.dealerRetained)}</span>
+              {" · "}OEM claim <span className="font-semibold text-ink">{inr(rules.allocation.totals.oemClaimable)}</span>
             </div>
           </div>
-          <div className="grid grid-cols-3 gap-3">
-            {rules.entitlements.map((e) => (
-              <div key={e.key} className="bg-white border border-line rounded-lg px-3 py-2"
-                   data-testid={`entitlement-${e.key}`}>
-                <div className="text-xs font-semibold text-ink">{e.label}</div>
-                <div className="text-sm text-ink mt-0.5">{inr(e.totalBenefit)}</div>
+          <div className="grid grid-cols-2 gap-3">
+            {rules.allocation.components.map((c) => (
+              <div key={c.key} className="bg-white border border-line rounded-lg px-3 py-2"
+                   data-testid={`allocation-${c.key}`}>
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold text-ink">{c.label}</div>
+                  {c.automatic && <span className="text-[10px] text-violet-700 bg-violet-100 rounded px-1.5 py-0.5">automatic</span>}
+                </div>
                 <div className="text-[11px] text-ink-faint mt-0.5">
-                  OEM {inr(e.companyShare)}{e.dealerShare > 0 ? ` · dealer funds ${inr(e.dealerShare)}` : ""}
+                  Available {inr(c.schemeAvailable)} · OEM {inr(c.oemShare)}
+                  {c.dealerFundedShare > 0 ? ` · dealer funds ${inr(c.dealerFundedShare)}` : ""}
+                </div>
+                <div className="grid grid-cols-3 gap-2 mt-2 items-end">
+                  <Field label="Customer gets">
+                    <Input type="number" data-testid={`alloc-input-${c.key}`}
+                           value={alloc[c.key] ?? c.customerBenefit} disabled={locked}
+                           onChange={(e) => setAlloc((a) => ({ ...a, [c.key]: e.target.value }))} />
+                  </Field>
+                  <div>
+                    <div className="text-[11px] text-ink-faint">Dealer retained</div>
+                    <div className="text-sm text-ink">{inr(c.dealerRetained)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] text-ink-faint">OEM claimable</div>
+                    <div className="text-sm text-ink">{inr(c.oemClaimable)}</div>
+                  </div>
                 </div>
               </div>
             ))}
+          </div>
+          <div className="mt-3">
+            <Button data-testid="save-allocation" onClick={saveAllocation} disabled={locked}>
+              Save allocation
+            </Button>
           </div>
         </Card>
       )}

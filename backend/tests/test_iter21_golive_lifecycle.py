@@ -161,9 +161,14 @@ async def test_complete_golive_lifecycle(client):
     # Independence: dealer earnings are not the customer's money.
     assert de != lead["customerPayable"]
     assert lead["customerOutstanding"] == 0
-    parts = ["consumerRetained", "exchangeRetained", "loyaltyRetained",
-             "referralRetained", "dsaRetained"]
-    assert ce.round2(sum(ce.num(lead[p]) for p in parts)) == ce.round2(lead["dealerSchemeRetained"])
+    # schemeRetainedBreakup spans EVERY component, including entitlements which have
+    # no dedicated column; the five offer columns are a subset of it.
+    breakup = {}
+    for part in str(lead.get("schemeRetainedBreakup") or "").split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            breakup[k.strip()] = float(v)
+    assert ce.round2(sum(breakup.values())) == ce.round2(lead["dealerSchemeRetained"])
 
     # Recording a financer disbursement must not touch the customer.
     r = await client.post(f"/api/finance/{fn}/receipt",
