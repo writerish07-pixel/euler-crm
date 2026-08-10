@@ -215,6 +215,9 @@ def lead_to_snapshot(lead):
     return {
         "bookingDate": lead.get("bookingDate", ""),
         "benefitPassedBreakup": lead.get("benefitPassedBreakup", ""),
+        # schemeAllocationV2: new/edited scheme saves opt into Full Benefit applying
+        # to entitlements. Absent ⇒ grandfather entitlements at CB=0 when not in breakup.
+        "schemeAllocationV2": bool(lead.get("schemeAllocationV2")),
         "exShowroom": lead.get("exShowroom", 0),
         "accessories": lead.get("accessoriesAmount", 0),
         "insurance": lead.get("insuranceAmount", 0),
@@ -293,18 +296,20 @@ async def recompute_lead(lead_id):
     oem_extra_recv = max(0.0, ce.num(lead.get("oemExtraSupportReceived")))
     oem_extra_pass = max(0.0, min(ce.num(lead.get("oemExtraSupportPassed")), oem_extra_recv))
     oem_extra_retained = ce.round2(max(0.0, oem_extra_recv - oem_extra_pass))
-    # Extra dealer income lines (C1) — full port of DEALER_EARNINGS_MANUAL_COLS_ (10 lines)
+    # Extra dealer income lines — customerInsuranceBenefitPassed is CUSTOMER
+    # benefit/discount, NOT dealer income, and must not enter this sum.
     extra_income = ce.round2(
         ce.num(lead.get("documentationIncome")) + ce.num(lead.get("warrantyIncome")) +
         ce.num(lead.get("rsaIncome")) + ce.num(lead.get("referralIncome")) +
-        ce.num(lead.get("otherIncome")) + ce.num(lead.get("customerInsuranceBenefitPassed")) +
+        ce.num(lead.get("otherIncome")) +
         ce.num(lead.get("financeIncentive")) + ce.num(lead.get("accessoriesMargin")) +
         ce.num(lead.get("exchangeMargin")) + ce.num(lead.get("campaignIncentive")))
     # Insurance PAYOUT income (premium × rate) — SEPARATE from Insurance Scheme Benefit.
+    # Dealer Insurance Income = expected insurer payout. Do NOT subtract scheme
+    # customerInsuranceBenefitPassed (that is customer discount, not payout share).
     _ins = await db.insurance.find_one({"leadId": lead_id}) or {}
     _ins_payout = ce.num(_ins.get("expectedPayout"))
-    _ins_passed = ce.num(lead.get("customerInsuranceBenefitPassed"))
-    _dealer_ins_income = ce.round2(max(0.0, _ins_payout - _ins_passed))
+    _dealer_ins_income = ce.round2(max(0.0, _ins_payout))
     updates = {
         "grossVehicleCost": totals["grossVehicleCost"],
         "customerPayable": customer_payable,
@@ -1147,25 +1152,33 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
         lead.get("bookingDate") or today(), offers, scheme_rows)
     if errors:
         raise HTTPException(422, "Please fix these scheme fields:\n" + "\n".join(errors))
-    # Persist numeric per-component customerBenefit. Entitlement keys present in the
-    # breakup are authoritative; missing entitlement keys stay at customerBenefit=0
-    # (grandfather — does not silently rewrite historical customer payable).
     import json as _json
+    # New/edited scheme saves opt into V2: Full Benefit applies to EVERY component
+    # (including Insurance/RTO entitlements). Historical leads without this flag keep
+    # grandfathered entitlement CB=0 unless an explicit breakup key exists.
+    payload["schemeAllocationV2"] = True
+    # Build a provisional snap and materialise explicit per-component customerBenefit
+    # into benefitPassedBreakup so the persisted allocation is numeric and deterministic.
+    provisional = {**lead_to_snapshot({**lead, **payload}), "schemeAllocationV2": True}
+    alloc = ce.compute_scheme_allocation(provisional, scheme_rows)
+    clean_bk = {c["key"]: c["customerBenefit"] for c in alloc["components"]
+                if c["key"] != "additionalDiscount"}
+    # Preserve any Partial amounts the client sent that already match (alloc already
+    # honoured breakup); overwrite with engine result so every key is explicit.
     raw_breakup = payload.get("benefitPassedBreakup")
     if isinstance(raw_breakup, str) and raw_breakup.strip():
         try:
             parsed = _json.loads(raw_breakup)
             if isinstance(parsed, dict):
-                clean_bk = {}
-                for k, v in parsed.items():
-                    amt = ce.round2(max(0.0, ce.num(v)))
-                    clean_bk[k] = amt
-                payload["benefitPassedBreakup"] = _json.dumps(clean_bk)
-                # Mirror the sum of OEM+entitlement customer benefits for legacy readers.
-                payload["customerBenefitPassed"] = ce.round2(sum(
-                    amt for k, amt in clean_bk.items() if k != "additionalDiscount"))
+                # Re-run with client breakup + V2 so Partial values stick.
+                provisional["benefitPassedBreakup"] = parsed
+                alloc = ce.compute_scheme_allocation(provisional, scheme_rows)
+                clean_bk = {c["key"]: c["customerBenefit"] for c in alloc["components"]
+                            if c["key"] != "additionalDiscount"}
         except Exception:
             pass
+    payload["benefitPassedBreakup"] = _json.dumps(clean_bk)
+    payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
@@ -1188,10 +1201,14 @@ class ExtraIncomeIn(BaseModel):
 
 @api.put("/leads/{lead_id}/extra-income")
 async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)):
-    """Dealer extra-income lines (C1, full port of DEALER_EARNINGS_MANUAL_COLS_):
-    Documentation / Warranty / RSA / Referral / Other / Customer Insurance Benefit
-    Passed / Finance Incentive / Accessories Margin / Exchange Margin / Campaign
-    Incentive. Never affects Customer Payable / Outstanding."""
+    """Dealer extra-income lines:
+    Documentation / Warranty / RSA / Referral / Other / Finance Incentive /
+    Accessories Margin / Exchange Margin / Campaign Incentive.
+
+    customerInsuranceBenefitPassed is accepted for memo/compatibility but is
+    CUSTOMER discount — it does NOT enter Dealer Earnings totals.
+
+    Never affects Customer Payable / Outstanding."""
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "extra-income edits (only Active leads)")
     payload = body.model_dump()
@@ -3180,7 +3197,8 @@ async def dealer_earnings_report():
     components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0,
                   "OEM Extra Support": 0.0, "Documentation": 0.0, "Warranty": 0.0,
                   "RSA": 0.0, "Referral": 0.0, "Other Income": 0.0,
-                  "Customer Insurance Benefit Passed": 0.0, "Finance Incentive": 0.0,
+                  "Customer Insurance Benefit Passed (memo, not income)": 0.0,
+                  "Finance Incentive": 0.0,
                   "Accessories Margin": 0.0, "Exchange Margin": 0.0, "Campaign Incentive": 0.0}
     totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "extra": 0.0, "total": 0.0, "count": 0}
     for l in leads:
@@ -3198,13 +3216,15 @@ async def dealer_earnings_report():
         rsa_inc = ce.num(l.get("rsaIncome"))
         ref_inc = ce.num(l.get("referralIncome"))
         other_inc = ce.num(l.get("otherIncome"))
-        cust_ins_inc = ce.num(l.get("customerInsuranceBenefitPassed"))
+        # customerInsuranceBenefitPassed is customer discount, NOT dealer income —
+        # tracked for visibility only; excluded from earnings totals.
+        cust_ins_memo = ce.num(l.get("customerInsuranceBenefitPassed"))
         fin_inc = ce.num(l.get("financeIncentive"))
         acc_margin = ce.num(l.get("accessoriesMargin"))
         exch_margin = ce.num(l.get("exchangeMargin"))
         camp_inc = ce.num(l.get("campaignIncentive"))
         extra = ce.round2(doc_inc + war_inc + rsa_inc + ref_inc + other_inc +
-                          cust_ins_inc + fin_inc + acc_margin + exch_margin + camp_inc)
+                          fin_inc + acc_margin + exch_margin + camp_inc)
         total = ce.round2(margin + scheme + insurance + other + extra)
         month = str(l.get("deliveryDate") or l.get("bookingDate") or "")[:7] or "Unknown"
         m = by_month.setdefault(month, {"key": month, "margin": 0.0, "scheme": 0.0,
@@ -3223,7 +3243,8 @@ async def dealer_earnings_report():
         components["RSA"] += rsa_inc
         components["Referral"] += ref_inc
         components["Other Income"] += other_inc
-        components["Customer Insurance Benefit Passed"] += cust_ins_inc
+        # Memo only — not added into totals (see above).
+        components["Customer Insurance Benefit Passed (memo, not income)"] += cust_ins_memo
         components["Finance Incentive"] += fin_inc
         components["Accessories Margin"] += acc_margin
         components["Exchange Margin"] += exch_margin

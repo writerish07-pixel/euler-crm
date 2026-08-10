@@ -87,13 +87,15 @@ async def test_per_component_retention_is_persisted_and_sums_to_the_total(client
     total = round(sum(ce.num(lead[p]) for p in parts), 2)
     assert total == round(ce.num(lead["dealerSchemeRetained"]), 2), \
         f"per-component {total} != total {lead['dealerSchemeRetained']}"
-    # HiCity Aug entitlements (RTO + Insurance) default customerBenefit=0 → retained 20,000
-    assert lead["dealerSchemeRetained"] == 20000
-    assert lead["rtoBenefitRetained"] == 10000
-    assert lead["insuranceBenefitRetained"] == 10000
-    # Staff offers were Full Benefit → zero retention on those
+    # HiCity Aug: Full Benefit (V2) passes every component including RTO+Insurance
+    # entitlements → dealer retained on those is 0. OEM claim remains 55,000.
+    assert lead["dealerSchemeRetained"] == 0
+    assert lead["rtoBenefitRetained"] == 0
+    assert lead["insuranceBenefitRetained"] == 0
     assert lead["consumerRetained"] == 0
     assert lead["loyaltyRetained"] == 0
+    assert lead["companyOutstanding"] == 55000
+    assert lead.get("schemeAllocationV2") is True
 
 
 @pytest.mark.asyncio

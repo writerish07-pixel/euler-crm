@@ -166,8 +166,11 @@ async def test_complete_golive_lifecycle(client):
              "referralRetained", "dsaRetained",
              "insuranceBenefitRetained", "rtoBenefitRetained", "rtoInsuranceBenefitRetained"]
     assert ce.round2(sum(ce.num(lead[p]) for p in parts)) == ce.round2(lead["dealerSchemeRetained"])
-    # HiCity Aug: Full Benefit on offers + entitlement CB default 0 → retain RTO+Insurance
-    assert lead["dealerSchemeRetained"] == 20000
+    # HiCity Aug Full Benefit (schemeAllocationV2): every component including
+    # RTO + Insurance entitlements is passed → dealer scheme retained = 0.
+    # OEM claim remains the company-share total 55,000.
+    assert lead["dealerSchemeRetained"] == 0
+    assert lead.get("schemeAllocationV2") is True
 
     # Recording a financer disbursement must not touch the customer.
     r = await client.post(f"/api/finance/{fn}/receipt",

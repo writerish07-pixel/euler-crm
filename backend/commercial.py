@@ -517,30 +517,41 @@ def _component_customer_benefit(key, scheme_available, mode, breakup, s, offer_w
       customerBenefit ∈ [0, schemeAvailable]
       dealerRetained  = schemeAvailable − customerBenefit   (computed by caller)
 
-    Entitlement components (insuranceBenefit / rtoBenefit / rtoInsuranceBenefit):
-      Only reduce customer payable when the dealer EXPLICITLY recorded an amount in
-      benefitPassedBreakup. Absence ⇒ customerBenefit = 0. This preserves historical
-      customer payable (entitlements were never auto-passed) while still letting the
-      dealer allocate any amount up to schemeAvailable on new decisions.
+    Benefit Mode applies identically to EVERY scheme component (Loyalty, Insurance,
+    RTO, Consumer, Exchange, Referral, DSA, …). No special-case for entitlements.
+
+      No Benefit     → customerBenefit = 0
+      Full Benefit   → customerBenefit = schemeAvailable
+      Partial Benefit→ customerBenefit = explicit per-component amount
+
+    Explicit benefitPassedBreakup[key] always wins (capped by schemeAvailable).
+
+    Historical safety (schemeAllocationV2):
+      Pre-fix leads never auto-passed entitlement components under Full Benefit.
+      Without schemeAllocationV2, entitlement keys ABSENT from breakup stay at CB=0
+      even if benefitMode is Full Benefit — preserving historical customer payable.
+      New / edited scheme saves set schemeAllocationV2 and write explicit breakup.
     """
     cap = max(0.0, num(scheme_available))
     if key == "additionalDiscount":
         return round2(cap)  # dealer-funded — always passed to customer
 
-    if key in AUTO_SCHEME_COMPONENT_KEYS:
-        if isinstance(breakup, dict) and key in breakup:
-            return round2(max(0.0, min(num(breakup.get(key)), cap)))
+    # Explicit per-component allocation is authoritative when present.
+    if isinstance(breakup, dict) and key in breakup:
+        return round2(max(0.0, min(num(breakup.get(key)), cap)))
+
+    # Grandfather pre-V2 entitlement rows that never recorded an allocation key.
+    v2 = bool(s.get("schemeAllocationV2"))
+    if key in AUTO_SCHEME_COMPONENT_KEYS and not v2:
         return 0.0
 
-    # Staff-entered OEM offers
     if mode == "No Benefit":
         return 0.0
     if mode == "Full Benefit":
         return round2(cap)
-    # Partial Benefit
-    if isinstance(breakup, dict) and key in breakup:
-        return round2(max(0.0, min(num(breakup.get(key)), cap)))
-    # Legacy aggregate waterfall when Partial has no per-key breakup
+    # Partial Benefit without an explicit key: offer waterfall (legacy) or 0.
+    if key in AUTO_SCHEME_COMPONENT_KEYS:
+        return 0.0
     take = min(cap, max(0.0, num(offer_waterfall.get(key))))
     return round2(take)
 
@@ -868,8 +879,12 @@ def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows
         max_amt = round2(total)
         rules[key] = {"key": key, "label": label, "allowed": True, "maxAmount": max_amt,
                       "dealerShare": dealer, "companyShare": company,
+                      "schemeAvailable": max_amt, "oemShare": company,
+                      "dealerFundedShare": dealer, "oemClaimable": company,
+                      "allocatable": True,
                       "choices": build_scheme_amount_choices(dealer, company, max_amt),
-                      "hint": f"Enter amount up to \u20b9{max_amt} (Scheme Master {m.get('label', '')} \u00b7 {month})"}
+                      "hint": f"Enter amount up to ₹{max_amt} (Scheme Master {m.get('label', '')} · {month}). "
+                              f"Then allocate how much of that amount passes to the customer."}
     # Entitlement components (Free RTO / Free Insurance) are NOT staff-entered offers, so
     # they have no rule/input — but they are part of the scheme and are claimed from the
     # OEM automatically. They must still be visible, or the Scheme screen understates the
@@ -897,9 +912,10 @@ def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows
             "automatic": True,
             "allocatable": True,
             "hint": (
-                f"Scheme entitlement — available ₹{total}. OEM claimable ₹{company}"
-                + (f"; dealer funds ₹{dealer}" if dealer > 0 else "")
-                + f". Dealer chooses how much of the ₹{total} to pass to the customer."
+                f"OEM entitlement from Scheme Master — available ₹{total}, "
+                f"OEM claimable ₹{company}"
+                + (f", dealer contractual ₹{dealer}" if dealer > 0 else "")
+                + f". Dealer decides how much of ₹{total} to pass to the customer."
             ),
         })
     return {"schemeMonth": month, "model": model_disp, "variant": variant_disp,
