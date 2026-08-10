@@ -31,6 +31,20 @@ import server  # noqa: E402
 MODEL, VARIANT = "Hi-Load", "XR"
 
 
+def parse_retained_breakup(lead):
+    """schemeRetainedBreakup is 'key=amount; key=amount' across EVERY component.
+    The five per-component columns (Consumer/Exchange/Loyalty/Referral/DSA Retained)
+    are a SUBSET: entitlement components (Insurance/RTO Benefit) also carry retained
+    value but have no dedicated column in the register."""
+    out = {}
+    for part in str(lead.get("schemeRetainedBreakup") or "").split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = float(v)
+    return out
+
+
+
 @pytest_asyncio.fixture
 async def client():
     await server.startup()
@@ -83,10 +97,14 @@ async def test_per_component_retention_is_persisted_and_sums_to_the_total(client
     for p in parts:
         assert p in lead, f"{p} not persisted"
     assert "schemeRetainedBreakup" in lead
-    # Every component the breakdown reported must be accounted for by a column.
-    total = round(sum(ce.num(lead[p]) for p in parts), 2)
+    # Every component the engine reported must be accounted for in the breakup.
+    breakup = parse_retained_breakup(lead)
+    total = round(sum(breakup.values()), 2)
     assert total == round(ce.num(lead["dealerSchemeRetained"]), 2), \
-        f"per-component {total} != total {lead['dealerSchemeRetained']}"
+        f"per-component {breakup} sums to {total}, total is {lead['dealerSchemeRetained']}"
+    # and each dedicated column matches its component in the breakup
+    for field, key in server.RETAINED_COMPONENT_COLUMNS.items():
+        assert ce.num(lead[field]) == round(breakup.get(key, 0.0), 2)
 
 
 @pytest.mark.asyncio
