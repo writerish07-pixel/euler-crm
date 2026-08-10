@@ -531,11 +531,19 @@ def _header_row_for(entity, tab):
     env = os.environ.get(f"GSHEET_HEADERROW_{entity.upper()}", "").strip()
     if env.isdigit():
         return int(env)
-    hint = SYNC_MAP.get(entity, (None, None, None, None))[3] if entity in SYNC_MAP else None
-    if hint:
-        return int(hint)
     if entity in _headerrow_cache:
         return _headerrow_cache[entity]
+    hint = SYNC_MAP.get(entity, (None, None, None, None))[3] if entity in SYNC_MAP else None
+    fields = SYNC_MAP[entity][2] if entity in SYNC_MAP else []
+    if fields:
+        # VERIFY the hint against the sheet rather than trusting it. A header that has
+        # been shifted (see locate_header_row) would otherwise make the sync read data
+        # rows as headers and mis-map every column.
+        found = locate_header_row(tab, fields, hint or 1)
+        _headerrow_cache[entity] = found
+        return found
+    if hint:
+        return int(hint)
     sheet_id = os.environ.get("GSHEET_ID", "")
     res = _service.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"'{tab}'!1:5").execute()
@@ -555,6 +563,45 @@ def _read_header_row(tab, header_row=1):
         spreadsheetId=sheet_id, range=f"'{tab}'!{header_row}:{header_row}").execute())
     vals = res.get("values", [])
     return vals[0] if vals else []
+
+
+# How far down to hunt for a tab's real header row.
+_HEADER_SCAN_ROWS = 40
+
+
+def locate_header_row(tab, fields, hint=1):
+    """Find the row that actually carries this tab's headers.
+
+    The row number is NOT trusted as a constant. A Google Sheets `append` with
+    insertDataOption=INSERT_ROWS inserts rows wherever its range anchors, which can
+    push a header down the sheet — the Lead Register's header moved from row 3 to
+    row 22 that way. With a hard-coded hint the sync then reads DATA as headers and
+    every column mapping silently becomes garbage.
+
+    So: score each of the first rows by how many expected field names it matches
+    (via the same normalisation + alias table the mapping uses) and take the best.
+    Falls back to the hint when nothing scores, so behaviour is unchanged on a
+    well-formed tab."""
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    res = _with_retry(lambda: _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=f"'{tab}'!1:{_HEADER_SCAN_ROWS}").execute())
+    rows = res.get("values", [])
+    if not rows:
+        return hint or 1
+    wanted = set()
+    for f in fields:
+        wanted.add(_norm(f))
+        for alias in HEADER_ALIASES.get(f, []):
+            wanted.add(_norm(alias))
+    best_row, best_score = None, 0
+    for i, row in enumerate(rows, start=1):
+        score = sum(1 for cell in row if _norm(cell) in wanted)
+        if score > best_score:
+            best_row, best_score = i, score
+    # Require a real match, not one incidental cell, before overriding the hint.
+    if best_row and best_score >= max(2, len(wanted) // 10):
+        return best_row
+    return hint or 1
 
 
 def _resolve_columns(tab, fields, use_cache=True, header_row=1):
@@ -701,8 +748,18 @@ def _upsert_sync(entity, doc):
     row = [""] * width
     for f, col_idx in mapping.items():
         row[col_idx] = doc.get(f, "")
+    # Anchor the append on the REGISTER's own header row, not on A1.
+    #
+    # A1 was wrong for any tab whose table does not start in column A. The Lead
+    # Register's register begins at column J with a separate SEARCH/helper block in
+    # A:I; anchored at A1, Sheets treated the helper block as the table and
+    # INSERT_ROWS inserted rows into it, shifting the real header down the sheet
+    # (row 3 -> row 22) and silently breaking every subsequent column mapping.
+    # Anchoring on the first mapped column at the header row makes the API detect
+    # the register itself, so rows land under the right header and nothing shifts.
+    first_col = _col_letter(min(mapping.values()))
     resp = _with_retry(lambda: _service.spreadsheets().values().append(
-        spreadsheetId=sheet_id, range=f"'{tab}'!A1",
+        spreadsheetId=sheet_id, range=f"'{tab}'!{first_col}{header_row}",
         valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
         body={"values": [row]}).execute())
     # Learn the new row number from the append response so the ID cache stays warm —

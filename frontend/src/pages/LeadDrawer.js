@@ -308,6 +308,35 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
           Not available for this model/variant: {hiddenFields.map(([, l]) => l).join(", ")}
         </div>
       )}
+      {/* Entitlement components (Free RTO / Free Insurance) are claimed from the OEM
+          automatically and are never typed by staff, so they have no input above. They
+          are still part of the scheme, and omitting them made the screen understate it
+          (Turbo Aug'26 showed only Loyalty while the Claim Register carried Loyalty +
+          Insurance Benefit). Read-only, straight from Scheme Master. */}
+      {(rules?.entitlements || []).length > 0 && (
+        <Card className="p-4 mt-4 bg-violet-50/50 border-violet-200" data-testid="scheme-entitlements">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs font-semibold text-ink">
+              Automatic entitlements — claimed from OEM, not entered by staff
+            </div>
+            <div className="text-xs text-ink-soft">
+              Company share total <span className="font-semibold text-ink">{inr(rules.entitlementCompanyTotal || 0)}</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            {rules.entitlements.map((e) => (
+              <div key={e.key} className="bg-white border border-line rounded-lg px-3 py-2"
+                   data-testid={`entitlement-${e.key}`}>
+                <div className="text-xs font-semibold text-ink">{e.label}</div>
+                <div className="text-sm text-ink mt-0.5">{inr(e.totalBenefit)}</div>
+                <div className="text-[11px] text-ink-faint mt-0.5">
+                  OEM {inr(e.companyShare)}{e.dealerShare > 0 ? ` · dealer funds ${inr(e.dealerShare)}` : ""}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
       {form.benefitMode === "Partial Benefit" && oemVisible.length > 0 && (
         <Card className="p-4 mt-4 bg-cobalt-tint/30 border-cobalt/20">
           <div className="text-xs font-semibold text-ink mb-2">Partial Benefit — amount of each OEM offer passed to customer</div>

@@ -661,8 +661,35 @@ def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows
                       "dealerShare": dealer, "companyShare": company,
                       "choices": build_scheme_amount_choices(dealer, company, max_amt),
                       "hint": f"Enter amount up to \u20b9{max_amt} (Scheme Master {m.get('label', '')} \u00b7 {month})"}
+    # Entitlement components (Free RTO / Free Insurance) are NOT staff-entered offers, so
+    # they have no rule/input — but they are part of the scheme and are claimed from the
+    # OEM automatically. They must still be visible, or the Scheme screen understates the
+    # scheme (e.g. Turbo Aug'26 showing only Loyalty 10,000 while the Claim Register
+    # correctly carries Loyalty 10,000 + Insurance Benefit 10,000).
+    entitlements = []
+    for key in AUTO_SCHEME_COMPONENT_KEYS:
+        m = master.get(key)
+        if not m:
+            continue
+        company = round2(num(m.get("companyShare")))
+        dealer = round2(num(m.get("dealerShare")))
+        total = round2(num(m.get("totalBenefit")) or (company + dealer))
+        if total <= 0 and company <= 0:
+            continue
+        entitlements.append({
+            "key": key,
+            "label": m.get("label") or SCHEME_COMPONENT_LABELS.get(key, key),
+            "dealerShare": dealer, "companyShare": company, "totalBenefit": total,
+            "automatic": True,
+            "hint": f"Automatic entitlement — claimed from OEM at ₹{company} "
+                    f"company share{f' (dealer funds ₹{dealer})' if dealer > 0 else ''}. "
+                    f"Not entered by staff.",
+        })
     return {"schemeMonth": month, "model": model_disp, "variant": variant_disp,
-            "modelFamily": family, "matchedComponents": master_keys, "rules": rules}
+            "modelFamily": family, "matchedComponents": master_keys, "rules": rules,
+            "entitlements": entitlements,
+            "entitlementCompanyTotal": round2(sum(e["companyShare"] for e in entitlements)),
+            "entitlementDealerTotal": round2(sum(e["dealerShare"] for e in entitlements))}
 
 
 def validate_scheme_offers(model, variant, booking_date, offers, scheme_rows):
