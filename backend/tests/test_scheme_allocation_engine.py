@@ -84,7 +84,8 @@ def test_A_eligible_but_not_used():
     _assert_invariants(alloc)
     assert alloc["totals"] == {
         "schemeAvailable": 30000.0, "customerBenefit": 0.0, "dealerRetained": 30000.0,
-        "oemClaimable": 20000.0, "dealerFundedShare": 10000.0, "oemShare": 20000.0,
+        "oemClaimable": 20000.0, "dealerFundedShare": 10000.0,
+        "dealerFundedBenefit": 0.0, "oemShare": 20000.0,
     }
 
 
@@ -388,25 +389,30 @@ async def test_earnings_no_double_count_scheme_and_payout(client):
     entry = await server.db.insurance.find_one({"leadId": lid})
     payout = ce.num(entry["expectedPayout"])
 
+    # Insurance CB ₹5,000 is fully within OEM share ₹10,000 → dealer-funded cost ₹0.
+    # customerInsuranceBenefitPassed is overwritten from allocation (SSOT), not the memo 3000.
     expected_total = ce.round2(
         lead["dealerMarginNetExGst"] + lead["dealerSchemeRetained"]
         + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
-        + lead["dealerInsuranceIncome"])
+        + lead["dealerInsuranceIncome"] - ce.num(lead.get("dealerFundedBenefit")))
     assert lead["dealerTotalEarnings"] == expected_total
     assert lead["dealerInsuranceIncome"] == payout
     assert lead["extraDealerIncomeTotal"] == 1000
     assert lead["dealerSchemeRetained"] == 25000
+    assert lead["dealerFundedBenefit"] == 0
+    assert lead["customerInsuranceBenefitPassed"] == 5000
 
     report = (await client.get("/api/reports/dealer-earnings")).json()
     assert report["totals"]["scheme"] == 25000
     assert report["totals"]["insurance"] == payout
-    memo_amt = next((c["amount"] for c in report["components"]
-                     if "memo" in c["label"].lower()), 0)
-    assert memo_amt == 3000
+    ins_benefit_amt = next((c["amount"] for c in report["components"]
+                            if "insurance benefit passed" in c["label"].lower()), 0)
+    assert ins_benefit_amt == 5000
     reconstructed = ce.round2(
         report["totals"]["margin"] + report["totals"]["scheme"]
         + report["totals"]["insurance"] + report["totals"]["extra"]
-        + sum(m.get("other", 0) for m in report["byMonth"]))
+        + sum(m.get("other", 0) for m in report["byMonth"])
+        - report["totals"].get("dealerFundedBenefit", 0))
     assert report["totals"]["total"] == reconstructed
     assert report["totals"]["extra"] == 1000
 

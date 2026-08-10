@@ -142,6 +142,7 @@ function Overview({ lead, c }) {
         <KV label="Customer Outstanding" value={inr(lead.customerOutstanding)} tone={lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"} />
         <KV label="OEM Claimable (Company Share)" value={inr(c.oemClaimCompanyShare ?? c.claim.claimEligible)} tone="text-amber-600" />
         <KV label="Dealer Scheme Retained" value={inr(c.dealerSchemeRetained ?? c.dealerRetained)} />
+        <KV label="Dealer-Funded Benefit" value={inr(c.dealerFundedBenefit ?? lead.dealerFundedBenefit ?? 0)} tone="text-rose-600" />
         <KV label="Dealer Margin (Net)" value={inr(c.margin.marginNetExGst)} />
         <KV label="Lead Source" value={lead.leadSource || "—"} tone="text-ink" />
       </Card>
@@ -450,10 +451,11 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
       </div>
 
       <Card className="p-4 mt-4 bg-amber-50/50 border-amber-200" data-testid="scheme-allocation-summary">
-        <div className="grid grid-cols-4 gap-3 text-center">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center">
           <Prev label="Customer Benefit" v={allocation?.totals?.customerBenefit ?? previewCb} />
           <Prev label="Dealer Scheme Retained" v={allocation?.totals?.dealerRetained ?? previewRetained} />
           <Prev label="OEM Claimable" v={allocation?.totals?.oemClaimable ?? previewOem} />
+          <Prev label="Dealer-Funded Benefit" v={allocation?.totals?.dealerFundedBenefit ?? 0} />
           <Prev label="Scheme Available" v={allocation?.totals?.schemeAvailable ?? previewAvail} />
         </div>
       </Card>
@@ -467,7 +469,7 @@ const EXTRA_INCOME_FIELDS = [
   ["documentationIncome", "Documentation"], ["warrantyIncome", "Warranty"],
   ["rsaIncome", "RSA"], ["referralIncome", "Referral"],
   ["otherIncome", "Other Income"],
-  ["customerInsuranceBenefitPassed", "Cust. Ins. Benefit Passed (memo, not earnings)"],
+  ["customerInsuranceBenefitPassed", "Cust. Ins. Benefit Passed (from scheme alloc; not earnings)"],
   ["financeIncentive", "Finance Incentive"], ["accessoriesMargin", "Accessories Margin"],
   ["exchangeMargin", "Exchange Margin"], ["campaignIncentive", "Campaign Incentive"],
 ];

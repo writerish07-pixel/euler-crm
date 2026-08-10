@@ -117,14 +117,19 @@ SYNC_MAP = {
                          # Margin components and per-component scheme retention: both are
                          # returned by commercial.py today and are now persisted on the lead
                          # by recompute_lead, so they are mappings, not new calculations.
-                         "dealerMarginGrossInclGst", "dealerMarginGst",
-                         "consumerRetained", "exchangeRetained", "loyaltyRetained",
-                         "referralRetained", "dsaRetained", "schemeRetainedBreakup",
-                         "oemExtraSupportReceived", "oemExtraSupportPassed",
-                         "leadSource", "claimStatus", "insuranceStatus",
-                         "lastUpdated", "createdBy", "timestamp", "remarks",
-                         # Newly sourced: attribution + lifecycle position.
-                         "modifiedBy", "currentStage"], None),
+                        "dealerMarginGrossInclGst", "dealerMarginGst",
+                        "consumerRetained", "exchangeRetained", "loyaltyRetained",
+                        "referralRetained", "dsaRetained", "schemeRetainedBreakup",
+                        "oemExtraSupportReceived", "oemExtraSupportPassed",
+                        "leadSource", "claimStatus", "insuranceStatus",
+                        "lastUpdated", "createdBy", "timestamp", "remarks",
+                        # Newly sourced: attribution + lifecycle position.
+                        "modifiedBy", "currentStage"], None),
+    # Lead Register has Loyalty Bonus but NO live "Insurance Benefit" column
+    # (LIVE_HEADERS / Euler Master). Insurance Benefit projects via:
+    #   1) Scheme Claim Register rows (componentKey=insuranceBenefit)
+    #   2) Dealer Earnings "Customer Insurance Benefit Passed"
+    #   3) Mongo lead.insuranceBenefit / customerInsuranceBenefitPassed
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.

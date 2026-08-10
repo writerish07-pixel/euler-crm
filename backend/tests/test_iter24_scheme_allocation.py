@@ -174,9 +174,12 @@ async def test_case8_dealer_earnings_take_the_retained_portion(client):
 
     assert lead["dealerSchemeRetained"] == 25000          # 10,000 + 15,000
     assert lead["schemeOemClaimableTotal"] == 20000       # separate from earnings
+    # Insurance CB ₹5,000 ≤ OEM share ₹10,000 → dealer-funded benefit cost ₹0
+    assert lead["dealerFundedBenefit"] == 0
     assert lead["dealerTotalEarnings"] == ce.round2(
         lead["dealerMarginNetExGst"] + 25000
-        + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"])
+        + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
+        - lead["dealerFundedBenefit"])
     # OEM claim receivable is NOT dealer income
     assert lead["dealerSchemeRetained"] != lead["schemeOemClaimableTotal"]
 
