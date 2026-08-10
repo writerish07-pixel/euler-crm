@@ -25,3 +25,12 @@ export const fmtDate = (d) => {
   if (isNaN(dt)) return s;
   return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 };
+
+/** Local calendar date as YYYY-MM-DD for `<input type="date">` defaults. */
+export const todayISO = () => {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};

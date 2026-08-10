@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { Plus, Phone, ChevronRight, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
+import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
 import LeadImport from "./LeadImport";
@@ -93,6 +93,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const [form, setForm] = useState({
     customerName: "", mobile: "", city: "", leadSource: "Walk-in", interestedModel: "",
     variant: "", executive: "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
+    createdDate: todayISO(), nextFollowupDate: "",
   });
   const [variants, setVariants] = useState([]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -103,6 +104,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
 
   const submit = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
+    if (!form.createdDate) return toast.error("Lead date is required");
     try {
       const lead = await post("/leads", { ...form, budget: Number(form.budget) });
       toast.success(`Lead ${lead.leadId} created`);
@@ -116,6 +118,8 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit}>Create Lead</Button></div>}>
       <div className="grid grid-cols-2 gap-4">
         <div className="col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
+        <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
+        <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
         <Field label="Mobile"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
         <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>

@@ -553,6 +553,7 @@ class LeadIn(BaseModel):
     financeRequired: str = "No"
     exchangeRequired: str = "No"
     nextFollowupDate: Optional[str] = None
+    createdDate: Optional[str] = None
 
 
 class LeadUpdateIn(BaseModel):
@@ -580,6 +581,7 @@ class LeadUpdateIn(BaseModel):
     financeRequired: Optional[str] = None
     exchangeRequired: Optional[str] = None
     nextFollowupDate: Optional[str] = None
+    bookingDate: Optional[str] = None
 
 
 class BookingIn(BaseModel):
@@ -652,6 +654,7 @@ class CloseIn(BaseModel):
     closeReason: str = ""
     rc: str = ""
     numberPlate: str = ""
+    closedDate: Optional[str] = None
 
 
 class ActivityIn(BaseModel):
@@ -659,6 +662,7 @@ class ActivityIn(BaseModel):
     discussion: str = ""
     executive: str = ""
     nextFollowup: str = ""
+    date: Optional[str] = None
 
 
 class SnapshotComputeIn(BaseModel):
@@ -892,10 +896,12 @@ async def create_lead(body: LeadIn):
         if existing:
             raise HTTPException(409, f"Mobile already used by lead {existing.get('leadId')} ({existing.get('customerName')}).")
     lead_id = await next_id("lead", "LD26")
+    payload = body.model_dump()
+    created_date = str(payload.pop("createdDate", None) or "").strip() or today()
     doc = {
         "leadId": lead_id,
-        "createdDate": today(),
-        **body.model_dump(),
+        **payload,
+        "createdDate": created_date,
         "accountStatus": "Active",
         "deliveryStatus": "",
         "outstandingAmount": 0, "customerOutstanding": 0, "companyOutstanding": 0,
@@ -907,7 +913,7 @@ async def create_lead(body: LeadIn):
     }
     await db.leads.insert_one(doc)
     _act_doc = {
-        "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": today(),
+        "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": created_date,
         "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Note",
         "discussion": "Lead created from CRM", "executive": body.executive,
         "customerName": body.customerName, "mobile": body.mobile, "model": body.interestedModel,
@@ -1425,7 +1431,9 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor)):
         if errs:
             raise HTTPException(422, "Cannot close lead:\n" + "\n".join("• " + e for e in errs))
     close_updates = {
-        "accountStatus": "Closed", "closedDate": today(), "closeReason": body.closeReason,
+        "accountStatus": "Closed",
+        "closedDate": str(body.closedDate or "").strip() or today(),
+        "closeReason": body.closeReason,
         "finalOutstanding": lead.get("customerOutstanding", 0), "lastUpdated": now_iso(),
         # Lead Register has "Closed By" and "Close Timestamp" columns. The acting user
         # and the moment of closure were both already known here — they were simply
@@ -2091,9 +2099,11 @@ async def list_activities(lead_id: Optional[str] = None):
 async def add_activity(lead_id: str, body: ActivityIn):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "logging activity (only Active leads)")
+    payload = body.model_dump()
+    act_date = str(payload.pop("date", None) or "").strip() or today()
     doc = {
-        "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": today(),
-        "time": datetime.now(timezone.utc).strftime("%H:%M"), **body.model_dump(),
+        "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": act_date,
+        "time": datetime.now(timezone.utc).strftime("%H:%M"), **payload,
         "customerName": lead.get("customerName"), "mobile": lead.get("mobile"), "model": lead.get("interestedModel"),
     }
     await db.activities.insert_one(doc)

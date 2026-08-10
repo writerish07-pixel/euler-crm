@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2 } from "lucide-react";
 import { get, post, put, del } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
+import { inr, fmtDate, todayISO } from "../lib/format";
 import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 
@@ -165,6 +165,7 @@ function Overview({ lead, c }) {
 /* -------------------------------------------------- Price Structure */
 function PriceStructure({ lead, actions = {}, onSaved }) {
   const locked = !actions.canPrice;
+  const [priceDate, setPriceDate] = useState(lead.bookingDate || lead.createdDate || todayISO());
   const [form, setForm] = useState(() => {
     const f = { tcsApplicable: lead.tcsApplicable || "No", finalExchangeValue: lead.finalExchangeValue || 0 };
     CHARGE_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
@@ -188,6 +189,7 @@ function PriceStructure({ lead, actions = {}, onSaved }) {
   useEffect(() => { computePreview(); }, [computePreview]);
 
   const save = async () => {
+    if (!priceDate) return toast.error("Price date is required");
     await put(`/leads/${lead.leadId}/price-structure`, {
       exShowroom: +form.exShowroom, rto: +form.rto, insuranceAmount: +form.insuranceAmount,
       accessoriesAmount: +form.accessoriesAmount, handlingCharges: +form.handlingCharges, trc: +form.trc,
@@ -203,6 +205,7 @@ function PriceStructure({ lead, actions = {}, onSaved }) {
     <div>
       {locked && <StepLock text="This lead is not Active — price structure is read-only." />}
       <div className="grid grid-cols-3 gap-3">
+        <Field label="Price Date"><Input data-testid="price-date" type="date" value={priceDate} onChange={(e) => setPriceDate(e.target.value)} disabled={locked} /></Field>
         {CHARGE_FIELDS.map(([k, label]) => (
           <Field key={k} label={label}><Input data-testid={`price-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} /></Field>
         ))}
@@ -239,6 +242,7 @@ function Prev({ label, v, highlight }) {
 function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
   const locked = !actions.canScheme;
   const [rules, setRules] = useState(null);
+  const [schemeDate, setSchemeDate] = useState(lead.bookingDate || todayISO());
   const [form, setForm] = useState(() => ({
     oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
     oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
@@ -262,6 +266,7 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
   });
 
   useEffect(() => { get(`/leads/${lead.leadId}/scheme-rules`).then(setRules).catch(() => setRules({ rules: {} })); }, [lead.leadId]);
+  useEffect(() => { setSchemeDate(lead.bookingDate || todayISO()); }, [lead.bookingDate]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const r = rules?.rules || {};
@@ -339,7 +344,14 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
       schemeComponentsUsed: JSON.stringify(usedClean),
       customerBenefitPassed: Object.values(clean).reduce((s, v) => s + (+v || 0), 0),
     };
+    if (!schemeDate) return toast.error("Scheme date is required");
     try {
+      // Only rewrite bookingDate after a real booking — never invent a booking via date alone.
+      const alreadyBooked = Boolean(lead.bookingId || lead.bookingDate
+        || ["booked", "finance process", "delivered"].includes(String(lead.currentStatus || "").toLowerCase()));
+      if (alreadyBooked && schemeDate !== (lead.bookingDate || "")) {
+        await put(`/leads/${lead.leadId}`, { bookingDate: schemeDate });
+      }
       await put(`/leads/${lead.leadId}/scheme`, payload);
       toast.success("Scheme updated");
       onSaved();
@@ -368,7 +380,10 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
         </div>
       )}
 
-      <div className="grid grid-cols-3 gap-3 mb-4">
+      <div className="grid grid-cols-4 gap-3 mb-4">
+        <Field label="Scheme Date">
+          <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
+        </Field>
         <Field label="OEM Extra Support Received"><Input type="number" value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} disabled={locked} /></Field>
         <Field label="OEM Extra Support Passed"><Input type="number" value={form.oemExtraSupportPassed} onChange={set("oemExtraSupportPassed")} disabled={locked} /></Field>
         <Field label="Additional (Dealer)">
@@ -516,27 +531,29 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
 
 /* -------------------------------------------------- Payments */
 function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
-  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "" });
+  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
   const add = async () => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
+    if (!form.date) return toast.error("Payment date is required");
     // The backend requires a financer on Finance receipts (it is what resolves/creates the
     // finance file). Ask for it here so staff get a clear prompt instead of a raw 422.
     if (isFinance && !form.financerName) return toast.error("Select a Financer for a Finance receipt");
     const saved = await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount });
     const file = saved?.financeFileNumber ? ` · Finance File ${saved.financeFileNumber}` : "";
     toast.success(`Receipt added · ${inr(+form.amount)}${file}`);
-    setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "" });
+    setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
     onSaved();
   };
   return (
     <div>
       {locked && <StepLock text={isFinance ? "This lead is archived — no receipts allowed." : "This lead is not Active — only Finance receipts are allowed."} />}
       <Card className="p-4 mb-4">
-        <div className="grid grid-cols-4 gap-3 items-end">
+        <div className="grid grid-cols-5 gap-3 items-end">
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
+          <Field label="Date"><Input data-testid="payment-date" type="date" value={form.date} onChange={set("date")} /></Field>
           <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{(masters?.paymentModes || []).map((m) => <option key={m}>{m}</option>)}</Select></Field>
           <Field label="Narration"><Input value={form.narration} onChange={set("narration")} /></Field>
           <Button data-testid="add-payment-btn" onClick={add} disabled={locked}><Wallet size={15} /> Add Receipt</Button>
@@ -571,13 +588,14 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
 const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
 function DeliveryTab({ lead, actions = {}, delivery, onSaved }) {
   const [form, setForm] = useState(() => {
-    const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || "" };
+    const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || todayISO() };
     DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
     return f;
   });
   const toggle = (k) => setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" }));
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
+    if (form.delivered === "Yes" && !form.deliveryDate) return toast.error("Delivery date is required");
     try {
       await put(`/leads/${lead.leadId}/delivery`, form);
       toast.success("Delivery status updated");
@@ -684,7 +702,7 @@ function InsuranceTab({ lead, masters }) {
   const [form, setForm] = useState({
     insuranceCompany: lead.insurerName || "", policyNumber: "",
     insuranceAmount: lead.insuranceAmount || 0, payoutRate: suggestInsRate(lead.interestedModel),
-    receivedPayout: 0, insuranceExecutive: lead.executive || "",
+    receivedPayout: 0, insuranceExecutive: lead.executive || "", policyDate: todayISO(),
   });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const setRate = (e) => { setRateTouched(true); setForm((f) => ({ ...f, payoutRate: e.target.value })); };
@@ -696,15 +714,17 @@ function InsuranceTab({ lead, masters }) {
   const expected = Math.round(premium * (rate / 100));
 
   const save = async () => {
+    if (!form.policyDate) return toast.error("Policy date is required");
     await post("/insurance", {
       leadId: lead.leadId, customerName: lead.customerName, mobile: lead.mobile,
       model: lead.interestedModel, variant: lead.variant,
       insuranceCompany: form.insuranceCompany, policyNumber: form.policyNumber,
       insuranceAmount: +form.insuranceAmount, payoutRate: +form.payoutRate,
       receivedPayout: +form.receivedPayout, insuranceExecutive: form.insuranceExecutive,
+      policyDate: form.policyDate,
     });
     toast.success("Insurance entry added");
-    setForm((f) => ({ ...f, policyNumber: "" }));
+    setForm((f) => ({ ...f, policyNumber: "", policyDate: todayISO() }));
     load();
   };
 
@@ -715,6 +735,7 @@ function InsuranceTab({ lead, masters }) {
         <div className="grid grid-cols-3 gap-3">
           <Field label="Insurer"><Input data-testid="lead-ins-company" value={form.insuranceCompany} onChange={set("insuranceCompany")} /></Field>
           <Field label="Policy Number"><Input value={form.policyNumber} onChange={set("policyNumber")} /></Field>
+          <Field label="Policy Date"><Input data-testid="lead-ins-policy-date" type="date" value={form.policyDate} onChange={set("policyDate")} /></Field>
           <Field label="Executive"><Select value={form.insuranceExecutive} onChange={set("insuranceExecutive")}><option value="">—</option>{(masters?.executives || []).map((x) => <option key={x}>{x}</option>)}</Select></Field>
           <Field label="Premium (₹)"><Input data-testid="lead-ins-premium" type="number" value={form.insuranceAmount} onChange={set("insuranceAmount")} /></Field>
           <Field label="Payout Rate (%)"><Input data-testid="lead-ins-rate" type="number" value={form.payoutRate} onChange={setRate} /></Field>
@@ -749,21 +770,26 @@ function InsuranceTab({ lead, masters }) {
 
 /* -------------------------------------------------- Activity */
 function ActivityTab({ lead, activities, masters, onSaved }) {
-  const [form, setForm] = useState({ activityType: "Call", discussion: "", nextFollowup: "" });
+  const [form, setForm] = useState({ activityType: "Call", discussion: "", nextFollowup: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const add = async () => {
     if (!form.discussion) return toast.error("Add a discussion note");
+    if (!form.date) return toast.error("Activity date is required");
     await post(`/leads/${lead.leadId}/activities`, { ...form, executive: lead.executive });
     toast.success("Activity logged");
-    setForm({ activityType: "Call", discussion: "", nextFollowup: "" });
+    setForm({ activityType: "Call", discussion: "", nextFollowup: "", date: todayISO() });
     onSaved();
   };
   return (
     <div>
       <Card className="p-4 mb-4">
-        <div className="grid grid-cols-4 gap-3 items-end">
+        <div className="grid grid-cols-5 gap-3 items-end">
           <Field label="Type"><Select value={form.activityType} onChange={set("activityType")}>{(masters?.activityTypes || []).map((t) => <option key={t}>{t}</option>)}</Select></Field>
+          <Field label="Date"><Input data-testid="activity-date" type="date" value={form.date} onChange={set("date")} /></Field>
+          <Field label="Next Follow-up"><Input data-testid="activity-followup" type="date" value={form.nextFollowup} onChange={set("nextFollowup")} /></Field>
           <div className="col-span-2"><Field label="Discussion"><Input data-testid="activity-note" value={form.discussion} onChange={set("discussion")} /></Field></div>
+        </div>
+        <div className="flex justify-end mt-3">
           <Button data-testid="add-activity-btn" onClick={add}>Log</Button>
         </div>
       </Card>
@@ -784,7 +810,7 @@ function ActivityTab({ lead, activities, masters, onSaved }) {
 
 /* -------------------------------------------------- Modals */
 function BookingModal({ lead, onClose, onDone }) {
-  const [form, setForm] = useState({ bookingAmount: lead.bookingAmount || 5000, paymentMode: "UPI", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No" });
+  const [form, setForm] = useState({ bookingAmount: lead.bookingAmount || 5000, paymentMode: "UPI", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO() });
   // Commercial gate: a booking may only be confirmed once the backend has resolved
   // the vehicle against Price Master. All figures below come from the API — nothing
   // is calculated or defaulted in React, so there is no path to a silent zero.
@@ -815,9 +841,11 @@ function BookingModal({ lead, onClose, onDone }) {
     if (!canBook || busy) return;
     setBusy(true);
     try {
+      if (!form.bookingDate) { toast.error("Booking date is required"); setBusy(false); return; }
       const res = await post(`/leads/${lead.leadId}/convert-booking`, {
         bookingAmount: +form.bookingAmount, paymentMode: form.paymentMode, executive: lead.executive,
         financeRequired: form.financeRequired, exchangeRequired: form.exchangeRequired,
+        bookingDate: form.bookingDate,
       });
       // Report the ACTUAL backend sync state, never an assumption from a 200.
       let sync = "Pending";
@@ -883,6 +911,7 @@ function BookingModal({ lead, onClose, onDone }) {
       )}
 
       <div className="grid grid-cols-2 gap-3">
+        <Field label="Booking Date"><Input data-testid="booking-date" type="date" value={form.bookingDate} onChange={set("bookingDate")} /></Field>
         <Field label="Advance Amount (₹)"><Input data-testid="booking-amount" type="number" value={form.bookingAmount} onChange={set("bookingAmount")} /></Field>
         <Field label="Payment Mode"><Select value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
         <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
@@ -894,13 +923,15 @@ function BookingModal({ lead, onClose, onDone }) {
 
 function CloseModal({ lead, onClose, onDone }) {
   const [reason, setReason] = useState("");
+  const [closedDate, setClosedDate] = useState(todayISO());
   const [rc, setRc] = useState(lead.rcStatus === "Yes" || lead.rcStatus === "Done" ? "Done" : "");
   const [plate, setPlate] = useState(lead.numberPlate || "");
   const delivered = (lead.deliveryStatus || "").toLowerCase() === "delivered" || (lead.currentStatus || "").toLowerCase() === "delivered";
   const submit = async () => {
     if (!reason.trim()) return toast.error("Close Reason is required");
+    if (!closedDate) return toast.error("Close date is required");
     try {
-      await post(`/leads/${lead.leadId}/close`, { closeReason: reason, rc, numberPlate: plate });
+      await post(`/leads/${lead.leadId}/close`, { closeReason: reason, rc, numberPlate: plate, closedDate });
       toast.success("Lead closed");
       onDone();
     } catch (e) {
@@ -917,7 +948,10 @@ function CloseModal({ lead, onClose, onDone }) {
           <Field label="Number Plate"><Input data-testid="close-plate" value={plate} onChange={(e) => setPlate(e.target.value)} /></Field>
         </div>
       )}
-      <Field label="Close Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Delivered & settled" /></Field>
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <Field label="Close Date"><Input data-testid="close-date" type="date" value={closedDate} onChange={(e) => setClosedDate(e.target.value)} /></Field>
+        <Field label="Close Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Delivered & settled" /></Field>
+      </div>
     </MiniModal>
   );
 }
