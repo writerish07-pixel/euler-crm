@@ -205,6 +205,31 @@ def _validate_delivery_ready(lead, body):
     return errs
 
 
+async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chassis_number="",
+                                             number_plate=""):
+    """Invoice / chassis / number plate must be unique across leads (case-insensitive).
+    Blank values are ignored. The current lead is excluded so re-saves are allowed."""
+    checks = (
+        ("invoiceNumber", invoice_number, "Invoice number"),
+        ("chassisNumber", chassis_number, "Chassis number"),
+        ("numberPlate", number_plate, "Number plate"),
+    )
+    for field, raw, label in checks:
+        val = str(raw or "").strip()
+        if not val:
+            continue
+        existing = await db.leads.find_one({
+            "leadId": {"$ne": lead_id},
+            field: {"$regex": f"^{re.escape(val)}$", "$options": "i"},
+        })
+        if existing:
+            raise HTTPException(
+                409,
+                f"{label} '{val}' is already used on lead {existing.get('leadId')} "
+                f"({existing.get('customerName') or '—'}).",
+            )
+
+
 def _require_action(lead, key, verb):
     acts = lead_actions(lead)
     if not acts.get(key):
@@ -1197,10 +1222,28 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)")
-    old = {k: lead.get(k) for k in body.model_dump().keys()}
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {**body.model_dump(), "lastUpdated": now_iso()}})
+    payload = body.model_dump()
+    # Ex-Showroom is Price Master–authoritative and not staff-editable. Prefer the
+    # live master row for the lead's model/variant; fall back to the lead's existing
+    # value only when no master row exists (so a saved structure is not wiped).
+    row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
+    if row:
+        master_ex = ce.num(_price_structure_from_master(row).get("exShowroom"))
+        if master_ex <= 0:
+            raise HTTPException(422,
+                f"Price Master row for {lead.get('interestedModel')}/{lead.get('variant')} "
+                f"has a zero ex-showroom price. Correct Price Master before saving.")
+        payload["exShowroom"] = master_ex
+    else:
+        payload["exShowroom"] = ce.num(lead.get("exShowroom"))
+        if payload["exShowroom"] <= 0:
+            raise HTTPException(422,
+                f"Price Master entry not found for {lead.get('interestedModel') or '(none)'}/"
+                f"{lead.get('variant') or '(none)'}. Select a valid vehicle before pricing.")
+    old = {k: lead.get(k) for k in payload.keys()}
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     lead = await recompute_lead(lead_id)
-    await write_audit(act, "update", "price-structure", leadId=lead_id, old=old, new=body.model_dump())
+    await write_audit(act, "update", "price-structure", leadId=lead_id, old=old, new=payload)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -1421,9 +1464,9 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor)):
     if not str(body.closeReason or "").strip():
         raise HTTPException(422, "Close Reason is required to close a lead.")
     # RC + Number Plate mandatory when closing a DELIVERED lead (port of validateCloseLeadRcFields_)
+    plate = body.numberPlate or lead.get("numberPlate")
     if _is_delivered(lead):
         rc = body.rc or lead.get("rcStatus")
-        plate = body.numberPlate or lead.get("numberPlate")
         errs = []
         if not _yes_or_done(rc):
             errs.append("Set RC to Yes/Done before closing the lead.")
@@ -1431,6 +1474,8 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor)):
             errs.append("Enter the number plate before closing the lead.")
         if errs:
             raise HTTPException(422, "Cannot close lead:\n" + "\n".join("• " + e for e in errs))
+    if str(plate or "").strip():
+        await _assert_unique_vehicle_identifiers(lead_id, number_plate=plate)
     close_updates = {
         "accountStatus": "Closed",
         "closedDate": str(body.closedDate or "").strip() or today(),
@@ -1935,6 +1980,12 @@ async def mark_delivery(lead_id: str, body: DeliveryIn):
         errs = _validate_delivery_ready(lead, body)
         if errs:
             raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
+    await _assert_unique_vehicle_identifiers(
+        lead_id,
+        invoice_number=body.invoiceNumber,
+        chassis_number=body.chassisNumber,
+        number_plate=body.numberPlate,
+    )
     doc = {"leadId": lead_id, "customerName": lead.get("customerName"), **body.model_dump(),
            "deliveryId": f"DL{uuid.uuid4().hex[:8]}"}
     await db.deliveries.update_one({"leadId": lead_id}, {"$set": doc}, upsert=True)
