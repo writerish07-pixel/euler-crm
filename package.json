@@ -2,9 +2,13 @@
   "name": "euler-crm-repo",
   "private": true,
   "version": "1.0.0",
-  "description": "Repo root. The deployable frontend lives in frontend/ (Create React App). These scripts delegate there so a build run from the repository root still works.",
+  "description": "Repo root. Frontend is Create React App under frontend/. Root scripts exist so Cloudflare Workers Builds (npm run build → wrangler deploy) and other root-level CI can build without a custom rootDir.",
   "scripts": {
-    "build": "cd frontend && yarn install --frozen-lockfile && yarn build",
-    "start": "cd frontend && yarn start"
+    "build": "npm install --prefix frontend && npm run build --prefix frontend",
+    "start": "npm start --prefix frontend",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.28.0"
   }
 }

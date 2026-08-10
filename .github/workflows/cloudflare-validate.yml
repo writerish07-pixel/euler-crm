@@ -1,0 +1,31 @@
+name: Cloudflare Workers validate
+
+# Validates the CRA → Wrangler SPA pipeline that Cloudflare Workers Builds runs.
+# Does not deploy (no Cloudflare token required). Keeps a green, inspectable
+# GitHub check even when the Cloudflare Git integration check is opaque.
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+
+jobs:
+  wrangler-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install root (wrangler)
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+        env:
+          CI: true
+      - name: Wrangler deploy dry-run (repo root)
+        run: npx wrangler deploy --dry-run
+      - name: Wrangler deploy dry-run (frontend rootDir)
+        working-directory: frontend
+        run: npx wrangler deploy --dry-run

@@ -1,0 +1,10 @@
+# Used when Cloudflare Workers Builds Root Directory is set to `frontend/`.
+name = "euler-crm"
+account_id = "4b992e8e51609fb53cc22fa337dfabc0"
+compatibility_date = "2026-08-10"
+main = "./worker.js"
+
+[assets]
+directory = "./build"
+binding = "ASSETS"
+not_found_handling = "single-page-application"

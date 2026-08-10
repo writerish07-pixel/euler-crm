@@ -1,0 +1,11 @@
+{
+  "name": "euler-crm",
+  "compatibility_date": "2026-08-10",
+  "account_id": "4b992e8e51609fb53cc22fa337dfabc0",
+  "main": "./worker.js",
+  "assets": {
+    "directory": "./frontend/build",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  }
+}
