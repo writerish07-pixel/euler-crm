@@ -568,6 +568,75 @@ def _read_header_row(tab, header_row=1):
 # How far down to hunt for a tab's real header row.
 _HEADER_SCAN_ROWS = 40
 
+# Registers that grow UPWARD: the header sits at the BOTTOM of the data as a
+# footer/boundary, and every new record is inserted immediately ABOVE it, pushing the
+# header down exactly one row. The newest record therefore always occupies the row
+# directly above the header, and nothing is ever written below it.
+#
+# This is the Lead Register's intended design, not an accident: its operational table
+# lives in columns J onward, columns A:I are a separate SEARCH/helper area that must
+# never be cleared or used as the table anchor, and the header marks the end of the
+# register. A plain append would put rows BELOW the header and break the contract.
+UPWARD_GROWING_REGISTERS = {"leads"}
+
+_sheetid_cache = {}
+
+
+def _sheet_id_for_tab(tab):
+    """Numeric sheetId (gid) for a tab title — required by insertDimension."""
+    if tab in _sheetid_cache:
+        return _sheetid_cache[tab]
+    meta = _with_retry(lambda: _service.spreadsheets().get(
+        spreadsheetId=os.environ.get("GSHEET_ID", ""),
+        fields="sheets.properties(sheetId,title)").execute())
+    for s in meta.get("sheets", []):
+        p = s.get("properties", {})
+        _sheetid_cache[p.get("title")] = p.get("sheetId")
+    if tab not in _sheetid_cache:
+        raise RuntimeError(f"tab '{tab}' not found in spreadsheet")
+    return _sheetid_cache[tab]
+
+
+def _insert_above_footer_header(tab, entity, header_row, mapping, row):
+    """Insert one row immediately ABOVE the footer header and write the record into it.
+
+    Two steps, in this order:
+      1. insertDimension a single blank row at the header's own index. Everything from
+         the header down shifts one row lower; every existing record — which lives
+         ABOVE the header — keeps its row number, so historical rows, their formulas
+         and their formatting are untouched.
+      2. write the record into the row just vacated.
+
+    inheritFromBefore=True copies formatting from the row above (the previous newest
+    record) rather than from the header, so new rows look like records, not headers.
+
+    Only the mapped columns are written, so the A:I search/helper area is never
+    touched even though the inserted row spans the full width of the sheet."""
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    gid = _sheet_id_for_tab(tab)
+    _with_retry(lambda: _service.spreadsheets().batchUpdate(
+        spreadsheetId=sheet_id,
+        body={"requests": [{"insertDimension": {
+            "range": {"sheetId": gid, "dimension": "ROWS",
+                      "startIndex": header_row - 1, "endIndex": header_row},
+            "inheritFromBefore": True,
+        }}]}).execute())
+    # The record now belongs on the row the header just vacated.
+    new_row = header_row
+    first, last = min(mapping.values()), max(mapping.values())
+    segment = [row[i] if i < len(row) else "" for i in range(first, last + 1)]
+    _with_retry(lambda: _service.spreadsheets().values().update(
+        spreadsheetId=sheet_id,
+        range=f"'{tab}'!{_col_letter(first)}{new_row}:{_col_letter(last)}{new_row}",
+        valueInputOption="USER_ENTERED", body={"values": [segment]}).execute())
+    # The header moved down one row — keep the caches honest or the next write
+    # would resolve columns against a data row.
+    _headerrow_cache[entity] = header_row + 1
+    headers = _header_cache.pop((tab, header_row), None)
+    if headers is not None:
+        _header_cache[(tab, header_row + 1)] = headers
+    return new_row
+
 
 def locate_header_row(tab, fields, hint=1):
     """Find the row that actually carries this tab's headers.
@@ -649,14 +718,14 @@ def invalidate_header_cache(tab=None):
 
 
 # ---------------------------------------------------------------- upsert (GS-2/GS-3)
-def _load_id_rows(tab, id_col_idx, start_row):
+def _load_id_rows(tab, id_col_idx, start_row, end_row=None):
     sheet_id = os.environ.get("GSHEET_ID", "")
     letter = _col_letter(id_col_idx)
     res = _with_retry(lambda: _service.spreadsheets().values().get(
         spreadsheetId=sheet_id, range=f"'{tab}'!{letter}:{letter}").execute())
     out = {}
     for i, row in enumerate(res.get("values", []), start=1):
-        if i < start_row:
+        if i < start_row or (end_row is not None and i > end_row):
             continue
         if row and str(row[0]).strip():
             out.setdefault(str(row[0]).strip(), i)
@@ -664,14 +733,26 @@ def _load_id_rows(tab, id_col_idx, start_row):
     return out
 
 
-def _find_row_by_id(tab, id_col_idx, id_value, start_row=2):
+def _data_window(entity, header_row):
+    """(first data row, last data row) for a register.
+
+    Normal registers put data BELOW the header, so the window is header+1 onwards.
+    Upward-growing registers put data ABOVE the header, so the window ends one row
+    before it — scanning from header+1 there would find nothing, every existing
+    record would look new, and each sync would insert a duplicate."""
+    if entity in UPWARD_GROWING_REGISTERS:
+        return 1, max(1, header_row - 1)
+    return header_row + 1, None
+
+
+def _find_row_by_id(tab, id_col_idx, id_value, start_row=2, end_row=None):
     """Return the 1-based sheet row number holding id_value in the ID column, else None."""
     target = str(id_value).strip()
     cache = _idrow_cache.get((tab, start_row))
     if cache is not None and target in cache:
         return cache[target]
     # miss -> one refresh read (also primes the cache for the rest of this burst)
-    cache = _load_id_rows(tab, id_col_idx, start_row)
+    cache = _load_id_rows(tab, id_col_idx, start_row, end_row)
     return cache.get(target)
 
 
@@ -723,7 +804,9 @@ def _upsert_sync(entity, doc):
         return {"ok": False, "operation": "refused", "tab": tab,
                 "error": f"record has no value for stable ID field '{id_field}'"}
 
-    row_num = _find_row_by_id(tab, mapping[id_field], id_value, start_row=header_row + 1)
+    data_start, data_end = _data_window(entity, header_row)
+    row_num = _find_row_by_id(tab, mapping[id_field], id_value,
+                              start_row=data_start, end_row=data_end)
 
     if row_num:
         protected = _formula_cells(tab, row_num, mapping)
@@ -743,11 +826,23 @@ def _upsert_sync(entity, doc):
                 "id": id_value, "cellsWritten": len(data),
                 "formulaCellsPreserved": len(protected), "missingHeaders": missing}
 
-    # New record -> append exactly one row, positioned by header mapping.
+    # New record -> one row, positioned by header mapping.
     width = max(mapping.values()) + 1
     row = [""] * width
     for f, col_idx in mapping.items():
         row[col_idx] = doc.get(f, "")
+
+    if entity in UPWARD_GROWING_REGISTERS:
+        new_row = _insert_above_footer_header(tab, entity, header_row, mapping, row)
+        ck = (tab, data_start)
+        # Rows above the insert point keep their numbers, so the ID cache stays valid;
+        # only the footer header (and anything below it) moved down by one.
+        if ck in _idrow_cache:
+            _idrow_cache[ck][id_value] = new_row
+        _formula_cache.pop((tab, new_row), None)
+        return {"ok": True, "operation": "inserted-above-header", "tab": tab, "id": id_value,
+                "row": new_row, "headerRow": header_row + 1,
+                "cellsWritten": len(mapping), "missingHeaders": missing}
     # Anchor the append on the REGISTER's own header row, not on A1.
     #
     # A1 was wrong for any tab whose table does not start in column A. The Lead
@@ -772,7 +867,7 @@ def _upsert_sync(entity, doc):
             new_row = int(m.group(1))
     except Exception:
         new_row = None
-    ck = (tab, header_row + 1)
+    ck = (tab, data_start)
     if new_row and ck in _idrow_cache:
         _idrow_cache[ck][id_value] = new_row
         _formula_cache.pop((tab, new_row), None)

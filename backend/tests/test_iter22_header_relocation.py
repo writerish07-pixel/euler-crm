@@ -143,17 +143,27 @@ def test_a_row_of_lead_data_is_never_mistaken_for_the_header(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_append_anchors_on_the_register_not_on_A1(monkeypatch):
-    """A1 anchoring is what let INSERT_ROWS shift the header. The append must target
-    the first mapped column at the header row instead."""
+async def test_leads_never_append_they_insert_above_the_footer_header(monkeypatch):
+    """A1-anchored append with INSERT_ROWS is what shifted the header in the first
+    place. The Lead Register is upward-growing, so it must not append at all — see
+    test_iter23_footer_header_register for the full insert contract."""
     v = install(monkeypatch, ShiftedValues())
+    monkeypatch.setattr(gsheets, "_sheetid_cache", {"Lead Register": 1})
+
+    def _batch(spreadsheetId=None, body=None, **kw):
+        for req in (body or {}).get("requests", []):
+            ins = req.get("insertDimension")
+            if ins:
+                v.grid.insert(ins["range"]["startIndex"], [])
+        return _Exec({})
+
+    monkeypatch.setattr(gsheets._service, "batchUpdate", _batch)
     res = await gsheets.sync("leads", {"leadId": "LD26999999", "customerName": "New Lead"})
     assert res["ok"] is True, res
-    assert res["operation"] == "appended"
-    assert v.appended, "no append was issued"
-    rng = v.appended[0]
-    assert rng == "'Lead Register'!J22", f"append anchored at {rng} — must be the register's own header cell"
-    assert "!A1" not in rng
+    assert res["operation"] == "inserted-above-header"
+    assert res["row"] == 22, f"record landed on row {res['row']}, expected the header's old row"
+    assert res["headerRow"] == 23, "header must move down exactly one row"
+    assert v.appended == [], "an upward-growing register must never call append"
 
 
 @pytest.mark.asyncio
