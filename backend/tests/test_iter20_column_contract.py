@@ -111,6 +111,17 @@ def test_fifty_columns_were_added():
     assert sum(len(v) for v in NEWLY_MAPPED.values()) == 50
 
 
+def test_lead_register_insurance_benefit_resolves_after_loyalty():
+    """Insurance Benefit is an independent Lead Register column after Loyalty Bonus."""
+    tab, fields = SYNC_MAP["leads"][0], SYNC_MAP["leads"][2]
+    assert "insuranceBenefit" in fields
+    mapping, missing = resolve(tab, ["loyaltyBonus", "insuranceBenefit"])
+    assert missing == []
+    assert mapping["insuranceBenefit"] == mapping["loyaltyBonus"] + 1
+    _hr, headers = LIVE_HEADERS[tab]
+    assert headers[mapping["insuranceBenefit"]] == "Insurance Benefit"
+
+
 # --------------------------------------------------------------- phase 3
 # Columns that had no mapping AND no obvious camelCase field, but whose value the CRM
 # either already captured under a different name or can derive from data it holds.
