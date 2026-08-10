@@ -212,12 +212,21 @@ def _require_action(lead, key, verb):
 
 def lead_to_snapshot(lead):
     """Build a commercial-engine snapshot dict from a lead document."""
+    used = lead.get("schemeComponentsUsed") or {}
+    if isinstance(used, str):
+        try:
+            import json as _json
+            used = _json.loads(used) if used.strip() else {}
+        except Exception:
+            used = {}
     return {
         "bookingDate": lead.get("bookingDate", ""),
         "benefitPassedBreakup": lead.get("benefitPassedBreakup", ""),
-        # schemeAllocationV2: new/edited scheme saves opt into Full Benefit applying
-        # to entitlements. Absent ⇒ grandfather entitlements at CB=0 when not in breakup.
+        # schemeAllocationV2: legacy Full Benefit may apply to entitlements when set.
+        # schemeAllocationExplicit: new UI — CB only from explicit breakup (default 0).
         "schemeAllocationV2": bool(lead.get("schemeAllocationV2")),
+        "schemeAllocationExplicit": bool(lead.get("schemeAllocationExplicit")),
+        "schemeComponentsUsed": used if isinstance(used, dict) else {},
         "exShowroom": lead.get("exShowroom", 0),
         "accessories": lead.get("accessoriesAmount", 0),
         "insurance": lead.get("insuranceAmount", 0),
@@ -546,9 +555,12 @@ class SchemeIn(BaseModel):
     referralBonus: float = 0
     dsaDiscount: float = 0
     additionalDiscount: float = 0
-    benefitMode: str = "Full Benefit"
+    # Kept for API compatibility / historical leads. New Scheme UI does not expose it;
+    # allocation is driven by explicit benefitPassedBreakup + schemeComponentsUsed.
+    benefitMode: str = "Partial Benefit"
     customerBenefitPassed: float = 0
     benefitPassedBreakup: Optional[str] = None
+    schemeComponentsUsed: Optional[str] = None
     oemExtraSupportReceived: float = 0
     oemExtraSupportPassed: float = 0
 
@@ -1144,6 +1156,8 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
     payload = body.model_dump()
     if payload.get("benefitPassedBreakup") is None:
         payload.pop("benefitPassedBreakup", None)
+    if payload.get("schemeComponentsUsed") is None:
+        payload.pop("schemeComponentsUsed", None)
     # Validate offers against Scheme Master availability + max caps (port of validateSchemeOffersForVehicle_)
     scheme_rows = await get_scheme_rows()
     offers = {k: payload.get(k, 0) for k in ce.OFFER_KEYS}
@@ -1153,32 +1167,91 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
     if errors:
         raise HTTPException(422, "Please fix these scheme fields:\n" + "\n".join(errors))
     import json as _json
-    # New/edited scheme saves opt into V2: Full Benefit applies to EVERY component
-    # (including Insurance/RTO entitlements). Historical leads without this flag keep
-    # grandfathered entitlement CB=0 unless an explicit breakup key exists.
-    payload["schemeAllocationV2"] = True
-    # Build a provisional snap and materialise explicit per-component customerBenefit
-    # into benefitPassedBreakup so the persisted allocation is numeric and deterministic.
-    provisional = {**lead_to_snapshot({**lead, **payload}), "schemeAllocationV2": True}
-    alloc = ce.compute_scheme_allocation(provisional, scheme_rows)
-    clean_bk = {c["key"]: c["customerBenefit"] for c in alloc["components"]
-                if c["key"] != "additionalDiscount"}
-    # Preserve any Partial amounts the client sent that already match (alloc already
-    # honoured breakup); overwrite with engine result so every key is explicit.
+
     raw_breakup = payload.get("benefitPassedBreakup")
+    parsed_breakup = None
     if isinstance(raw_breakup, str) and raw_breakup.strip():
         try:
-            parsed = _json.loads(raw_breakup)
-            if isinstance(parsed, dict):
-                # Re-run with client breakup + V2 so Partial values stick.
-                provisional["benefitPassedBreakup"] = parsed
-                alloc = ce.compute_scheme_allocation(provisional, scheme_rows)
-                clean_bk = {c["key"]: c["customerBenefit"] for c in alloc["components"]
-                            if c["key"] != "additionalDiscount"}
+            parsed_breakup = _json.loads(raw_breakup)
         except Exception:
-            pass
-    payload["benefitPassedBreakup"] = _json.dumps(clean_bk)
-    payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
+            raise HTTPException(422, "benefitPassedBreakup must be valid JSON")
+    elif isinstance(raw_breakup, dict):
+        parsed_breakup = raw_breakup
+
+    raw_used = payload.get("schemeComponentsUsed")
+    parsed_used = {}
+    if isinstance(raw_used, str) and raw_used.strip():
+        try:
+            parsed_used = _json.loads(raw_used)
+        except Exception:
+            raise HTTPException(422, "schemeComponentsUsed must be valid JSON")
+    elif isinstance(raw_used, dict):
+        parsed_used = raw_used
+    if not isinstance(parsed_used, dict):
+        parsed_used = {}
+
+    # Explicit breakup from the Scheme UI ⇒ assignment model (eligibility ≠ assignment).
+    # Legacy clients that omit breakup keep Full/No Benefit materialisation.
+    if isinstance(parsed_breakup, dict):
+        alloc_errs = ce.validate_scheme_allocation_breakup(
+            lead.get("interestedModel") or "", lead.get("variant") or "",
+            lead.get("bookingDate") or today(), parsed_breakup, scheme_rows)
+        if alloc_errs:
+            raise HTTPException(422, "Please fix these scheme allocation fields:\n" + "\n".join(alloc_errs))
+        payload["schemeAllocationExplicit"] = True
+        payload["schemeAllocationV2"] = True
+        # Benefit Mode is not used by the new UI; store Partial for compatibility.
+        payload["benefitMode"] = "Partial Benefit"
+        provisional = {
+            **lead_to_snapshot({**lead, **payload}),
+            "schemeAllocationExplicit": True,
+            "schemeAllocationV2": True,
+            "benefitPassedBreakup": parsed_breakup,
+            "schemeComponentsUsed": parsed_used,
+            "benefitMode": "Partial Benefit",
+        }
+        # Ensure eligible offer pools are present so OEM claim shares resolve even
+        # when customer benefit is ₹0 (Use Scheme = No). Available = Scheme Master.
+        rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
+            lead.get("interestedModel") or "", lead.get("variant") or "",
+            lead.get("bookingDate") or today(), scheme_rows)
+        for key, rule in (rules_ctx.get("rules") or {}).items():
+            if key == "additionalDiscount":
+                continue
+            if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+                # Persist the eligible pool amount (not customer assignment).
+                payload[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
+                provisional[key] = payload[key]
+        alloc = ce.compute_scheme_allocation(provisional, scheme_rows)
+        clean_bk = {}
+        clean_used = {}
+        for c in alloc["components"]:
+            if c["key"] == "additionalDiscount":
+                continue
+            # Prefer client amount when provided; otherwise 0 (never auto-assign).
+            if c["key"] in parsed_breakup:
+                cb = ce.round2(max(0.0, min(ce.num(parsed_breakup[c["key"]]), c["schemeAvailable"])))
+            else:
+                cb = 0.0
+            clean_bk[c["key"]] = cb
+            if c["key"] in parsed_used:
+                clean_used[c["key"]] = bool(parsed_used[c["key"]])
+            else:
+                clean_used[c["key"]] = cb > 0
+        payload["benefitPassedBreakup"] = _json.dumps(clean_bk)
+        payload["schemeComponentsUsed"] = _json.dumps(clean_used)
+        payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
+    else:
+        # Legacy path: materialise from Benefit Mode (older API / tests).
+        payload["schemeAllocationV2"] = True
+        provisional = {**lead_to_snapshot({**lead, **payload}), "schemeAllocationV2": True}
+        alloc = ce.compute_scheme_allocation(provisional, scheme_rows)
+        clean_bk = {c["key"]: c["customerBenefit"] for c in alloc["components"]
+                    if c["key"] != "additionalDiscount"}
+        payload["benefitPassedBreakup"] = _json.dumps(clean_bk)
+        payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
+        payload["schemeComponentsUsed"] = _json.dumps({k: (v > 0) for k, v in clean_bk.items()})
+
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)

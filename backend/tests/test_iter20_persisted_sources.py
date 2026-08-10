@@ -87,8 +87,8 @@ async def test_per_component_retention_is_persisted_and_sums_to_the_total(client
     total = round(sum(ce.num(lead[p]) for p in parts), 2)
     assert total == round(ce.num(lead["dealerSchemeRetained"]), 2), \
         f"per-component {total} != total {lead['dealerSchemeRetained']}"
-    # HiCity Aug: Full Benefit (V2) passes every component including RTO+Insurance
-    # entitlements → dealer retained on those is 0. OEM claim remains 55,000.
+    # HiCity Aug: Full Benefit (legacy API, no explicit breakup) still materialises
+    # every component including RTO+Insurance → dealer retained 0. OEM claim 55,000.
     assert lead["dealerSchemeRetained"] == 0
     assert lead["rtoBenefitRetained"] == 0
     assert lead["insuranceBenefitRetained"] == 0
@@ -96,6 +96,8 @@ async def test_per_component_retention_is_persisted_and_sums_to_the_total(client
     assert lead["loyaltyRetained"] == 0
     assert lead["companyOutstanding"] == 55000
     assert lead.get("schemeAllocationV2") is True
+    # Explicit assignment flag is only set when a benefitPassedBreakup is submitted.
+    assert not lead.get("schemeAllocationExplicit")
 
 
 @pytest.mark.asyncio

@@ -517,20 +517,16 @@ def _component_customer_benefit(key, scheme_available, mode, breakup, s, offer_w
       customerBenefit ∈ [0, schemeAvailable]
       dealerRetained  = schemeAvailable − customerBenefit   (computed by caller)
 
-    Benefit Mode applies identically to EVERY scheme component (Loyalty, Insurance,
-    RTO, Consumer, Exchange, Referral, DSA, …). No special-case for entitlements.
+    Explicit assignment model (schemeAllocationExplicit):
+      Scheme Master eligibility ≠ assignment. Missing breakup key ⇒ CB = 0.
+      Only an explicit benefitPassedBreakup amount assigns customer benefit.
+      Benefit Mode is ignored for CB resolution when explicit.
 
-      No Benefit     → customerBenefit = 0
-      Full Benefit   → customerBenefit = schemeAvailable
-      Partial Benefit→ customerBenefit = explicit per-component amount
-
-    Explicit benefitPassedBreakup[key] always wins (capped by schemeAvailable).
-
-    Historical safety (schemeAllocationV2):
-      Pre-fix leads never auto-passed entitlement components under Full Benefit.
-      Without schemeAllocationV2, entitlement keys ABSENT from breakup stay at CB=0
-      even if benefitMode is Full Benefit — preserving historical customer payable.
-      New / edited scheme saves set schemeAllocationV2 and write explicit breakup.
+    Legacy (non-explicit) — preserved for historical leads / older API clients:
+      Explicit benefitPassedBreakup[key] still wins when present.
+      No Benefit → 0; Full Benefit → schemeAvailable; Partial → breakup/waterfall.
+      schemeAllocationV2 grandfathering: entitlements absent from breakup stay CB=0
+      under Full Benefit when V2 is unset (no silent historical rewrite).
     """
     cap = max(0.0, num(scheme_available))
     if key == "additionalDiscount":
@@ -539,6 +535,10 @@ def _component_customer_benefit(key, scheme_available, mode, breakup, s, offer_w
     # Explicit per-component allocation is authoritative when present.
     if isinstance(breakup, dict) and key in breakup:
         return round2(max(0.0, min(num(breakup.get(key)), cap)))
+
+    # New UI / explicit saves: eligibility alone never assigns customer benefit.
+    if bool(s.get("schemeAllocationExplicit")):
+        return 0.0
 
     # Grandfather pre-V2 entitlement rows that never recorded an allocation key.
     v2 = bool(s.get("schemeAllocationV2"))
@@ -576,22 +576,22 @@ def compute_scheme_allocation(s, scheme_rows):
 
       schemeAvailable    — total entitlement under the scheme
       oemShare           — contractual OEM/company share (oemClaimable)
-      dealerFundedShare  — portion funded by the dealer
+      dealerFundedShare  — portion funded by the dealer (contractual; ≠ retained)
       customerBenefit    — amount the dealer actually passes to the customer
       dealerRetained     — schemeAvailable − customerBenefit
       oemClaimable       — amount claimable from OEM (== oemShare)
 
-    OEM CLAIMABLE is NOT automatically equal to schemeAvailable.
-    Dealer Retained is NOT automatically equal to OEM Claimable.
-    Customer Benefit is NOT automatically equal to schemeAvailable.
+    schemeAllocationExplicit:
+      Eligible offer components are included from Scheme Master even when the
+      lead offer field is 0 (eligibility ≠ assignment). Customer benefit comes
+      only from benefitPassedBreakup — never auto-filled from Benefit Mode.
 
-    Staff-entered offers use company-share-first capping (preserved Scheme Master
-    rule). Entitlement components use the Scheme Master's own shares directly.
     Insurance Payout (premium × rate) is a SEPARATE ledger and must never appear here.
     """
     s = s or {}
     mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
     breakup = _parse_benefit_breakup(s)
+    explicit = bool(s.get("schemeAllocationExplicit"))
     model = str(s.get("model") or s.get("interestedModel") or "").strip()
     variant = str(s.get("variant") or "").strip()
     booking_date = s.get("bookingDate") or ""
@@ -600,17 +600,23 @@ def compute_scheme_allocation(s, scheme_rows):
     # Pre-compute offer available amounts so Partial waterfall can run once
     offer_full = {}
     for key in ["consumerDiscount", "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount"]:
-        actual = max(0.0, num(s.get(key)))
-        if actual <= 0:
-            continue
         m = master.get(key)
+        master_total = 0.0
         if m:
-            max_total = num(m.get("totalBenefit")) or (num(m.get("dealerShare")) + num(m.get("companyShare")))
-            offer_full[key] = round2(min(actual, max_total)) if max_total > 0 else round2(actual)
-        else:
-            offer_full[key] = round2(actual)
+            master_total = num(m.get("totalBenefit")) or (num(m.get("dealerShare")) + num(m.get("companyShare")))
+        actual = max(0.0, num(s.get(key)))
+        if explicit and master_total > 0:
+            # Eligibility from Scheme Master — available is the master amount.
+            # Lead offer field may still carry a typed amount for legacy columns;
+            # never exceed master_total.
+            offer_full[key] = round2(min(actual, master_total) if actual > 0 else master_total)
+        elif actual > 0:
+            if m and master_total > 0:
+                offer_full[key] = round2(min(actual, master_total))
+            else:
+                offer_full[key] = round2(actual)
     waterfall = {}
-    if mode == "Partial Benefit" and not (isinstance(breakup, dict) and any(k in breakup for k in offer_full)):
+    if (not explicit) and mode == "Partial Benefit" and not (isinstance(breakup, dict) and any(k in breakup for k in offer_full)):
         waterfall = _offer_partial_waterfall(s, offer_full)
 
     components = []
@@ -624,6 +630,19 @@ def compute_scheme_allocation(s, scheme_rows):
         # Never invent negative retention — clamp at 0 unless an explicit rule
         # requires it (none does under this contract).
         dealer_retained = round2(max(0.0, scheme_available - customer_benefit))
+        used_map = s.get("schemeComponentsUsed") or {}
+        if isinstance(used_map, str):
+            try:
+                import json as _json
+                used_map = _json.loads(used_map) if used_map.strip() else {}
+            except Exception:
+                used_map = {}
+        if not isinstance(used_map, dict):
+            used_map = {}
+        if key in used_map:
+            used = bool(used_map.get(key))
+        else:
+            used = customer_benefit > 0
         components.append({
             "key": key,
             "label": label,
@@ -634,6 +653,7 @@ def compute_scheme_allocation(s, scheme_rows):
             "dealerRetained": dealer_retained,
             "oemClaimable": oem_share,
             "source": source,
+            "used": used,
         })
 
     # --- Staff-entered OEM offer components ---
@@ -692,6 +712,7 @@ def compute_scheme_allocation(s, scheme_rows):
         "model": model,
         "variant": variant,
         "shareSplitAvailable": bool(master) or bool(components),
+        "explicit": explicit,
     }
 
 
@@ -912,10 +933,10 @@ def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows
             "automatic": True,
             "allocatable": True,
             "hint": (
-                f"OEM entitlement from Scheme Master — available ₹{total}, "
+                f"Eligible from Scheme Master — available ₹{total}, "
                 f"OEM claimable ₹{company}"
                 + (f", dealer contractual ₹{dealer}" if dealer > 0 else "")
-                + f". Dealer decides how much of ₹{total} to pass to the customer."
+                + ". Dealer must explicitly choose Use Scheme and Customer Benefit."
             ),
         })
     return {"schemeMonth": month, "model": model_disp, "variant": variant_disp,
@@ -953,6 +974,55 @@ def validate_scheme_offers(model, variant, booking_date, offers, scheme_rows):
             continue
         if amt > num(rule["maxAmount"]) + 0.01:
             lines.append(f"\u2022 {rule['label']}: \u20b9{amt} exceeds Scheme Master max \u20b9{rule['maxAmount']}")
+    return lines
+
+
+def validate_scheme_allocation_breakup(model, variant, booking_date, breakup, scheme_rows):
+    """Validate explicit per-component customerBenefit decisions against Scheme Master.
+
+    Returns a list of error lines (empty = OK). Rejects unknown keys, non-numeric /
+    negative amounts, and amounts above schemeAvailable. Eligibility comes only from
+    Scheme Master — unknown or ineligible keys are rejected.
+    """
+    if breakup is None:
+        return []
+    if isinstance(breakup, str):
+        try:
+            import json as _json
+            breakup = _json.loads(breakup) if breakup.strip() else {}
+        except Exception:
+            return ["• benefitPassedBreakup must be valid JSON"]
+    if not isinstance(breakup, dict):
+        return ["• benefitPassedBreakup must be an object of component → amount"]
+
+    ctx = get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
+    eligible = {}
+    for key, rule in (ctx.get("rules") or {}).items():
+        if key == "additionalDiscount":
+            continue
+        if rule.get("allowed") and num(rule.get("maxAmount") or rule.get("schemeAvailable")) > 0:
+            eligible[key] = num(rule.get("schemeAvailable") or rule.get("maxAmount"))
+    for ent in ctx.get("entitlements") or []:
+        eligible[ent["key"]] = num(ent.get("schemeAvailable") or ent.get("totalBenefit"))
+
+    lines = []
+    for key, raw in breakup.items():
+        if key == "additionalDiscount":
+            continue
+        if key not in eligible:
+            lines.append(f"• Unknown or ineligible scheme component: {key}")
+            continue
+        try:
+            amt = float(raw)
+        except (TypeError, ValueError):
+            lines.append(f"• {key}: customer benefit must be numeric")
+            continue
+        if amt < 0:
+            lines.append(f"• {key}: customer benefit cannot be negative")
+            continue
+        avail = eligible[key]
+        if amt > avail + 0.01:
+            lines.append(f"• {key}: customer benefit ₹{round2(amt)} exceeds available ₹{round2(avail)}")
     return lines
 
 
