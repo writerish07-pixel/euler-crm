@@ -1,0 +1,11 @@
+# Cloudflare Workers Builds deploys this SPA as static assets.
+# Dashboard Worker name must match `name` below (euler-crm).
+# Build command (repo root): npm run build
+# Deploy command (default):   npx wrangler deploy
+name = "euler-crm"
+compatibility_date = "2026-08-10"
+
+[assets]
+directory = "./frontend/build"
+# CRA client-side routes (/leads, /bookings, …) must fall back to index.html.
+not_found_handling = "single-page-application"

@@ -1,8 +1,7 @@
-# Render Blueprint. The repo has NO root package.json — the frontend is a
-# Create React App under frontend/ with a yarn.lock. A Render service whose Root
-# Directory is left unset runs npm at the repo root, finds nothing to build and
-# fails with npm's usage output (the "--workspaces" line seen in the build log).
-# Pinning rootDir here removes that ambiguity.
+# Render Blueprint.
+# Frontend lives under frontend/ (Create React App + yarn.lock). Root package.json
+# + wrangler.toml exist for Cloudflare Workers Builds; Render still pins rootDir
+# to frontend so the static service does not depend on the root npm wrapper.
 services:
   - type: web
     name: euler-crm
