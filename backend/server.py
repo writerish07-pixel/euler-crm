@@ -1175,7 +1175,8 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
     if not lead:
         raise HTTPException(404, "Lead not found")
     counts = {}
-    for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims", "activities", "dealer_earnings"]:
+    for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
+                 "activities", "dealer_earnings", "incentive_register"]:
         r = await db[coll].delete_many({"leadId": lead_id})
         counts[coll] = r.deleted_count
     await db.leads.delete_one({"leadId": lead_id})
@@ -3672,11 +3673,13 @@ async def migrate_insurance_rates():
 @api.post("/admin/reset-transactions", dependencies=[Depends(owner_only)])
 async def reset_transactions(act=Depends(actor)):
     """Owner-only go-live reset: permanently clears all transaction data (leads, bookings,
-    payments, deliveries, finance, insurance, claims, activities, earnings) and blocks the
-    sample-data re-seed. Master data (price/scheme/incentive) is preserved."""
+    payments, deliveries, finance, insurance, claims, activities, earnings, incentives,
+    quotations) and blocks the sample-data re-seed. Master data (price/scheme/incentive
+    master, users, Masters list) is preserved. Also clears operational Google Sheet
+    register data rows (headers kept) when sheet sync is writable."""
     counts = {}
     for coll in ["leads", "bookings", "payments", "deliveries", "finance", "insurance",
-                 "claims", "activities", "dealer_earnings", "quotations"]:
+                 "claims", "activities", "dealer_earnings", "quotations", "incentive_register"]:
         r = await db[coll].delete_many({})
         counts[coll] = r.deleted_count
     await db["system"].update_one({"_id": "seed_state"},
@@ -3684,8 +3687,11 @@ async def reset_transactions(act=Depends(actor)):
     await db["counters"].update_one({"_id": "lead"}, {"$set": {"seq": 0}}, upsert=True)
     for c in ["receipt", "booking", "activity", "snapshot", "claim", "finance", "insurance"]:
         await db["counters"].update_one({"_id": c}, {"$set": {"seq": 100}}, upsert=True)
-    await write_audit(act, "reset", "system", new={"clearedTransactions": counts})
-    return {"ok": True, "cleared": counts}
+    sheet_clear = await gsheets.clear_operational_register_rows()
+    await write_audit(act, "reset", "system",
+                      new={"clearedTransactions": counts, "sheetClear": sheet_clear})
+    return {"ok": True, "cleared": counts, "sheetClear": sheet_clear,
+            "nextLeadId": "LD26000001"}
 
 
 def _config_diagnostics():
