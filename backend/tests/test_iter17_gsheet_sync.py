@@ -96,23 +96,7 @@ class FakeValues:
     def clear(self, **kw):
         return _Exec({})
 
-    def update(self, spreadsheetId=None, range=None, body=None, **kw):
-        """Real write. Upward-growing registers write their new row with update()
-        after insertDimension, so a no-op stub silently produced empty rows."""
-        tab, a1 = self._parse(range)
-        start = a1.split(":")[0]
-        col = self._col_to_idx("".join(c for c in start if c.isalpha()))
-        row_n = int("".join(c for c in start if c.isdigit()))
-        grid = self.tabs[tab]
-        while len(grid) < row_n:
-            grid.append([])
-        row = grid[row_n - 1]
-        vals = body["values"][0]
-        while len(row) < col + len(vals):
-            row.append("")
-        for i, v in enumerate(vals):
-            row[col + i] = v
-        grid[row_n - 1] = row
+    def update(self, **kw):
         return _Exec({})
 
 
@@ -135,22 +119,9 @@ class FakeService:
         return self._values
 
     def get(self, **kw):
-        # Sheet metadata: insertDimension needs each tab's numeric sheetId.
-        return _Exec({"properties": {"title": "Euler Master"},
-                      "sheets": [{"properties": {"sheetId": i, "title": t}}
-                                 for i, t in enumerate(self._values.tabs)]})
+        return _Exec({"properties": {"title": "Euler Master"}})
 
-    def batchUpdate(self, spreadsheetId=None, body=None, **kw):
-        """Structural requests. Only insertDimension is used (upward-growing
-        registers insert a row immediately above their footer header)."""
-        titles = list(self._values.tabs)
-        for req in (body or {}).get("requests", []):
-            ins = req.get("insertDimension")
-            if not ins:
-                continue
-            rng = ins["range"]
-            tab = titles[rng["sheetId"]]
-            self._values.tabs[tab].insert(rng["startIndex"], [])
+    def batchUpdate(self, **kw):
         return _Exec({})
 
 
@@ -254,36 +225,13 @@ def sheet(monkeypatch):
     return tabs, values
 
 
-def _lead_header_idx(tabs):
-    """0-based index of the Lead Register's header row.
-
-    The Lead Register is an UPWARD-GROWING register: its header is a FOOTER at the
-    bottom of the data, and every new lead is inserted immediately above it, so the
-    header's row number changes with each insert and must be located, not assumed."""
-    for i, row in enumerate(tabs["Lead Register"]):
-        if len(row) > 9 and str(row[9]).strip() == "Lead ID":
-            return i
-    return None
-
-
 def rows(tabs, tab):
-    """The tab's data rows.
-
-    Lead Register: rows ABOVE the footer header (index 2 up to the header). Every
-    other register: rows below its row-1 header."""
-    if tab == "Lead Register":
-        end = _lead_header_idx(tabs)
-        if end is None:
-            return []
-        return [r for r in tabs[tab][2:end] if len(r) > 9 and str(r[9]).strip()]
-    return tabs[tab][1:]
+    """Data rows below the tab's header row (Lead Register's real header is row 3)."""
+    return tabs[tab][3:] if tab == "Lead Register" else tabs[tab][1:]
 
 
 def hdr(tabs, tab):
-    if tab != "Lead Register":
-        return tabs[tab][0]
-    i = _lead_header_idx(tabs)
-    return tabs[tab][i] if i is not None else []
+    return tabs[tab][2] if tab == "Lead Register" else tabs[tab][0]
 
 
 # ---------------------------------------------------------------- GS-1
@@ -296,9 +244,9 @@ async def test_header_based_mapping_not_positional(sheet):
         "leadId": "LD1", "createdDate": "2026-08-01", "customerName": "Asha",
         "mobile": "9000000001", "leadSource": "Walk-in", "interestedModel": "HiCity",
         "variant": "XR", "executive": "Amit", "currentStatus": "New"})
-    assert res["ok"] and res["operation"] == "inserted-above-header"
+    assert res["ok"] and res["operation"] == "appended"
     row = rows(tabs, "Lead Register")[0]
-    hdr = globals()["hdr"](tabs, "Lead Register")
+    hdr = tabs["Lead Register"][2]
     assert row[hdr.index("Lead ID")] == "LD1"
     assert row[hdr.index("Customer Name")] == "Asha"
     assert row[hdr.index("Created Date")] == "2026-08-01"
@@ -329,7 +277,7 @@ async def test_lead_update_updates_same_row(sheet):
     r3 = await gsheets.sync("leads", {**base, "customerName": "Asha Devi", "currentStatus": "Delivered"})
     assert r2["operation"] == "updated" and r3["operation"] == "updated"
     assert len(rows(tabs, "Lead Register")) == 1, "must never append a second row"
-    hdr = globals()["hdr"](tabs, "Lead Register")
+    hdr = tabs["Lead Register"][2]
     assert rows(tabs, "Lead Register")[0][hdr.index("Current Status")] == "Delivered"
     assert rows(tabs, "Lead Register")[0][hdr.index("Customer Name")] == "Asha Devi"
 
@@ -391,15 +339,15 @@ async def test_formula_and_unmapped_columns_preserved(sheet):
     not own. None of them may be touched."""
     tabs, _ = sheet
     await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha", "currentStatus": "New"})
-    hdr = globals()["hdr"](tabs, "Lead Register")
-    row = rows(tabs, "Lead Register")[0]
+    hdr = tabs["Lead Register"][2]
+    row = tabs["Lead Register"][3]
     row[hdr.index("Total Discount")] = "=BF4+BG4+BH4"        # sheet formula, mapped column
     row[hdr.index("Last Activity")] = "called customer"       # staff input, unmapped
     row[hdr.index("Registration Status")] = "Pending RTO"     # dealership-owned, unmapped
 
     await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha Devi",
                                  "currentStatus": "Delivered", "totalDiscount": 99999})
-    row = rows(tabs, "Lead Register")[0]
+    row = tabs["Lead Register"][3]
     assert row[hdr.index("Total Discount")] == "=BF4+BG4+BH4", "formula in mapped column overwritten"
     assert row[hdr.index("Last Activity")] == "called customer", "unmapped staff column altered"
     assert row[hdr.index("Registration Status")] == "Pending RTO", "unmapped column altered"
@@ -409,8 +357,8 @@ async def test_formula_and_unmapped_columns_preserved(sheet):
 
 @pytest.mark.asyncio
 async def test_search_helper_area_never_touched(sheet):
-    """Lead Register cols A:I are the SEARCH/helper area. CRM writes target the real
-    table in column J+ and must leave A:I untouched."""
+    """Lead Register rows 1-2 (cols A:I) are the SEARCH/helper area. CRM writes
+    target the real table at row 3+ / column J+ and must leave A:I untouched."""
     tabs, _ = sheet
     before_r1 = list(tabs["Lead Register"][0])
     before_r2 = list(tabs["Lead Register"][1])
@@ -420,9 +368,8 @@ async def test_search_helper_area_never_touched(sheet):
     assert tabs["Lead Register"][0] == before_r1, "search header row modified"
     assert tabs["Lead Register"][1] == before_r2, "search helper data row modified"
     # the helper row 2 also contains 'LD26000001' in col A — it must NOT be matched as
-    # the target row; the real record sits ABOVE the footer header (upward-growing
-    # register), never in the A:I helper block.
-    hdr = globals()["hdr"](tabs, "Lead Register")
+    # the target row; the real record goes below the row-3 header.
+    hdr = tabs["Lead Register"][2]
     data = rows(tabs, "Lead Register")
     assert len(data) == 1
     assert data[0][hdr.index("Lead ID")] == "LD26000001"
@@ -435,8 +382,8 @@ async def test_partial_update_does_not_blank_other_fields(sheet):
     await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha",
                                  "mobile": "9000000001", "executive": "Amit"})
     await gsheets.sync("leads", {"leadId": "LD1", "currentStatus": "Booked"})
-    hdr = globals()["hdr"](tabs, "Lead Register")
-    row = rows(tabs, "Lead Register")[0]
+    hdr = tabs["Lead Register"][2]
+    row = tabs["Lead Register"][3]
     assert row[hdr.index("Mobile")] == "9000000001"
     assert row[hdr.index("Executive")] == "Amit"
     assert row[hdr.index("Current Status")] == "Booked"
