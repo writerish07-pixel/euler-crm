@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { get, put } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
-import { PageHeader, Table, Badge, Button } from "../components/ui";
+import { inr, fmtDate, todayISO } from "../lib/format";
+import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 
 export default function IncentiveMaster() {
@@ -33,12 +33,14 @@ export default function IncentiveMaster() {
 function IncentiveRegister() {
   const { user } = useAuth();
   const [rows, setRows] = useState([]);
+  const [paidDate, setPaidDate] = useState(todayISO());
   const load = useCallback(() => get("/incentive-register").then(setRows).catch(() => {}), []);
   useEffect(() => { load(); }, [load]);
 
   const markPaid = async (id) => {
+    if (!paidDate) return toast.error("Paid date is required");
     try {
-      await put(`/incentive-register/${id}/pay`, {});
+      await put(`/incentive-register/${id}/pay`, { paidDate });
       toast.success("Marked paid");
       load();
     } catch (e) {
@@ -52,6 +54,13 @@ function IncentiveRegister() {
   return (
     <div className="mt-8">
       <PageHeader title="Incentive Register" subtitle={`Auto-created on delivery · ${inr(pending)} pending payout`} />
+      {user?.role === "owner" && (
+        <div className="mb-3 max-w-xs">
+          <Field label="Paid Date (used when marking paid)">
+            <Input data-testid="incentive-paid-date" type="date" value={paidDate} onChange={(e) => setPaidDate(e.target.value)} />
+          </Field>
+        </div>
+      )}
       <Table
         rowKey="incentiveId"
         columns={[

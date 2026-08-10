@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { HandCoins, Plus } from "lucide-react";
 import { get, post } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
+import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 
 export default function Claims() {
@@ -58,7 +58,7 @@ export default function Claims() {
 
 const CLAIM_TYPES = ["OEM Incentive", "Warranty Claim", "Scheme Support", "Target Incentive", "Other"];
 function ManualClaimModal({ leads, onClose, onDone }) {
-  const [form, setForm] = useState({ claimType: "OEM Incentive", oemCompany: "", leadId: "", customer: "", model: "", claimAmount: "", submittedDate: "", claimReference: "", note: "" });
+  const [form, setForm] = useState({ claimType: "OEM Incentive", oemCompany: "", leadId: "", customer: "", model: "", claimAmount: "", submittedDate: todayISO(), claimReference: "", note: "" });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const pickLead = (e) => {
     const id = e.target.value;
@@ -104,7 +104,7 @@ function ManualClaimModal({ leads, onClose, onDone }) {
 
 function ClaimReceiptModal({ rows, onClose, onDone }) {
   const [key, setKey] = useState("");
-  const [form, setForm] = useState({ amount: "", date: "", reference: "" });
+  const [form, setForm] = useState({ amount: "", date: todayISO(), reference: "" });
   const sel = rows.find((r) => `${r.leadId}|${r.componentKey}` === key);
   const outstanding = sel ? Math.max(0, Number(sel.eligibleClaim || 0) - Number(sel.receivedAmount || 0)) : 0;
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -147,7 +147,7 @@ function ClaimReceiptModal({ rows, onClose, onDone }) {
 }
 
 function SettleModal({ claim, onClose, onDone }) {
-  const [form, setForm] = useState({ claimStatus: claim.claimStatus || "Submitted", receivedAmount: claim.receivedAmount || claim.eligibleClaim || 0, claimReference: claim.claimReference || "", submittedDate: claim.submittedDate || "", approvedDate: claim.approvedDate || "" });
+  const [form, setForm] = useState({ claimStatus: claim.claimStatus || "Submitted", receivedAmount: claim.receivedAmount || claim.eligibleClaim || 0, claimReference: claim.claimReference || "", submittedDate: claim.submittedDate || todayISO(), approvedDate: claim.approvedDate || todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
     await post("/claims/settle", { leadId: claim.leadId, componentKey: claim.componentKey, claimStatus: form.claimStatus, receivedAmount: +form.receivedAmount, claimReference: form.claimReference, submittedDate: form.submittedDate, approvedDate: form.approvedDate });

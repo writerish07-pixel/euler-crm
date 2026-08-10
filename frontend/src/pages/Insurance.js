@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { Plus, Pencil, Trash2, Banknote, HandCoins } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put, del } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
+import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 
@@ -72,7 +72,7 @@ export default function Insurance() {
 
 function PayoutReceiptModal({ rows, isOwner, onClose, onDone }) {
   const [entryId, setEntryId] = useState("");
-  const [form, setForm] = useState({ amount: "", date: "", reference: "" });
+  const [form, setForm] = useState({ amount: "", date: todayISO(), reference: "" });
   const sel = rows.find((r) => r.entryId === entryId);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
@@ -120,7 +120,7 @@ function EntryDrawer({ row, isOwner, masters, delivered = [], onClose, onSaved }
     model: row.model || "", variant: row.variant || "", insuranceCompany: row.insuranceCompany || "",
     policyNumber: row.policyNumber || "", insuranceAmount: row.insuranceAmount || 0,
     payoutRate: row.payoutRate ? Number(row.payoutRate) * 100 : 0, receivedPayout: row.receivedPayout || 0,
-    policyDate: row.policyDate || "", insuranceExecutive: row.insuranceExecutive || "", remarks: row.remarks || "",
+    policyDate: row.policyDate || todayISO(), insuranceExecutive: row.insuranceExecutive || "", remarks: row.remarks || "",
   });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const [rateTouched, setRateTouched] = useState(Number(row.payoutRate) > 0);

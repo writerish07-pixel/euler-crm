@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { Landmark } from "lucide-react";
 import { get, post } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
+import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 
 export default function Finance() {
@@ -49,7 +49,7 @@ export default function Finance() {
 
 function FinanceReceiptModal({ files, onClose, onDone }) {
   const [fileNumber, setFileNumber] = useState("");
-  const [form, setForm] = useState({ amount: "", date: "", reference: "" });
+  const [form, setForm] = useState({ amount: "", date: todayISO(), reference: "" });
   const sel = files.find((f) => f.fileNumber === fileNumber);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
