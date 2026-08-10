@@ -304,16 +304,11 @@ async def recompute_lead(lead_id):
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     total_received = ce.round2(agg[0]["total"]) if agg else 0.0
-    # Customer Payable falls by what was actually PASSED to the customer. Offer
-    # components are already inside compute_commercial_totals; entitlement components
-    # (Free RTO / Free Insurance) were previously incapable of reducing payable at
-    # all, so their allocated customer benefit is applied here. Nothing is
-    # double-counted: only entitlement keys are added.
-    entitlement_benefit = ce.round2(sum(
-        c["customerBenefit"] for c in alloc["components"] if c["automatic"]))
-    # No clamp here: negative payable from an over-value exchange is pre-existing
-    # behaviour and is not this change's business to alter.
-    customer_payable = ce.round2(totals["customerPayable"] - entitlement_benefit)
+    # Customer Payable comes solely from compute_commercial_totals(…, scheme_rows),
+    # which already reduces by Σ customerBenefit across offers + entitlements.
+    # Do NOT subtract entitlement benefits again — that double-counted after the
+    # allocation engines were merged onto one path.
+    customer_payable = totals["customerPayable"]
     customer_outstanding = ce.round2(max(0.0, customer_payable - total_received)) if customer_payable > 0 else 0.0
     oem_extra_recv = max(0.0, ce.num(lead.get("oemExtraSupportReceived")))
     oem_extra_pass = max(0.0, min(ce.num(lead.get("oemExtraSupportPassed")), oem_extra_recv))
@@ -347,6 +342,9 @@ async def recompute_lead(lead_id):
         "schemeCompanyTotal": shares["displayTotal"],
         "dealerSchemeRetained": income["retainedIncomeTotal"],
         "schemeCustomerBenefit": alloc["totals"]["customerBenefit"],
+        # Compat aliases used by scheme-allocation tests / reports (PR #21).
+        "schemeCustomerBenefitTotal": alloc["totals"]["customerBenefit"],
+        "schemeOemClaimableTotal": alloc["totals"]["oemClaimable"],
         "schemeAvailableTotal": alloc["totals"]["schemeAvailable"],
         "oemExtraSupportRetained": oem_extra_retained,
         "dealerMarginNetExGst": margin["marginNetExGst"],
@@ -359,7 +357,10 @@ async def recompute_lead(lead_id):
         "dealerTotalEarnings": ce.round2(
             margin["marginNetExGst"] + income["retainedIncomeTotal"] + oem_extra_retained
             + extra_income + _dealer_ins_income),
-        "schemeAllocation": {
+        # Engine summary lives here — NOT in schemeAllocation.
+        # schemeAllocation is reserved for the flat {componentKey: amount} decision
+        # map written by PUT /scheme-allocation (must not be overwritten).
+        "schemeAllocationSummary": {
             "components": alloc["components"],
             "totals": alloc["totals"],
             "benefitMode": alloc["benefitMode"],
@@ -367,6 +368,11 @@ async def recompute_lead(lead_id):
         },
         "lastUpdated": now_iso(),
     }
+    # Preserve flat decision map if present; never replace it with the summary object.
+    flat_decisions = ce._explicit_allocation({"schemeAllocation": lead.get("schemeAllocation")})
+    if flat_decisions:
+        import json as _json
+        updates["schemeAllocation"] = _json.dumps(flat_decisions)
     await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
     merged = {**lead, **updates}
     # The Lead Register is the dealership's primary register and must reflect the
@@ -1321,8 +1327,18 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
         raise HTTPException(422, "Please fix the scheme allocation:\n" + "\n".join(errors))
     merged = {**ce._explicit_allocation(lead_to_snapshot(lead)), **clean_alloc}
     old = lead.get("schemeAllocation")
+    # Persist decisions in BOTH shapes: flat schemeAllocation (PR #21 endpoint) and
+    # benefitPassedBreakup (authoritative engine / Scheme UI).
+    used = {k: (ce.num(v) > 0) for k, v in merged.items()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {
-        "schemeAllocation": json.dumps(merged), "lastUpdated": now_iso(),
+        "schemeAllocation": json.dumps(merged),
+        "benefitPassedBreakup": json.dumps(merged),
+        "schemeComponentsUsed": json.dumps(used),
+        "schemeAllocationExplicit": True,
+        "schemeAllocationV2": True,
+        "benefitMode": "Partial Benefit",
+        "customerBenefitPassed": ce.round2(sum(ce.num(v) for v in merged.values())),
+        "lastUpdated": now_iso(),
         "lastUpdatedBy": act.get("email", "")}})
     await recompute_lead(lead_id)
     await write_audit(act, "update", "scheme-allocation", leadId=lead_id,
