@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Coins } from "lucide-react";
 import { get } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
+import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, StatCard } from "../components/ui";
 
 export default function DealerEarnings() {

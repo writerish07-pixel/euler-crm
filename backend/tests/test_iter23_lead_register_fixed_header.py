@@ -1,12 +1,11 @@
 """The Lead Register is a normal register: FIXED header at the top, data below.
 
 Contract:
-  * the header stays permanently at the top and never moves
-  * existing leads sit below the header
+  * the header stays permanently at row 1 starting at column A
+  * existing leads sit below the header in sequence
   * a new lead is written after the last existing lead
   * updating an existing lead rewrites its own row — never adds one
   * re-syncing the same lead produces no duplicate
-  * columns A:I are a SEARCH/helper area and are never touched
   * formulas, formatting and the frozen header are preserved
 
 The headline test drives three consecutive inserts and asserts every point.
@@ -26,11 +25,9 @@ from gsheets import SYNC_MAP, _col_letter  # noqa: E402
 
 from live_headers import LIVE_HEADERS  # noqa: E402
 
-LEAD_HEADER = LIVE_HEADERS["Lead Register"][1][9:]      # real header, column J onward
-HEADER_ROW = 3                                          # rows 1-2 are the helper block
-FIRST_DATA_ROW = 4
-HELPER_ROW1 = ["SEARCH", "Lead ID", "Mobile", "Customer Name", "→ Use CRM menu > Search Lead"]
-HELPER_ROW2 = ["LD26000001", "2026-08-08", "Helper Row", "9800000001", "Walk-in"]
+LEAD_HEADER = LIVE_HEADERS["Lead Register"][1]
+HEADER_ROW = 1
+FIRST_DATA_ROW = 2
 
 
 class _Exec:
@@ -42,14 +39,13 @@ class _Exec:
 
 
 class LeadSheet:
-    """Lead Register in its correct shape: helper block rows 1-2 (cols A:I), the
-    header on row 3 from column J, and lead rows from row 4 downward."""
+    """Lead Register in its correct shape: header on row 1 from column A,
+    lead rows from row 2 downward (same structure as Booking / Claims / etc.)."""
 
     def __init__(self, n_existing=0):
-        self.grid = [list(HELPER_ROW1), list(HELPER_ROW2),
-                     [""] * 9 + list(LEAD_HEADER)]
+        self.grid = [list(LEAD_HEADER)]
         for i in range(n_existing):
-            self.grid.append([""] * 9 + [f"LD260000{i + 1:02d}", "2026-08-01", f"Old {i + 1}"])
+            self.grid.append([f"LD260000{i + 1:02d}", "2026-08-01", f"Old {i + 1}"])
         self.appended = []
 
     # --- inspection helpers ---------------------------------------------
@@ -59,18 +55,15 @@ class LeadSheet:
 
     def header_row_number(self):
         for i, row in enumerate(self.grid, start=1):
-            if len(row) > 9 and str(row[9]).strip() == "Lead ID":
+            if row and str(row[0]).strip() == "Lead ID":
                 return i
         raise AssertionError("header row not found")
 
     def lead_rows(self):
-        """(row number, leadId) for every row carrying a lead id in column J."""
-        return [(i, str(self._cell(i - 1, 9)).strip())
+        """(row number, leadId) for every row carrying a lead id in column A."""
+        return [(i, str(self._cell(i - 1, 0)).strip())
                 for i in range(1, len(self.grid) + 1)
-                if str(self._cell(i - 1, 9)).strip().startswith("LD26")]
-
-    def helper_block(self):
-        return [list(r[:9]) for r in self.grid[:2]]
+                if str(self._cell(i - 1, 0)).strip().startswith("LD26")]
 
     # --- Sheets values() surface -----------------------------------------
     def get(self, spreadsheetId=None, range=None, valueRenderOption=None, **kw):
@@ -85,7 +78,7 @@ class LeadSheet:
                 idx = idx * 26 + (ord(ch) - 64)
             idx -= 1
             return _Exec({"values": [[self._cell(r, idx)] for r in _RANGE(len(self.grid))]})
-        # single-row span, e.g. J5:BZ5 (formula protection probe)
+        # single-row span, e.g. A5:BZ5 (formula protection probe)
         start = a1.split(":")[0]
         row_n = int("".join(c for c in start if c.isdigit()))
         c0 = 0
@@ -245,35 +238,20 @@ async def test_header_row_never_changes_across_many_writes(monkeypatch):
         await gsheets.sync("leads", {"leadId": f"LD2692000{n}", "customerName": f"N{n}"})
         await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": f"Upd{n}"})
         assert sheet.header_row_number() == HEADER_ROW
-    assert sheet.grid[HEADER_ROW - 1][9:9 + len(LEAD_HEADER)] == list(LEAD_HEADER), \
+    assert sheet.grid[HEADER_ROW - 1][:len(LEAD_HEADER)] == list(LEAD_HEADER), \
         "header labels were altered"
 
 
 @pytest.mark.asyncio
-async def test_A_to_I_helper_area_is_never_touched(monkeypatch):
-    sheet = install(monkeypatch, LeadSheet(n_existing=2))
-    before = sheet.helper_block()
-    for n in range(3):
-        await gsheets.sync("leads", {"leadId": f"LD2693000{n}", "customerName": f"H{n}"})
-    await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "Updated"})
-    assert sheet.helper_block() == before, "the A:I search/helper area was modified"
-    # and no lead field ever maps into A:I
+async def test_lead_id_maps_to_column_A(monkeypatch):
+    install(monkeypatch, LeadSheet(n_existing=1))
     hr = gsheets._header_row_for("leads", "Lead Register")
     mapping, _ = gsheets._resolve_columns("Lead Register", SYNC_MAP["leads"][2],
                                           use_cache=False, header_row=hr)
-    assert min(mapping.values()) >= 9
-    assert _col_letter(mapping["leadId"]) == "J"
-
-
-@pytest.mark.asyncio
-async def test_helper_row_lead_id_is_not_mistaken_for_a_record(monkeypatch):
-    """Helper row 2 carries 'LD26000001' in column A. The ID scan reads column J only,
-    below the header — it must not match the helper cell and update the wrong row."""
-    sheet = install(monkeypatch, LeadSheet())
-    res = await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "Real Record"})
-    assert res["operation"] == "appended", "matched the A:I helper row instead of appending"
-    assert sheet.lead_rows() == [(FIRST_DATA_ROW, "LD26000001")]
-    assert sheet.helper_block()[1] == HELPER_ROW2
+    assert hr == HEADER_ROW
+    assert mapping["leadId"] == 0
+    assert _col_letter(mapping["leadId"]) == "A"
+    assert min(mapping.values()) >= 0
 
 
 @pytest.mark.asyncio
@@ -284,10 +262,10 @@ async def test_formulas_in_mapped_columns_are_preserved_on_update(monkeypatch):
     row = sheet.grid[FIRST_DATA_ROW - 1]
     while len(row) <= td:
         row.append("")
-    row[td] = "=BF4+BG4+BH4"
+    row[td] = "=BF2+BG2+BH2"
     await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "Asha",
                                  "totalDiscount": 99999})
-    assert sheet.grid[FIRST_DATA_ROW - 1][td] == "=BF4+BG4+BH4", "formula was overwritten"
+    assert sheet.grid[FIRST_DATA_ROW - 1][td] == "=BF2+BG2+BH2", "formula was overwritten"
 
 
 @pytest.mark.asyncio

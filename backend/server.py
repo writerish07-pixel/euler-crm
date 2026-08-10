@@ -335,9 +335,9 @@ async def recompute_lead(lead_id):
     _dealer_funded_benefit = (
         ce.round2(ce.num(alloc["totals"].get("dealerFundedBenefit"))) if _has_auth_alloc else 0.0)
     # Insurance Scheme Benefit (entitlement) — project independently from Loyalty.
-    # Lead Register has no live "Insurance Benefit" column; Dealer Earnings Register
-    # column "Customer Insurance Benefit Passed" and Scheme Claim Register component
-    # rows (componentKey=insuranceBenefit) are the sheet projections.
+    # Lead Register has an "Insurance Benefit" column; Dealer Earnings still carries
+    # "Customer Insurance Benefit Passed"; Scheme Claim Register has a dedicated
+    # Insurance Benefit amount column keyed by componentKey=insuranceBenefit.
     _ins_comp = (alloc.get("byKey") or {}).get("insuranceBenefit") or {}
     _ins_benefit_cb = ce.round2(ce.num(_ins_comp.get("customerBenefit"))) if _has_auth_alloc else None
     _ins_benefit_avail = ce.round2(ce.num(_ins_comp.get("schemeAvailable"))) if _ins_comp else 0.0
@@ -475,10 +475,23 @@ async def recompute_lead(lead_id):
         # Derived OEM claims must also reach the existing Scheme Claim Register.
         # They are keyed on the same stable claimId GET /claims exposes, so this is an
         # upsert — a claim later settled/receipted updates that same row.
+        # Scheme Claim Register is one row per component. Amount columns
+        # (Loyalty Bonus, Insurance Benefit, …) must carry THIS row's claim only —
+        # never the lead's full denormalized offer map (that put Loyalty 10000 on
+        # Insurance Benefit rows and made every scheme look like Loyalty).
+        _claim_amount_fields = [
+            "consumerDiscount", "exchangeBonus", "loyaltyBonus", "insuranceBenefit",
+            "referralBonus", "dsaDiscount", "additionalDiscount",
+            "rtoBenefit", "rtoInsuranceBenefit",
+        ]
         for _key, _amt in shares["displayByComponent"].items():
             if _amt <= 0:
                 continue
             _ex = await db.claims.find_one({"leadId": lead_id, "componentKey": _key})
+            _amt = ce.round2(_amt)
+            _comp_cols = {f: 0.0 for f in _claim_amount_fields}
+            if _key in _comp_cols:
+                _comp_cols[_key] = _amt
             await sheet_sync("claims", {
                 "claimId": (_ex or {}).get("claimId", f"CLM-{lead_id}-{_key}"),
                 "leadId": lead_id, "customer": merged.get("customerName"),
@@ -486,7 +499,7 @@ async def recompute_lead(lead_id):
                 "bookingDate": merged.get("bookingDate", ""),
                 "component": ce.SCHEME_COMPONENT_LABELS.get(_key, _key), "componentKey": _key,
                 "eligibleClaim": ce.round2(shares["eligibleByComponent"].get(_key, 0)),
-                "claimAmount": ce.round2(_amt),
+                "claimAmount": _amt,
                 "receivedAmount": (_ex or {}).get("receivedAmount", 0),
                 "claimStatus": (_ex or {}).get("claimStatus", "Pending"),
                 "claimReference": (_ex or {}).get("claimReference", ""),
@@ -494,16 +507,12 @@ async def recompute_lead(lead_id):
                 "bookingId": (await db.bookings.find_one({"leadId": lead_id}) or {}).get("bookingId", ""),
                 "schemeMonth": ce.scheme_month_from_date(merged.get("bookingDate", "")),
                 "executive": merged.get("executive", ""),
-                "consumerDiscount": ce.num(merged.get("consumerDiscount")),
-                "exchangeBonus": ce.num(merged.get("exchangeBonus")),
-                "loyaltyBonus": ce.num(merged.get("loyaltyBonus")),
-                "referralBonus": ce.num(merged.get("referralBonus")),
-                "dsaDiscount": ce.num(merged.get("dsaDiscount")),
-                "additionalDiscount": ce.num(merged.get("additionalDiscount")),
-                "totalDiscount": updates["totalDiscount"],
-                "dealerDiscount": updates["dealerSchemeAmount"],
-                "oemDiscount": updates["oemSchemeAmount"],
-                "claimRequired": "Yes" if ce.round2(_amt) > 0 else "No",
+                **_comp_cols,
+                # Row-level totals = this component's claim (not the whole-lead aggregate).
+                "totalDiscount": _amt,
+                "dealerDiscount": 0.0,
+                "oemDiscount": _amt,
+                "claimRequired": "Yes" if _amt > 0 else "No",
                 "ageingDays": _claim_ageing_days(
                     (_ex or {}).get("submittedDate") or merged.get("deliveryDate", ""),
                     (_ex or {}).get("claimStatus", "Pending")),

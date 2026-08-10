@@ -1,14 +1,13 @@
 """Header rows captured from the LIVE Euler Master workbook (read-only pull).
 
-Column NAMES only. The Lead Register's A:I search/helper area is NOT part of the
-header contract (the real database header starts at column J) and holds live customer
-rows, so those nine positions are masked here — never copy real customer data into the
-repository. Regenerate only from a live read-only pull.
+Column NAMES only. Lead Register is a normal register: header in row 1 starting at
+column A (same shape as Booking / Claims / Dealer Earnings). Regenerate only from a
+live read-only pull.
 """
 LIVE_HEADERS = {
     'Lead Register': (
-        3,
-        ['<helper A:I col 1 - masked>', '<helper A:I col 2 - masked>', '<helper A:I col 3 - masked>', '<helper A:I col 4 - masked>', '<helper A:I col 5 - masked>', '<helper A:I col 6 - masked>', '<helper A:I col 7 - masked>', '<helper A:I col 8 - masked>', '<helper A:I col 9 - masked>', 'Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', 'City', 'Lead Source', 'Interested Model', 'Variant', 'Executive', 'Current Status', 'Priority', 'Budget', 'Last Activity', 'Next Follow-up Date', 'Next Follow-up Time', 'Booking Date', 'Booking Amount', 'Finance Required', 'Exchange Required', 'Delivery Status', 'Delivery Date', 'Outstanding Amount', 'Remarks', 'Last Updated', 'Last Updated By', 'Account Status', 'Closed Date', 'Close Reason', 'Final Outstanding', 'Closed By', 'Close Timestamp', 'Ex Showroom', 'RTO', 'Insurance Amount', 'Accessories Amount', 'Handling Charges', 'TRC', 'Fastag', 'Extended Warranty', 'Other Charges', 'Gross Vehicle Cost', 'Customer Payable', 'Financer Name', 'Finance File Number', 'Last Payment Mode', 'Total Received', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Referral Bonus', 'DSA Bonus', 'Additional Discount', 'Total Discount', 'OEM Scheme Amount', 'Dealer Scheme Amount', 'Customer Outstanding', 'Company Outstanding', 'Insurer Name', 'Invoice Number', 'Chassis Number', 'Number Plate', 'Insurance Status', 'Registration Status', 'Invoice Status', 'RC Status', 'PDI Status', 'Dealer Earnings'],
+        1,
+        ['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', 'City', 'Lead Source', 'Interested Model', 'Variant', 'Executive', 'Current Status', 'Priority', 'Budget', 'Last Activity', 'Next Follow-up Date', 'Next Follow-up Time', 'Booking Date', 'Booking Amount', 'Finance Required', 'Exchange Required', 'Delivery Status', 'Delivery Date', 'Outstanding Amount', 'Remarks', 'Last Updated', 'Last Updated By', 'Account Status', 'Closed Date', 'Close Reason', 'Final Outstanding', 'Closed By', 'Close Timestamp', 'Ex Showroom', 'RTO', 'Insurance Amount', 'Accessories Amount', 'Handling Charges', 'TRC', 'Fastag', 'Extended Warranty', 'Other Charges', 'Gross Vehicle Cost', 'Customer Payable', 'Financer Name', 'Finance File Number', 'Last Payment Mode', 'Total Received', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Insurance Benefit', 'Referral Bonus', 'DSA Bonus', 'Additional Discount', 'Total Discount', 'OEM Scheme Amount', 'Dealer Scheme Amount', 'Customer Outstanding', 'Company Outstanding', 'Insurer Name', 'Invoice Number', 'Chassis Number', 'Number Plate', 'Insurance Status', 'Registration Status', 'Invoice Status', 'RC Status', 'PDI Status', 'Dealer Earnings'],
     ),
     'Activity Log': (
         1,
@@ -28,7 +27,7 @@ LIVE_HEADERS = {
     ),
     'Scheme Claim Register': (
         1,
-        ['Claim ID', 'Source', 'Booking ID', 'Lead ID', 'Customer', 'Model', 'Variant', 'Booking Date', 'Scheme Month', 'Executive', 'Component', 'Component Key', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Referral Bonus', 'DSA Discount', 'Additional Discount', 'Total Discount', 'Dealer Discount', 'OEM Discount', 'DSA Approval', 'Claim Required', 'Eligible Claim', 'Claim Amount', 'Received Amount', 'Claim Status', 'Claim Reference Number', 'Claim Submitted Date', 'Claim Approved Date', 'Claim Received Date', 'Claim Ageing (Days)', 'Claim Remarks'],
+        ['Claim ID', 'Source', 'Booking ID', 'Lead ID', 'Customer', 'Model', 'Variant', 'Booking Date', 'Scheme Month', 'Executive', 'Component', 'Component Key', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Insurance Benefit', 'Referral Bonus', 'DSA Discount', 'Additional Discount', 'RTO Benefit', 'RTO Insurance Benefit', 'Total Discount', 'Dealer Discount', 'OEM Discount', 'DSA Approval', 'Claim Required', 'Eligible Claim', 'Claim Amount', 'Received Amount', 'Claim Status', 'Claim Reference Number', 'Claim Submitted Date', 'Claim Approved Date', 'Claim Received Date', 'Claim Ageing (Days)', 'Claim Remarks'],
     ),
     'Insurance Register': (
         1,

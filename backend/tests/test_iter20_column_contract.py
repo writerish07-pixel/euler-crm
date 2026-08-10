@@ -111,6 +111,38 @@ def test_fifty_columns_were_added():
     assert sum(len(v) for v in NEWLY_MAPPED.values()) == 50
 
 
+def test_lead_register_insurance_benefit_resolves_after_loyalty():
+    """Insurance Benefit is an independent Lead Register column after Loyalty Bonus."""
+    tab, fields = SYNC_MAP["leads"][0], SYNC_MAP["leads"][2]
+    assert "insuranceBenefit" in fields
+    mapping, missing = resolve(tab, ["loyaltyBonus", "insuranceBenefit"])
+    assert missing == []
+    assert mapping["insuranceBenefit"] == mapping["loyaltyBonus"] + 1
+    _hr, headers = LIVE_HEADERS[tab]
+    assert headers[mapping["insuranceBenefit"]] == "Insurance Benefit"
+
+
+def test_claim_register_has_independent_scheme_amount_columns():
+    """Claim Register must resolve every scheme amount column independently."""
+    tab, fields = SYNC_MAP["claims"][0], SYNC_MAP["claims"][2]
+    needed = ["loyaltyBonus", "insuranceBenefit", "rtoBenefit", "rtoInsuranceBenefit",
+              "consumerDiscount", "exchangeBonus", "referralBonus", "dsaDiscount",
+              "additionalDiscount"]
+    for f in needed:
+        assert f in fields, f
+    mapping, missing = resolve(tab, needed)
+    assert missing == [], missing
+    # No two scheme fields may collapse onto one column.
+    seen = {}
+    for f in needed:
+        seen.setdefault(mapping[f], []).append(f)
+    collisions = {i: fs for i, fs in seen.items() if len(fs) > 1}
+    assert collisions == {}
+    _hr, headers = LIVE_HEADERS[tab]
+    assert headers[mapping["insuranceBenefit"]] == "Insurance Benefit"
+    assert mapping["insuranceBenefit"] == mapping["loyaltyBonus"] + 1
+
+
 # --------------------------------------------------------------- phase 3
 # Columns that had no mapping AND no obvious camelCase field, but whose value the CRM
 # either already captured under a different name or can derive from data it holds.
@@ -134,10 +166,7 @@ def test_newly_sourced_columns_resolve_live(entity, fields):
 
 
 def test_every_operational_column_is_either_mapped_or_declared_source_required():
-    """The contract's central promise: no operational column is silently unaccounted for.
-
-    Lead Register A:I is excluded — it is the staff search/helper area, owned by the
-    sheet, and is deliberately never written."""
+    """The contract's central promise: no operational column is silently unaccounted for."""
     unaccounted = []
     for entity, spec in SYNC_MAP.items():
         tab, fields = spec[0], spec[2]
@@ -145,8 +174,6 @@ def test_every_operational_column_is_either_mapped_or_declared_source_required()
         mapping, _ = resolve(tab, fields)
         owned = set(mapping.values())
         for i, header in enumerate(headers):
-            if tab == "Lead Register" and i < 9:
-                continue                      # protected search/helper area
             if not str(header).strip() or i in owned:
                 continue
             if (tab, header) in gsheets.SOURCE_REQUIRED:
@@ -170,27 +197,26 @@ def test_source_required_columns_are_not_silently_invented():
 
 def test_preflight_reports_source_required(monkeypatch):
     """The gap must stay visible in the API, not just in a comment."""
+    # Prevent re-init from picking up a live credential file mounted in the VM.
+    monkeypatch.setattr(gsheets, "_init", lambda: None)
     monkeypatch.setattr(gsheets, "_service", None)
-    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=False))
+    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=False,
+                                                 reason="sync disabled for test"))
     rep = gsheets.preflight()
     assert rep["enabled"] is False        # not connected here, but the shape is asserted below
     assert isinstance(gsheets.SOURCE_REQUIRED, dict) and gsheets.SOURCE_REQUIRED
 
 
-def test_lead_register_header_is_row_3_and_starts_at_column_J():
-    """Rows 1-2 and columns A:I are the staff search/helper area — never written."""
+def test_lead_register_header_is_row_1_and_starts_at_column_A():
+    """Lead Register matches every other tab: header in A1, leads from A2 downward."""
     hr, headers = LIVE_HEADERS["Lead Register"]
-    assert hr == 3
-    assert headers[9] == "Lead ID"
+    assert hr == 1
+    assert headers[0] == "Lead ID"
+    assert "Insurance Benefit" in headers
     mapping, _ = resolve("Lead Register", SYNC_MAP["leads"][2])
-    assert min(mapping.values()) >= 9, "a lead field resolved into the protected A:I area"
-    assert _col_letter(mapping["leadId"]) == "J"
-
-
-def test_helper_area_is_masked_in_the_fixture():
-    """The A:I area holds live customer rows; the fixture must not carry them."""
-    _hr, headers = LIVE_HEADERS["Lead Register"]
-    assert all("masked" in h for h in headers[:9])
+    assert mapping["leadId"] == 0
+    assert _col_letter(mapping["leadId"]) == "A"
+    assert SYNC_MAP["leads"][3] == 1
 
 
 def test_insurance_benefit_columns_stay_distinct():

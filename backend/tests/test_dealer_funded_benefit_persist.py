@@ -262,8 +262,9 @@ async def test11_lead_and_earnings_insurance_benefit_persist(client):
 
     lead_syncs = [s for s in client.sync_calls if s["entity"] == "leads"]
     assert lead_syncs
-    # Loyalty remains independently present on the Lead Register payload.
+    # Loyalty + Insurance Benefit are independently present on the Lead Register payload.
     assert lead_syncs[-1]["doc"].get("loyaltyBonus") == 10000
+    assert lead_syncs[-1]["doc"].get("insuranceBenefit") == 20000
 
 
 @pytest.mark.asyncio
