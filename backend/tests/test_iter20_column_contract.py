@@ -202,8 +202,11 @@ def test_source_required_columns_are_not_silently_invented():
 
 def test_preflight_reports_source_required(monkeypatch):
     """The gap must stay visible in the API, not just in a comment."""
+    # Prevent re-init from picking up a live credential file mounted in the VM.
+    monkeypatch.setattr(gsheets, "_init", lambda: None)
     monkeypatch.setattr(gsheets, "_service", None)
-    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=False))
+    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=False,
+                                                 reason="sync disabled for test"))
     rep = gsheets.preflight()
     assert rep["enabled"] is False        # not connected here, but the shape is asserted below
     assert isinstance(gsheets.SOURCE_REQUIRED, dict) and gsheets.SOURCE_REQUIRED
