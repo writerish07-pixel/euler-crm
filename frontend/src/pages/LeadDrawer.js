@@ -166,6 +166,7 @@ function Overview({ lead, c }) {
 function PriceStructure({ lead, actions = {}, onSaved }) {
   const locked = !actions.canPrice;
   const [priceDate, setPriceDate] = useState(lead.bookingDate || lead.createdDate || todayISO());
+  const [masterMsg, setMasterMsg] = useState("");
   const [form, setForm] = useState(() => {
     const f = { tcsApplicable: lead.tcsApplicable || "No", finalExchangeValue: lead.finalExchangeValue || 0 };
     CHARGE_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
@@ -173,6 +174,23 @@ function PriceStructure({ lead, actions = {}, onSaved }) {
   });
   const [preview, setPreview] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // Ex-Showroom is locked to Price Master for the lead's model/variant.
+  useEffect(() => {
+    let alive = true;
+    get(`/leads/${lead.leadId}/price-preview`)
+      .then((d) => {
+        if (!alive) return;
+        if (d?.found && d.priceStructure) {
+          setForm((f) => ({ ...f, exShowroom: d.priceStructure.exShowroom || 0 }));
+          setMasterMsg("Ex-Showroom is fixed from Price Master and cannot be edited.");
+        } else {
+          setMasterMsg(d?.message || "Price Master entry not found — select a valid model/variant.");
+        }
+      })
+      .catch(() => { if (alive) setMasterMsg("Could not load Price Master for this vehicle."); });
+    return () => { alive = false; };
+  }, [lead.leadId, lead.interestedModel, lead.variant]);
 
   const computePreview = useCallback(() => {
     post("/commercial/compute", {
@@ -190,24 +208,39 @@ function PriceStructure({ lead, actions = {}, onSaved }) {
 
   const save = async () => {
     if (!priceDate) return toast.error("Price date is required");
-    await put(`/leads/${lead.leadId}/price-structure`, {
-      exShowroom: +form.exShowroom, rto: +form.rto, insuranceAmount: +form.insuranceAmount,
-      accessoriesAmount: +form.accessoriesAmount, handlingCharges: +form.handlingCharges, trc: +form.trc,
-      fastag: +form.fastag, extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
-      rsaAmc: +form.rsaAmc,
-      tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
-    });
-    toast.success("Price structure saved");
-    onSaved();
+    if (!(+form.exShowroom > 0)) return toast.error("Ex-Showroom from Price Master is required");
+    try {
+      await put(`/leads/${lead.leadId}/price-structure`, {
+        exShowroom: +form.exShowroom, rto: +form.rto, insuranceAmount: +form.insuranceAmount,
+        accessoriesAmount: +form.accessoriesAmount, handlingCharges: +form.handlingCharges, trc: +form.trc,
+        fastag: +form.fastag, extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
+        rsaAmc: +form.rsaAmc,
+        tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
+      });
+      toast.success("Price structure saved");
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Price save failed");
+    }
   };
 
   return (
     <div>
       {locked && <StepLock text="This lead is not Active — price structure is read-only." />}
+      {masterMsg && <p className="text-xs text-ink-soft mb-3" data-testid="exshowroom-lock-note">{masterMsg}</p>}
       <div className="grid grid-cols-3 gap-3">
         <Field label="Price Date"><Input data-testid="price-date" type="date" value={priceDate} onChange={(e) => setPriceDate(e.target.value)} disabled={locked} /></Field>
         {CHARGE_FIELDS.map(([k, label]) => (
-          <Field key={k} label={label}><Input data-testid={`price-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} /></Field>
+          <Field key={k} label={label}>
+            <Input
+              data-testid={`price-${k}`}
+              type="number"
+              value={form[k]}
+              onChange={set(k)}
+              disabled={locked || k === "exShowroom"}
+              readOnly={k === "exShowroom"}
+            />
+          </Field>
         ))}
         <Field label="Final Exchange Value"><Input type="number" value={form.finalExchangeValue} onChange={set("finalExchangeValue")} disabled={locked} /></Field>
         <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={set("tcsApplicable")} disabled={locked}><option>No</option><option>Yes</option></Select></Field>
@@ -618,10 +651,11 @@ function DeliveryTab({ lead, actions = {}, delivery, onSaved }) {
           </button>
         ))}
       </div>
+      <p className="text-xs text-ink-soft mb-3">Invoice number, chassis number, and number plate must be unique across all leads.</p>
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Invoice Number"><Input value={form.invoiceNumber} onChange={set("invoiceNumber")} /></Field>
-        <Field label="Chassis Number"><Input value={form.chassisNumber} onChange={set("chassisNumber")} /></Field>
-        <Field label="Number Plate"><Input value={form.numberPlate} onChange={set("numberPlate")} /></Field>
+        <Field label="Invoice Number"><Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")} /></Field>
+        <Field label="Chassis Number"><Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} /></Field>
+        <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} /></Field>
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} /></Field>
         <Field label="Delivery Date"><Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} /></Field>
         <Field label="Mark Delivered?">
