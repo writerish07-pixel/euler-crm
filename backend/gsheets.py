@@ -901,6 +901,59 @@ async def sync_masters(rows):
 FINANCE_PENDING_TAB = _tab("GSHEET_TAB_FINANCE_PENDING", "Finance Pending")
 FINANCE_OVERDUE_TAB = _tab("GSHEET_TAB_FINANCE_OVERDUE", "Finance Overdue")
 
+# Operational mirrors wiped by go-live reset (headers kept). Masters / Settings never listed.
+OPERATIONAL_CLEAR_TABS = tuple(dict.fromkeys([
+    *(SYNC_MAP[e][0] for e in SYNC_MAP),
+    "Incentive Register",
+    "Quotation Log",
+    "OEM Extra Support Register",
+    FINANCE_PENDING_TAB,
+    FINANCE_OVERDUE_TAB,
+]))
+
+
+def _clear_operational_register_rows_sync():
+    """Clear data rows (A2:ZZ) on operational registers. Never touches masters."""
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    meta = _service.spreadsheets().get(
+        spreadsheetId=sheet_id,
+        fields="sheets(properties(title))",
+    ).execute()
+    titles = {sh["properties"]["title"] for sh in meta.get("sheets", [])}
+    ranges = [f"'{tab}'!A2:ZZ" for tab in OPERATIONAL_CLEAR_TABS if tab in titles]
+    cleared = []
+    for i in range(0, len(ranges), 10):
+        chunk = ranges[i:i + 10]
+        resp = _service.spreadsheets().values().batchClear(
+            spreadsheetId=sheet_id, body={"ranges": chunk},
+        ).execute()
+        cleared.extend(resp.get("clearedRanges", chunk))
+    return {"tabs": [t for t in OPERATIONAL_CLEAR_TABS if t in titles], "clearedRanges": cleared}
+
+
+async def clear_operational_register_rows():
+    """Go-live helper: wipe transactional sheet rows while preserving header row 1
+    and all master/config tabs. Returns False if sync is disabled / write-blocked."""
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled")}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True}
+    try:
+        detail = await asyncio.to_thread(_clear_operational_register_rows_sync)
+        invalidate_header_cache()
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
+        return {"ok": True, **detail}
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return {"ok": False, "reason": str(e)[:300]}
+
 
 def _overwrite_report_sync(tab, values):
     sheet_id = os.environ.get("GSHEET_ID", "")
