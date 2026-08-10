@@ -161,12 +161,39 @@ def _acct(lead):
     return (lead.get("accountStatus") or "Active").strip() or "Active"
 
 
+def _has_persisted_scheme(lead):
+    """True once a scheme step has been saved (explicit allocation or breakup)."""
+    if lead.get("schemeAllocationExplicit"):
+        return True
+    raw = lead.get("benefitPassedBreakup") or lead.get("schemeAllocation") or ""
+    if isinstance(raw, dict):
+        return bool(raw)
+    if isinstance(raw, str) and raw.strip() and raw.strip() not in ("{}", "null"):
+        return True
+    used = lead.get("schemeComponentsUsed") or ""
+    if isinstance(used, dict) and used:
+        return True
+    if isinstance(used, str) and used.strip() and used.strip() not in ("{}", "null"):
+        return True
+    return False
+
+
+def _is_priced(lead):
+    """True after an explicit Price Structure save (not merely booking auto-fill)."""
+    if "priceStructureSaved" in (lead or {}):
+        return bool(lead.get("priceStructureSaved"))
+    # Legacy leads (pre-flag): any positive Ex-Showroom counts as priced.
+    return ce.num((lead or {}).get("exShowroom")) > 0
+
+
 def lead_actions(lead):
     """Which workflow steps a lead is eligible for (faithful to PICKER_STAGE + requireActiveLead_)."""
     active = _acct(lead) == "Active"
     booked = _is_booked(lead)
     delivered = _is_delivered(lead)
     not_archived = _acct(lead) != "Archived"
+    priced = _is_priced(lead)
+    schemed = _has_persisted_scheme(lead)
     return {
         "canBook": active and not booked,                 # booking stage: exclude booked/delivered
         "canPrice": active,                               # requires Active
@@ -176,7 +203,20 @@ def lead_actions(lead):
         "canDeliver": active and booked and not delivered,# delivery stage: exclude delivered
         "canClose": active,                               # close: RC+plate captured here (delivered) or lost-lead close
         "isBooked": booked, "isDelivered": delivered, "isActive": active,
+        # Step completion — staff may complete a step once; only owner re-edits.
+        "priceCompleted": priced,
+        "schemeCompleted": schemed,
+        "deliveryCompleted": delivered,
     }
+
+
+def _require_owner_reedit(act, completed, step_label):
+    """Staff may fill a step the first time; re-edits of a completed step are owner-only."""
+    if completed and (act or {}).get("role") != "owner":
+        raise HTTPException(
+            403,
+            f"{step_label} is already saved. Only the owner can edit a completed step.",
+        )
 
 
 def _yes_or_done(v):
@@ -1059,13 +1099,26 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
     if not payload:
         return clean(lead)
 
+    vehicle_changed = (
+        ("interestedModel" in payload and str(payload["interestedModel"] or "").strip()
+         != str(lead.get("interestedModel") or "").strip())
+        or ("variant" in payload and str(payload["variant"] or "").strip()
+            != str(lead.get("variant") or "").strip())
+    )
+    # Once priced/schemed, only the owner may change model/variant (cascades commercials).
+    if vehicle_changed and (_is_priced(lead) or _has_persisted_scheme(lead)):
+        _require_owner_reedit(act, True, "Model / variant")
+
     old = {k: lead.get(k) for k in payload.keys()}
     payload["lastUpdated"] = now_iso()
     # Lead Register "Last Updated By": the acting user was already resolved for the
     # audit log, but was never written onto the lead, so the column had no source.
     payload["lastUpdatedBy"] = act.get("email", "")
     await db.leads.update_one({"leadId": lead_id}, {"$set": payload})
-    await recompute_lead(lead_id)
+    if vehicle_changed:
+        await _cascade_vehicle_or_price_change(lead_id, refresh_price=True, realign_scheme=True)
+    else:
+        await recompute_lead(lead_id)
     await write_audit(act, "update", "lead", leadId=lead_id, old=old, new={k: v for k, v in payload.items() if k != "lastUpdated"})
     updated = await db.leads.find_one({"leadId": lead_id})
     # GS-2: a lead edit must reach the EXISTING Lead Register row. Previously this
@@ -1110,6 +1163,86 @@ def _price_structure_from_master(row):
     }
 
 
+async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, realign_scheme=True):
+    """After model/variant or price edits, refresh Master-backed fields and recompute.
+
+    - Price Master: when refresh_price, overwrite Ex-Showroom (and empty charge lines
+      from master defaults) for the lead's current model/variant.
+    - Scheme: when a scheme was already saved, rematerialise eligible offer pools from
+      Scheme Master for the new vehicle/month and clamp any prior customer benefits
+      that no longer fit. Then recompute_lead refreshes payable / retained / claims.
+    """
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead:
+        return None
+    patch = {}
+    if refresh_price:
+        row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
+        if row:
+            # Full Price Master structure for the new model/variant.
+            patch.update(_price_structure_from_master(row))
+
+    if realign_scheme and _has_persisted_scheme(lead):
+        import json as _json
+        scheme_rows = await get_scheme_rows()
+        model = lead.get("interestedModel") or ""
+        variant = lead.get("variant") or ""
+        booking_date = lead.get("bookingDate") or today()
+        rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
+            model, variant, booking_date, scheme_rows)
+        for key, rule in (rules_ctx.get("rules") or {}).items():
+            if key == "additionalDiscount":
+                continue
+            if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+                patch[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
+            else:
+                patch[key] = 0
+        # Drop / clamp breakup keys that are no longer eligible.
+        raw_bk = lead.get("benefitPassedBreakup") or "{}"
+        try:
+            bk = _json.loads(raw_bk) if isinstance(raw_bk, str) else dict(raw_bk or {})
+        except Exception:
+            bk = {}
+        if not isinstance(bk, dict):
+            bk = {}
+        raw_used = lead.get("schemeComponentsUsed") or "{}"
+        try:
+            used = _json.loads(raw_used) if isinstance(raw_used, str) else dict(raw_used or {})
+        except Exception:
+            used = {}
+        if not isinstance(used, dict):
+            used = {}
+        allowed = set()
+        for key, rule in (rules_ctx.get("rules") or {}).items():
+            if key != "additionalDiscount" and rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+                allowed.add(key)
+        for ent in (rules_ctx.get("entitlements") or []):
+            if ce.num(ent.get("schemeAvailable") or ent.get("totalBenefit")) > 0:
+                allowed.add(ent["key"])
+        clean_bk, clean_used = {}, {}
+        for key in allowed:
+            cap = ce.num(patch.get(key))
+            if key in (rules_ctx.get("rules") or {}) and (rules_ctx["rules"][key].get("allowed")):
+                cap = ce.num(rules_ctx["rules"][key].get("schemeAvailable")
+                             or rules_ctx["rules"][key].get("maxAmount") or cap)
+            for ent in (rules_ctx.get("entitlements") or []):
+                if ent.get("key") == key:
+                    cap = ce.num(ent.get("schemeAvailable") or ent.get("totalBenefit") or cap)
+            cb = ce.round2(max(0.0, min(ce.num(bk.get(key)), cap)))
+            clean_bk[key] = cb
+            clean_used[key] = bool(used.get(key)) if key in used else (cb > 0)
+        patch["benefitPassedBreakup"] = _json.dumps(clean_bk)
+        patch["schemeComponentsUsed"] = _json.dumps(clean_used)
+        patch["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
+        patch["schemeAllocationExplicit"] = True
+        patch["schemeAllocationV2"] = True
+
+    if patch:
+        patch["lastUpdated"] = now_iso()
+        await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    return await recompute_lead(lead_id)
+
+
 @api.get("/leads/{lead_id}/price-preview")
 async def price_preview(lead_id: str):
     """What Price Master resolves to for this lead's model/variant, before booking.
@@ -1151,9 +1284,12 @@ async def convert_booking(lead_id: str, body: BookingIn):
             f"{lead.get('variant')} has a zero ex-showroom price. Correct the Price Master entry "
             f"before booking.")
     if ce.num(lead.get("exShowroom")) <= 0:
-        # Unpriced lead: adopt the authoritative structure, then recompute.
+        # Unpriced lead: adopt the authoritative structure for booking maths, but do
+        # NOT mark priceStructureSaved — staff must still complete the Price step.
         await db.leads.update_one({"leadId": lead_id},
-                                  {"$set": {**_price_structure_from_master(row), "lastUpdated": now_iso()}})
+                                  {"$set": {**_price_structure_from_master(row),
+                                            "priceStructureSaved": False,
+                                            "lastUpdated": now_iso()}})
         await recompute_lead(lead_id)
         lead = await db.leads.find_one({"leadId": lead_id})
     if ce.num(lead.get("grossVehicleCost")) <= 0 or ce.num(lead.get("customerPayable")) <= 0:
@@ -1222,6 +1358,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)")
+    _require_owner_reedit(act, _is_priced(lead), "Price structure")
     payload = body.model_dump()
     # Ex-Showroom is Price Master–authoritative and not staff-editable. Prefer the
     # live master row for the lead's model/variant; fall back to the lead's existing
@@ -1240,9 +1377,14 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
             raise HTTPException(422,
                 f"Price Master entry not found for {lead.get('interestedModel') or '(none)'}/"
                 f"{lead.get('variant') or '(none)'}. Select a valid vehicle before pricing.")
+    payload["priceStructureSaved"] = True
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
-    lead = await recompute_lead(lead_id)
+    # Owner re-edit of price must also realign scheme pools / retained totals.
+    if _has_persisted_scheme({**lead, **payload}):
+        await _cascade_vehicle_or_price_change(lead_id, refresh_price=False, realign_scheme=True)
+    else:
+        await recompute_lead(lead_id)
     await write_audit(act, "update", "price-structure", leadId=lead_id, old=old, new=payload)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
@@ -1264,6 +1406,7 @@ async def scheme_rules(lead_id: str):
 async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)")
+    _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
     payload = body.model_dump()
     if payload.get("benefitPassedBreakup") is None:
         payload.pop("benefitPassedBreakup", None)
@@ -1397,6 +1540,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
     fixed by the circular — and neither are the Scheme Master values themselves."""
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)")
+    _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
     scheme_rows = await get_scheme_rows()
     alloc = ce.compute_scheme_allocation(lead_to_snapshot(lead), scheme_rows)
     available = {c["key"]: c["schemeAvailable"] for c in alloc["components"]}
@@ -1449,6 +1593,13 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
     Never affects Customer Payable / Outstanding."""
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "extra-income edits (only Active leads)")
+    _extra_keys = (
+        "documentationIncome", "warrantyIncome", "rsaIncome", "referralIncome",
+        "otherIncome", "financeIncentive", "accessoriesMargin", "exchangeMargin",
+        "campaignIncentive",
+    )
+    _require_owner_reedit(
+        act, any(ce.num(lead.get(k)) > 0 for k in _extra_keys), "Extra income")
     payload = body.model_dump()
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
@@ -1972,9 +2123,11 @@ async def list_deliveries():
 
 
 @api.put("/leads/{lead_id}/delivery")
-async def mark_delivery(lead_id: str, body: DeliveryIn):
+async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
+    # Staff may capture delivery once; only owner may re-edit a delivered lead.
+    _require_owner_reedit(act, _is_delivered(lead), "Delivery")
     if delivered and not _is_delivered(lead):
         _require_action(lead, "canDeliver", "delivery (not booked/active)")
         errs = _validate_delivery_ready(lead, body)

@@ -7,13 +7,14 @@ Single source of truth for commercial math:
 
 Scheme allocation contract (every component):
   schemeAvailable, oemShare, dealerFundedShare, customerBenefit,
-  dealerRetained = schemeAvailable − customerBenefit,
+  dealerRetained = company share KEPT (oemShare − oemPassed) — never the unused
+                   dealer share. Unspent dealer share is NOT income.
   oemClaimable   = oemShare (authoritative Scheme Master company share),
-  dealerFundedBenefit = portion of customerBenefit borne by the dealer
-                        (OEM share of the passed amount is recoverable, not a cost).
+  dealerFundedBenefit = dealer share GIVEN to customer (company-share-first:
+                        only CB above oemShare, up to dealerFundedShare).
 
 Customer Payable reduction = Σ customerBenefit (NOT schemeAvailable / oemShare / retained).
-Dealer Scheme Retained     = Σ dealerRetained          (income)
+Dealer Scheme Retained     = Σ dealerRetained          (income = company kept)
 Dealer-Funded Benefit      = Σ dealerFundedBenefit     (cost — reduces Dealer Earnings)
 OEM Claim                  = Σ oemClaimable            (receivable, NOT income)
 Insurance Payout (premium × rate) is a SEPARATE ledger from Insurance Scheme Benefit.
@@ -518,7 +519,7 @@ def _component_customer_benefit(key, scheme_available, mode, breakup, s, offer_w
 
     Formulas:
       customerBenefit ∈ [0, schemeAvailable]
-      dealerRetained  = schemeAvailable − customerBenefit   (computed by caller)
+      dealerRetained  = company kept = oemShare − min(oemShare, CB)  (caller)
 
     Explicit assignment model (schemeAllocationExplicit):
       Scheme Master eligibility ≠ assignment. Missing breakup key ⇒ CB = 0.
@@ -608,10 +609,10 @@ def compute_scheme_allocation(s, scheme_rows):
       oemShare             — contractual OEM/company share (oemClaimable)
       dealerFundedShare    — contractual dealer-funded share (≠ retained, ≠ cost)
       customerBenefit      — amount the dealer actually passes to the customer
-      dealerRetained       — schemeAvailable − customerBenefit
+      dealerRetained       — company share kept (oemShare − oemPassed).
+                             Unused dealer share is NOT income.
       oemClaimable         — amount claimable from OEM (== oemShare)
-      dealerFundedBenefit  — cost of customerBenefit borne by the dealer
-                             (OEM-recoverable portion of CB is NOT a cost)
+      dealerFundedBenefit  — dealer share given to customer (cost line)
 
     schemeAllocationExplicit:
       Eligible offer components are included from Scheme Master even when the
@@ -670,9 +671,17 @@ def compute_scheme_allocation(s, scheme_rows):
         dealer_funded_share = round2(max(0.0, num(dealer_funded_share)))
         customer_benefit = _component_customer_benefit(
             key, scheme_available, mode, breakup, s, waterfall)
-        # Never invent negative retention — clamp at 0 unless an explicit rule
-        # requires it (none does under this contract).
-        dealer_retained = round2(max(0.0, scheme_available - customer_benefit))
+        # Company-share-first funding of the PASSED amount: OEM share covers the
+        # first ₹oemShare of customerBenefit (recoverable claim). Only the excess
+        # up to dealerFundedShare is a real dealer cost (dealer share GIVEN).
+        oem_passed = round2(min(oem_share, customer_benefit))
+        dealer_funded_benefit = round2(max(
+            0.0, min(dealer_funded_share, max(0.0, customer_benefit - oem_share))))
+        # ERP / Apps Script: Scheme Retained = company_kept − dealer_given.
+        # UI keeps retained non-negative (= company kept); dealer_given is the
+        # separate dealerFundedBenefit cost line subtracted from earnings.
+        # Unspent dealer share is NOT income.
+        dealer_retained = round2(max(0.0, oem_share - oem_passed))
         used_map = s.get("schemeComponentsUsed") or {}
         if isinstance(used_map, str):
             try:
@@ -686,11 +695,6 @@ def compute_scheme_allocation(s, scheme_rows):
             used = bool(used_map.get(key))
         else:
             used = customer_benefit > 0
-        # Company-share-first funding of the PASSED amount: OEM share covers the
-        # first ₹oemShare of customerBenefit (recoverable claim). Only the excess
-        # up to dealerFundedShare is a real dealer cost.
-        dealer_funded_benefit = round2(max(
-            0.0, min(dealer_funded_share, max(0.0, customer_benefit - oem_share))))
         components.append({
             "key": key,
             "label": label,
@@ -773,7 +777,7 @@ def compute_scheme_income_breakdown(s, scheme_rows):
     """Dealer retained income + OEM claim total per component.
 
     Thin adapter over compute_scheme_allocation — do NOT invent a second formula.
-    retained = schemeAvailable − customerBenefit
+    retained = company share kept (oemShare − oemPassed)
     oemClaim = oemShare (authoritative company share)
     """
     alloc = compute_scheme_allocation(s, scheme_rows)

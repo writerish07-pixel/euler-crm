@@ -61,7 +61,7 @@ def allocate(**allocation):
 def test1_turbo_no_benefit():
     t = allocate(loyaltyBonus=0, insuranceBenefit=0)["totals"]
     assert t["customerBenefit"] == 0
-    assert t["dealerRetained"] == 30000
+    assert t["dealerRetained"] == 20000
     assert t["oemClaimable"] == 20000
     assert t["dealerFundedBenefit"] == 0
 
@@ -69,7 +69,7 @@ def test1_turbo_no_benefit():
 def test2_loyalty_full():
     t = allocate(loyaltyBonus=10000, insuranceBenefit=0)["totals"]
     assert t["customerBenefit"] == 10000
-    assert t["dealerRetained"] == 20000
+    assert t["dealerRetained"] == 10000
     assert t["oemClaimable"] == 20000
     assert t["dealerFundedBenefit"] == 0  # loyalty is 100% OEM-funded
 
@@ -93,14 +93,14 @@ def test4_both_full():
 def test6_partial_insurance():
     t = allocate(loyaltyBonus=0, insuranceBenefit=15000)["totals"]
     assert t["dealerFundedBenefit"] == 5000
-    assert t["dealerRetained"] == 15000  # 10000 loyalty + 5000 ins
+    assert t["dealerRetained"] == 10000  # 10000 loyalty kept + 0 ins kept
     assert t["oemClaimable"] == 20000
 
 
 def test7_partial_loyalty():
     t = allocate(loyaltyBonus=5000, insuranceBenefit=0)["totals"]
     assert t["dealerFundedBenefit"] == 0
-    assert t["dealerRetained"] == 25000
+    assert t["dealerRetained"] == 15000  # loy 5k kept + ins 10k kept
     assert t["oemClaimable"] == 20000
 
 
@@ -129,7 +129,7 @@ def test_income_breakdown_matches_allocation_funded_cost():
     income = ce.compute_scheme_income_breakdown(snap, turbo_rows())
     assert income["dealerFundedBenefit"] == 5000
     assert income["dealerCostPassed"] == 5000
-    assert income["retainedIncomeTotal"] == 15000
+    assert income["retainedIncomeTotal"] == 10000
 
 
 # ================================================================== API / E2E
@@ -354,8 +354,9 @@ async def test_partial_insurance_earnings_deducts_exactly_5000(client):
         allocation={"loyaltyBonus": 0, "insuranceBenefit": 15000})
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["dealerFundedBenefit"] == 5000
-    assert lead["dealerSchemeRetained"] == 15000
+    # Loyalty unused keeps ₹10k OEM; insurance CB ₹15k keeps ₹0 company (₹5k dealer-funded).
+    assert lead["dealerSchemeRetained"] == 10000
     assert lead["dealerTotalEarnings"] == ce.round2(
-        lead["dealerMarginNetExGst"] + 15000 - 5000
+        lead["dealerMarginNetExGst"] + 10000 - 5000
         + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
         + lead["dealerInsuranceIncome"])
