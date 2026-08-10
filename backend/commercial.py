@@ -1046,3 +1046,98 @@ def compute_full_commercials(s, scheme_rows=None):
         result["schemeCustomerBenefit"] = alloc["totals"]["customerBenefit"]
         result["schemeOemClaimable"] = alloc["totals"]["oemClaimable"]
     return result
+
+
+# ============================================================================
+# SCHEME ALLOCATION ENGINE — the single authoritative scheme calculation.
+#
+# Every scheme component carries TWO independent concepts:
+#   SCHEME ENTITLEMENT — what the OEM circular makes available
+#   DEALER ALLOCATION  — how much of it the dealer actually passes to the customer
+#
+# Per component:
+#   schemeAvailable    total benefit from Scheme Master (OEM share + dealer-funded)
+#   oemShare           the OEM/company share, per the circular
+#   dealerFundedShare  the dealer's own funded share, per the circular
+#   customerBenefit    what the dealer chose to pass on            [the decision]
+#   dealerRetained     schemeAvailable - customerBenefit           [never negative]
+#   oemClaimable       oemShare  (NOT schemeAvailable, NOT dealerRetained)
+#
+# These are not interchangeable. Customer Payable falls only by customerBenefit;
+# Dealer Earnings takes only dealerRetained; the OEM Claim Register takes only
+# oemClaimable. No component is special-cased — entitlements (Free RTO / Free
+# Insurance) allocate exactly like staff-entered offers.
+#
+# NOTE: this is the OEM insurance *scheme benefit*. It is unrelated to the
+# insurance *payout* (premium x model payout rate), which is dealer insurance
+# income and is computed by suggested_insurance_payout_rate elsewhere.
+# ============================================================================
+
+def _explicit_allocation(s):
+    """Persisted per-component customer benefit: {componentKey: amount}.
+    This is the authoritative dealer allocation once staff have made a decision."""
+    raw = s.get("schemeAllocation")
+    if isinstance(raw, str) and raw.strip():
+        import json
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = None
+    return raw if isinstance(raw, dict) else {}
+
+
+def compute_scheme_allocation(s, scheme_rows):
+    """Normalised allocation for every scheme component available to this lead.
+
+    Resolution order for customerBenefit:
+      1. an explicit persisted allocation for the component (staff decision)
+      2. otherwise the legacy behaviour, so existing leads are unchanged:
+         - staff-entered offers: the entered amount, moderated by benefit mode
+         - automatic entitlements: 0 (they never reduced customer payable before)
+
+    Point 2 matters: it means introducing this engine does NOT retroactively move
+    any historical customer payable. Only an explicit allocation changes it."""
+    model = str(s.get("model") or s.get("interestedModel") or "").strip()
+    variant = str(s.get("variant") or "").strip()
+    booking_date = s.get("bookingDate") or ""
+    master = get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows)
+    explicit = _explicit_allocation(s)
+    legacy_passed = resolve_passed_breakup(s)["passed"]
+
+    components = []
+    for key, m in master.items():
+        oem_share = round2(num(m.get("companyShare")))
+        dealer_funded = round2(num(m.get("dealerShare")))
+        available = round2(num(m.get("totalBenefit")) or (oem_share + dealer_funded))
+        if available <= 0 and oem_share <= 0:
+            continue
+        if key in explicit:
+            benefit = num(explicit.get(key))
+        elif key in OFFER_KEYS:
+            benefit = num(legacy_passed.get(key))
+        else:
+            benefit = 0.0                      # entitlement, no explicit decision yet
+        # Validation: a benefit is never negative and never exceeds what the scheme offers.
+        benefit = round2(max(0.0, min(benefit, available)))
+        components.append({
+            "key": key,
+            "label": m.get("label") or SCHEME_COMPONENT_LABELS.get(key, key),
+            "automatic": key in AUTO_SCHEME_COMPONENT_KEYS,
+            "schemeAvailable": available,
+            "oemShare": oem_share,
+            "dealerFundedShare": dealer_funded,
+            "customerBenefit": benefit,
+            "dealerRetained": round2(available - benefit),
+            "oemClaimable": oem_share,
+        })
+    components.sort(key=lambda c: c["key"])
+    totals = {
+        "schemeAvailable": round2(sum(c["schemeAvailable"] for c in components)),
+        "oemShare": round2(sum(c["oemShare"] for c in components)),
+        "dealerFundedShare": round2(sum(c["dealerFundedShare"] for c in components)),
+        "customerBenefit": round2(sum(c["customerBenefit"] for c in components)),
+        "dealerRetained": round2(sum(c["dealerRetained"] for c in components)),
+        "oemClaimable": round2(sum(c["oemClaimable"] for c in components)),
+    }
+    return {"components": components, "totals": totals,
+            "byKey": {c["key"]: c for c in components}}

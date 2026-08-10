@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import io
 import os
@@ -251,6 +252,9 @@ def lead_to_snapshot(lead):
         "oemExtraSupportPassed": lead.get("oemExtraSupportPassed", 0),
         "model": lead.get("interestedModel", ""),
         "variant": lead.get("variant", ""),
+        # The dealer's per-component allocation decision drives the whole scheme
+        # engine, so it must reach every snapshot-based calculation.
+        "schemeAllocation": lead.get("schemeAllocation"),
     }
 
 
@@ -300,7 +304,16 @@ async def recompute_lead(lead_id):
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     total_received = ce.round2(agg[0]["total"]) if agg else 0.0
-    customer_payable = totals["customerPayable"]
+    # Customer Payable falls by what was actually PASSED to the customer. Offer
+    # components are already inside compute_commercial_totals; entitlement components
+    # (Free RTO / Free Insurance) were previously incapable of reducing payable at
+    # all, so their allocated customer benefit is applied here. Nothing is
+    # double-counted: only entitlement keys are added.
+    entitlement_benefit = ce.round2(sum(
+        c["customerBenefit"] for c in alloc["components"] if c["automatic"]))
+    # No clamp here: negative payable from an over-value exchange is pre-existing
+    # behaviour and is not this change's business to alter.
+    customer_payable = ce.round2(totals["customerPayable"] - entitlement_benefit)
     customer_outstanding = ce.round2(max(0.0, customer_payable - total_received)) if customer_payable > 0 else 0.0
     oem_extra_recv = max(0.0, ce.num(lead.get("oemExtraSupportReceived")))
     oem_extra_pass = max(0.0, min(ce.num(lead.get("oemExtraSupportPassed")), oem_extra_recv))
@@ -1146,7 +1159,10 @@ async def scheme_rules(lead_id: str):
     model = lead.get("interestedModel") or ""
     variant = lead.get("variant") or ""
     booking_date = lead.get("bookingDate") or today()
-    return ce.get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
+    out = ce.get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
+    # The Lead Drawer must render the SAME allocation every other module consumes.
+    out["allocation"] = ce.compute_scheme_allocation(lead_to_snapshot(lead), scheme_rows)
+    return out
 
 
 @api.put("/leads/{lead_id}/scheme")
@@ -1259,6 +1275,11 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
+class SchemeAllocationIn(BaseModel):
+    """Per-component customer benefit: {componentKey: amount passed to the customer}."""
+    allocation: dict = {}
+
+
 class ExtraIncomeIn(BaseModel):
     documentationIncome: float = 0
     warrantyIncome: float = 0
@@ -1270,6 +1291,45 @@ class ExtraIncomeIn(BaseModel):
     accessoriesMargin: float = 0
     exchangeMargin: float = 0
     campaignIncentive: float = 0
+
+
+@api.put("/leads/{lead_id}/scheme-allocation")
+async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depends(actor)):
+    """Record how much of EACH scheme component the dealer passes to the customer.
+
+    Validation is per component against Scheme Master: a benefit is never negative and
+    never exceeds schemeAvailable. The OEM claimable share is NOT editable here — it is
+    fixed by the circular — and neither are the Scheme Master values themselves."""
+    lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canScheme", "scheme edits (only Active leads)")
+    scheme_rows = await get_scheme_rows()
+    alloc = ce.compute_scheme_allocation(lead_to_snapshot(lead), scheme_rows)
+    available = {c["key"]: c["schemeAvailable"] for c in alloc["components"]}
+    errors, clean_alloc = [], {}
+    for key, raw in (body.allocation or {}).items():
+        if key not in available:
+            errors.append(f"• {key}: not a scheme component for this model/variant/month")
+            continue
+        amt = ce.round2(ce.num(raw))
+        if amt < 0:
+            errors.append(f"• {key}: customer benefit cannot be negative")
+        elif amt > available[key] + 0.01:
+            errors.append(f"• {key}: ₹{amt} exceeds the ₹{available[key]} the scheme makes available")
+        else:
+            clean_alloc[key] = amt
+    if errors:
+        raise HTTPException(422, "Please fix the scheme allocation:\n" + "\n".join(errors))
+    merged = {**ce._explicit_allocation(lead_to_snapshot(lead)), **clean_alloc}
+    old = lead.get("schemeAllocation")
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "schemeAllocation": json.dumps(merged), "lastUpdated": now_iso(),
+        "lastUpdatedBy": act.get("email", "")}})
+    await recompute_lead(lead_id)
+    await write_audit(act, "update", "scheme-allocation", leadId=lead_id,
+                      old={"schemeAllocation": old}, new={"schemeAllocation": merged})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    return {**clean(updated),
+            "allocation": ce.compute_scheme_allocation(lead_to_snapshot(updated), scheme_rows)}
 
 
 @api.put("/leads/{lead_id}/extra-income")
@@ -2215,6 +2275,55 @@ async def owner_commercial_report():
         },
         "byExecutive": sorted(by_exec.values(), key=lambda x: x["executive"]),
     }
+
+
+@api.get("/reports/scheme-allocation-impact", dependencies=[Depends(owner_only)])
+async def scheme_allocation_impact():
+    """READ-ONLY impact of the Scheme Allocation Engine on existing leads.
+
+    Nothing is written. This exists so the change can be reviewed BEFORE any
+    historical accounting moves. Customer payable is only ever affected by an
+    explicit dealer allocation, so leads without one show a zero payable delta —
+    but their dealer-retained figure does change, because the old formula reported
+    the dealer's own funded share as negative income."""
+    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    scheme_rows = await get_scheme_rows()
+    affected, payable_delta, retained_delta = [], 0.0, 0.0
+    for l in leads:
+        snap = lead_to_snapshot(l)
+        alloc = ce.compute_scheme_allocation(snap, scheme_rows)
+        old_retained = ce.num(ce.compute_scheme_income_breakdown(snap, scheme_rows)["retainedIncomeTotal"])
+        new_retained = alloc["totals"]["dealerRetained"]
+        ent_benefit = ce.round2(sum(c["customerBenefit"] for c in alloc["components"] if c["automatic"]))
+        old_payable = ce.num(l.get("customerPayable"))
+        new_payable = ce.round2(max(0.0, ce.compute_commercial_totals(snap)["customerPayable"] - ent_benefit))
+        d_pay = ce.round2(new_payable - old_payable)
+        d_ret = ce.round2(new_retained - old_retained)
+        if d_pay == 0 and d_ret == 0:
+            continue
+        payable_delta = ce.round2(payable_delta + d_pay)
+        retained_delta = ce.round2(retained_delta + d_ret)
+        affected.append({
+            "leadId": l.get("leadId"), "customerName": l.get("customerName"),
+            "vehicle": f"{l.get('interestedModel','')} {l.get('variant','')}".strip(),
+            "hasExplicitAllocation": bool(l.get("schemeAllocation")),
+            "components": [{k: c[k] for k in ("key", "label", "schemeAvailable", "oemShare",
+                                              "dealerFundedShare", "customerBenefit",
+                                              "dealerRetained", "oemClaimable")}
+                           for c in alloc["components"]],
+            "old": {"customerPayable": old_payable, "dealerSchemeRetained": old_retained,
+                    "companyOutstanding": ce.num(l.get("companyOutstanding"))},
+            "new": {"customerPayable": new_payable, "dealerSchemeRetained": new_retained,
+                    "companyOutstanding": alloc["totals"]["oemClaimable"]},
+            "impact": {"customerPayable": d_pay, "dealerSchemeRetained": d_ret,
+                       "oemClaim": ce.round2(alloc["totals"]["oemClaimable"] - ce.num(l.get("companyOutstanding")))},
+        })
+    return {"ok": True, "leadsExamined": len(leads), "leadsAffected": len(affected),
+            "totals": {"customerPayableDelta": payable_delta,
+                       "dealerSchemeRetainedDelta": retained_delta},
+            "note": "READ-ONLY. No record was modified. Customer payable only moves for "
+                    "leads carrying an explicit dealer allocation.",
+            "leads": affected}
 
 
 @api.get("/reports/oem-claim-dashboard", dependencies=[Depends(owner_only)])
@@ -3277,8 +3386,9 @@ async def dealer_earnings_report():
     for l in leads:
         snap = lead_to_snapshot(l)
         margin = ce.compute_dealer_margin(snap)["marginNetExGst"]
-        income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
-        scheme = income["retainedIncomeTotal"]
+        # Scheme income comes from the Scheme Allocation Engine: what the dealer
+        # RETAINED. The old breakdown reported the dealer's funded share as negative.
+        scheme = ce.compute_scheme_allocation(snap, scheme_rows)["totals"]["dealerRetained"]
         insurance = ins_by_lead.get(l.get("leadId"), 0)
         oem_recv = max(0.0, ce.num(l.get("oemExtraSupportReceived")))
         oem_pass = max(0.0, min(ce.num(l.get("oemExtraSupportPassed")), oem_recv))

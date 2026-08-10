@@ -31,6 +31,20 @@ import server  # noqa: E402
 MODEL, VARIANT = "Hi-Load", "XR"
 
 
+def parse_retained_breakup(lead):
+    """schemeRetainedBreakup is 'key=amount; key=amount' across EVERY component.
+    The five per-component columns (Consumer/Exchange/Loyalty/Referral/DSA Retained)
+    are a SUBSET: entitlement components (Insurance/RTO Benefit) also carry retained
+    value but have no dedicated column in the register."""
+    out = {}
+    for part in str(lead.get("schemeRetainedBreakup") or "").split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip()] = float(v)
+    return out
+
+
+
 @pytest_asyncio.fixture
 async def client():
     await server.startup()
