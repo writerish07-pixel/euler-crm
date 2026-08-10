@@ -342,7 +342,18 @@ async def recompute_lead(lead_id):
     # Both are keyed on leadId, so these are upserts — one row per lead, kept current
     # on every commercial recompute rather than appended each time.
     if _is_booked(merged) or ce.num(merged.get("customerPayable")) > 0:
+        # Insurance payout economics for the Dealer Earnings Register. "Insurance Payout"
+        # and "Dealer Insurance Income" are register columns that previously had no
+        # source at all. Authoritative source is the insurance entry itself (premium x
+        # model payout rate); the dealer's own income is what is left after any part of
+        # the payout is passed back to the customer.
+        _ins = await db.insurance.find_one({"leadId": lead_id}) or {}
+        _ins_payout = ce.num(_ins.get("expectedPayout"))
+        _ins_passed = ce.num(merged.get("customerInsuranceBenefitPassed"))
+        _dealer_ins_income = ce.round2(max(0.0, _ins_payout - _ins_passed))
         await sheet_sync("dealer_earnings", {
+            "insurancePayout": _ins_payout,
+            "dealerInsuranceIncome": _dealer_ins_income,
             "leadId": lead_id, "customerName": merged.get("customerName"),
             "model": merged.get("interestedModel"),
             "dealerMarginNetExGst": updates["dealerMarginNetExGst"],
@@ -1701,8 +1712,56 @@ async def mark_delivery(lead_id: str, body: DeliveryIn):
             "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
         })
         await _upsert_incentive_register_on_delivery(lead_id, body.deliveryDate or today())
+        await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
         await rebuild_finance_views()
+        await recompute_lead(lead_id)
     return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
+async def _upsert_insurance_on_delivery(lead_id, delivery_date):
+    """On Mark Delivered, open the insurance payout entry for the vehicle.
+
+    Nothing was creating these, so the Insurance Payouts screen stayed empty and the
+    Earnings Report's insurance column (which sums expectedPayout) was always 0 — even
+    though the premium, insurer and payout rate were all known.
+
+    No new business rule: the premium is the lead's own insuranceAmount, the insurer is
+    the one captured at delivery, and the rate/expected/outstanding/status come from the
+    existing _insurance_derive + suggested_insurance_payout_rate (49% Storm/Turbo,
+    36.5% others). Idempotent — one entry per lead, refreshed rather than duplicated."""
+    lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    premium = ce.num(lead.get("insuranceAmount"))
+    if premium <= 0:
+        return None          # no premium charged -> no payout is due; leave it absent
+    existing = await db.insurance.find_one({"leadId": lead_id})
+    data = {
+        "leadId": lead_id,
+        "customerName": lead.get("customerName", ""),
+        "mobile": lead.get("mobile", ""),
+        "model": lead.get("interestedModel", ""),
+        "variant": lead.get("variant", ""),
+        "insuranceCompany": lead.get("insurerName", "") or (existing or {}).get("insuranceCompany", ""),
+        "policyNumber": (existing or {}).get("policyNumber", ""),
+        "insuranceAmount": premium,
+        # Preserve a manually set rate / already-received money on re-delivery edits.
+        "payoutRate": ce.num((existing or {}).get("payoutRate")),
+        "receivedPayout": ce.num((existing or {}).get("receivedPayout")),
+        "status": (existing or {}).get("status", "Pending"),
+        "deliveryDate": delivery_date,
+        "insuranceExecutive": lead.get("executive", ""),
+        "remarks": (existing or {}).get("remarks", ""),
+        "lastUpdated": now_iso(),
+    }
+    data.update(_insurance_derive(data))
+    if existing:
+        await db.insurance.update_one({"entryId": existing["entryId"]}, {"$set": data})
+        data["entryId"] = existing["entryId"]
+    else:
+        data["entryId"] = await next_id("insurance", "INS26")
+        data["policyDate"] = None
+        await db.insurance.insert_one(dict(data))
+    await sheet_sync("insurance", {**data, "payoutRatePct": round(ce.num(data.get("payoutRate")) * 100, 1)})
+    return data
 
 
 async def _upsert_incentive_register_on_delivery(lead_id, delivery_date):
@@ -2077,13 +2136,17 @@ async def oem_claim_dashboard():
         m["bookings"] += 1
         m["claim"] = ce.round2(m["claim"] + cc)
         m["oem"] = ce.round2(m["oem"] + cc)
-        for b in r["claim"]["breakdown"]:
-            if not b["claimable"]:
-                continue
-            val = ce.num((r["displayByComponent"] or {}).get(b["key"], b["amount"]))
+        # Scheme-wise must come from the SAME normalised component map the Claim
+        # Register renders (displayByComponent), not from claim["breakdown"].
+        # breakdown only walks staff-entered OFFER_KEYS, so entitlement components
+        # (Insurance Benefit, RTO Benefit) were never visited — the section showed
+        # Loyalty 10,000 while every other total on the page correctly said 20,000.
+        for key, amount in (r["displayByComponent"] or {}).items():
+            val = ce.num(amount)
             if val <= 0:
                 continue
-            sc = scheme.setdefault(b["label"], {"scheme": b["label"], "count": 0, "value": 0.0})
+            label = ce.SCHEME_COMPONENT_LABELS.get(key, key)
+            sc = scheme.setdefault(label, {"scheme": label, "count": 0, "value": 0.0})
             sc["count"] += 1
             sc["value"] = ce.round2(sc["value"] + val)
         e = execu.setdefault(r["executive"], {"executive": r["executive"], "bookings": 0, "claim": 0.0})
