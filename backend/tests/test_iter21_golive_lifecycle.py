@@ -156,19 +156,22 @@ async def test_complete_golive_lifecycle(client):
     de = lead["dealerTotalEarnings"]
     assert de == ce.round2(
         lead["dealerMarginNetExGst"] + lead["dealerSchemeRetained"]
-        + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]), \
+        + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
+        + ce.num(lead.get("dealerInsuranceIncome"))), \
         "dealer total earnings must be the sum of its components"
     # Independence: dealer earnings are not the customer's money.
     assert de != lead["customerPayable"]
     assert lead["customerOutstanding"] == 0
-    # schemeRetainedBreakup spans EVERY component, including entitlements which have
-    # no dedicated column; the five offer columns are a subset of it.
-    breakup = {}
-    for part in str(lead.get("schemeRetainedBreakup") or "").split(";"):
-        if "=" in part:
-            k, v = part.split("=", 1)
-            breakup[k.strip()] = float(v)
-    assert ce.round2(sum(breakup.values())) == ce.round2(lead["dealerSchemeRetained"])
+    parts = ["consumerRetained", "exchangeRetained", "loyaltyRetained",
+             "referralRetained", "dsaRetained",
+             "insuranceBenefitRetained", "rtoBenefitRetained", "rtoInsuranceBenefitRetained"]
+    assert ce.round2(sum(ce.num(lead[p]) for p in parts)) == ce.round2(lead["dealerSchemeRetained"])
+    # HiCity Aug Full Benefit (legacy API without explicit breakup): every component
+    # including RTO + Insurance is materialised → dealer scheme retained = 0.
+    # OEM claim remains the company-share total 55,000.
+    assert lead["dealerSchemeRetained"] == 0
+    assert lead.get("schemeAllocationV2") is True
+    assert not lead.get("schemeAllocationExplicit")
 
     # Recording a financer disbursement must not touch the customer.
     r = await client.post(f"/api/finance/{fn}/receipt",

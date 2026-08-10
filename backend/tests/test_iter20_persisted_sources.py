@@ -85,26 +85,33 @@ async def test_margin_components_are_persisted(client):
 
 @pytest.mark.asyncio
 async def test_per_component_retention_is_persisted_and_sums_to_the_total(client):
-    """The five '… Retained' columns are the existing retainedByComponent map broken out.
-    Their sum must equal the already-trusted dealerSchemeRetained total."""
+    """Per-component retained columns break out retainedByComponent from the
+    allocation engine. Their sum (offers + entitlements) must equal dealerSchemeRetained."""
     lid = await booked(client, "9444400002")
     await client.put(f"/api/leads/{lid}/scheme",
                      json={"consumerDiscount": 25000, "loyaltyBonus": 10000,
                            "benefitMode": "Full Benefit"})
     lead = await server.db.leads.find_one({"leadId": lid})
     parts = ["consumerRetained", "exchangeRetained", "loyaltyRetained",
-             "referralRetained", "dsaRetained"]
+             "referralRetained", "dsaRetained",
+             "insuranceBenefitRetained", "rtoBenefitRetained", "rtoInsuranceBenefitRetained"]
     for p in parts:
         assert p in lead, f"{p} not persisted"
     assert "schemeRetainedBreakup" in lead
-    # Every component the engine reported must be accounted for in the breakup.
-    breakup = parse_retained_breakup(lead)
-    total = round(sum(breakup.values()), 2)
+    total = round(sum(ce.num(lead[p]) for p in parts), 2)
     assert total == round(ce.num(lead["dealerSchemeRetained"]), 2), \
-        f"per-component {breakup} sums to {total}, total is {lead['dealerSchemeRetained']}"
-    # and each dedicated column matches its component in the breakup
-    for field, key in server.RETAINED_COMPONENT_COLUMNS.items():
-        assert ce.num(lead[field]) == round(breakup.get(key, 0.0), 2)
+        f"per-component {total} != total {lead['dealerSchemeRetained']}"
+    # HiCity Aug: Full Benefit (legacy API, no explicit breakup) still materialises
+    # every component including RTO+Insurance → dealer retained 0. OEM claim 55,000.
+    assert lead["dealerSchemeRetained"] == 0
+    assert lead["rtoBenefitRetained"] == 0
+    assert lead["insuranceBenefitRetained"] == 0
+    assert lead["consumerRetained"] == 0
+    assert lead["loyaltyRetained"] == 0
+    assert lead["companyOutstanding"] == 55000
+    assert lead.get("schemeAllocationV2") is True
+    # Explicit assignment flag is only set when a benefitPassedBreakup is submitted.
+    assert not lead.get("schemeAllocationExplicit")
 
 
 @pytest.mark.asyncio
