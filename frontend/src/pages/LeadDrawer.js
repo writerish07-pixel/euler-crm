@@ -252,30 +252,56 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const setBk = (k) => (e) => setBreakup((b) => ({ ...b, [k]: e.target.value }));
 
-  // Only components available in Scheme Master for this model/variant are shown (additionalDiscount is always dealer-funded)
   const r = rules?.rules || {};
   const rulesReady = !!rules;
   const visibleFields = SCHEME_FIELDS.filter(([k]) => k === "additionalDiscount" || (r[k] ? r[k].allowed : rulesReady ? false : true));
   const hiddenFields = SCHEME_FIELDS.filter(([k]) => k !== "additionalDiscount" && r[k] && !r[k].allowed);
   const oemVisible = visibleFields.filter(([k]) => k !== "additionalDiscount");
+  const entitlements = rules?.entitlements || [];
+  const allocation = c?.schemeAllocation;
+
+  const applyBenefitMode = (mode) => {
+    setForm((f) => ({ ...f, benefitMode: mode }));
+    setBreakup((prev) => {
+      const next = { ...prev };
+      oemVisible.forEach(([k]) => {
+        const avail = +form[k] || 0;
+        if (mode === "No Benefit") next[k] = 0;
+        else if (mode === "Full Benefit") next[k] = avail;
+      });
+      entitlements.forEach((e) => {
+        // Entitlements default to 0 unless the dealer explicitly allocates.
+        // Full Benefit on entitlements is opt-in via the per-component field.
+        if (mode === "No Benefit") next[e.key] = 0;
+        else if (!(e.key in next)) next[e.key] = prev[e.key] ?? 0;
+      });
+      return next;
+    });
+  };
 
   const save = async () => {
     const payload = {
       benefitMode: form.benefitMode, customerBenefitPassed: +form.customerBenefitPassed,
       oemExtraSupportReceived: +form.oemExtraSupportReceived, oemExtraSupportPassed: +form.oemExtraSupportPassed,
     };
-    // send 0 for any component not shown so stale amounts get cleared
     SCHEME_FIELDS.forEach(([k]) => {
       const shown = k === "additionalDiscount" || (r[k] ? r[k].allowed : true);
       payload[k] = shown ? (+form[k] || 0) : 0;
     });
-    if (form.benefitMode === "Partial Benefit") {
-      const clean = {};
-      oemVisible.forEach(([k]) => { if (+breakup[k]) clean[k] = +breakup[k]; });
-      payload.benefitPassedBreakup = JSON.stringify(clean);
-    } else {
-      payload.benefitPassedBreakup = "";
-    }
+    // Always persist numeric per-component customerBenefit (offers + entitlements).
+    const clean = {};
+    oemVisible.forEach(([k]) => {
+      if (form.benefitMode === "Full Benefit") clean[k] = +form[k] || 0;
+      else if (form.benefitMode === "No Benefit") clean[k] = 0;
+      else clean[k] = +(breakup[k] ?? 0) || 0;
+    });
+    entitlements.forEach((e) => {
+      clean[e.key] = Math.max(0, Math.min(+(breakup[e.key] ?? 0) || 0, e.schemeAvailable || e.totalBenefit || 0));
+    });
+    payload.benefitPassedBreakup = JSON.stringify(clean);
+    payload.customerBenefitPassed = Object.entries(clean)
+      .filter(([k]) => k !== "additionalDiscount")
+      .reduce((s, [, v]) => s + (+v || 0), 0);
     try {
       await put(`/leads/${lead.leadId}/scheme`, payload);
       toast.success("Scheme updated");
@@ -284,13 +310,17 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
       toast.error(e?.response?.data?.detail || "Scheme validation failed");
     }
   };
+
+  const allocByKey = {};
+  (allocation?.components || []).forEach((comp) => { allocByKey[comp.key] = comp; });
+
   return (
     <div>
       {locked && <StepLock text="This lead is not Active — scheme is read-only." />}
       {rules && (
         <div className="text-xs text-ink-soft mb-3" data-testid="scheme-month-note">
           Scheme Master · <span className="font-semibold text-ink">{rules.model} {rules.variant}</span> · {rules.schemeMonth}
-          {oemVisible.length === 0 && <span className="text-amber-700"> — no OEM scheme components for this model/variant this month</span>}
+          {oemVisible.length === 0 && entitlements.length === 0 && <span className="text-amber-700"> — no scheme components for this model/variant this month</span>}
         </div>
       )}
       <div className="grid grid-cols-3 gap-3">
@@ -299,7 +329,12 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
             <Input data-testid={`scheme-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} />
           </Field>
         ))}
-        <Field label="Benefit Mode"><Select data-testid="benefit-mode" value={form.benefitMode} onChange={set("benefitMode")} disabled={locked}>{(masters?.benefitModes || ["Full Benefit","Partial Benefit","No Benefit"]).map((m) => <option key={m}>{m}</option>)}</Select></Field>
+        <Field label="Benefit Mode">
+          <Select data-testid="benefit-mode" value={form.benefitMode}
+            onChange={(e) => applyBenefitMode(e.target.value)} disabled={locked}>
+            {(masters?.benefitModes || ["Full Benefit","Partial Benefit","No Benefit"]).map((m) => <option key={m}>{m}</option>)}
+          </Select>
+        </Field>
         <Field label="OEM Extra Support Received"><Input type="number" value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} disabled={locked} /></Field>
         <Field label="OEM Extra Support Passed"><Input type="number" value={form.oemExtraSupportPassed} onChange={set("oemExtraSupportPassed")} disabled={locked} /></Field>
       </div>
@@ -308,35 +343,36 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
           Not available for this model/variant: {hiddenFields.map(([, l]) => l).join(", ")}
         </div>
       )}
-      {/* Entitlement components (Free RTO / Free Insurance) are claimed from the OEM
-          automatically and are never typed by staff, so they have no input above. They
-          are still part of the scheme, and omitting them made the screen understate it
-          (Turbo Aug'26 showed only Loyalty while the Claim Register carried Loyalty +
-          Insurance Benefit). Read-only, straight from Scheme Master. */}
-      {(rules?.entitlements || []).length > 0 && (
-        <Card className="p-4 mt-4 bg-violet-50/50 border-violet-200" data-testid="scheme-entitlements">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-xs font-semibold text-ink">
-              Automatic entitlements — claimed from OEM, not entered by staff
-            </div>
-            <div className="text-xs text-ink-soft">
-              Company share total <span className="font-semibold text-ink">{inr(rules.entitlementCompanyTotal || 0)}</span>
-            </div>
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            {rules.entitlements.map((e) => (
-              <div key={e.key} className="bg-white border border-line rounded-lg px-3 py-2"
-                   data-testid={`entitlement-${e.key}`}>
-                <div className="text-xs font-semibold text-ink">{e.label}</div>
-                <div className="text-sm text-ink mt-0.5">{inr(e.totalBenefit)}</div>
-                <div className="text-[11px] text-ink-faint mt-0.5">
-                  OEM {inr(e.companyShare)}{e.dealerShare > 0 ? ` · dealer funds ${inr(e.dealerShare)}` : ""}
+
+      {/* Entitlement allocation — Scheme Master values are read-only; dealer edits customer benefit only. */}
+      {entitlements.length > 0 && (
+        <div className="mt-4 space-y-3" data-testid="scheme-entitlements">
+          <div className="text-xs font-semibold text-ink">Automatic OEM entitlements — allocate customer benefit</div>
+          {entitlements.map((e) => {
+            const live = allocByKey[e.key];
+            const avail = e.schemeAvailable ?? e.totalBenefit ?? 0;
+            const cb = +(breakup[e.key] ?? live?.customerBenefit ?? 0);
+            const retained = Math.max(0, avail - cb);
+            return (
+              <Card key={e.key} className="p-4 bg-zinc-50/80 border-line" data-testid={`entitlement-${e.key}`}>
+                <div className="text-sm font-semibold text-ink mb-2">{e.label}</div>
+                <div className="grid grid-cols-3 gap-3 text-sm">
+                  <div><div className="text-[11px] text-ink-faint uppercase">Available</div><div className="font-mono">{inr(avail)}</div></div>
+                  <div><div className="text-[11px] text-ink-faint uppercase">OEM Share</div><div className="font-mono">{inr(e.oemShare ?? e.companyShare)}</div></div>
+                  <div><div className="text-[11px] text-ink-faint uppercase">Dealer Funded</div><div className="font-mono">{inr(e.dealerFundedShare ?? e.dealerShare)}</div></div>
+                  <Field label="Customer Benefit">
+                    <Input data-testid={`breakup-${e.key}`} type="number" min={0} max={avail}
+                      value={breakup[e.key] ?? ""} onChange={setBk(e.key)} disabled={locked} />
+                  </Field>
+                  <div><div className="text-[11px] text-ink-faint uppercase">Dealer Retained</div><div className="font-mono font-semibold text-emerald-700">{inr(retained)}</div></div>
+                  <div><div className="text-[11px] text-ink-faint uppercase">OEM Claimable</div><div className="font-mono text-amber-700">{inr(e.oemClaimable ?? e.companyShare)}</div></div>
                 </div>
-              </div>
-            ))}
-          </div>
-        </Card>
+              </Card>
+            );
+          })}
+        </div>
       )}
+
       {form.benefitMode === "Partial Benefit" && oemVisible.length > 0 && (
         <Card className="p-4 mt-4 bg-cobalt-tint/30 border-cobalt/20">
           <div className="text-xs font-semibold text-ink mb-2">Partial Benefit — amount of each OEM offer passed to customer</div>
@@ -349,13 +385,28 @@ function SchemeTab({ lead, c, actions = {}, masters, onSaved }) {
           </div>
         </Card>
       )}
-      <Card className="p-4 mt-4 bg-amber-50/50 border-amber-200">
+
+      {/* Live allocation summary from the authoritative engine */}
+      <Card className="p-4 mt-4 bg-amber-50/50 border-amber-200" data-testid="scheme-allocation-summary">
         <div className="grid grid-cols-4 gap-3 text-center">
-          <Prev label="OEM Eligible" v={c.oemEligible} />
-          <Prev label="Dealer Discount" v={c.dealerDiscount} />
-          <Prev label="OEM Claimable (Co. Share)" v={c.oemClaimCompanyShare ?? c.claim.claimEligible} />
-          <Prev label="Dealer Scheme Retained" v={c.dealerSchemeRetained ?? c.dealerRetained} />
+          <Prev label="Customer Benefit" v={allocation?.totals?.customerBenefit ?? c.customerBenefitPassed} />
+          <Prev label="Dealer Scheme Retained" v={allocation?.totals?.dealerRetained ?? c.dealerSchemeRetained ?? c.dealerRetained} />
+          <Prev label="OEM Claimable" v={allocation?.totals?.oemClaimable ?? c.oemClaimCompanyShare ?? c.claim?.claimEligible} />
+          <Prev label="Scheme Available" v={allocation?.totals?.schemeAvailable ?? c.oemEligible} />
         </div>
+        {(allocation?.components || []).length > 0 && (
+          <div className="mt-3 border-t border-amber-200 pt-3 space-y-1" data-testid="scheme-allocation-components">
+            {allocation.components.map((comp) => (
+              <div key={comp.key} className="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-ink-soft">
+                <span className="font-semibold text-ink min-w-[9rem]">{comp.label}</span>
+                <span>Avail {inr(comp.schemeAvailable)}</span>
+                <span>Cust {inr(comp.customerBenefit)}</span>
+                <span>Retained {inr(comp.dealerRetained)}</span>
+                <span>OEM Claim {inr(comp.oemClaimable)}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </Card>
       <ExtraIncomeCard lead={lead} locked={locked} onSaved={onSaved} />
       <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save} disabled={locked}>Update Scheme</Button></div>

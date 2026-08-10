@@ -243,13 +243,16 @@ def lead_to_snapshot(lead):
 
 
 # Scheme components the Dealer Earnings Register keeps a dedicated "… Retained"
-# column for, mapped to the componentKey compute_scheme_income_breakdown emits.
+# column for, mapped to the componentKey compute_scheme_allocation emits.
 RETAINED_COMPONENT_COLUMNS = {
     "consumerRetained": "consumerDiscount",
     "exchangeRetained": "exchangeBonus",
     "loyaltyRetained": "loyaltyBonus",
     "referralRetained": "referralBonus",
     "dsaRetained": "dsaDiscount",
+    "insuranceBenefitRetained": "insuranceBenefit",
+    "rtoBenefitRetained": "rtoBenefit",
+    "rtoInsuranceBenefitRetained": "rtoInsuranceBenefit",
 }
 
 
@@ -274,10 +277,11 @@ async def recompute_lead(lead_id):
         return None
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
-    totals = ce.compute_commercial_totals(snap)
+    totals = ce.compute_commercial_totals(snap, scheme_rows)
     margin = ce.compute_dealer_margin(snap)
     income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
     shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
+    alloc = income.get("allocation") or ce.compute_scheme_allocation(snap, scheme_rows)
     # total received from payments
     agg = await db.payments.aggregate([
         {"$match": {"leadId": lead_id}},
@@ -296,6 +300,11 @@ async def recompute_lead(lead_id):
         ce.num(lead.get("otherIncome")) + ce.num(lead.get("customerInsuranceBenefitPassed")) +
         ce.num(lead.get("financeIncentive")) + ce.num(lead.get("accessoriesMargin")) +
         ce.num(lead.get("exchangeMargin")) + ce.num(lead.get("campaignIncentive")))
+    # Insurance PAYOUT income (premium × rate) — SEPARATE from Insurance Scheme Benefit.
+    _ins = await db.insurance.find_one({"leadId": lead_id}) or {}
+    _ins_payout = ce.num(_ins.get("expectedPayout"))
+    _ins_passed = ce.num(lead.get("customerInsuranceBenefitPassed"))
+    _dealer_ins_income = ce.round2(max(0.0, _ins_payout - _ins_passed))
     updates = {
         "grossVehicleCost": totals["grossVehicleCost"],
         "customerPayable": customer_payable,
@@ -310,21 +319,25 @@ async def recompute_lead(lead_id):
         "oemClaimCompanyShare": shares["eligibleTotal"],
         "schemeCompanyTotal": shares["displayTotal"],
         "dealerSchemeRetained": income["retainedIncomeTotal"],
+        "schemeCustomerBenefit": alloc["totals"]["customerBenefit"],
+        "schemeAvailableTotal": alloc["totals"]["schemeAvailable"],
         "oemExtraSupportRetained": oem_extra_retained,
         "dealerMarginNetExGst": margin["marginNetExGst"],
-        # Persist the two margin components the Dealer Earnings Register has columns for.
-        # compute_dealer_margin already returns them; only the net figure was being stored,
-        # so "Dealer Margin Gross (Incl GST)" and "Dealer Margin GST (5%)" had no source.
         "dealerMarginGrossInclGst": margin["marginGrossInclGst"],
         "dealerMarginGst": margin["marginGst"],
-        # Per-component scheme retention. compute_scheme_income_breakdown already returns
-        # retainedByComponent; only the total was persisted, leaving the register's
-        # Consumer/Exchange/Loyalty/Referral/DSA Retained columns without a source.
-        # These are NOT a second calculation — they are the same numbers, broken out.
         **_retained_component_fields(income.get("retainedByComponent") or {}),
         "extraDealerIncomeTotal": extra_income,
+        "dealerInsuranceIncome": _dealer_ins_income,
+        "insurancePayout": _ins_payout,
         "dealerTotalEarnings": ce.round2(
-            margin["marginNetExGst"] + income["retainedIncomeTotal"] + oem_extra_retained + extra_income),
+            margin["marginNetExGst"] + income["retainedIncomeTotal"] + oem_extra_retained
+            + extra_income + _dealer_ins_income),
+        "schemeAllocation": {
+            "components": alloc["components"],
+            "totals": alloc["totals"],
+            "benefitMode": alloc["benefitMode"],
+            "schemeMonth": alloc.get("schemeMonth"),
+        },
         "lastUpdated": now_iso(),
     }
     await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
@@ -342,16 +355,7 @@ async def recompute_lead(lead_id):
     # Both are keyed on leadId, so these are upserts — one row per lead, kept current
     # on every commercial recompute rather than appended each time.
     if _is_booked(merged) or ce.num(merged.get("customerPayable")) > 0:
-        # Insurance payout economics for the Dealer Earnings Register. "Insurance Payout"
-        # and "Dealer Insurance Income" are register columns that previously had no
-        # source at all. Authoritative source is the insurance entry itself (premium x
-        # model payout rate); the dealer's own income is what is left after any part of
-        # the payout is passed back to the customer.
-        _ins = await db.insurance.find_one({"leadId": lead_id}) or {}
-        _ins_payout = ce.num(_ins.get("expectedPayout"))
-        _ins_passed = ce.num(merged.get("customerInsuranceBenefitPassed"))
-        _dealer_ins_income = ce.round2(max(0.0, _ins_payout - _ins_passed))
-        await sheet_sync("dealer_earnings", {
+        de_row = {
             "insurancePayout": _ins_payout,
             "dealerInsuranceIncome": _dealer_ins_income,
             "leadId": lead_id, "customerName": merged.get("customerName"),
@@ -371,7 +375,7 @@ async def recompute_lead(lead_id):
             "oemExtraSupportRetained": updates["oemExtraSupportRetained"],
             "extraDealerIncomeTotal": updates["extraDealerIncomeTotal"],
             "dealerTotalEarnings": updates["dealerTotalEarnings"],
-            # Columns that already had a value in Mongo but no Sheet mapping.
+            "totalDealerEarnings": updates["dealerTotalEarnings"],
             "variant": merged.get("variant", ""),
             "bookingDate": merged.get("bookingDate", ""),
             "deliveryDate": merged.get("deliveryDate", ""),
@@ -379,12 +383,12 @@ async def recompute_lead(lead_id):
             "executive": merged.get("executive", ""),
             "leadSource": merged.get("leadSource", ""),
             "customerPayable": updates["customerPayable"],
+            "oemEligible": updates["oemSchemeAmount"],
+            "customerSchemeBenefitPassed": updates.get("schemeCustomerBenefit", totals["customerBenefitPassed"]),
             "insuranceStatus": merged.get("insuranceStatus", ""),
             "remarks": merged.get("remarks", ""),
             "createdBy": merged.get("createdBy", "crm"),
             "modifiedBy": merged.get("lastUpdatedBy", ""),
-            # "Current Stage" is the lead's lifecycle position, already tracked as
-            # currentStatus — the register just names the column differently.
             "currentStage": merged.get("currentStatus", ""),
             "lastUpdated": updates["lastUpdated"],
             "timestamp": updates["lastUpdated"],
@@ -397,8 +401,14 @@ async def recompute_lead(lead_id):
             "loyaltyRetained": updates["loyaltyRetained"],
             "referralRetained": updates["referralRetained"],
             "dsaRetained": updates["dsaRetained"],
+            "insuranceBenefitRetained": updates.get("insuranceBenefitRetained", 0),
+            "rtoBenefitRetained": updates.get("rtoBenefitRetained", 0),
+            "rtoInsuranceBenefitRetained": updates.get("rtoInsuranceBenefitRetained", 0),
             "schemeRetainedBreakup": updates["schemeRetainedBreakup"],
-        })
+        }
+        # Keep Mongo dealer_earnings in sync so GET /dealer-earnings matches the live report.
+        await db.dealer_earnings.update_one({"leadId": lead_id}, {"$set": de_row}, upsert=True)
+        await sheet_sync("dealer_earnings", de_row)
         # Derived OEM claims must also reach the existing Scheme Claim Register.
         # They are keyed on the same stable claimId GET /claims exposes, so this is an
         # upsert — a claim later settled/receipted updates that same row.
@@ -1137,6 +1147,25 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
         lead.get("bookingDate") or today(), offers, scheme_rows)
     if errors:
         raise HTTPException(422, "Please fix these scheme fields:\n" + "\n".join(errors))
+    # Persist numeric per-component customerBenefit. Entitlement keys present in the
+    # breakup are authoritative; missing entitlement keys stay at customerBenefit=0
+    # (grandfather — does not silently rewrite historical customer payable).
+    import json as _json
+    raw_breakup = payload.get("benefitPassedBreakup")
+    if isinstance(raw_breakup, str) and raw_breakup.strip():
+        try:
+            parsed = _json.loads(raw_breakup)
+            if isinstance(parsed, dict):
+                clean_bk = {}
+                for k, v in parsed.items():
+                    amt = ce.round2(max(0.0, ce.num(v)))
+                    clean_bk[k] = amt
+                payload["benefitPassedBreakup"] = _json.dumps(clean_bk)
+                # Mirror the sum of OEM+entitlement customer benefits for legacy readers.
+                payload["customerBenefitPassed"] = ce.round2(sum(
+                    amt for k, amt in clean_bk.items() if k != "additionalDiscount"))
+        except Exception:
+            pass
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
@@ -2018,16 +2047,16 @@ async def _owner_booking_metrics():
     rows = []
     for l in leads:
         snap = lead_to_snapshot(l)
-        totals = ce.compute_commercial_totals(snap)
+        totals = ce.compute_commercial_totals(snap, scheme_rows)
         claim = ce.derive_claim(snap)
         shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
         income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
-        split = ce.scheme_share_split_for(l.get("interestedModel") or "", l.get("variant") or "",
-                                          l.get("bookingDate") or "", ce._oem_offers(snap), scheme_rows)
+        alloc = income.get("allocation") or ce.compute_scheme_allocation(snap, scheme_rows)
         use_shares = shares["shareSplitAvailable"]
         company_claim = shares["eligibleTotal"] if use_shares else (income["oemClaimTotal"] if income["shareSplitAvailable"] else claim["claimEligible"])
         company_oem = shares["displayTotal"] if use_shares else (income["oemClaimTotal"] if income["shareSplitAvailable"] else claim["oemDiscount"])
-        dealer_scheme = ce.num(split.get("dealerTotal"))
+        # Dealer-funded scheme share from the allocation engine (not a parallel calc).
+        dealer_scheme = alloc["totals"]["dealerFundedShare"]
         if not (dealer_scheme > 0) and not use_shares:
             dealer_scheme = ce.num(claim["dealerDiscount"])
         reg = reg_by_lead.get(l.get("leadId"))
@@ -2195,6 +2224,7 @@ FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "va
                       "currentStatus", "accountStatus"]
 PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "derive_claim",
                          "scheme_share_split_for", "get_scheme_shares_for_lead",
+                         "compute_scheme_allocation",
                          "compute_scheme_income_breakdown", "compute_scheme_claim_shares",
                          "get_scheme_offer_rules_for_vehicle", "validate_scheme_offers",
                          "scheme_month_from_date", "suggested_insurance_payout_rate"]
@@ -3055,6 +3085,84 @@ async def insurance_payout_report():
 
     return {"byMonth": norm(by_month, True), "byInsurer": norm(by_insurer),
             "totals": {k: (ce.round2(v) if isinstance(v, float) else v) for k, v in totals.items()}}
+
+
+@api.get("/reports/scheme-allocation-impact", dependencies=[Depends(owner_only)])
+async def scheme_allocation_impact_report():
+    """READ-ONLY historical impact of the authoritative scheme allocation engine.
+
+    Compares each booked lead's currently persisted commercial fields against what
+    compute_scheme_allocation would produce. Does NOT modify any records.
+    """
+    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    scheme_rows = await get_scheme_rows()
+    rows = []
+    summary = {
+        "leadsScanned": 0, "leadsAffected": 0,
+        "customerPayableDeltaTotal": 0.0,
+        "dealerEarningsDeltaTotal": 0.0,
+        "oemClaimDeltaTotal": 0.0,
+    }
+    for l in leads:
+        summary["leadsScanned"] += 1
+        snap = lead_to_snapshot(l)
+        alloc = ce.compute_scheme_allocation(snap, scheme_rows)
+        new_totals = ce.compute_commercial_totals(snap, scheme_rows)
+        new_income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
+        new_shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
+        old_payable = ce.round2(ce.num(l.get("customerPayable")))
+        new_payable = new_totals["customerPayable"]
+        old_retained = ce.round2(ce.num(l.get("dealerSchemeRetained")))
+        new_retained = new_income["retainedIncomeTotal"]
+        old_claim = ce.round2(ce.num(l.get("oemClaimCompanyShare") if l.get("oemClaimCompanyShare") is not None else l.get("companyOutstanding")))
+        new_claim = new_shares["eligibleTotal"]
+        payable_diff = ce.round2(new_payable - old_payable)
+        retained_diff = ce.round2(new_retained - old_retained)
+        claim_diff = ce.round2(new_claim - old_claim)
+        affected = abs(payable_diff) > 0.01 or abs(retained_diff) > 0.01 or abs(claim_diff) > 0.01
+        if not affected and not alloc["components"]:
+            continue
+        if affected:
+            summary["leadsAffected"] += 1
+            summary["customerPayableDeltaTotal"] = ce.round2(summary["customerPayableDeltaTotal"] + payable_diff)
+            summary["dealerEarningsDeltaTotal"] = ce.round2(summary["dealerEarningsDeltaTotal"] + retained_diff)
+            summary["oemClaimDeltaTotal"] = ce.round2(summary["oemClaimDeltaTotal"] + claim_diff)
+        component_rows = []
+        for c in alloc["components"]:
+            component_rows.append({
+                "componentKey": c["key"], "label": c["label"],
+                "schemeAvailable": c["schemeAvailable"],
+                "customerBenefit": c["customerBenefit"],
+                "dealerRetained": c["dealerRetained"],
+                "oemClaimable": c["oemClaimable"],
+                "oemShare": c["oemShare"],
+                "dealerFundedShare": c["dealerFundedShare"],
+            })
+        rows.append({
+            "leadId": l.get("leadId"),
+            "customerName": l.get("customerName"),
+            "vehicle": f"{l.get('interestedModel') or ''} {l.get('variant') or ''}".strip(),
+            "bookingDate": l.get("bookingDate"),
+            "benefitMode": l.get("benefitMode"),
+            "affected": affected,
+            "oldCustomerPayable": old_payable,
+            "newCustomerPayable": new_payable,
+            "customerPayableDifference": payable_diff,
+            "oldDealerSchemeRetained": old_retained,
+            "newDealerSchemeRetained": new_retained,
+            "dealerEarningsDifference": retained_diff,
+            "oldOemClaim": old_claim,
+            "newOemClaim": new_claim,
+            "claimDifference": claim_diff,
+            "components": component_rows,
+        })
+    return {
+        "readOnly": True,
+        "modified": False,
+        "note": "Impact only — no historical accounting was rewritten. New transactions use the allocation engine.",
+        "summary": summary,
+        "rows": rows,
+    }
 
 
 @api.get("/reports/dealer-earnings", dependencies=[Depends(owner_only)])

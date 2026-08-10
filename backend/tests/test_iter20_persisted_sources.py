@@ -71,22 +71,29 @@ async def test_margin_components_are_persisted(client):
 
 @pytest.mark.asyncio
 async def test_per_component_retention_is_persisted_and_sums_to_the_total(client):
-    """The five '… Retained' columns are the existing retainedByComponent map broken out.
-    Their sum must equal the already-trusted dealerSchemeRetained total."""
+    """Per-component retained columns break out retainedByComponent from the
+    allocation engine. Their sum (offers + entitlements) must equal dealerSchemeRetained."""
     lid = await booked(client, "9444400002")
     await client.put(f"/api/leads/{lid}/scheme",
                      json={"consumerDiscount": 25000, "loyaltyBonus": 10000,
                            "benefitMode": "Full Benefit"})
     lead = await server.db.leads.find_one({"leadId": lid})
     parts = ["consumerRetained", "exchangeRetained", "loyaltyRetained",
-             "referralRetained", "dsaRetained"]
+             "referralRetained", "dsaRetained",
+             "insuranceBenefitRetained", "rtoBenefitRetained", "rtoInsuranceBenefitRetained"]
     for p in parts:
         assert p in lead, f"{p} not persisted"
     assert "schemeRetainedBreakup" in lead
-    # Every component the breakdown reported must be accounted for by a column.
     total = round(sum(ce.num(lead[p]) for p in parts), 2)
     assert total == round(ce.num(lead["dealerSchemeRetained"]), 2), \
         f"per-component {total} != total {lead['dealerSchemeRetained']}"
+    # HiCity Aug entitlements (RTO + Insurance) default customerBenefit=0 → retained 20,000
+    assert lead["dealerSchemeRetained"] == 20000
+    assert lead["rtoBenefitRetained"] == 10000
+    assert lead["insuranceBenefitRetained"] == 10000
+    # Staff offers were Full Benefit → zero retention on those
+    assert lead["consumerRetained"] == 0
+    assert lead["loyaltyRetained"] == 0
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,19 @@
 """
 Commercial engine — faithful Python port of the Apps Script CommercialEngineService.
 
-Single source of truth for all commercial math:
-  Gross Vehicle Cost, TCS, Total Discount, Customer Payable, Dealer Margin, Claims.
+Single source of truth for commercial math:
+  Gross Vehicle Cost, TCS, Total Discount, Customer Payable, Dealer Margin, Claims,
+  and SCHEME ALLOCATION (compute_scheme_allocation).
+
+Scheme allocation contract (every component):
+  schemeAvailable, oemShare, dealerFundedShare, customerBenefit,
+  dealerRetained = schemeAvailable − customerBenefit,
+  oemClaimable   = oemShare (authoritative Scheme Master company share).
+
+Customer Payable reduction = Σ customerBenefit (NOT schemeAvailable / oemShare / retained).
+Dealer Scheme Earnings     = Σ dealerRetained.
+OEM Claim                  = Σ oemClaimable.
+Insurance Payout (premium × rate) is a SEPARATE ledger from Insurance Scheme Benefit.
 
 Component policy (from Config.gs COMMERCIAL.COMPONENT_POLICY):
   consumerDiscount / exchangeBonus / loyaltyBonus / referralBonus -> OEM, claimable, no approval
@@ -94,19 +105,39 @@ def sum_dealer_offers(s):
     return round2(total)
 
 
-def resolve_customer_benefit_passed(s):
+def _parse_benefit_breakup(s):
+    """Normalize benefitPassedBreakup to a dict (or None)."""
+    breakup = (s or {}).get("benefitPassedBreakup")
+    if isinstance(breakup, str) and breakup:
+        import json
+        try:
+            breakup = json.loads(breakup)
+        except Exception:
+            breakup = None
+    return breakup if isinstance(breakup, dict) else None
+
+
+def resolve_customer_benefit_passed(s, scheme_rows=None):
+    """OEM + entitlement amount actually passed to the customer.
+
+    When scheme_rows are available this delegates to compute_scheme_allocation
+    (the single source of truth). Without scheme rows it falls back to the
+    legacy offer-only benefit-mode logic so call sites that only have a charge
+    snapshot (price preview, unit tests) keep working.
+    """
+    if scheme_rows is not None:
+        alloc = compute_scheme_allocation(s, scheme_rows)
+        # additionalDiscount is dealer-funded and counted separately as dealerDiscount
+        return round2(sum(
+            c["customerBenefit"] for c in alloc["components"]
+            if c["key"] != "additionalDiscount"
+        ))
     oem_pool = sum_oem_offers(s)
     mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
     if mode == "No Benefit":
         return 0.0
     if mode == "Partial Benefit":
-        breakup = s.get("benefitPassedBreakup")
-        if isinstance(breakup, str) and breakup:
-            import json
-            try:
-                breakup = json.loads(breakup)
-            except Exception:
-                breakup = None
+        breakup = _parse_benefit_breakup(s)
         if isinstance(breakup, dict):
             total = 0.0
             for key in OFFER_KEYS:
@@ -121,8 +152,13 @@ def resolve_customer_benefit_passed(s):
     return oem_pool  # Full Benefit
 
 
-def compute_commercial_totals(s):
-    """The ONLY place Customer Payable is derived."""
+def compute_commercial_totals(s, scheme_rows=None):
+    """The ONLY place Customer Payable is derived.
+
+    Customer Payable may be reduced ONLY by amounts actually passed to the
+    customer (Σ customerBenefit + OEM extra support passed). When scheme_rows
+    are supplied, customerBenefit comes from compute_scheme_allocation.
+    """
     s = s or {}
     gross_vehicle_cost = round2(sum(num(s.get(k)) for k in CHARGE_KEYS))
     tcs_applicable = str(s.get("tcsApplicable") or "No").lower() == "yes"
@@ -130,10 +166,24 @@ def compute_commercial_totals(s):
 
     oem_pool = sum_oem_offers(s)
     dealer_pool = sum_dealer_offers(s)
-    passed_oem = resolve_customer_benefit_passed(s)
     oem_extra_passed = max(0.0, num(s.get("oemExtraSupportPassed")))
-    dealer_retained = round2(max(0.0, oem_pool - passed_oem))
-    total_passed = round2(passed_oem + dealer_pool + oem_extra_passed)
+    benefit_mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
+
+    if scheme_rows is not None:
+        alloc = compute_scheme_allocation(s, scheme_rows)
+        # Scheme customer-payable reduction = Σ customerBenefit across every
+        # component (offers + entitlements + dealer-funded additional).
+        scheme_passed = alloc["totals"]["customerBenefit"]
+        passed_oem = round2(sum(
+            c["customerBenefit"] for c in alloc["components"]
+            if c["key"] != "additionalDiscount"
+        ))
+        dealer_retained = alloc["totals"]["dealerRetained"]
+        total_passed = round2(scheme_passed + oem_extra_passed)
+    else:
+        passed_oem = resolve_customer_benefit_passed(s)
+        dealer_retained = round2(max(0.0, oem_pool - passed_oem))
+        total_passed = round2(passed_oem + dealer_pool + oem_extra_passed)
 
     gross_invoice = round2(gross_vehicle_cost + tcs)
     net_vehicle_cost = round2(gross_invoice - total_passed)
@@ -148,7 +198,7 @@ def compute_commercial_totals(s):
         "oemExtraSupportPassed": oem_extra_passed,
         "totalPassedToCustomer": total_passed,
         "dealerRetained": dealer_retained,
-        "benefitMode": normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode")),
+        "benefitMode": benefit_mode,
         "grossInvoiceAmount": gross_invoice,
         "netVehicleCost": net_vehicle_cost,
         "customerPayable": customer_payable,
@@ -416,9 +466,24 @@ def scheme_share_split_for(model, variant, booking_date, offers, scheme_rows):
             "model": model, "variant": variant}
 
 
-def resolve_passed_breakup(s):
-    """Full vs passed OEM offer amounts per component, honouring benefit mode."""
+def resolve_passed_breakup(s, scheme_rows=None):
+    """Full vs passed amounts per component, honouring benefit mode.
+
+    When scheme_rows are given, values come from compute_scheme_allocation
+    (includes entitlements). Otherwise falls back to offer-only mode logic.
+    """
     mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
+    if scheme_rows is not None:
+        alloc = compute_scheme_allocation(s, scheme_rows)
+        full, passed = {}, {}
+        for c in alloc["components"]:
+            if c["key"] == "additionalDiscount":
+                continue
+            if c["schemeAvailable"] > 0:
+                full[c["key"]] = c["schemeAvailable"]
+            if c["customerBenefit"] > 0:
+                passed[c["key"]] = c["customerBenefit"]
+        return {"full": full, "passed": passed, "mode": mode}
     full, passed = {}, {}
     for key in OFFER_KEYS:
         pol = COMPONENT_POLICY.get(key)
@@ -430,13 +495,7 @@ def resolve_passed_breakup(s):
     if mode == "Full Benefit":
         passed = dict(full)
     elif mode == "Partial Benefit":
-        breakup = s.get("benefitPassedBreakup")
-        if isinstance(breakup, str) and breakup:
-            import json
-            try:
-                breakup = json.loads(breakup)
-            except Exception:
-                breakup = None
+        breakup = _parse_benefit_breakup(s)
         if isinstance(breakup, dict):
             for k, cap in full.items():
                 passed[k] = max(0.0, min(num(breakup.get(k)), cap))
@@ -448,95 +507,245 @@ def resolve_passed_breakup(s):
                 take = min(full[k], remaining)
                 passed[k] = take
                 remaining = round2(remaining - take)
-    # No Benefit -> passed stays {}
     return {"full": full, "passed": passed, "mode": mode}
 
 
-def compute_scheme_income_breakdown(s, scheme_rows):
-    """Dealer retained income (company unpassed − dealer passed) + OEM claim total per component."""
-    bk = resolve_passed_breakup(s)
+def _component_customer_benefit(key, scheme_available, mode, breakup, s, offer_waterfall):
+    """Resolve numeric customerBenefit for one component.
+
+    Formulas:
+      customerBenefit ∈ [0, schemeAvailable]
+      dealerRetained  = schemeAvailable − customerBenefit   (computed by caller)
+
+    Entitlement components (insuranceBenefit / rtoBenefit / rtoInsuranceBenefit):
+      Only reduce customer payable when the dealer EXPLICITLY recorded an amount in
+      benefitPassedBreakup. Absence ⇒ customerBenefit = 0. This preserves historical
+      customer payable (entitlements were never auto-passed) while still letting the
+      dealer allocate any amount up to schemeAvailable on new decisions.
+    """
+    cap = max(0.0, num(scheme_available))
+    if key == "additionalDiscount":
+        return round2(cap)  # dealer-funded — always passed to customer
+
+    if key in AUTO_SCHEME_COMPONENT_KEYS:
+        if isinstance(breakup, dict) and key in breakup:
+            return round2(max(0.0, min(num(breakup.get(key)), cap)))
+        return 0.0
+
+    # Staff-entered OEM offers
+    if mode == "No Benefit":
+        return 0.0
+    if mode == "Full Benefit":
+        return round2(cap)
+    # Partial Benefit
+    if isinstance(breakup, dict) and key in breakup:
+        return round2(max(0.0, min(num(breakup.get(key)), cap)))
+    # Legacy aggregate waterfall when Partial has no per-key breakup
+    take = min(cap, max(0.0, num(offer_waterfall.get(key))))
+    return round2(take)
+
+
+def _offer_partial_waterfall(s, full_by_key):
+    """Distribute a single customerBenefitPassed total across offer keys in order."""
+    remaining = max(0.0, num(s.get("customerBenefitPassed")))
+    out = {}
+    for k in OFFER_KEYS:
+        if k not in full_by_key:
+            continue
+        take = min(full_by_key[k], remaining)
+        out[k] = take
+        remaining = round2(remaining - take)
+    return out
+
+
+def compute_scheme_allocation(s, scheme_rows):
+    """AUTHORITATIVE scheme allocation engine — single source of truth.
+
+    For every active scheme component returns the six independent values:
+
+      schemeAvailable    — total entitlement under the scheme
+      oemShare           — contractual OEM/company share (oemClaimable)
+      dealerFundedShare  — portion funded by the dealer
+      customerBenefit    — amount the dealer actually passes to the customer
+      dealerRetained     — schemeAvailable − customerBenefit
+      oemClaimable       — amount claimable from OEM (== oemShare)
+
+    OEM CLAIMABLE is NOT automatically equal to schemeAvailable.
+    Dealer Retained is NOT automatically equal to OEM Claimable.
+    Customer Benefit is NOT automatically equal to schemeAvailable.
+
+    Staff-entered offers use company-share-first capping (preserved Scheme Master
+    rule). Entitlement components use the Scheme Master's own shares directly.
+    Insurance Payout (premium × rate) is a SEPARATE ledger and must never appear here.
+    """
+    s = s or {}
+    mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
+    breakup = _parse_benefit_breakup(s)
     model = str(s.get("model") or s.get("interestedModel") or "").strip()
     variant = str(s.get("variant") or "").strip()
     booking_date = s.get("bookingDate") or ""
-    offers_all = _oem_offers(s)
-    out = {"retainedIncomeTotal": 0.0, "retainedByComponent": {}, "oemClaimTotal": 0.0,
-           "oemClaimByComponent": {}, "dealerCostPassed": 0.0,
-           "passedByComponent": bk["passed"], "fullByComponent": bk["full"], "shareSplitAvailable": False}
-    if model and scheme_rows:
-        full_split = scheme_share_split_for(model, variant, booking_date, offers_all, scheme_rows)
-        pass_split = scheme_share_split_for(model, variant, booking_date, bk["passed"], scheme_rows)
-        f_by = full_split["byComponent"]
-        p_by = pass_split["byComponent"]
-        keys = set(list(f_by.keys()) + list(p_by.keys()))
-        for k in keys:
-            c_full = num(f_by.get(k, {}).get("companyShare"))
-            c_pass = num(p_by.get(k, {}).get("companyShare"))
-            d_pass = num(p_by.get(k, {}).get("dealerShare"))
-            retained = round2((c_full - c_pass) - d_pass)
-            if c_full > 0:
-                out["oemClaimByComponent"][k] = c_full
-            if retained != 0:
-                out["retainedByComponent"][k] = retained
-            out["oemClaimTotal"] = round2(out["oemClaimTotal"] + c_full)
-            out["retainedIncomeTotal"] = round2(out["retainedIncomeTotal"] + retained)
-            out["dealerCostPassed"] = round2(out["dealerCostPassed"] + d_pass)
-        has_oem_offer = len(bk["full"]) > 0
-        out["shareSplitAvailable"] = (out["oemClaimTotal"] > 0) if has_oem_offer else True
-        return out
-    # Fallback: treat each component as 100% company-funded
-    for k, f in bk["full"].items():
-        p = num(bk["passed"].get(k))
-        retained = round2(f - p)
-        if retained != 0:
-            out["retainedByComponent"][k] = retained
-        if f > 0:
-            out["oemClaimByComponent"][k] = f
-        out["retainedIncomeTotal"] = round2(out["retainedIncomeTotal"] + retained)
-        out["oemClaimTotal"] = round2(out["oemClaimTotal"] + f)
+    master = get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows) if (model and scheme_rows) else {}
+
+    # Pre-compute offer available amounts so Partial waterfall can run once
+    offer_full = {}
+    for key in ["consumerDiscount", "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount"]:
+        actual = max(0.0, num(s.get(key)))
+        if actual <= 0:
+            continue
+        m = master.get(key)
+        if m:
+            max_total = num(m.get("totalBenefit")) or (num(m.get("dealerShare")) + num(m.get("companyShare")))
+            offer_full[key] = round2(min(actual, max_total)) if max_total > 0 else round2(actual)
+        else:
+            offer_full[key] = round2(actual)
+    waterfall = {}
+    if mode == "Partial Benefit" and not (isinstance(breakup, dict) and any(k in breakup for k in offer_full)):
+        waterfall = _offer_partial_waterfall(s, offer_full)
+
+    components = []
+
+    def _push(key, label, scheme_available, oem_share, dealer_funded_share, source):
+        scheme_available = round2(max(0.0, num(scheme_available)))
+        oem_share = round2(max(0.0, num(oem_share)))
+        dealer_funded_share = round2(max(0.0, num(dealer_funded_share)))
+        customer_benefit = _component_customer_benefit(
+            key, scheme_available, mode, breakup, s, waterfall)
+        # Never invent negative retention — clamp at 0 unless an explicit rule
+        # requires it (none does under this contract).
+        dealer_retained = round2(max(0.0, scheme_available - customer_benefit))
+        components.append({
+            "key": key,
+            "label": label,
+            "schemeAvailable": scheme_available,
+            "oemShare": oem_share,
+            "dealerFundedShare": dealer_funded_share,
+            "customerBenefit": customer_benefit,
+            "dealerRetained": dealer_retained,
+            "oemClaimable": oem_share,
+            "source": source,
+        })
+
+    # --- Staff-entered OEM offer components ---
+    for key in ["consumerDiscount", "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount"]:
+        if key not in offer_full:
+            continue
+        scheme_available = offer_full[key]
+        m = master.get(key)
+        if m:
+            # Company-share-first: OEM claimable capped by available; dealer funded
+            # takes the remainder up to its master share.
+            oem_share = round2(min(num(m.get("companyShare")), scheme_available))
+            dealer_funded_share = round2(min(
+                num(m.get("dealerShare")), max(0.0, scheme_available - oem_share)))
+            label = m.get("label") or SCHEME_COMPONENT_LABELS.get(key, key)
+        else:
+            # No Scheme Master row — treat the typed offer as 100% company-funded.
+            oem_share = scheme_available
+            dealer_funded_share = 0.0
+            label = SCHEME_COMPONENT_LABELS.get(key, key)
+        _push(key, label, scheme_available, oem_share, dealer_funded_share, "offer")
+
+    # --- Dealer-funded additional discount (always passed; never claimable) ---
+    addl = max(0.0, num(s.get("additionalDiscount")))
+    if addl > 0:
+        _push("additionalDiscount", "Additional Discount", addl, 0.0, addl, "dealer")
+
+    # --- Entitlement components from Scheme Master (not staff-typed offers) ---
+    for auto_key in AUTO_SCHEME_COMPONENT_KEYS:
+        m = master.get(auto_key)
+        if not m:
+            continue
+        company = round2(num(m.get("companyShare")))
+        dealer = round2(num(m.get("dealerShare")))
+        total = round2(num(m.get("totalBenefit")) or (company + dealer))
+        if total <= 0 and company <= 0:
+            continue
+        label = m.get("label") or SCHEME_COMPONENT_LABELS.get(auto_key, auto_key)
+        _push(auto_key, label, total, company, dealer, "entitlement")
+
+    totals = {
+        "schemeAvailable": round2(sum(c["schemeAvailable"] for c in components)),
+        "customerBenefit": round2(sum(c["customerBenefit"] for c in components)),
+        "dealerRetained": round2(sum(c["dealerRetained"] for c in components)),
+        "oemClaimable": round2(sum(c["oemClaimable"] for c in components)),
+        "dealerFundedShare": round2(sum(c["dealerFundedShare"] for c in components)),
+        "oemShare": round2(sum(c["oemShare"] for c in components)),
+    }
+    by_key = {c["key"]: c for c in components}
+    return {
+        "components": components,
+        "totals": totals,
+        "byKey": by_key,
+        "benefitMode": mode,
+        "schemeMonth": scheme_month_from_date(booking_date),
+        "model": model,
+        "variant": variant,
+        "shareSplitAvailable": bool(master) or bool(components),
+    }
+
+
+def compute_scheme_income_breakdown(s, scheme_rows):
+    """Dealer retained income + OEM claim total per component.
+
+    Thin adapter over compute_scheme_allocation — do NOT invent a second formula.
+    retained = schemeAvailable − customerBenefit
+    oemClaim = oemShare (authoritative company share)
+    """
+    alloc = compute_scheme_allocation(s, scheme_rows)
+    out = {
+        "retainedIncomeTotal": alloc["totals"]["dealerRetained"],
+        "retainedByComponent": {},
+        "oemClaimTotal": alloc["totals"]["oemClaimable"],
+        "oemClaimByComponent": {},
+        "dealerCostPassed": 0.0,
+        "passedByComponent": {},
+        "fullByComponent": {},
+        "shareSplitAvailable": alloc["shareSplitAvailable"],
+        "allocation": alloc,
+    }
+    for c in alloc["components"]:
+        k = c["key"]
+        if c["dealerRetained"] != 0:
+            out["retainedByComponent"][k] = c["dealerRetained"]
+        if c["oemClaimable"] > 0:
+            out["oemClaimByComponent"][k] = c["oemClaimable"]
+        if c["customerBenefit"] > 0:
+            out["passedByComponent"][k] = c["customerBenefit"]
+        if c["schemeAvailable"] > 0 and k != "additionalDiscount":
+            out["fullByComponent"][k] = c["schemeAvailable"]
+        # Dealer-funded portion that was passed through to the customer
+        if c["dealerFundedShare"] > 0 and c["customerBenefit"] > 0:
+            passed_dealer = min(c["dealerFundedShare"], c["customerBenefit"])
+            out["dealerCostPassed"] = round2(out["dealerCostPassed"] + passed_dealer)
     return out
 
 
 def compute_scheme_claim_shares(s, scheme_rows, approvals=None):
-    """Company-share amounts for claim register: display (all) vs eligible (DSA needs approval)."""
+    """Company-share amounts for claim register: display (all) vs eligible (DSA needs approval).
+
+    Reads oemClaimable from compute_scheme_allocation — never invents a parallel total.
+    """
     approvals = approvals or {}
-    model = str(s.get("model") or s.get("interestedModel") or "").strip()
-    variant = str(s.get("variant") or "").strip()
-    booking_date = s.get("bookingDate") or ""
-    offers_all = _oem_offers(s)
-    offers_eligible = {}
-    for key, amt in offers_all.items():
-        pol = COMPONENT_POLICY.get(key)
-        status = approvals.get(key) or "Pending"
-        # DSA applied on a booked deal is treated approved unless explicitly rejected
-        if key == "dsaDiscount" and pol and pol["approvalRequired"] and status == "Pending" and amt > 0:
-            status = "Approved"
-        if pol and pol["approvalRequired"] and status != "Approved":
-            continue
-        offers_eligible[key] = amt
+    alloc = compute_scheme_allocation(s, scheme_rows)
     out = {"displayByComponent": {}, "eligibleByComponent": {},
-           "displayTotal": 0.0, "eligibleTotal": 0.0, "shareSplitAvailable": False}
-    if model and scheme_rows:
-        disp = scheme_share_split_for(model, variant, booking_date, offers_all, scheme_rows)["byComponent"]
-        elig = scheme_share_split_for(model, variant, booking_date, offers_eligible, scheme_rows)["byComponent"]
-        for k, v in disp.items():
-            c = num(v.get("companyShare"))
-            if c > 0:
-                out["displayByComponent"][k] = c
-                out["displayTotal"] = round2(out["displayTotal"] + c)
-        for k, v in elig.items():
-            c = num(v.get("companyShare"))
-            if c > 0:
-                out["eligibleByComponent"][k] = c
-                out["eligibleTotal"] = round2(out["eligibleTotal"] + c)
-        has_oem_offer = len(offers_all) > 0
-        out["shareSplitAvailable"] = (out["displayTotal"] > 0) if has_oem_offer else True
-        return out
-    for k, amt in offers_all.items():
-        out["displayByComponent"][k] = amt
-        out["displayTotal"] = round2(out["displayTotal"] + amt)
-    for k, amt in offers_eligible.items():
-        out["eligibleByComponent"][k] = amt
-        out["eligibleTotal"] = round2(out["eligibleTotal"] + amt)
+           "displayTotal": 0.0, "eligibleTotal": 0.0,
+           "shareSplitAvailable": alloc["shareSplitAvailable"],
+           "allocation": alloc}
+    for c in alloc["components"]:
+        claimable = c["oemClaimable"]
+        if claimable <= 0:
+            continue
+        k = c["key"]
+        out["displayByComponent"][k] = claimable
+        out["displayTotal"] = round2(out["displayTotal"] + claimable)
+        pol = COMPONENT_POLICY.get(k)
+        status = approvals.get(k) or "Pending"
+        if k == "dsaDiscount" and pol and pol.get("approvalRequired") and status == "Pending" and claimable > 0:
+            status = "Approved"
+        if pol and pol.get("approvalRequired") and status != "Approved":
+            continue
+        out["eligibleByComponent"][k] = claimable
+        out["eligibleTotal"] = round2(out["eligibleTotal"] + claimable)
     return out
 
 
@@ -680,10 +889,18 @@ def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows
             "key": key,
             "label": m.get("label") or SCHEME_COMPONENT_LABELS.get(key, key),
             "dealerShare": dealer, "companyShare": company, "totalBenefit": total,
+            # Allocation contract fields (Scheme Master is authoritative for these).
+            "schemeAvailable": total,
+            "oemShare": company,
+            "dealerFundedShare": dealer,
+            "oemClaimable": company,
             "automatic": True,
-            "hint": f"Automatic entitlement — claimed from OEM at ₹{company} "
-                    f"company share{f' (dealer funds ₹{dealer})' if dealer > 0 else ''}. "
-                    f"Not entered by staff.",
+            "allocatable": True,
+            "hint": (
+                f"Scheme entitlement — available ₹{total}. OEM claimable ₹{company}"
+                + (f"; dealer funds ₹{dealer}" if dealer > 0 else "")
+                + f". Dealer chooses how much of the ₹{total} to pass to the customer."
+            ),
         })
     return {"schemeMonth": month, "model": model_disp, "variant": variant_disp,
             "modelFamily": family, "matchedComponents": master_keys, "rules": rules,
@@ -725,17 +942,21 @@ def validate_scheme_offers(model, variant, booking_date, offers, scheme_rows):
 
 
 def compute_full_commercials(s, scheme_rows=None):
-    """Convenience: returns totals + margin + claim (+ scheme share-split when scheme rows given)."""
-    totals = compute_commercial_totals(s)
+    """Convenience: returns totals + margin + claim (+ scheme allocation when scheme rows given)."""
+    totals = compute_commercial_totals(s, scheme_rows)
     margin = compute_dealer_margin(s)
     claim = derive_claim(s)
     result = {**totals, "margin": margin, "claim": claim}
     if scheme_rows is not None:
+        alloc = compute_scheme_allocation(s, scheme_rows)
         income = compute_scheme_income_breakdown(s, scheme_rows)
         shares = compute_scheme_claim_shares(s, scheme_rows)
+        result["schemeAllocation"] = alloc
         result["schemeIncome"] = income
         result["schemeClaimShares"] = shares
-        # Report-facing truths derived from the share split
+        # Report-facing truths — all from the single allocation engine
         result["oemClaimCompanyShare"] = shares["eligibleTotal"]
         result["dealerSchemeRetained"] = income["retainedIncomeTotal"]
+        result["schemeCustomerBenefit"] = alloc["totals"]["customerBenefit"]
+        result["schemeOemClaimable"] = alloc["totals"]["oemClaimable"]
     return result

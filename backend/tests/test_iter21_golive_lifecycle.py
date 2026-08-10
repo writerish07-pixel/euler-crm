@@ -156,14 +156,18 @@ async def test_complete_golive_lifecycle(client):
     de = lead["dealerTotalEarnings"]
     assert de == ce.round2(
         lead["dealerMarginNetExGst"] + lead["dealerSchemeRetained"]
-        + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]), \
+        + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
+        + ce.num(lead.get("dealerInsuranceIncome"))), \
         "dealer total earnings must be the sum of its components"
     # Independence: dealer earnings are not the customer's money.
     assert de != lead["customerPayable"]
     assert lead["customerOutstanding"] == 0
     parts = ["consumerRetained", "exchangeRetained", "loyaltyRetained",
-             "referralRetained", "dsaRetained"]
+             "referralRetained", "dsaRetained",
+             "insuranceBenefitRetained", "rtoBenefitRetained", "rtoInsuranceBenefitRetained"]
     assert ce.round2(sum(ce.num(lead[p]) for p in parts)) == ce.round2(lead["dealerSchemeRetained"])
+    # HiCity Aug: Full Benefit on offers + entitlement CB default 0 → retain RTO+Insurance
+    assert lead["dealerSchemeRetained"] == 20000
 
     # Recording a financer disbursement must not touch the customer.
     r = await client.post(f"/api/finance/{fn}/receipt",
