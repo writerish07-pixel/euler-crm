@@ -122,6 +122,27 @@ def test_lead_register_insurance_benefit_resolves_after_loyalty():
     assert headers[mapping["insuranceBenefit"]] == "Insurance Benefit"
 
 
+def test_claim_register_has_independent_scheme_amount_columns():
+    """Claim Register must resolve every scheme amount column independently."""
+    tab, fields = SYNC_MAP["claims"][0], SYNC_MAP["claims"][2]
+    needed = ["loyaltyBonus", "insuranceBenefit", "rtoBenefit", "rtoInsuranceBenefit",
+              "consumerDiscount", "exchangeBonus", "referralBonus", "dsaDiscount",
+              "additionalDiscount"]
+    for f in needed:
+        assert f in fields, f
+    mapping, missing = resolve(tab, needed)
+    assert missing == [], missing
+    # No two scheme fields may collapse onto one column.
+    seen = {}
+    for f in needed:
+        seen.setdefault(mapping[f], []).append(f)
+    collisions = {i: fs for i, fs in seen.items() if len(fs) > 1}
+    assert collisions == {}
+    _hr, headers = LIVE_HEADERS[tab]
+    assert headers[mapping["insuranceBenefit"]] == "Insurance Benefit"
+    assert mapping["insuranceBenefit"] == mapping["loyaltyBonus"] + 1
+
+
 # --------------------------------------------------------------- phase 3
 # Columns that had no mapping AND no obvious camelCase field, but whose value the CRM
 # either already captured under a different name or can derive from data it holds.

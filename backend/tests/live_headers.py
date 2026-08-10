@@ -28,7 +28,7 @@ LIVE_HEADERS = {
     ),
     'Scheme Claim Register': (
         1,
-        ['Claim ID', 'Source', 'Booking ID', 'Lead ID', 'Customer', 'Model', 'Variant', 'Booking Date', 'Scheme Month', 'Executive', 'Component', 'Component Key', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Referral Bonus', 'DSA Discount', 'Additional Discount', 'Total Discount', 'Dealer Discount', 'OEM Discount', 'DSA Approval', 'Claim Required', 'Eligible Claim', 'Claim Amount', 'Received Amount', 'Claim Status', 'Claim Reference Number', 'Claim Submitted Date', 'Claim Approved Date', 'Claim Received Date', 'Claim Ageing (Days)', 'Claim Remarks'],
+        ['Claim ID', 'Source', 'Booking ID', 'Lead ID', 'Customer', 'Model', 'Variant', 'Booking Date', 'Scheme Month', 'Executive', 'Component', 'Component Key', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Insurance Benefit', 'Referral Bonus', 'DSA Discount', 'Additional Discount', 'RTO Benefit', 'RTO Insurance Benefit', 'Total Discount', 'Dealer Discount', 'OEM Discount', 'DSA Approval', 'Claim Required', 'Eligible Claim', 'Claim Amount', 'Received Amount', 'Claim Status', 'Claim Reference Number', 'Claim Submitted Date', 'Claim Approved Date', 'Claim Received Date', 'Claim Ageing (Days)', 'Claim Remarks'],
     ),
     'Insurance Register': (
         1,

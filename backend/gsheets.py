@@ -90,7 +90,8 @@ SYNC_MAP = {
                 # Already derivable from the lead / booking / scheme split — these were
                 # simply never mapped, which is why Scheme Month was blank on all 17 rows.
                 "bookingId", "schemeMonth", "executive", "consumerDiscount", "exchangeBonus",
-                "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount",
+                "loyaltyBonus", "insuranceBenefit", "referralBonus", "dsaDiscount",
+                "additionalDiscount", "rtoBenefit", "rtoInsuranceBenefit",
                 "totalDiscount", "dealerDiscount", "oemDiscount", "claimRequired",
                 "ageingDays",
                 # Newly sourced on the claim record itself.
@@ -187,6 +188,8 @@ HEADER_ALIASES = {
     "altMobile": ["alternate mobile"],
     "dsaDiscount": ["dsa bonus", "dsa discount"],
     "insuranceBenefit": ["insurance benefit"],
+    "rtoBenefit": ["rto benefit"],
+    "rtoInsuranceBenefit": ["rto insurance benefit"],
     "dealerTotalEarnings": ["dealer earnings", "total dealer earnings"],
     "nextFollowupDate": ["next follow-up date", "next followup date"],
     # Booking Register
