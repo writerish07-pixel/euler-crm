@@ -63,10 +63,14 @@ def _assert_invariants(alloc):
         assert abs(c["schemeAvailable"] - (c["customerBenefit"] + c["dealerRetained"])) < 0.01
         assert c["oemClaimable"] <= c["schemeAvailable"] + 0.01
         assert c["oemClaimable"] == c["oemShare"]
+        expected_funded = ce.round2(max(
+            0.0, min(c["dealerFundedShare"], max(0.0, c["customerBenefit"] - c["oemShare"]))))
+        assert c["dealerFundedBenefit"] == expected_funded
     t = alloc["totals"]
     assert abs(t["customerBenefit"] - sum(c["customerBenefit"] for c in alloc["components"])) < 0.01
     assert abs(t["dealerRetained"] - sum(c["dealerRetained"] for c in alloc["components"])) < 0.01
     assert abs(t["oemClaimable"] - sum(c["oemClaimable"] for c in alloc["components"])) < 0.01
+    assert abs(t["dealerFundedBenefit"] - sum(c["dealerFundedBenefit"] for c in alloc["components"])) < 0.01
 
 
 def _explicit(breakup, used=None):

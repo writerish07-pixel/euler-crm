@@ -50,7 +50,8 @@ SYNC_MAP = {
                "accessoriesAmount", "handlingCharges", "trc", "fastag", "extendedWarranty",
                "otherCharges", "grossVehicleCost", "customerPayable", "financerName",
                "financeFileNumber", "lastPaymentMode", "totalReceived", "consumerDiscount",
-               "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount",
+               "exchangeBonus", "loyaltyBonus", "insuranceBenefit", "referralBonus", "dsaDiscount",
+               "additionalDiscount",
                "totalDiscount", "oemSchemeAmount", "dealerSchemeAmount", "customerOutstanding",
                "companyOutstanding", "insurerName", "invoiceNumber", "chassisNumber", "numberPlate",
                "dealerTotalEarnings",
@@ -125,11 +126,6 @@ SYNC_MAP = {
                         "lastUpdated", "createdBy", "timestamp", "remarks",
                         # Newly sourced: attribution + lifecycle position.
                         "modifiedBy", "currentStage"], None),
-    # Lead Register has Loyalty Bonus but NO live "Insurance Benefit" column
-    # (LIVE_HEADERS / Euler Master). Insurance Benefit projects via:
-    #   1) Scheme Claim Register rows (componentKey=insuranceBenefit)
-    #   2) Dealer Earnings "Customer Insurance Benefit Passed"
-    #   3) Mongo lead.insuranceBenefit / customerInsuranceBenefitPassed
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.
@@ -190,6 +186,7 @@ HEADER_ALIASES = {
     # Lead Register
     "altMobile": ["alternate mobile"],
     "dsaDiscount": ["dsa bonus", "dsa discount"],
+    "insuranceBenefit": ["insurance benefit"],
     "dealerTotalEarnings": ["dealer earnings", "total dealer earnings"],
     "nextFollowupDate": ["next follow-up date", "next followup date"],
     # Booking Register
