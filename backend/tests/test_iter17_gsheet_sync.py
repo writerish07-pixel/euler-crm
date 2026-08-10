@@ -126,20 +126,12 @@ class FakeService:
 
 
 def make_sheet():
-    """EXACT structure of the live Euler Master (2).xlsx workbook:
-    real tab names, real header text, real column order — including the Lead
-    Register whose real database header is on ROW 3 starting at column J, with
-    rows 1-2 being the SEARCH/helper area the CRM must never write into."""
+    """EXACT structure of the live Euler Master workbook: real tab names, real
+    header text, real column order. Lead Register is a normal register — header
+    in row 1 starting at column A, lead rows below (same shape as every other tab)."""
     return {
         "Lead Register": [
-            # row 1 = search/helper header, row 2 = helper data, row 3 = REAL header
-            ["SEARCH", "Lead ID", "Mobile", "Customer Name",
-             "\u2192 Use CRM menu > Search Lead, or filter column below"],
-            ["LD26000001", "2026-08-08", "First Real Lead", "9800000001", "Walk-in",
-             "Turbo Max", "City (PV)", "", "New"],
-            ["LD26000008", "2026-07-04", "Sher Singh", "7023644243", "Phone", "Hi-Load",
-             "XR (PV)", "Payal", "New",
-             "Lead ID", "Created Date", "Customer Name", "Mobile", "Alternate Mobile",
+            ["Lead ID", "Created Date", "Customer Name", "Mobile", "Alternate Mobile",
              "Village", "City", "Lead Source", "Interested Model", "Variant", "Executive",
              "Current Status", "Priority", "Budget", "Last Activity", "Next Follow-up Date",
              "Next Follow-up Time", "Booking Date", "Booking Amount", "Finance Required",
@@ -150,8 +142,8 @@ def make_sheet():
              "Handling Charges", "TRC", "Fastag", "Extended Warranty", "Other Charges",
              "Gross Vehicle Cost", "Customer Payable", "Financer Name", "Finance File Number",
              "Last Payment Mode", "Total Received", "Consumer Discount", "Exchange Bonus",
-             "Loyalty Bonus", "Referral Bonus", "DSA Bonus", "Additional Discount",
-             "Total Discount", "OEM Scheme Amount", "Dealer Scheme Amount",
+             "Loyalty Bonus", "Insurance Benefit", "Referral Bonus", "DSA Bonus",
+             "Additional Discount", "Total Discount", "OEM Scheme Amount", "Dealer Scheme Amount",
              "Customer Outstanding", "Company Outstanding", "Insurer Name", "Invoice Number",
              "Chassis Number", "Number Plate", "Insurance Status", "Registration Status",
              "Invoice Status", "RC Status", "PDI Status", "Dealer Earnings"],
@@ -226,19 +218,18 @@ def sheet(monkeypatch):
 
 
 def rows(tabs, tab):
-    """Data rows below the tab's header row (Lead Register's real header is row 3)."""
-    return tabs[tab][3:] if tab == "Lead Register" else tabs[tab][1:]
+    """Data rows below the tab's header row (row 1 for every register)."""
+    return tabs[tab][1:]
 
 
 def hdr(tabs, tab):
-    return tabs[tab][2] if tab == "Lead Register" else tabs[tab][0]
+    return tabs[tab][0]
 
 
 # ---------------------------------------------------------------- GS-1
 @pytest.mark.asyncio
 async def test_header_based_mapping_not_positional(sheet):
-    """Lead ID is column B in this sheet, not column A. A positional writer would
-    corrupt every row; the header-mapped writer must place values correctly."""
+    """Values are placed by header name, not by CRM field list position."""
     tabs, _ = sheet
     res = await gsheets.sync("leads", {
         "leadId": "LD1", "createdDate": "2026-08-01", "customerName": "Asha",
@@ -246,17 +237,17 @@ async def test_header_based_mapping_not_positional(sheet):
         "variant": "XR", "executive": "Amit", "currentStatus": "New"})
     assert res["ok"] and res["operation"] == "appended"
     row = rows(tabs, "Lead Register")[0]
-    hdr = tabs["Lead Register"][2]
-    assert row[hdr.index("Lead ID")] == "LD1"
-    assert row[hdr.index("Customer Name")] == "Asha"
-    assert row[hdr.index("Created Date")] == "2026-08-01"
+    header = tabs["Lead Register"][0]
+    assert row[header.index("Lead ID")] == "LD1"
+    assert row[header.index("Customer Name")] == "Asha"
+    assert row[header.index("Created Date")] == "2026-08-01"
 
 
 @pytest.mark.asyncio
 async def test_missing_id_header_refuses_to_write(sheet):
     """If the ID header is absent we must refuse, never guess a column."""
     tabs, values = sheet
-    tabs["Lead Register"][2] = ["Created Date", "Customer Name", "Mobile"]
+    tabs["Lead Register"][0] = ["Created Date", "Customer Name", "Mobile"]
     gsheets.invalidate_header_cache()
     res = await gsheets.sync("leads", {"leadId": "LD9", "customerName": "X"})
     assert res["ok"] is False
@@ -277,9 +268,9 @@ async def test_lead_update_updates_same_row(sheet):
     r3 = await gsheets.sync("leads", {**base, "customerName": "Asha Devi", "currentStatus": "Delivered"})
     assert r2["operation"] == "updated" and r3["operation"] == "updated"
     assert len(rows(tabs, "Lead Register")) == 1, "must never append a second row"
-    hdr = tabs["Lead Register"][2]
-    assert rows(tabs, "Lead Register")[0][hdr.index("Current Status")] == "Delivered"
-    assert rows(tabs, "Lead Register")[0][hdr.index("Customer Name")] == "Asha Devi"
+    header = tabs["Lead Register"][0]
+    assert rows(tabs, "Lead Register")[0][header.index("Current Status")] == "Delivered"
+    assert rows(tabs, "Lead Register")[0][header.index("Customer Name")] == "Asha Devi"
 
 
 @pytest.mark.asyncio
@@ -335,45 +326,39 @@ async def test_delivery_repeat_does_not_duplicate(sheet):
 @pytest.mark.asyncio
 async def test_formula_and_unmapped_columns_preserved(sheet):
     """Real Lead Register columns: "Total Discount" is mapped but may hold a sheet
-    formula; "Last Activity" and "Registration Status" are real columns the CRM does
-    not own. None of them may be touched."""
+    formula; "Next Follow-up Time" is SOURCE_REQUIRED / not written by sync. None of
+    them may be overwritten incorrectly."""
     tabs, _ = sheet
     await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha", "currentStatus": "New"})
-    hdr = tabs["Lead Register"][2]
-    row = tabs["Lead Register"][3]
-    row[hdr.index("Total Discount")] = "=BF4+BG4+BH4"        # sheet formula, mapped column
-    row[hdr.index("Last Activity")] = "called customer"       # staff input, unmapped
-    row[hdr.index("Registration Status")] = "Pending RTO"     # dealership-owned, unmapped
+    header = tabs["Lead Register"][0]
+    row = tabs["Lead Register"][1]
+    row[header.index("Total Discount")] = "=BF2+BG2+BH2"        # sheet formula, mapped column
+    row[header.index("Next Follow-up Time")] = "10:30"          # dealership-owned / unmapped write
 
     await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha Devi",
                                  "currentStatus": "Delivered", "totalDiscount": 99999})
-    row = tabs["Lead Register"][3]
-    assert row[hdr.index("Total Discount")] == "=BF4+BG4+BH4", "formula in mapped column overwritten"
-    assert row[hdr.index("Last Activity")] == "called customer", "unmapped staff column altered"
-    assert row[hdr.index("Registration Status")] == "Pending RTO", "unmapped column altered"
-    assert row[hdr.index("Customer Name")] == "Asha Devi", "normal cell should still update"
-    assert row[hdr.index("Current Status")] == "Delivered"
+    row = tabs["Lead Register"][1]
+    assert row[header.index("Total Discount")] == "=BF2+BG2+BH2", "formula in mapped column overwritten"
+    assert row[header.index("Next Follow-up Time")] == "10:30", "unmapped column altered"
+    assert row[header.index("Customer Name")] == "Asha Devi", "normal cell should still update"
+    assert row[header.index("Current Status")] == "Delivered"
 
 
 @pytest.mark.asyncio
-async def test_search_helper_area_never_touched(sheet):
-    """Lead Register rows 1-2 (cols A:I) are the SEARCH/helper area. CRM writes
-    target the real table at row 3+ / column J+ and must leave A:I untouched."""
+async def test_header_row_stays_at_row_1(sheet):
+    """Lead Register header is permanently row 1; sync must not push it down."""
     tabs, _ = sheet
-    before_r1 = list(tabs["Lead Register"][0])
-    before_r2 = list(tabs["Lead Register"][1])
+    before_header = list(tabs["Lead Register"][0])
     await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "New Name",
                                  "currentStatus": "Booked"})
     await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "Newer Name"})
-    assert tabs["Lead Register"][0] == before_r1, "search header row modified"
-    assert tabs["Lead Register"][1] == before_r2, "search helper data row modified"
-    # the helper row 2 also contains 'LD26000001' in col A — it must NOT be matched as
-    # the target row; the real record goes below the row-3 header.
-    hdr = tabs["Lead Register"][2]
+    assert tabs["Lead Register"][0] == before_header, "header row modified or shifted"
+    header = tabs["Lead Register"][0]
     data = rows(tabs, "Lead Register")
     assert len(data) == 1
-    assert data[0][hdr.index("Lead ID")] == "LD26000001"
-    assert data[0][hdr.index("Customer Name")] == "Newer Name"
+    assert data[0][header.index("Lead ID")] == "LD26000001"
+    assert data[0][header.index("Customer Name")] == "Newer Name"
+    assert header[0] == "Lead ID"
 
 
 @pytest.mark.asyncio
@@ -382,11 +367,11 @@ async def test_partial_update_does_not_blank_other_fields(sheet):
     await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha",
                                  "mobile": "9000000001", "executive": "Amit"})
     await gsheets.sync("leads", {"leadId": "LD1", "currentStatus": "Booked"})
-    hdr = tabs["Lead Register"][2]
-    row = tabs["Lead Register"][3]
-    assert row[hdr.index("Mobile")] == "9000000001"
-    assert row[hdr.index("Executive")] == "Amit"
-    assert row[hdr.index("Current Status")] == "Booked"
+    header = tabs["Lead Register"][0]
+    row = tabs["Lead Register"][1]
+    assert row[header.index("Mobile")] == "9000000001"
+    assert row[header.index("Executive")] == "Amit"
+    assert row[header.index("Current Status")] == "Booked"
 
 
 # ---------------------------------------------------------------- GS-4
@@ -469,8 +454,8 @@ async def test_preflight_reports_mapping_and_gaps(sheet):
     rep = gsheets.preflight()
     assert rep["enabled"] is True
     assert rep["tabs"]["leads"]["willSync"] is True
-    assert rep["tabs"]["leads"]["resolved"]["leadId"] == "J"
-    assert rep["tabs"]["leads"]["headerRow"] == 3
+    assert rep["tabs"]["leads"]["resolved"]["leadId"] == "A"
+    assert rep["tabs"]["leads"]["headerRow"] == 1
     bk = rep["tabs"]["bookings"]
     assert bk["willSync"] is True
     assert "bookingAmount" in bk["missingHeaders"]

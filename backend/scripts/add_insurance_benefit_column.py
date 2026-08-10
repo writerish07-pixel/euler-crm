@@ -3,10 +3,9 @@
 
 Safety rules (production Euler Master):
   * Find headers by TEXT, never by fixed column numbers.
-  * Only touch Lead Register header row (default 3).
+  * Only touch Lead Register header row (default 1 — normal register layout).
   * Insert one column after Loyalty Bonus if Insurance Benefit is missing.
-  * Never clear(), never reorder rows, never touch A:I helper area contents
-    beyond the structural column insert that Sheets applies to the whole grid.
+  * Never clear(), never reorder rows.
   * Refuse to run if Loyalty Bonus header is not found.
   * No-op if Insurance Benefit already exists.
 
@@ -85,7 +84,7 @@ def main():
     dry = "--dry-run" in sys.argv
     svc, sheet_id, cred_src = _service()
     sheet_gid, grid = _sheet_meta(svc, sheet_id)
-    header_row = int(os.environ.get("GSHEET_HEADERROW_LEADS", "").strip() or "3")
+    header_row = int(os.environ.get("GSHEET_HEADERROW_LEADS", "").strip() or "1")
     headers = _read_header_row(svc, sheet_id, header_row)
 
     def find(name):

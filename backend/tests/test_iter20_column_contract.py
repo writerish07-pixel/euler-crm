@@ -166,10 +166,7 @@ def test_newly_sourced_columns_resolve_live(entity, fields):
 
 
 def test_every_operational_column_is_either_mapped_or_declared_source_required():
-    """The contract's central promise: no operational column is silently unaccounted for.
-
-    Lead Register A:I is excluded — it is the staff search/helper area, owned by the
-    sheet, and is deliberately never written."""
+    """The contract's central promise: no operational column is silently unaccounted for."""
     unaccounted = []
     for entity, spec in SYNC_MAP.items():
         tab, fields = spec[0], spec[2]
@@ -177,8 +174,6 @@ def test_every_operational_column_is_either_mapped_or_declared_source_required()
         mapping, _ = resolve(tab, fields)
         owned = set(mapping.values())
         for i, header in enumerate(headers):
-            if tab == "Lead Register" and i < 9:
-                continue                      # protected search/helper area
             if not str(header).strip() or i in owned:
                 continue
             if (tab, header) in gsheets.SOURCE_REQUIRED:
@@ -212,20 +207,16 @@ def test_preflight_reports_source_required(monkeypatch):
     assert isinstance(gsheets.SOURCE_REQUIRED, dict) and gsheets.SOURCE_REQUIRED
 
 
-def test_lead_register_header_is_row_3_and_starts_at_column_J():
-    """Rows 1-2 and columns A:I are the staff search/helper area — never written."""
+def test_lead_register_header_is_row_1_and_starts_at_column_A():
+    """Lead Register matches every other tab: header in A1, leads from A2 downward."""
     hr, headers = LIVE_HEADERS["Lead Register"]
-    assert hr == 3
-    assert headers[9] == "Lead ID"
+    assert hr == 1
+    assert headers[0] == "Lead ID"
+    assert "Insurance Benefit" in headers
     mapping, _ = resolve("Lead Register", SYNC_MAP["leads"][2])
-    assert min(mapping.values()) >= 9, "a lead field resolved into the protected A:I area"
-    assert _col_letter(mapping["leadId"]) == "J"
-
-
-def test_helper_area_is_masked_in_the_fixture():
-    """The A:I area holds live customer rows; the fixture must not carry them."""
-    _hr, headers = LIVE_HEADERS["Lead Register"]
-    assert all("masked" in h for h in headers[:9])
+    assert mapping["leadId"] == 0
+    assert _col_letter(mapping["leadId"]) == "A"
+    assert SYNC_MAP["leads"][3] == 1
 
 
 def test_insurance_benefit_columns_stay_distinct():

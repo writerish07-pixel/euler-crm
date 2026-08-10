@@ -1,9 +1,8 @@
 """The sync survives a header that is not where the hint says it is.
 
 A Google Sheets append with insertDataOption=INSERT_ROWS inserts rows wherever its
-range anchors. The Lead Register's register starts at column J with a separate
-SEARCH/helper block in A:I; anchored at A1 the API treated the helper block as the
-table and inserted rows into it, pushing the real header from row 3 down to row 22.
+range anchors. If the append anchors badly, rows can be inserted above the header
+and push it down the sheet (historically row 1 -> row 22 on Lead Register).
 
 With a hard-coded header row the sync then reads DATA as headers and silently
 mis-maps every column. These lock both halves of the fix: the header is located by
@@ -22,7 +21,7 @@ from gsheets import SYNC_MAP, _col_letter  # noqa: E402
 
 from live_headers import LIVE_HEADERS  # noqa: E402
 
-LEAD_HEADER = LIVE_HEADERS["Lead Register"][1][9:]     # real header, column J onward
+LEAD_HEADER = LIVE_HEADERS["Lead Register"][1]
 
 
 class _Exec:
@@ -34,18 +33,18 @@ class _Exec:
 
 
 class ShiftedValues:
-    """Lead Register in the state the live sheet was found in: SEARCH labels on row 1,
-    19 lead rows at rows 2-20 (columns J+), blank row 21, real header on row 22."""
+    """Lead Register after a bad append shifted the header: 19 lead rows at
+    rows 1-19, blank row 20, real header on row 21 (or configurable)."""
 
-    def __init__(self, header_row=22, n_data=19):
+    def __init__(self, header_row=21, n_data=19):
         self.header_row = header_row
         self.appended = []
-        grid = [["SEARCH", "Lead ID", "Mobile", "Customer Name"]]
+        grid = []
         for i in range(n_data):
-            grid.append([""] * 9 + [f"LD260000{i + 1:02d}", "2026-08-09", f"Customer {i + 1}"])
+            grid.append([f"LD260000{i + 1:02d}", "2026-08-09", f"Customer {i + 1}"])
         while len(grid) < header_row - 1:
             grid.append([])                              # blank separator row(s)
-        grid.append([""] * 9 + list(LEAD_HEADER))        # the real header
+        grid.append(list(LEAD_HEADER))                   # the real header
         self.grid = grid
 
     def get(self, spreadsheetId=None, range=None, valueRenderOption=None, **kw):
@@ -104,56 +103,54 @@ def install(monkeypatch, values):
     return values
 
 
-def test_locate_header_row_finds_a_header_that_moved_to_row_22(monkeypatch):
-    v = install(monkeypatch, ShiftedValues())
-    found = gsheets.locate_header_row("Lead Register", SYNC_MAP["leads"][2], hint=3)
-    assert found == 22, f"header not located; would have read row 3 (lead data) as headers, got {found}"
+def test_locate_header_row_finds_a_header_that_moved_down(monkeypatch):
+    v = install(monkeypatch, ShiftedValues(header_row=21))
+    found = gsheets.locate_header_row("Lead Register", SYNC_MAP["leads"][2], hint=1)
+    assert found == 21, f"header not located; would have read lead data as headers, got {found}"
 
 
 def test_header_row_for_overrides_a_stale_hint(monkeypatch):
-    """SYNC_MAP still hints row 3; the sheet says 22. The sheet wins."""
-    install(monkeypatch, ShiftedValues())
-    assert SYNC_MAP["leads"][3] == 3
-    assert gsheets._header_row_for("leads", "Lead Register") == 22
+    """SYNC_MAP hints row 1; the sheet says 21. The sheet wins."""
+    install(monkeypatch, ShiftedValues(header_row=21))
+    assert SYNC_MAP["leads"][3] == 1
+    assert gsheets._header_row_for("leads", "Lead Register") == 21
 
 
 def test_columns_resolve_correctly_against_the_relocated_header(monkeypatch):
-    install(monkeypatch, ShiftedValues())
+    install(monkeypatch, ShiftedValues(header_row=21))
     hr = gsheets._header_row_for("leads", "Lead Register")
     mapping, missing = gsheets._resolve_columns("Lead Register", SYNC_MAP["leads"][2],
                                                 use_cache=False, header_row=hr)
     assert missing == [], f"unresolved fields against relocated header: {missing}"
-    assert _col_letter(mapping["leadId"]) == "J"
-    assert min(mapping.values()) >= 9, "a lead field mapped into the protected A:I area"
+    assert _col_letter(mapping["leadId"]) == "A"
+    assert mapping["leadId"] == 0
 
 
 def test_unshifted_sheet_still_uses_its_normal_header_row(monkeypatch):
-    """The fix must not disturb a well-formed tab: header on row 3, data below."""
-    v = ShiftedValues(header_row=3, n_data=0)
-    v.grid = [["SEARCH", "Lead ID", "Mobile"], [], [""] * 9 + list(LEAD_HEADER),
-              [""] * 9 + ["LD26000001", "2026-08-09", "Real Customer"]]
+    """The fix must not disturb a well-formed tab: header on row 1, data below."""
+    v = ShiftedValues(header_row=1, n_data=0)
+    v.grid = [list(LEAD_HEADER),
+              ["LD26000001", "2026-08-09", "Real Customer"]]
     install(monkeypatch, v)
-    assert gsheets._header_row_for("leads", "Lead Register") == 3
+    assert gsheets._header_row_for("leads", "Lead Register") == 1
 
 
 def test_a_row_of_lead_data_is_never_mistaken_for_the_header(monkeypatch):
-    """Row 2 holds lead IDs, not header labels — it must score far below the header."""
-    v = install(monkeypatch, ShiftedValues())
-    assert gsheets.locate_header_row("Lead Register", SYNC_MAP["leads"][2], hint=3) != 2
+    """Row 1 holds lead IDs, not header labels — it must score far below the header."""
+    v = install(monkeypatch, ShiftedValues(header_row=21))
+    assert gsheets.locate_header_row("Lead Register", SYNC_MAP["leads"][2], hint=1) != 1
 
 
 @pytest.mark.asyncio
-async def test_append_anchors_on_the_register_not_on_A1(monkeypatch):
-    """A1 anchoring is what let INSERT_ROWS shift the header. The append must target
-    the first mapped column at the header row instead."""
-    v = install(monkeypatch, ShiftedValues())
+async def test_append_anchors_on_the_register_header_cell(monkeypatch):
+    """Append must target the first mapped column at the located header row."""
+    v = install(monkeypatch, ShiftedValues(header_row=21))
     res = await gsheets.sync("leads", {"leadId": "LD26999999", "customerName": "New Lead"})
     assert res["ok"] is True, res
     assert res["operation"] == "appended"
     assert v.appended, "no append was issued"
     rng = v.appended[0]
-    assert rng == "'Lead Register'!J22", f"append anchored at {rng} — must be the register's own header cell"
-    assert "!A1" not in rng
+    assert rng == "'Lead Register'!A21", f"append anchored at {rng} — must be the register's own header cell"
 
 
 @pytest.mark.asyncio

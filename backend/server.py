@@ -335,9 +335,9 @@ async def recompute_lead(lead_id):
     _dealer_funded_benefit = (
         ce.round2(ce.num(alloc["totals"].get("dealerFundedBenefit"))) if _has_auth_alloc else 0.0)
     # Insurance Scheme Benefit (entitlement) — project independently from Loyalty.
-    # Lead Register has no live "Insurance Benefit" column; Dealer Earnings Register
-    # column "Customer Insurance Benefit Passed" and Scheme Claim Register component
-    # rows (componentKey=insuranceBenefit) are the sheet projections.
+    # Lead Register has an "Insurance Benefit" column; Dealer Earnings still carries
+    # "Customer Insurance Benefit Passed"; Scheme Claim Register has a dedicated
+    # Insurance Benefit amount column keyed by componentKey=insuranceBenefit.
     _ins_comp = (alloc.get("byKey") or {}).get("insuranceBenefit") or {}
     _ins_benefit_cb = ce.round2(ce.num(_ins_comp.get("customerBenefit"))) if _has_auth_alloc else None
     _ins_benefit_avail = ce.round2(ce.num(_ins_comp.get("schemeAvailable"))) if _ins_comp else 0.0

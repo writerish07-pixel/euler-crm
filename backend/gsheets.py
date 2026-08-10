@@ -38,9 +38,9 @@ SYNC_MAP = {
     # entity -> (tab, stable ID field, CRM fields we own, header row hint)
     # Tab names and header rows are overridable by env var. header_row=None means
     # auto-detect (the row carrying the most text labels in the first few rows).
-    # Verified against Euler Master (2).xlsx: the Lead Register's real database
-    # header row is row 3 starting at column J — rows 1-2 are the SEARCH/helper
-    # area, which we never touch.
+    # Lead Register is a normal register (same shape as Booking / Claims / etc.):
+    # header permanently in row 1 starting at column A; lead rows below in sequence.
+    # (Legacy SEARCH/helper block in A:I + header at J3 was removed from the live sheet.)
     "leads": (_tab("GSHEET_TAB_LEADS", "Lead Register"), "leadId",
               ["leadId", "createdDate", "customerName", "mobile", "altMobile", "village", "city",
                "leadSource", "interestedModel", "variant", "executive", "currentStatus", "priority",
@@ -62,7 +62,7 @@ SYNC_MAP = {
                "insuranceStatus", "registrationStatus", "invoiceStatus", "rcStatus", "pdiStatus",
                # Newly sourced: attribution and activity summary (see SOURCE_REQUIRED
                # below for the Lead Register columns that still have no source).
-               "lastActivity", "lastUpdatedBy", "closedBy", "closeTimestamp"], 3),
+               "lastActivity", "lastUpdatedBy", "closedBy", "closeTimestamp"], 1),
     "activities": (_tab("GSHEET_TAB_ACTIVITIES", "Activity Log"), "activityId",
                    ["activityId", "leadId", "date", "time", "activityType", "discussion",
                     "executive", "customerName", "mobile", "model",
@@ -531,8 +531,7 @@ def _header_row_for(entity, tab):
     """Which sheet row carries this tab's real header labels.
     Env override GSHEET_HEADERROW_<ENTITY> wins; then the per-entity hint; then
     auto-detect by picking the row (of the first 5) with the most text labels.
-    The Lead Register's real database header is row 3 — rows 1-2 are the
-    SEARCH/helper area, which the CRM must never write into."""
+    Lead Register uses row 1 (normal register — header at top, data below)."""
     env = os.environ.get(f"GSHEET_HEADERROW_{entity.upper()}", "").strip()
     if env.isdigit():
         return int(env)
@@ -579,9 +578,9 @@ def locate_header_row(tab, fields, hint=1):
 
     The row number is NOT trusted as a constant. A Google Sheets `append` with
     insertDataOption=INSERT_ROWS inserts rows wherever its range anchors, which can
-    push a header down the sheet — the Lead Register's header moved from row 3 to
-    row 22 that way. With a hard-coded hint the sync then reads DATA as headers and
-    every column mapping silently becomes garbage.
+    push a header down the sheet (historically happened on Lead Register). With a
+    hard-coded hint the sync then reads DATA as headers and every column mapping
+    silently becomes garbage.
 
     So: score each of the first rows by how many expected field names it matches
     (via the same normalisation + alias table the mapping uses) and take the best.
@@ -753,15 +752,9 @@ def _upsert_sync(entity, doc):
     row = [""] * width
     for f, col_idx in mapping.items():
         row[col_idx] = doc.get(f, "")
-    # Anchor the append on the REGISTER's own header row, not on A1.
-    #
-    # A1 was wrong for any tab whose table does not start in column A. The Lead
-    # Register's register begins at column J with a separate SEARCH/helper block in
-    # A:I; anchored at A1, Sheets treated the helper block as the table and
-    # INSERT_ROWS inserted rows into it, shifting the real header down the sheet
-    # (row 3 -> row 22) and silently breaking every subsequent column mapping.
-    # Anchoring on the first mapped column at the header row makes the API detect
-    # the register itself, so rows land under the right header and nothing shifts.
+    # Anchor the append on the register's header row / first mapped column so
+    # Sheets detects the table correctly and INSERT_ROWS lands under the header
+    # without shifting it.
     first_col = _col_letter(min(mapping.values()))
     resp = _with_retry(lambda: _service.spreadsheets().values().append(
         spreadsheetId=sheet_id, range=f"'{tab}'!{first_col}{header_row}",

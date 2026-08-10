@@ -231,11 +231,13 @@ def test_read_id_column_list_preserves_duplicates_and_skips_header(monkeypatch):
     assert gsheets._read_id_column("Booking Register", 0, header_row=1) == {"BK1", "BK2", "BK3"}
 
 
-def test_read_id_column_list_respects_a_row_3_header(monkeypatch):
-    """Lead Register's real header is on row 3 — rows 1-2 are the search/helper area."""
+def test_read_id_column_list_respects_header_row(monkeypatch):
+    """ID scan skips the header row — Lead Register header is row 1 like other tabs."""
     class V:
         def get(self, spreadsheetId=None, range=None, **kw):
-            return _Exec({"values": [["SEARCH"], ["LD_HELPER"], ["Lead ID"], ["LD26000001"]]})
+            return _Exec({"values": [["Lead ID"], ["LD26000001"], ["LD26000002"]]})
 
     monkeypatch.setattr(gsheets, "_service", RecordingService(V()))
-    assert gsheets._read_id_column_list("Lead Register", 0, header_row=3) == ["LD26000001"]
+    assert gsheets._read_id_column_list("Lead Register", 0, header_row=1) == [
+        "LD26000001", "LD26000002"
+    ]
