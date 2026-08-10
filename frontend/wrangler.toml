@@ -1,0 +1,8 @@
+# Used when Cloudflare Workers Builds Root Directory is set to `frontend/`.
+# Worker dashboard name must remain `euler-crm`.
+name = "euler-crm"
+compatibility_date = "2026-08-10"
+
+[assets]
+directory = "./build"
+not_found_handling = "single-page-application"
