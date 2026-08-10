@@ -157,8 +157,9 @@ async def test_complete_golive_lifecycle(client):
     assert de == ce.round2(
         lead["dealerMarginNetExGst"] + lead["dealerSchemeRetained"]
         + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
-        + ce.num(lead.get("dealerInsuranceIncome"))), \
-        "dealer total earnings must be the sum of its components"
+        + ce.num(lead.get("dealerInsuranceIncome"))
+        - ce.num(lead.get("dealerFundedBenefit"))), \
+        "dealer total earnings must be the sum of its components (minus dealer-funded benefit)"
     # Independence: dealer earnings are not the customer's money.
     assert de != lead["customerPayable"]
     assert lead["customerOutstanding"] == 0

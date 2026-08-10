@@ -17,12 +17,13 @@ export default function EarningsReport() {
   return (
     <div>
       <PageHeader title="Dealer Earnings Report" subtitle="Owner · monthly margin, scheme retained, insurance & extra income" />
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4 mb-6">
         <StatCard label="Total Earnings" value={compactInr(d.totals.total)} icon={Coins} tone="text-amber-600" />
         <StatCard label="Dealer Margin" value={compactInr(d.totals.margin)} icon={TrendingUp} tone="text-cobalt" />
         <StatCard label="Scheme Retained" value={compactInr(d.totals.scheme)} icon={Layers} tone="text-emerald-600" />
         <StatCard label="Insurance Income" value={compactInr(d.totals.insurance)} icon={ShieldCheck} tone="text-violet-600" />
         <StatCard label="Extra Income" value={compactInr(d.totals.extra || 0)} icon={Coins} tone="text-teal-600" />
+        <StatCard label="Dealer-Funded Benefit" value={d.totals.dealerFundedBenefit ? `−${compactInr(d.totals.dealerFundedBenefit)}` : compactInr(0)} icon={Coins} tone="text-rose-600" />
       </div>
 
       {d.components?.length > 0 && (

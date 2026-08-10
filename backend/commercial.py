@@ -8,11 +8,14 @@ Single source of truth for commercial math:
 Scheme allocation contract (every component):
   schemeAvailable, oemShare, dealerFundedShare, customerBenefit,
   dealerRetained = schemeAvailable − customerBenefit,
-  oemClaimable   = oemShare (authoritative Scheme Master company share).
+  oemClaimable   = oemShare (authoritative Scheme Master company share),
+  dealerFundedBenefit = portion of customerBenefit borne by the dealer
+                        (OEM share of the passed amount is recoverable, not a cost).
 
 Customer Payable reduction = Σ customerBenefit (NOT schemeAvailable / oemShare / retained).
-Dealer Scheme Earnings     = Σ dealerRetained.
-OEM Claim                  = Σ oemClaimable.
+Dealer Scheme Retained     = Σ dealerRetained          (income)
+Dealer-Funded Benefit      = Σ dealerFundedBenefit     (cost — reduces Dealer Earnings)
+OEM Claim                  = Σ oemClaimable            (receivable, NOT income)
 Insurance Payout (premium × rate) is a SEPARATE ledger from Insurance Scheme Benefit.
 
 Component policy (from Config.gs COMMERCIAL.COMPONENT_POLICY):
@@ -599,14 +602,16 @@ def _explicit_allocation(s):
 def compute_scheme_allocation(s, scheme_rows):
     """AUTHORITATIVE scheme allocation engine — single source of truth.
 
-    For every active scheme component returns the six independent values:
+    For every active scheme component returns these independent values:
 
-      schemeAvailable    — total entitlement under the scheme
-      oemShare           — contractual OEM/company share (oemClaimable)
-      dealerFundedShare  — portion funded by the dealer (contractual; ≠ retained)
-      customerBenefit    — amount the dealer actually passes to the customer
-      dealerRetained     — schemeAvailable − customerBenefit
-      oemClaimable       — amount claimable from OEM (== oemShare)
+      schemeAvailable      — total entitlement under the scheme
+      oemShare             — contractual OEM/company share (oemClaimable)
+      dealerFundedShare    — contractual dealer-funded share (≠ retained, ≠ cost)
+      customerBenefit      — amount the dealer actually passes to the customer
+      dealerRetained       — schemeAvailable − customerBenefit
+      oemClaimable         — amount claimable from OEM (== oemShare)
+      dealerFundedBenefit  — cost of customerBenefit borne by the dealer
+                             (OEM-recoverable portion of CB is NOT a cost)
 
     schemeAllocationExplicit:
       Eligible offer components are included from Scheme Master even when the
@@ -681,6 +686,11 @@ def compute_scheme_allocation(s, scheme_rows):
             used = bool(used_map.get(key))
         else:
             used = customer_benefit > 0
+        # Company-share-first funding of the PASSED amount: OEM share covers the
+        # first ₹oemShare of customerBenefit (recoverable claim). Only the excess
+        # up to dealerFundedShare is a real dealer cost.
+        dealer_funded_benefit = round2(max(
+            0.0, min(dealer_funded_share, max(0.0, customer_benefit - oem_share))))
         components.append({
             "key": key,
             "label": label,
@@ -690,6 +700,7 @@ def compute_scheme_allocation(s, scheme_rows):
             "customerBenefit": customer_benefit,
             "dealerRetained": dealer_retained,
             "oemClaimable": oem_share,
+            "dealerFundedBenefit": dealer_funded_benefit,
             "source": source,
             # Compat for callers that filter entitlements via `automatic`
             # (scheme-allocation impact report / older recompute paths).
@@ -741,6 +752,7 @@ def compute_scheme_allocation(s, scheme_rows):
         "dealerRetained": round2(sum(c["dealerRetained"] for c in components)),
         "oemClaimable": round2(sum(c["oemClaimable"] for c in components)),
         "dealerFundedShare": round2(sum(c["dealerFundedShare"] for c in components)),
+        "dealerFundedBenefit": round2(sum(c["dealerFundedBenefit"] for c in components)),
         "oemShare": round2(sum(c["oemShare"] for c in components)),
     }
     by_key = {c["key"]: c for c in components}
@@ -786,10 +798,11 @@ def compute_scheme_income_breakdown(s, scheme_rows):
             out["passedByComponent"][k] = c["customerBenefit"]
         if c["schemeAvailable"] > 0 and k != "additionalDiscount":
             out["fullByComponent"][k] = c["schemeAvailable"]
-        # Dealer-funded portion that was passed through to the customer
-        if c["dealerFundedShare"] > 0 and c["customerBenefit"] > 0:
-            passed_dealer = min(c["dealerFundedShare"], c["customerBenefit"])
-            out["dealerCostPassed"] = round2(out["dealerCostPassed"] + passed_dealer)
+        # Authoritative dealer-funded COST of the passed benefit (not the
+        # contractual dealerFundedShare). Same value as c["dealerFundedBenefit"].
+        if c["dealerFundedBenefit"] > 0:
+            out["dealerCostPassed"] = round2(out["dealerCostPassed"] + c["dealerFundedBenefit"])
+    out["dealerFundedBenefit"] = out["dealerCostPassed"]
     return out
 
 
