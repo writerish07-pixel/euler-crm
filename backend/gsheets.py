@@ -372,13 +372,22 @@ def credential_diagnostics():
 def env_safety():
     """Preview/Production isolation control. Preview must never WRITE to the
     production spreadsheet. Set ENVIRONMENT=preview and PRODUCTION_GSHEET_ID in the
-    preview env; production sets ENVIRONMENT=production. Reads are always allowed."""
+    preview env; production sets ENVIRONMENT=production. Reads are always allowed.
+
+    Pytest / Cloud Agent test runs must never write to a live spreadsheet — that is
+    how Lead Register got refilled with ITER24 / Step Lock / Fresh Start One rows
+    after go-live resets (tests used mongomock for Mongo but real GSHEET_ID + creds).
+    """
     env = os.environ.get("ENVIRONMENT", "").strip().lower()
     prod_id = os.environ.get("PRODUCTION_GSHEET_ID", "").strip()
     cur_id = os.environ.get("GSHEET_ID", "").strip()
     is_preview = env in ("preview", "dev", "development", "test", "staging")
     reason = None
-    if is_preview and prod_id and cur_id and cur_id == prod_id:
+    # Hard stop: any pytest process, unless an explicit opt-in for a dedicated test sheet.
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("GSHEET_ALLOW_TEST_WRITES", "").strip():
+        reason = ("TEST WRITE BLOCKED — pytest must not write to Google Sheets "
+                  "(set GSHEET_ALLOW_TEST_WRITES=1 only for a disposable test spreadsheet).")
+    elif is_preview and prod_id and cur_id and cur_id == prod_id:
         reason = "PREVIEW WRITE BLOCKED — PREVIEW IS POINTING TO PRODUCTION GOOGLE SHEET."
     elif env == "production" and prod_id and cur_id and cur_id != prod_id:
         reason = "PRODUCTION WRITE BLOCKED — PRODUCTION IS NOT POINTING TO THE PRODUCTION GOOGLE SHEET."
