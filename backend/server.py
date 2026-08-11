@@ -3605,6 +3605,19 @@ async def gsheets_preflight():
     return gsheets.preflight()
 
 
+@api.post("/integrations/gsheets/ensure-oem-extra-columns", dependencies=[Depends(owner_only)])
+async def gsheets_ensure_oem_extra_columns(act=Depends(actor)):
+    """Owner-only: create/append OEM Extra Support Received / Passed / Retained headers
+    on Lead Register + Dealer Earnings, and create OEM Extra Support Register if missing.
+
+    The CRM cannot show values in columns that do not exist yet — this is the one-time
+    sheet structure step. After it succeeds, re-save Scheme (or run Backfill) to fill rows.
+    """
+    result = await gsheets.ensure_oem_extra_support_columns()
+    await write_audit(act, "ensure", "gsheets-oem-extra-columns", new=result)
+    return result
+
+
 @api.get("/integrations/gsheets/verify-lead/{lead_id}", dependencies=[Depends(owner_only)])
 async def gsheets_verify_lead(lead_id: str):
     """Read-only: how many rows the LIVE sheet actually holds for this lead in each

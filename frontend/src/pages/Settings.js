@@ -19,6 +19,7 @@ export default function Settings() {
   const [gs, setGs] = useState(null);
   const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive" });
   const [backfilling, setBackfilling] = useState(false);
+  const [ensuringOem, setEnsuringOem] = useState(false);
 
   const loadUsers = useCallback(() => { if (isOwner) get("/auth/users").then(setUsers).catch(() => {}); }, [isOwner]);
   useEffect(() => { loadUsers(); get("/integrations/gsheets").then(setGs).catch(() => {}); }, [loadUsers]);
@@ -35,6 +36,25 @@ export default function Settings() {
       }
     } catch { toast.error("Backfill failed"); }
     finally { setBackfilling(false); }
+  };
+
+  const ensureOemExtraColumns = async () => {
+    setEnsuringOem(true);
+    try {
+      const r = await post("/integrations/gsheets/ensure-oem-extra-columns", {});
+      if (r.ok === false) {
+        toast.error(r.reason || "Could not update sheet headers");
+        return;
+      }
+      const added = (r.tabs || []).flatMap((t) => t.added || []);
+      if (r.changed) {
+        toast.success(`OEM Extra Support columns ready${added.length ? ` — added ${added.length} header(s)` : ""}`);
+      } else {
+        toast.success("OEM Extra Support columns already present on all related tabs");
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to add OEM Extra Support columns");
+    } finally { setEnsuringOem(false); }
   };
 
   const addUser = async () => {
@@ -76,11 +96,22 @@ export default function Settings() {
               </div>
             )}
             {isOwner && (
-              <div className="pt-2">
-                <Button variant="secondary" data-testid="backfill-btn" onClick={runBackfill} disabled={backfilling}>
-                  <RefreshCcw size={14} /> {backfilling ? "Backfilling…" : "Backfill existing data to sheet"}
-                </Button>
-                <span className="text-xs text-ink-faint ml-2">Pushes all current leads, bookings & payments (skips rows already in the sheet)</span>
+              <div className="pt-2 space-y-2">
+                <div>
+                  <Button variant="secondary" data-testid="ensure-oem-extra-cols-btn"
+                    onClick={ensureOemExtraColumns} disabled={ensuringOem || !gs?.enabled}>
+                    <ListPlus size={14} /> {ensuringOem ? "Adding columns…" : "Add OEM Extra Support columns"}
+                  </Button>
+                  <span className="text-xs text-ink-faint ml-2">
+                    Creates Received / Passed / Retained headers on Lead Register, Dealer Earnings & OEM Extra Support Register
+                  </span>
+                </div>
+                <div>
+                  <Button variant="secondary" data-testid="backfill-btn" onClick={runBackfill} disabled={backfilling}>
+                    <RefreshCcw size={14} /> {backfilling ? "Backfilling…" : "Backfill existing data to sheet"}
+                  </Button>
+                  <span className="text-xs text-ink-faint ml-2">Pushes all current leads, bookings & payments (skips rows already in the sheet)</span>
+                </div>
               </div>
             )}
           </div>
