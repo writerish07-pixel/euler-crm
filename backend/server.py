@@ -316,6 +316,8 @@ def lead_to_snapshot(lead):
         "exShowroom": lead.get("exShowroom", 0),
         "accessories": lead.get("accessoriesAmount", 0),
         "insurance": lead.get("insuranceAmount", 0),
+        "insuranceArrangedBy": ce.normalize_insurance_arranged_by(
+            lead.get("insuranceArrangedBy")),
         "registrationRto": lead.get("rto", 0),
         "fastag": lead.get("fastag", 0),
         "handlingCharges": lead.get("handlingCharges", 0),
@@ -682,6 +684,9 @@ class PriceStructureIn(BaseModel):
     exShowroom: float = 0
     rto: float = 0
     insuranceAmount: float = 0
+    # dealer (default) = premium in customer outstanding + payout earnings on delivery.
+    # self = customer arranges insurance → premium not in outstanding; no dealer payout.
+    insuranceArrangedBy: str = "dealer"
     accessoriesAmount: float = 0
     handlingCharges: float = 0
     trc: float = 0
@@ -754,6 +759,7 @@ class SnapshotComputeIn(BaseModel):
     exShowroom: float = 0
     accessories: float = 0
     insurance: float = 0
+    insuranceArrangedBy: str = "dealer"
     registrationRto: float = 0
     fastag: float = 0
     handlingCharges: float = 0
@@ -1381,6 +1387,8 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)")
     _require_owner_reedit(act, _is_priced(lead), "Price structure")
     payload = body.model_dump()
+    payload["insuranceArrangedBy"] = ce.normalize_insurance_arranged_by(
+        payload.get("insuranceArrangedBy"))
     # Ex-Showroom is Price Master–authoritative and not staff-editable. Prefer the
     # live master row for the lead's model/variant; fall back to the lead's existing
     # value only when no master row exists (so a saved structure is not wiped).
@@ -1581,9 +1589,18 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
         raise HTTPException(422, "Please fix the scheme allocation:\n" + "\n".join(errors))
     merged = {**ce._explicit_allocation(lead_to_snapshot(lead)), **clean_alloc}
     old = lead.get("schemeAllocation")
-    # Persist decisions in BOTH shapes: flat schemeAllocation (PR #21 endpoint) and
-    # benefitPassedBreakup (authoritative engine / Scheme UI).
-    used = {k: (ce.num(v) > 0) for k, v in merged.items()}
+    # Keys present in this allocation decision are Use=Yes (CB may be ₹0 = keep company share).
+    # Omitted keys keep their previous Use flag when available.
+    prev_used = lead.get("schemeComponentsUsed") or {}
+    if isinstance(prev_used, str):
+        try:
+            prev_used = json.loads(prev_used) if prev_used.strip() else {}
+        except Exception:
+            prev_used = {}
+    if not isinstance(prev_used, dict):
+        prev_used = {}
+    used = {**{str(k): bool(v) for k, v in prev_used.items()},
+            **{k: True for k in clean_alloc}}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {
         "schemeAllocation": json.dumps(merged),
         "benefitPassedBreakup": json.dumps(merged),
@@ -2204,6 +2221,23 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
     existing _insurance_derive + suggested_insurance_payout_rate (49% Storm/Turbo,
     36.5% others). Idempotent — one entry per lead, refreshed rather than duplicated."""
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    # Customer-arranged insurance: dealer does not earn a payout.
+    if ce.normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) == "self":
+        existing = await db.insurance.find_one({"leadId": lead_id})
+        if existing:
+            # Zero out any prior dealer payout so earnings stay clean after a switch to Self.
+            cleared = {
+                "expectedPayout": 0,
+                "payoutOutstanding": 0,
+                "payoutRate": 0,
+                "status": "N/A — customer arranged",
+                "lastUpdated": now_iso(),
+                "remarks": ((existing.get("remarks") or "") + " | insuranceArrangedBy=self").strip(" |"),
+            }
+            await db.insurance.update_one({"entryId": existing["entryId"]}, {"$set": cleared})
+            await sheet_sync("insurance", {**clean(existing), **cleared,
+                                          "payoutRatePct": 0})
+        return None
     premium = ce.num(lead.get("insuranceAmount"))
     if premium <= 0:
         return None          # no premium charged -> no payout is due; leave it absent

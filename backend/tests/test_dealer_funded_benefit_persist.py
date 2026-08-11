@@ -53,7 +53,8 @@ def allocate(**allocation):
             "loyaltyBonus": 10000, "benefitMode": "Full Benefit",
             "schemeAllocationExplicit": True, "schemeAllocationV2": True,
             "schemeAllocation": allocation,
-            "benefitPassedBreakup": allocation}
+            "benefitPassedBreakup": allocation,
+            "schemeComponentsUsed": {k: True for k in allocation}}
     return ce.compute_scheme_allocation(snap, turbo_rows())
 
 
@@ -125,7 +126,8 @@ def test9_change_loyalty_only_leaves_insurance():
 def test_income_breakdown_matches_allocation_funded_cost():
     snap = {"model": MODEL, "variant": VARIANT, "bookingDate": "2026-08-09",
             "loyaltyBonus": 10000, "schemeAllocationExplicit": True,
-            "schemeAllocation": {"loyaltyBonus": 0, "insuranceBenefit": 15000}}
+            "schemeAllocation": {"loyaltyBonus": 0, "insuranceBenefit": 15000},
+            "schemeComponentsUsed": {"loyaltyBonus": True, "insuranceBenefit": True}}
     income = ce.compute_scheme_income_breakdown(snap, turbo_rows())
     assert income["dealerFundedBenefit"] == 5000
     assert income["dealerCostPassed"] == 5000

@@ -7,17 +7,23 @@ Single source of truth for commercial math:
 
 Scheme allocation contract (every component):
   schemeAvailable, oemShare, dealerFundedShare, customerBenefit,
-  dealerRetained = company share KEPT (oemShare − oemPassed) — never the unused
-                   dealer share. Unspent dealer share is NOT income.
-  oemClaimable   = oemShare (authoritative Scheme Master company share),
-  dealerFundedBenefit = dealer share GIVEN to customer (company-share-first:
-                        only CB above oemShare, up to dealerFundedShare).
+  Use Scheme = No (schemeComponentsUsed[key]=false) ⇒ full opt-out:
+    customerBenefit = dealerRetained = oemClaimable = dealerFundedBenefit = 0
+    (eligibility amounts still shown; they do not enter totals for claim/income).
+  Use Scheme = Yes:
+    dealerRetained = company share KEPT (oemShare − oemPassed) — never the
+                     unused dealer share. Unspent dealer share is NOT income.
+    oemClaimable   = oemShare (authoritative Scheme Master company share),
+    dealerFundedBenefit = dealer share GIVEN to customer (company-share-first:
+                          only CB above oemShare, up to dealerFundedShare).
 
 Customer Payable reduction = Σ customerBenefit (NOT schemeAvailable / oemShare / retained).
 Dealer Scheme Retained     = Σ dealerRetained          (income = company kept)
 Dealer-Funded Benefit      = Σ dealerFundedBenefit     (cost — reduces Dealer Earnings)
 OEM Claim                  = Σ oemClaimable            (receivable, NOT income)
 Insurance Payout (premium × rate) is a SEPARATE ledger from Insurance Scheme Benefit.
+insuranceArrangedBy = "self" ⇒ premium excluded from customer GVC/outstanding and
+  no dealer insurance payout earnings; "dealer" (default) keeps current behaviour.
 
 Component policy (from Config.gs COMMERCIAL.COMPONENT_POLICY):
   consumerDiscount / exchangeBonus / loyaltyBonus / referralBonus -> OEM, claimable, no approval
@@ -156,6 +162,22 @@ def resolve_customer_benefit_passed(s, scheme_rows=None):
     return oem_pool  # Full Benefit
 
 
+def normalize_insurance_arranged_by(value):
+    """Who arranges vehicle insurance: dealer (default) or customer (self)."""
+    v = str(value or "dealer").strip().lower()
+    if v in ("self", "customer", "cust"):
+        return "self"
+    return "dealer"
+
+
+def insurance_charge_for_payable(s):
+    """Premium included in customer GVC only when dealer arranges insurance."""
+    s = s or {}
+    if normalize_insurance_arranged_by(s.get("insuranceArrangedBy")) == "self":
+        return 0.0
+    return max(0.0, num(s.get("insurance")))
+
+
 def compute_commercial_totals(s, scheme_rows=None):
     """The ONLY place Customer Payable is derived.
 
@@ -164,7 +186,10 @@ def compute_commercial_totals(s, scheme_rows=None):
     are supplied, customerBenefit comes from compute_scheme_allocation.
     """
     s = s or {}
-    gross_vehicle_cost = round2(sum(num(s.get(k)) for k in CHARGE_KEYS))
+    gross_vehicle_cost = round2(sum(
+        (insurance_charge_for_payable(s) if k == "insurance" else num(s.get(k)))
+        for k in CHARGE_KEYS
+    ))
     tcs_applicable = str(s.get("tcsApplicable") or "No").lower() == "yes"
     tcs = calculate_tcs(gross_vehicle_cost) if tcs_applicable else 0.0
 
@@ -669,19 +694,6 @@ def compute_scheme_allocation(s, scheme_rows):
         scheme_available = round2(max(0.0, num(scheme_available)))
         oem_share = round2(max(0.0, num(oem_share)))
         dealer_funded_share = round2(max(0.0, num(dealer_funded_share)))
-        customer_benefit = _component_customer_benefit(
-            key, scheme_available, mode, breakup, s, waterfall)
-        # Company-share-first funding of the PASSED amount: OEM share covers the
-        # first ₹oemShare of customerBenefit (recoverable claim). Only the excess
-        # up to dealerFundedShare is a real dealer cost (dealer share GIVEN).
-        oem_passed = round2(min(oem_share, customer_benefit))
-        dealer_funded_benefit = round2(max(
-            0.0, min(dealer_funded_share, max(0.0, customer_benefit - oem_share))))
-        # ERP / Apps Script: Scheme Retained = company_kept − dealer_given.
-        # UI keeps retained non-negative (= company kept); dealer_given is the
-        # separate dealerFundedBenefit cost line subtracted from earnings.
-        # Unspent dealer share is NOT income.
-        dealer_retained = round2(max(0.0, oem_share - oem_passed))
         used_map = s.get("schemeComponentsUsed") or {}
         if isinstance(used_map, str):
             try:
@@ -691,10 +703,29 @@ def compute_scheme_allocation(s, scheme_rows):
                 used_map = {}
         if not isinstance(used_map, dict):
             used_map = {}
+        customer_benefit = _component_customer_benefit(
+            key, scheme_available, mode, breakup, s, waterfall)
         if key in used_map:
             used = bool(used_map.get(key))
         else:
+            # No explicit Use flag → infer from passed benefit (legacy leads).
             used = customer_benefit > 0
+        if not used:
+            # Full opt-out: eligible but not assigned — no CB, retained, or OEM claim.
+            customer_benefit = 0.0
+            dealer_retained = 0.0
+            oem_claimable = 0.0
+            dealer_funded_benefit = 0.0
+        else:
+            # Company-share-first funding of the PASSED amount: OEM share covers the
+            # first ₹oemShare of customerBenefit (recoverable claim). Only the excess
+            # up to dealerFundedShare is a real dealer cost (dealer share GIVEN).
+            oem_passed = round2(min(oem_share, customer_benefit))
+            dealer_funded_benefit = round2(max(
+                0.0, min(dealer_funded_share, max(0.0, customer_benefit - oem_share))))
+            # Scheme Retained = company share KEPT. Unspent dealer share is NOT income.
+            dealer_retained = round2(max(0.0, oem_share - oem_passed))
+            oem_claimable = oem_share
         components.append({
             "key": key,
             "label": label,
@@ -703,7 +734,7 @@ def compute_scheme_allocation(s, scheme_rows):
             "dealerFundedShare": dealer_funded_share,
             "customerBenefit": customer_benefit,
             "dealerRetained": dealer_retained,
-            "oemClaimable": oem_share,
+            "oemClaimable": oem_claimable,
             "dealerFundedBenefit": dealer_funded_benefit,
             "source": source,
             # Compat for callers that filter entitlements via `automatic`
