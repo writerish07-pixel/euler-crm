@@ -202,7 +202,11 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
   const [priceDate, setPriceDate] = useState(lead.bookingDate || lead.createdDate || todayISO());
   const [masterMsg, setMasterMsg] = useState("");
   const [form, setForm] = useState(() => {
-    const f = { tcsApplicable: lead.tcsApplicable || "No", finalExchangeValue: lead.finalExchangeValue || 0 };
+    const f = {
+      tcsApplicable: lead.tcsApplicable || "No",
+      finalExchangeValue: lead.finalExchangeValue || 0,
+      insuranceArrangedBy: lead.insuranceArrangedBy === "self" ? "self" : "dealer",
+    };
     CHARGE_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
     return f;
   });
@@ -229,6 +233,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
   const computePreview = useCallback(() => {
     post("/commercial/compute", {
       exShowroom: +form.exShowroom, accessories: +form.accessoriesAmount, insurance: +form.insuranceAmount,
+      insuranceArrangedBy: form.insuranceArrangedBy,
       registrationRto: +form.rto, fastag: +form.fastag, handlingCharges: +form.handlingCharges, trc: +form.trc,
       extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
       rsaAmc: +form.rsaAmc,
@@ -246,6 +251,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
     try {
       await put(`/leads/${lead.leadId}/price-structure`, {
         exShowroom: +form.exShowroom, rto: +form.rto, insuranceAmount: +form.insuranceAmount,
+        insuranceArrangedBy: form.insuranceArrangedBy === "self" ? "self" : "dealer",
         accessoriesAmount: +form.accessoriesAmount, handlingCharges: +form.handlingCharges, trc: +form.trc,
         fastag: +form.fastag, extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
         rsaAmc: +form.rsaAmc,
@@ -277,9 +283,25 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
             />
           </Field>
         ))}
+        <Field label="Insurance arranged by">
+          <Select
+            data-testid="price-insuranceArrangedBy"
+            value={form.insuranceArrangedBy}
+            onChange={set("insuranceArrangedBy")}
+            disabled={locked}
+          >
+            <option value="dealer">Dealer</option>
+            <option value="self">Self (customer)</option>
+          </Select>
+        </Field>
         <Field label="Final Exchange Value"><Input type="number" value={form.finalExchangeValue} onChange={set("finalExchangeValue")} disabled={locked} /></Field>
         <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={set("tcsApplicable")} disabled={locked}><option>No</option><option>Yes</option></Select></Field>
       </div>
+      {form.insuranceArrangedBy === "self" && (
+        <p className="text-xs text-ink-soft mt-2" data-testid="insurance-self-note">
+          Self insurance: premium is not added to customer outstanding, and there is no dealer insurance payout earning.
+        </p>
+      )}
       {preview && (
         <Card className="p-4 mt-4 bg-cobalt-tint/40 border-cobalt/20">
           <div className="grid grid-cols-4 gap-3 text-center">
@@ -341,9 +363,6 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
 
   const r = rules?.rules || {};
   const entitlements = rules?.entitlements || [];
-  const allocation = c?.schemeAllocation;
-  const allocByKey = {};
-  (allocation?.components || []).forEach((comp) => { allocByKey[comp.key] = comp; });
 
   // Eligible components from Scheme Master only — same card for every component.
   // Eligibility ≠ assignment: default Use Scheme = No, Customer Benefit = 0.
@@ -431,19 +450,21 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
   };
 
   // Live preview totals from local decisions (backend remains SSOT on save).
-  // Retained = company share kept — unused dealer share is NOT income.
+  // Use=No ⇒ full opt-out (no CB / retained / OEM claim). Use=Yes ⇒ company-kept retained.
   const previewCb = components.reduce((s, comp) => {
     if (!usedMap[comp.key]) return s;
     return s + Math.max(0, Math.min(+(breakup[comp.key] ?? 0) || 0, comp.available));
   }, 0);
   const previewAvail = components.reduce((s, comp) => s + comp.available, 0);
   const previewRetained = components.reduce((s, comp) => {
-    const cb = !usedMap[comp.key] ? 0 : Math.max(0, Math.min(+(breakup[comp.key] ?? 0) || 0, comp.available));
+    if (!usedMap[comp.key]) return s;
+    const cb = Math.max(0, Math.min(+(breakup[comp.key] ?? 0) || 0, comp.available));
     return s + companyKeptRetained(comp.oemShare, cb);
   }, 0);
-  const previewOem = components.reduce((s, comp) => s + comp.oemShare, 0);
+  const previewOem = components.reduce((s, comp) => (usedMap[comp.key] ? s + comp.oemShare : s), 0);
   const previewFunded = components.reduce((s, comp) => {
-    const cb = !usedMap[comp.key] ? 0 : Math.max(0, Math.min(+(breakup[comp.key] ?? 0) || 0, comp.available));
+    if (!usedMap[comp.key]) return s;
+    const cb = Math.max(0, Math.min(+(breakup[comp.key] ?? 0) || 0, comp.available));
     return s + Math.max(0, Math.min(comp.dealerShare, Math.max(0, cb - comp.oemShare)));
   }, 0);
 
@@ -482,8 +503,9 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         {components.map((comp) => {
           const isUsed = !!usedMap[comp.key];
           const cb = !isUsed ? 0 : Math.max(0, Math.min(+(breakup[comp.key] ?? 0) || 0, comp.available));
-          const retained = allocByKey[comp.key]?.dealerRetained ?? companyKeptRetained(comp.oemShare, cb);
-          const oemClaim = allocByKey[comp.key]?.oemClaimable ?? comp.oemShare;
+          // Live local math while editing so Use=No never shows a stale OEM claim.
+          const retained = isUsed ? companyKeptRetained(comp.oemShare, cb) : 0;
+          const oemClaim = isUsed ? comp.oemShare : 0;
           return (
             <Card key={comp.key} className="p-4 bg-zinc-50/80 border-line" data-testid={`scheme-component-${comp.key}`}>
               <div className="text-sm font-semibold text-ink mb-3">{comp.label}</div>
@@ -546,11 +568,14 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
 
       <Card className="p-4 mt-4 bg-amber-50/50 border-amber-200" data-testid="scheme-allocation-summary">
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center">
-          <Prev label="Customer Benefit" v={allocation?.totals?.customerBenefit ?? previewCb} />
-          <Prev label="Dealer Scheme Retained" v={allocation?.totals?.dealerRetained ?? previewRetained} />
-          <Prev label="OEM Claimable" v={allocation?.totals?.oemClaimable ?? previewOem} />
-          <Prev label="Dealer-Funded Benefit" v={allocation?.totals?.dealerFundedBenefit ?? previewFunded} />
-          <Prev label="Scheme Available" v={allocation?.totals?.schemeAvailable ?? previewAvail} />
+          <Prev label="Customer Benefit" v={previewCb} />
+          <Prev label="Dealer Scheme Retained" v={previewRetained} />
+          <Prev label="OEM Claimable" v={previewOem} />
+          <Prev label="Dealer-Funded Benefit" v={previewFunded} />
+          <Prev label="Scheme Available" v={previewAvail} />
+        </div>
+        <div className="text-[11px] text-ink-faint text-center mt-2">
+          Summary follows Use Scheme = Yes only. Save to persist on the lead.
         </div>
       </Card>
       <ExtraIncomeCard lead={lead} locked={locked} onSaved={onRefresh || onSaved} />

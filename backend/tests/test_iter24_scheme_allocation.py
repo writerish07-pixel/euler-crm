@@ -14,6 +14,7 @@ oemClaimable. Nothing is special-cased — entitlements allocate like offers.
 Scheme Master rows here come from the LIVE workbook's Turbo Aug'26 rows, which match
 circular EM/08-2026/001: Loyalty 0/10,000/10,000 and Insurance 10,000/10,000/20,000.
 """
+import json
 import os
 import sys
 
@@ -51,10 +52,14 @@ def turbo_rows():
 
 
 def allocate(**allocation):
-    """Run the engine for a Turbo lead with an explicit dealer allocation."""
+    """Run the engine for a Turbo lead with an explicit dealer allocation.
+
+    Keys present in the decision map are treated as Use=Yes (including CB=0).
+    """
     snap = {"model": MODEL, "variant": VARIANT, "bookingDate": "2026-08-09",
             "loyaltyBonus": 10000, "benefitMode": "Full Benefit",
-            "schemeAllocation": allocation}
+            "schemeAllocation": allocation,
+            "schemeComponentsUsed": {k: True for k in allocation}}
     return ce.compute_scheme_allocation(snap, turbo_rows())
 
 
@@ -147,7 +152,13 @@ async def turbo_lead(c, mobile):
     await c.post(f"/api/leads/{lid}/convert-booking",
                  json={"bookingDate": "2026-08-09", "bookingAmount": 0})
     await c.put(f"/api/leads/{lid}/scheme",
-                json={"loyaltyBonus": 10000, "benefitMode": "No Benefit"})
+                json={
+                    "loyaltyBonus": 10000, "benefitMode": "Partial Benefit",
+                    "benefitPassedBreakup": json.dumps(
+                        {"loyaltyBonus": 0, "insuranceBenefit": 0}),
+                    "schemeComponentsUsed": json.dumps(
+                        {"loyaltyBonus": True, "insuranceBenefit": True}),
+                })
     return lid
 
 
@@ -247,9 +258,9 @@ async def test_case12_repeat_operations_create_no_duplicates(client):
     delivery = {"insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes",
                 "rc": "Yes", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-24-DUP",
                 "chassisNumber": "CH-24-DUP", "numberPlate": "RJ14-24-DUP", "delivered": "Yes"}
+    r = await client.put(f"/api/leads/{lid}/delivery", json=delivery)
+    assert r.status_code == 200, r.text
     for _ in range(3):
-        r = await client.put(f"/api/leads/{lid}/delivery", json=delivery)
-        assert r.status_code == 200, r.text
         await server.recompute_lead(lid)
 
     assert await server.db.insurance.count_documents({"leadId": lid}) == 1

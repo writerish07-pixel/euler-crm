@@ -33,7 +33,7 @@ MODEL, VARIANT = "Turbo Max", "Maxx (PV)"
 
 
 def test_user_bug_loyalty_passed_insurance_unused_retains_oem_share_only():
-    """Screenshot case: loyalty → customer, insurance CB=0 → retained ₹10k not ₹20k."""
+    """Loyalty passed; insurance Use=Yes CB=0 → keep insurance OEM as retained+claim."""
     snap = {
         "model": MODEL, "variant": VARIANT, "bookingDate": "2026-08-09",
         "loyaltyBonus": 10000, "schemeAllocationExplicit": True, "schemeAllocationV2": True,
@@ -51,6 +51,27 @@ def test_user_bug_loyalty_passed_insurance_unused_retains_oem_share_only():
     assert alloc["totals"]["oemClaimable"] == 20000
 
 
+def test_user_bug_only_insurance_used_partial_cb():
+    """Screenshot: loyalty Use=No, insurance Use=Yes CB=2533 → claim ₹10k only."""
+    snap = {
+        "model": MODEL, "variant": VARIANT, "bookingDate": "2026-08-09",
+        "loyaltyBonus": 10000, "schemeAllocationExplicit": True, "schemeAllocationV2": True,
+        "benefitMode": "Partial Benefit",
+        "benefitPassedBreakup": {"loyaltyBonus": 0, "insuranceBenefit": 2533},
+        "schemeComponentsUsed": {"loyaltyBonus": False, "insuranceBenefit": True},
+    }
+    alloc = ce.compute_scheme_allocation(snap, TURBO)
+    by = {c["key"]: c for c in alloc["components"]}
+    assert by["loyaltyBonus"]["oemClaimable"] == 0
+    assert by["loyaltyBonus"]["dealerRetained"] == 0
+    assert by["insuranceBenefit"]["customerBenefit"] == 2533
+    assert by["insuranceBenefit"]["dealerRetained"] == 7467
+    assert by["insuranceBenefit"]["oemClaimable"] == 10000
+    assert alloc["totals"]["customerBenefit"] == 2533
+    assert alloc["totals"]["dealerRetained"] == 7467
+    assert alloc["totals"]["oemClaimable"] == 10000
+
+
 def test_unused_dealer_share_is_never_income_across_cb_ladder():
     for cb, retained, funded in (
         (0, 10000, 0),
@@ -63,6 +84,7 @@ def test_unused_dealer_share_is_never_income_across_cb_ladder():
             "model": MODEL, "variant": VARIANT, "bookingDate": "2026-08-09",
             "loyaltyBonus": 0, "schemeAllocationExplicit": True,
             "benefitPassedBreakup": {"loyaltyBonus": 0, "insuranceBenefit": cb},
+            "schemeComponentsUsed": {"loyaltyBonus": False, "insuranceBenefit": True},
         }
         ins = ce.compute_scheme_allocation(snap, TURBO)["byKey"]["insuranceBenefit"]
         assert ins["dealerRetained"] == retained, cb
