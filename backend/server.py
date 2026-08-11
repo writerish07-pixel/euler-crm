@@ -564,7 +564,8 @@ async def recompute_lead(lead_id):
         await sheet_sync("dealer_earnings", de_row)
         # Derived OEM claims must also reach the existing Scheme Claim Register.
         # They are keyed on the same stable claimId GET /claims exposes, so this is an
-        # upsert — a claim later settled/receipted updates that same row.
+        # upsert — a claim later settled/receipted updates that same row. Never delete:
+        # Scheme Claim Register is a permanent ledger (Received rows stay forever).
         # Scheme Claim Register is one row per component. Amount columns
         # (Loyalty Bonus, Insurance Benefit, …) must carry THIS row's claim only —
         # never the lead's full denormalized offer map (that put Loyalty 10000 on
@@ -3288,10 +3289,15 @@ async def list_claims():
     it's marked Delivered or moves through Finance Process — the OEM claim is still owed
     to the dealer regardless of delivery status. Was previously "book" only, which caused
     every claim to silently vanish from this register on delivery while the same money
-    remained visible in the Owner Commercial Report (a real, provable inconsistency)."""
+    remained visible in the Owner Commercial Report (a real, provable inconsistency).
+
+    Scheme Claim Register is a permanent ledger: Received / settled claims stay listed
+    forever (same rule as the Google Sheet). Persisted claim docs are merged in even when
+    live scheme display drops to zero or the lead leaves the book/deliver/finance filter."""
     leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(2000)
     scheme_rows = await get_scheme_rows()
     result = []
+    seen_ids = set()
     for l in leads:
         snap = lead_to_snapshot(l)
         shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
@@ -3306,8 +3312,10 @@ async def list_claims():
             approved = (existing or {}).get("approvedDate", "")
             claim_status = (existing or {}).get("claimStatus", "Pending")
             ageing = _claim_ageing_days(submitted, claim_status, approved)
+            claim_id = (existing or {}).get("claimId", f"CLM-{l['leadId']}-{key}")
+            seen_ids.add(claim_id)
             result.append({
-                "claimId": (existing or {}).get("claimId", f"CLM-{l['leadId']}-{key}"),
+                "claimId": claim_id,
                 "leadId": l["leadId"], "customer": l.get("customerName"),
                 "model": l.get("interestedModel"), "variant": l.get("variant"),
                 "bookingDate": l.get("bookingDate"),
@@ -3323,8 +3331,11 @@ async def list_claims():
     # Manual claims (OEM incentives / executive incentives) — merged into the register
     for m in await db.claims.find({"manual": True}).to_list(2000):
         elig = ce.round2(ce.num(m.get("eligibleClaim") if m.get("eligibleClaim") is not None else m.get("claimAmount")))
+        claim_id = m.get("claimId")
+        if claim_id:
+            seen_ids.add(claim_id)
         result.append({
-            "claimId": m.get("claimId"), "leadId": m.get("leadId", ""),
+            "claimId": claim_id, "leadId": m.get("leadId", ""),
             "customer": m.get("customer", ""), "model": m.get("model", ""),
             "variant": m.get("variant", ""),
             "bookingDate": m.get("bookingDate", ""),
@@ -3344,6 +3355,40 @@ async def list_claims():
             "totalDiscount": ce.round2(ce.num(m.get("totalDiscount") if m.get("totalDiscount") is not None else elig)),
             "oemDiscount": ce.round2(ce.num(m.get("oemDiscount") if m.get("oemDiscount") is not None else elig)),
         })
+    # Persisted scheme claims that would otherwise drop out (Use=No / lead status change /
+    # share recomputed to 0) — Received or Partial money still belongs in the eternal register.
+    for c in await db.claims.find({"manual": {"$ne": True}}).to_list(5000):
+        claim_id = c.get("claimId") or f"CLM-{c.get('leadId')}-{c.get('componentKey')}"
+        if claim_id in seen_ids:
+            continue
+        received = ce.round2(ce.num(c.get("receivedAmount")))
+        status = (c.get("claimStatus") or "").strip()
+        if received <= 0 and status not in ("Received", "Partial", "Submitted", "Approved", "Rejected"):
+            # Skip pure empty shells with no lifecycle — only keep real register history.
+            if not (c.get("submittedDate") or c.get("approvedDate") or c.get("claimReceivedDate")):
+                continue
+        elig = ce.round2(ce.num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount")))
+        key = c.get("componentKey") or ""
+        lead = await db.leads.find_one({"leadId": c.get("leadId")}) or {}
+        result.append({
+            "claimId": claim_id, "leadId": c.get("leadId", ""),
+            "customer": c.get("customer") or lead.get("customerName", ""),
+            "model": c.get("model") or lead.get("interestedModel", ""),
+            "variant": c.get("variant") or lead.get("variant", ""),
+            "bookingDate": c.get("bookingDate") or lead.get("bookingDate", ""),
+            "component": c.get("component") or ce.SCHEME_COMPONENT_LABELS.get(key, key),
+            "componentKey": key,
+            "claimAmount": ce.round2(ce.num(c.get("claimAmount") if c.get("claimAmount") is not None else elig)),
+            "eligibleClaim": elig,
+            "approvalStatus": c.get("approvalStatus") or status or "Pending",
+            "claimStatus": status or "Pending",
+            "receivedAmount": received,
+            "claimReference": c.get("claimReference", ""),
+            "submittedDate": c.get("submittedDate", ""), "approvedDate": c.get("approvedDate", ""),
+            "ageingDays": _claim_ageing_days(c.get("submittedDate", ""), status, c.get("approvedDate", "")),
+            "permanent": True,
+        })
+        seen_ids.add(claim_id)
     return result
 
 
@@ -4212,6 +4257,10 @@ async def reset_transactions(act=Depends(actor)):
     master, users, Masters list) is preserved. Also clears operational Google Sheet
     register data rows (headers kept) when sheet sync is writable.
 
+    Scheme Claim Register is excluded from the sheet wipe — it is a permanent ledger
+    (Received claims stay forever). Mongo claims are still cleared with other
+    transactions so the CRM starts clean; historical sheet claim rows remain.
+
     Also clears sheet_sync_log so a later /integrations/gsheets/retry cannot resurrect
     deleted leads onto the spreadsheet.
     """
@@ -4228,8 +4277,10 @@ async def reset_transactions(act=Depends(actor)):
         await db["counters"].update_one({"_id": c}, {"$set": {"seq": 100}}, upsert=True)
     sheet_clear = await gsheets.clear_operational_register_rows()
     await write_audit(act, "reset", "system",
-                      new={"clearedTransactions": counts, "sheetClear": sheet_clear})
+                      new={"clearedTransactions": counts, "sheetClear": sheet_clear,
+                           "permanentLedgersPreserved": sorted(gsheets.PERMANENT_LEDGER_TABS)})
     return {"ok": True, "cleared": counts, "sheetClear": sheet_clear,
+            "permanentLedgersPreserved": sorted(gsheets.PERMANENT_LEDGER_TABS),
             "nextLeadId": "LD26000001"}
 
 
