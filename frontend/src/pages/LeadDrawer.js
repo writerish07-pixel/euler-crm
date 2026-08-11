@@ -39,6 +39,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const lead = data.lead;
   const c = data.commercials;
   const actions = data.actions || {};
+  const leadLocked = !!actions.isLocked || !actions.isActive || !!actions.isDelivered;
 
   const tabs = [
     { key: "overview", label: "Overview" },
@@ -59,7 +60,10 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
-        <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
+        {leadLocked && <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="lead-locked-badge">Locked</Badge>}
+        {!leadLocked && (
+          <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
+        )}
         {isOwner && (
           <Button variant="secondary" data-testid="delete-lead-btn"
             onClick={async () => {
@@ -79,7 +83,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         </div>
       </div>
 
-      {editing && (
+      {editing && !leadLocked && (
         <EditLeadModal
           lead={lead}
           masters={masters}
@@ -92,6 +96,10 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             else refresh();
           }}
         />
+      )}
+
+      {leadLocked && (
+        <StepLock text="This lead is Delivered or Closed — vehicle details and commercial steps are locked. Only Active leads can be edited." />
       )}
 
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
@@ -659,9 +667,9 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
 const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
 function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
-  const staffLocked = !isOwner && !!alreadyDelivered;
+  const closedOrInactive = !actions.isActive;
+  const locked = alreadyDelivered || closedOrInactive;
   const canMarkDelivered = actions.canDeliver;   // active + booked + not delivered
-  const locked = staffLocked;
   const [form, setForm] = useState(() => {
     const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || todayISO() };
     DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
@@ -681,9 +689,9 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, onSaved })
   };
   return (
     <div>
-      {staffLocked && <StepLock text="Delivery is complete. Only the owner can edit a completed step." />}
-      {!staffLocked && alreadyDelivered && <StepLock text="Vehicle already delivered — owner can still correct paperwork." />}
-      {!alreadyDelivered && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
+      {alreadyDelivered && <StepLock text="Vehicle delivered — this lead is locked. No further delivery or commercial edits." />}
+      {!alreadyDelivered && closedOrInactive && <StepLock text="This lead is Closed — delivery cannot be changed." />}
+      {!alreadyDelivered && !closedOrInactive && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
       <div className="flex flex-wrap gap-2 mb-4">
         {DELIV_STEPS.map(([k, label]) => (
           <button key={k} data-testid={`deliv-${k}`} onClick={() => toggle(k)} disabled={locked}

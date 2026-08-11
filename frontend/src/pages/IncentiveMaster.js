@@ -41,7 +41,7 @@ function IncentiveRegister() {
     if (!paidDate) return toast.error("Paid date is required");
     try {
       await put(`/incentive-register/${id}/pay`, { paidDate });
-      toast.success("Marked paid");
+      toast.success("Marked paid — OEM claim opened as outstanding");
       load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to update");
@@ -50,10 +50,15 @@ function IncentiveRegister() {
 
   if (!rows.length) return null;
   const pending = rows.filter((r) => r.status !== "Paid").reduce((s, r) => s + Number(r.incentiveAmount || 0), 0);
+  const paid = rows.filter((r) => r.status === "Paid").reduce((s, r) => s + Number(r.incentiveAmount || 0), 0);
+  const total = pending + paid;
 
   return (
     <div className="mt-8">
-      <PageHeader title="Incentive Register" subtitle={`Auto-created on delivery · ${inr(pending)} pending payout`} />
+      <PageHeader
+        title="Incentive Register"
+        subtitle={`Auto-created on delivery · Pending ${inr(pending)} · Paid ${inr(paid)} · Total ${inr(total)}`}
+      />
       {user?.role === "owner" && (
         <div className="mb-3 max-w-xs">
           <Field label="Paid Date (used when marking paid)">
@@ -79,7 +84,7 @@ function IncentiveRegister() {
         ]}
         rows={rows}
       />
-      <p className="text-xs text-ink-faint mt-3">Eligibility (min retails / month) verified manually by ASM/RM before payout, per scheme circular.</p>
+      <p className="text-xs text-ink-faint mt-3">Eligibility (min retails / month) verified manually by ASM/RM before payout, per scheme circular. Mark Paid also opens an OEM Claim Register row (outstanding).</p>
     </div>
   );
 }
