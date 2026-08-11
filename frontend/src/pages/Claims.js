@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { HandCoins, Plus } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { PageHeader, Table, Badge, Button, Field, Input, Select, Card } from "../components/ui";
+import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard } from "../components/ui";
 
 export default function Claims() {
   const [rows, setRows] = useState([]);
@@ -14,7 +14,17 @@ export default function Claims() {
   const load = useCallback(() => get("/claims").then(setRows), []);
   useEffect(() => { load(); get("/leads").then(setLeads); }, [load]);
 
-  const eligible = rows.reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
+  const isIncentive = (r) => String(r.componentKey || "").startsWith("executiveIncentive")
+    || /executive incentive/i.test(String(r.component || r.claimType || ""));
+  const schemeRows = rows.filter((r) => !r.manual || !isIncentive(r));
+  const incentiveRows = rows.filter((r) => isIncentive(r));
+  const schemeEligible = schemeRows.reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
+  const incentiveEligible = incentiveRows.reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
+  const eligible = schemeEligible + incentiveEligible;
+  const outstandingOf = (list) => list.reduce((s, r) => s + Math.max(0, Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0)), 0);
+  const schemeOutstanding = outstandingOf(schemeRows);
+  const incentiveOutstanding = outstandingOf(incentiveRows);
+  const totalOutstanding = schemeOutstanding + incentiveOutstanding;
   const outstandingRows = rows.filter((r) => Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0) > 0.01);
 
   return (
@@ -24,6 +34,12 @@ export default function Claims() {
           <Button variant="secondary" data-testid="add-manual-claim-btn" onClick={() => setManual(true)}><Plus size={16} /> Add Manual Claim</Button>
           <Button data-testid="record-claim-receipt-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Claim Received</Button>
         </div>} />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6" data-testid="claim-totals">
+        <StatCard label="Scheme Eligible" value={inr(schemeEligible)} tone="text-cobalt" />
+        <StatCard label="Executive Incentive" value={inr(incentiveEligible)} tone="text-violet-600" />
+        <StatCard label="Total Eligible" value={inr(eligible)} tone="text-emerald-600" />
+        <StatCard label="Total Outstanding" value={inr(totalOutstanding)} tone="text-red-600" />
+      </div>
       <Table
         rowKey="claimId"
         onRowClick={setActive}
@@ -47,7 +63,7 @@ export default function Claims() {
           { key: "ageingDays", label: "Ageing", align: "right", render: (r) => r.ageingDays ? <Badge tone={r.ageingDays > 30 ? "bg-red-50 text-red-700 ring-red-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>{r.ageingDays}d</Badge> : "—" },
         ]}
         rows={rows}
-        empty="No claims yet — apply schemes on booked leads, or click Add Manual Claim"
+        empty="No claims yet — apply schemes on booked leads, mark incentives paid, or click Add Manual Claim"
       />
       {active && <SettleModal claim={active} onClose={() => setActive(null)} onDone={() => { setActive(null); load(); }} />}
       {receipt && <ClaimReceiptModal rows={outstandingRows} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />}

@@ -127,6 +127,11 @@ SYNC_MAP = {
                         "lastUpdated", "createdBy", "timestamp", "remarks",
                         # Newly sourced: attribution + lifecycle position.
                         "modifiedBy", "currentStage"], None),
+    # Incentive Register — created on Mark Delivered; Mark Paid also upserts an OEM claim.
+    "incentive_register": (_tab("GSHEET_TAB_INCENTIVE_REGISTER", "Incentive Register"), "incentiveId",
+                           ["incentiveId", "schemeMonth", "executive", "leadId", "bookingId",
+                            "model", "variant", "productCategory", "deliveryDate", "incentiveAmount",
+                            "status", "paidDate", "remarks", "lastUpdated"], 1),
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.

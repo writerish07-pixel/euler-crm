@@ -187,23 +187,32 @@ def _is_priced(lead):
 
 
 def lead_actions(lead):
-    """Which workflow steps a lead is eligible for (faithful to PICKER_STAGE + requireActiveLead_)."""
+    """Which workflow steps a lead is eligible for (faithful to PICKER_STAGE + requireActiveLead_).
+
+    Delivered / Closed / Cancelled / Archived leads are frozen for commercial edits —
+    the vehicle is unique; only Active, non-delivered leads may change.
+    Close remains available on Active (including Delivered) so the lifecycle can exit.
+    Finance / claim receipts stay allowed after close (not Archived).
+    """
     active = _acct(lead) == "Active"
     booked = _is_booked(lead)
     delivered = _is_delivered(lead)
     not_archived = _acct(lead) != "Archived"
+    mutable = active and not delivered
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
     return {
-        "canBook": active and not booked,                 # booking stage: exclude booked/delivered
-        "canPrice": active,                               # requires Active
-        "canScheme": active,                              # requires Active
-        "canPayment": active,                             # customer payment requires Active
+        "canBook": mutable and not booked,
+        "canPrice": mutable,
+        "canScheme": mutable,
+        "canPayment": mutable,                             # customer payment
         "canFinanceReceipt": not_archived,               # finance receipt allowed after close
-        "canDeliver": active and booked and not delivered,# delivery stage: exclude delivered
-        "canClose": active,                               # close: RC+plate captured here (delivered) or lost-lead close
+        "canDeliver": active and booked and not delivered,
+        "canClose": active,                               # close exit path (incl. delivered)
+        "canEditLead": mutable,                           # Edit Lead modal / PUT /leads
         "isBooked": booked, "isDelivered": delivered, "isActive": active,
-        # Step completion — staff may complete a step once; only owner re-edits.
+        "isLocked": not mutable,
+        # Step completion — staff may complete a step once; only owner re-edits (while mutable).
         "priceCompleted": priced,
         "schemeCompleted": schemed,
         "deliveryCompleted": delivered,
@@ -216,6 +225,17 @@ def _require_owner_reedit(act, completed, step_label):
         raise HTTPException(
             403,
             f"{step_label} is already saved. Only the owner can edit a completed step.",
+        )
+
+
+def _require_mutable_lead(lead, verb="edits"):
+    """Strict freeze: only Active AND not Delivered may change commercial/workflow fields."""
+    if _acct(lead) != "Active" or _is_delivered(lead):
+        raise HTTPException(
+            409,
+            f"This lead is locked for {verb} "
+            f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
+            f"Only Active, non-delivered leads can be changed.",
         )
 
 
@@ -1078,6 +1098,7 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
     other field on the lead (including system/financial fields, which aren't even
     part of this model) is left exactly as it was. See LEAD_SYSTEM_FIELDS."""
     lead = await get_lead_or_404(lead_id)
+    _require_mutable_lead(lead, "lead edits")
     payload = body.model_dump(exclude_unset=True)
     payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
 
@@ -2126,8 +2147,14 @@ async def list_deliveries():
 async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
-    # Staff may capture delivery once; only owner may re-edit a delivered lead.
-    _require_owner_reedit(act, _is_delivered(lead), "Delivery")
+    # Delivered / Closed leads are fully frozen — no paperwork re-edits (vehicle is unique).
+    if _is_delivered(lead) or _acct(lead) != "Active":
+        raise HTTPException(
+            409,
+            f"This lead is locked for delivery edits "
+            f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
+            f"Delivered and closed leads cannot be changed.",
+        )
     if delivered and not _is_delivered(lead):
         _require_action(lead, "canDeliver", "delivery (not booked/active)")
         errs = _validate_delivery_ready(lead, body)
@@ -2241,6 +2268,8 @@ async def _upsert_incentive_register_on_delivery(lead_id, delivery_date):
         "lastUpdated": now_iso(),
     }
     await db.incentive_register.insert_one(doc)
+    # Push to Google Sheet Incentive Register (was missing from SYNC_MAP / never called).
+    await sheet_sync("incentive_register", clean(doc))
     return doc
 
 
@@ -2253,6 +2282,78 @@ class IncentivePayIn(BaseModel):
     paidDate: str = ""
 
 
+async def _upsert_incentive_oem_claim(incentive_row, act=None):
+    """When executive incentive is Mark Paid, open an OEM Claim Register row (outstanding).
+
+    Same receivable path as scheme claims: appears in GET /claims, Scheme Claim Register
+    sheet, and OEM totals. Does NOT touch scheme allocation / companyOutstanding formula
+    (those stay scheme-share SSOT); incentive is a separate manual claim component.
+    """
+    lead_id = incentive_row.get("leadId") or ""
+    amount = ce.round2(ce.num(incentive_row.get("incentiveAmount")))
+    if amount <= 0 or not lead_id:
+        return None
+    incentive_id = incentive_row.get("incentiveId") or ""
+    component_key = f"executiveIncentive-{incentive_id}" if incentive_id else "executiveIncentive"
+    claim_id = f"CLM-{lead_id}-executiveIncentive"
+    lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    existing = await db.claims.find_one({"leadId": lead_id, "componentKey": component_key}) or {}
+    # Preserve receipts if the claim was already partially paid by OEM.
+    received = ce.round2(ce.num(existing.get("receivedAmount")))
+    status = existing.get("claimStatus") or "Pending"
+    if received <= 0:
+        status = "Pending"
+    elif received + 0.01 >= amount:
+        status = "Received"
+    else:
+        status = "Partial"
+    doc = {
+        "claimId": existing.get("claimId") or claim_id,
+        "manual": True,
+        "componentKey": component_key,
+        "leadId": lead_id,
+        "customer": lead.get("customerName") or existing.get("customer") or "",
+        "model": incentive_row.get("model") or lead.get("interestedModel") or "",
+        "variant": incentive_row.get("variant") or lead.get("variant") or "",
+        "bookingDate": lead.get("bookingDate") or "",
+        "bookingId": incentive_row.get("bookingId") or lead.get("bookingId") or "",
+        "schemeMonth": incentive_row.get("schemeMonth") or "",
+        "executive": incentive_row.get("executive") or lead.get("executive") or "",
+        "claimType": "Executive Incentive",
+        "component": "Executive Incentive",
+        "oemCompany": "Euler Motors",
+        "claimAmount": amount,
+        "eligibleClaim": amount,
+        "claimStatus": status,
+        "receivedAmount": received,
+        "claimReference": existing.get("claimReference") or incentive_id,
+        "note": existing.get("note") or f"Executive incentive paid {incentive_row.get('paidDate') or ''}".strip(),
+        "submittedDate": existing.get("submittedDate") or incentive_row.get("paidDate") or today(),
+        "approvedDate": existing.get("approvedDate") or "",
+        "source": "Executive Incentive (Paid)",
+        "claimRequired": "Yes",
+        # Bifurcation columns stay 0; total/oemDiscount carry the incentive amount.
+        "consumerDiscount": 0, "exchangeBonus": 0, "loyaltyBonus": 0, "insuranceBenefit": 0,
+        "referralBonus": 0, "dsaDiscount": 0, "additionalDiscount": 0,
+        "rtoBenefit": 0, "rtoInsuranceBenefit": 0,
+        "totalDiscount": amount, "dealerDiscount": 0, "oemDiscount": amount,
+        "lastUpdated": now_iso(),
+    }
+    if not existing:
+        doc["receipts"] = []
+        doc["createdAt"] = now_iso()
+    await db.claims.update_one(
+        {"leadId": lead_id, "componentKey": component_key},
+        {"$set": doc}, upsert=True,
+    )
+    await sheet_sync("claims", clean(doc))
+    if act:
+        await write_audit(act, "upsert", "claim", leadId=lead_id, claimId=doc["claimId"],
+                          new={"component": "Executive Incentive", "claimAmount": amount,
+                               "incentiveId": incentive_id, "source": doc["source"]})
+    return doc
+
+
 @api.put("/incentive-register/{incentive_id}/pay", dependencies=[Depends(owner_only)])
 async def mark_incentive_paid(incentive_id: str, body: IncentivePayIn, act=Depends(actor)):
     existing = await db.incentive_register.find_one({"incentiveId": incentive_id})
@@ -2260,9 +2361,30 @@ async def mark_incentive_paid(incentive_id: str, body: IncentivePayIn, act=Depen
         raise HTTPException(404, "Incentive Register row not found")
     updates = {"status": "Paid", "paidDate": body.paidDate or today(), "lastUpdated": now_iso()}
     await db.incentive_register.update_one({"incentiveId": incentive_id}, {"$set": updates})
+    paid = {**existing, **updates}
+    await sheet_sync("incentive_register", clean(paid))
+    # Paid executive incentive → OEM Claim Register outstanding (claim from OEM).
+    await _upsert_incentive_oem_claim(paid, act=act)
     await write_audit(act, "update", "incentive_register", leadId=existing.get("leadId", ""),
                       old={"status": existing.get("status")}, new=updates)
     return clean(await db.incentive_register.find_one({"incentiveId": incentive_id}))
+
+
+@api.post("/admin/sync-incentive-register", dependencies=[Depends(owner_only)])
+async def sync_incentive_register_sheet(act=Depends(actor)):
+    """Backfill Google Sheet Incentive Register from Mongo (rows created before sheet sync)."""
+    rows = [clean(r) for r in await db.incentive_register.find().to_list(5000)]
+    synced, errors = 0, []
+    for row in rows:
+        try:
+            await sheet_sync("incentive_register", row)
+            synced += 1
+            if str(row.get("status") or "").lower() == "paid":
+                await _upsert_incentive_oem_claim(row, act=None)
+        except Exception as e:
+            errors.append({"incentiveId": row.get("incentiveId"), "error": str(e)})
+    await write_audit(act, "sync", "incentive_register", new={"synced": synced, "errors": len(errors)})
+    return {"ok": True, "synced": synced, "total": len(rows), "errors": errors}
 
 
 # ---------------------------------------------------------------- price master
@@ -2651,13 +2773,44 @@ async def oem_claim_dashboard():
         e = execu.setdefault(r["executive"], {"executive": r["executive"], "bookings": 0, "claim": 0.0})
         e["bookings"] += 1
         e["claim"] = ce.round2(e["claim"] + cc)
+    # Executive incentives marked Paid → OEM claim outstanding (manual claims).
+    # Shown as their own bifurcation line + folded into eligible / OEM liability totals.
+    incentive_claim_total = 0.0
+    incentive_claim_count = 0
+    incentive_received = 0.0
+    for m in await db.claims.find({
+        "manual": True,
+        "componentKey": {"$regex": "^executiveIncentive"},
+    }).to_list(5000):
+        amt = ce.round2(ce.num(m.get("eligibleClaim") if m.get("eligibleClaim") is not None else m.get("claimAmount")))
+        if amt <= 0:
+            continue
+        incentive_claim_total = ce.round2(incentive_claim_total + amt)
+        incentive_claim_count += 1
+        incentive_received = ce.round2(incentive_received + ce.num(m.get("receivedAmount")))
+        label = m.get("component") or m.get("claimType") or "Executive Incentive"
+        sc = scheme.setdefault(label, {"scheme": label, "count": 0, "value": 0.0})
+        sc["count"] += 1
+        sc["value"] = ce.round2(sc["value"] + amt)
+        exec_name = m.get("executive") or "—"
+        e = execu.setdefault(exec_name, {"executive": exec_name, "bookings": 0, "claim": 0.0})
+        e["claim"] = ce.round2(e["claim"] + amt)
+    scheme_eligible = eligible_val
+    eligible_val = ce.round2(eligible_val + incentive_claim_total)
+    total_oem = ce.round2(total_oem + incentive_claim_total)
+    company_share_val = ce.round2(company_share_val + incentive_claim_total)
+    oem_liability = ce.round2(
+        eligible_val - status_value.get("Received", 0) - incentive_received)
     return {
         "bookings": len(rows), "totalOemClaimValue": total_oem,
         "statusSummary": [{"status": s, "bookings": status_count.get(s, 0), "value": status_value.get(s, 0)} for s in status_keys],
         "valueSummary": {
             "totalDiscountGiven": total_disc_val, "eligibleClaim": eligible_val,
             "companyShare": company_share_val, "yourOwnShare": dealer_share_val,
-            "oemLiability": ce.round2(eligible_val - status_value.get("Received", 0)),
+            "oemLiability": oem_liability,
+            "schemeEligibleClaim": scheme_eligible,
+            "executiveIncentiveClaim": incentive_claim_total,
+            "executiveIncentiveCount": incentive_claim_count,
         },
         "monthly": sorted(monthly.values(), key=lambda x: x["month"]),
         "schemeWise": sorted(scheme.values(), key=lambda x: x["scheme"]),
@@ -3068,13 +3221,17 @@ async def list_claims():
                 "claimReference": (existing or {}).get("claimReference", ""),
                 "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
             })
-    # Manual claims (OEM incentives etc.) entered directly — merged into the register
+    # Manual claims (OEM incentives / executive incentives) — merged into the register
     for m in await db.claims.find({"manual": True}).to_list(2000):
         elig = ce.round2(ce.num(m.get("eligibleClaim") if m.get("eligibleClaim") is not None else m.get("claimAmount")))
         result.append({
             "claimId": m.get("claimId"), "leadId": m.get("leadId", ""),
-            "customer": m.get("customer", ""), "model": m.get("model", ""), "variant": "",
-            "bookingDate": "", "component": m.get("component") or m.get("claimType") or "Manual Claim",
+            "customer": m.get("customer", ""), "model": m.get("model", ""),
+            "variant": m.get("variant", ""),
+            "bookingDate": m.get("bookingDate", ""),
+            "executive": m.get("executive", ""),
+            "schemeMonth": m.get("schemeMonth", ""),
+            "component": m.get("component") or m.get("claimType") or "Manual Claim",
             "componentKey": m.get("componentKey"), "claimAmount": ce.round2(ce.num(m.get("claimAmount"))),
             "eligibleClaim": elig,
             "approvalStatus": m.get("claimStatus", "Submitted"),
@@ -3084,6 +3241,9 @@ async def list_claims():
             "submittedDate": m.get("submittedDate", ""), "approvedDate": m.get("approvedDate", ""),
             "ageingDays": _claim_ageing_days(m.get("submittedDate", ""), m.get("claimStatus", ""), m.get("approvedDate", "")),
             "manual": True, "oemCompany": m.get("oemCompany", ""), "note": m.get("note", ""),
+            "source": m.get("source", ""),
+            "totalDiscount": ce.round2(ce.num(m.get("totalDiscount") if m.get("totalDiscount") is not None else elig)),
+            "oemDiscount": ce.round2(ce.num(m.get("oemDiscount") if m.get("oemDiscount") is not None else elig)),
         })
     return result
 
