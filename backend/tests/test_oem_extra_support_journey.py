@@ -172,6 +172,15 @@ async def test_scheme_save_wires_claim_earnings_and_payable(client):
             if c.get("leadId") == lid and c.get("componentKey") == "oemExtraSupport"]
     assert oem2[0]["claimAmount"] == 7000
 
+    # Dealer Earnings page API must surface OEM Extra Retained inside Total.
+    de = (await client.get("/api/dealer-earnings")).json()
+    row = next(r for r in de["rows"] if r["leadId"] == lid)
+    assert row["oemExtraSupportRetained"] == 7000
+    assert row["totalDealerEarnings"] == ce.round2(
+        row["dealerMarginNetExGst"] + row["dealerSchemeRetained"]
+        + row["oemExtraSupportRetained"] + row["dealerInsuranceIncome"]
+        + row["extraDealerIncomeTotal"] - row["dealerFundedBenefit"])
+
 
 @pytest.mark.asyncio
 async def test_passed_above_received_is_clamped(client):

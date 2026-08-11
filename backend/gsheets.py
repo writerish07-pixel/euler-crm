@@ -57,6 +57,7 @@ SYNC_MAP = {
                "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
                "totalDiscount", "oemSchemeAmount", "dealerSchemeAmount", "customerOutstanding",
                "companyOutstanding", "insurerName", "invoiceNumber", "chassisNumber", "numberPlate",
+               # Dealer Earnings LAST among commercial totals — includes OEM Extra Retained.
                "dealerTotalEarnings",
                # Closure + delivery-checklist columns. All of these were already
                # persisted on the lead by close_lead / mark_delivery; they simply had
@@ -117,19 +118,16 @@ SYNC_MAP = {
                          "insurancePayout", "customerInsuranceBenefitPassed", "dealerInsuranceIncome",
                          "financeIncentive", "accessoriesMargin", "exchangeMargin",
                          "documentationIncome", "warrantyIncome", "rsaIncome", "referralIncome",
-                         "campaignIncentive", "otherIncome", "dealerTotalEarnings",
-                         "dealerMarginNetExGst", "oemExtraSupportRetained",
-                         # Margin components and per-component scheme retention: both are
-                         # returned by commercial.py today and are now persisted on the lead
-                         # by recompute_lead, so they are mappings, not new calculations.
-                        "dealerMarginGrossInclGst", "dealerMarginGst",
-                        "consumerRetained", "exchangeRetained", "loyaltyRetained",
-                        "referralRetained", "dsaRetained", "schemeRetainedBreakup",
-                        "oemExtraSupportReceived", "oemExtraSupportPassed",
-                        "leadSource", "claimStatus", "insuranceStatus",
-                        "lastUpdated", "createdBy", "timestamp", "remarks",
-                        # Newly sourced: attribution + lifecycle position.
-                        "modifiedBy", "currentStage"], None),
+                         "campaignIncentive", "otherIncome",
+                         "dealerMarginNetExGst", "dealerMarginGrossInclGst", "dealerMarginGst",
+                         "consumerRetained", "exchangeRetained", "loyaltyRetained",
+                         "referralRetained", "dsaRetained", "schemeRetainedBreakup",
+                         # OEM Extra trio, then TOTAL (final calc includes Retained).
+                         "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
+                         "dealerTotalEarnings",
+                         "leadSource", "claimStatus", "insuranceStatus",
+                         "lastUpdated", "createdBy", "timestamp", "remarks",
+                         "modifiedBy", "currentStage"], None),
     # Incentive Register — created on Mark Delivered; Mark Paid also upserts an OEM claim.
     "incentive_register": (_tab("GSHEET_TAB_INCENTIVE_REGISTER", "Incentive Register"), "incentiveId",
                            ["incentiveId", "schemeMonth", "executive", "leadId", "bookingId",
@@ -731,11 +729,95 @@ def _append_missing_headers(tab, required_headers, header_row=1):
             "startColumn": letter}
 
 
-def _ensure_oem_extra_support_columns_sync():
-    """Create/append OEM Extra Support headers on related operational tabs.
+def _header_index(headers, *names):
+    """0-based index of the first matching header name, else None."""
+    by_norm = {_norm(h): i for i, h in enumerate(headers) if str(h or "").strip()}
+    for name in names:
+        if _norm(name) in by_norm:
+            return by_norm[_norm(name)]
+    return None
 
-    Lead Register + Dealer Earnings get the Received/Passed/Retained trio.
-    OEM Extra Support Register is created (if missing) with full header row.
+
+def _ensure_oem_extra_before_total_earnings(tab, total_header_names, header_row=1):
+    """Ensure OEM Extra trio sits immediately BEFORE the total Dealer Earnings column.
+
+    Final layout: … | OEM Extra Received | Passed | Retained | Dealer Earnings (total) |
+    So the earnings column is last and holds the final calculation (includes Retained).
+    """
+    gid = _gid_for_tab(tab)
+    if gid is None:
+        return {"tab": tab, "ok": False, "error": "tab not found"}
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    headers = _read_header_row(tab, header_row)
+    total_idx = _header_index(headers, *total_header_names)
+    missing = [h for h in OEM_EXTRA_CANONICAL_HEADERS if _header_index(headers, h) is None]
+    changed = False
+    added = []
+    moved_total = False
+
+    if missing:
+        # Insert blank columns just before Dealer Earnings (or at end if total missing).
+        insert_at = total_idx if total_idx is not None else len([h for h in headers if str(h or "").strip()])
+        _with_retry(lambda: _service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": [{
+                "insertDimension": {
+                    "range": {
+                        "sheetId": gid,
+                        "dimension": "COLUMNS",
+                        "startIndex": insert_at,
+                        "endIndex": insert_at + len(missing),
+                    },
+                    "inheritFromBefore": insert_at > 0,
+                }
+            }]},
+        ).execute())
+        letter = _col_letter(insert_at)
+        end_letter = _col_letter(insert_at + len(missing) - 1)
+        rng = f"'{tab}'!{letter}{header_row}:{end_letter}{header_row}"
+        _with_retry(lambda: _service.spreadsheets().values().update(
+            spreadsheetId=sheet_id, range=rng, valueInputOption="RAW",
+            body={"values": [missing]},
+        ).execute())
+        added = list(missing)
+        changed = True
+        invalidate_header_cache(tab)
+        headers = _read_header_row(tab, header_row)
+        total_idx = _header_index(headers, *total_header_names)
+
+    # If Dealer Earnings is still LEFT of OEM Extra, move it to after Retained.
+    oem_idxs = [_header_index(headers, h) for h in OEM_EXTRA_CANONICAL_HEADERS]
+    oem_idxs = [i for i in oem_idxs if i is not None]
+    total_idx = _header_index(headers, *total_header_names)
+    if total_idx is not None and oem_idxs and total_idx < min(oem_idxs):
+        dest = max(oem_idxs) + 1  # after last OEM Extra column (pre-removal coords)
+        _with_retry(lambda: _service.spreadsheets().batchUpdate(
+            spreadsheetId=sheet_id,
+            body={"requests": [{
+                "moveDimension": {
+                    "source": {
+                        "sheetId": gid,
+                        "dimension": "COLUMNS",
+                        "startIndex": total_idx,
+                        "endIndex": total_idx + 1,
+                    },
+                    "destinationIndex": dest,
+                }
+            }]},
+        ).execute())
+        moved_total = True
+        changed = True
+        invalidate_header_cache(tab)
+
+    return {"tab": tab, "changed": changed, "added": added, "movedTotalAfterOemExtra": moved_total,
+            "totalHeader": total_header_names[0]}
+
+
+def _ensure_oem_extra_support_columns_sync():
+    """Create/place OEM Extra Support headers so Dealer Earnings is the final total column.
+
+    Lead Register + Dealer Earnings Register: Received / Passed / Retained, then total.
+    OEM Extra Support Register: create tab if missing.
     """
     titles = _sheet_titles()
     results = []
@@ -744,12 +826,14 @@ def _ensure_oem_extra_support_columns_sync():
     oem_tab = SYNC_MAP["oem_extra_support"][0]
 
     if lead_tab in titles:
-        results.append(_append_missing_headers(lead_tab, OEM_EXTRA_CANONICAL_HEADERS, 1))
+        results.append(_ensure_oem_extra_before_total_earnings(
+            lead_tab, ["Dealer Earnings", "TOTAL DEALER EARNINGS"], 1))
     else:
         results.append({"tab": lead_tab, "ok": False, "error": "tab not found"})
 
     if earn_tab in titles:
-        results.append(_append_missing_headers(earn_tab, OEM_EXTRA_CANONICAL_HEADERS, 1))
+        results.append(_ensure_oem_extra_before_total_earnings(
+            earn_tab, ["TOTAL DEALER EARNINGS", "Dealer Earnings"], 1))
     else:
         results.append({"tab": earn_tab, "ok": False, "error": "tab not found"})
 
@@ -761,12 +845,13 @@ def _ensure_oem_extra_support_columns_sync():
             valueInputOption="RAW", body={"values": [list(OEM_EXTRA_REGISTER_COLS)]},
         ).execute())
         invalidate_header_cache(oem_tab)
-        results.append({"tab": oem_tab, "created": True,
+        results.append({"tab": oem_tab, "created": True, "changed": True,
                         "added": list(OEM_EXTRA_REGISTER_COLS)})
     else:
         results.append(_append_missing_headers(oem_tab, OEM_EXTRA_REGISTER_COLS, 1))
 
-    added_any = any(r.get("added") or r.get("created") for r in results)
+    added_any = any(r.get("added") or r.get("created") or r.get("changed")
+                    or r.get("movedTotalAfterOemExtra") for r in results)
     return {"ok": True, "changed": added_any, "tabs": results}
 
 

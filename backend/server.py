@@ -3585,9 +3585,57 @@ async def delete_scheme_row(scheme_id: str):
 # ---------------------------------------------------------------- dealer earnings (owner-only)
 @api.get("/dealer-earnings", dependencies=[Depends(owner_only)])
 async def list_dealer_earnings():
-    rows = await db.dealer_earnings.find().to_list(1000)
+    """Owner Dealer Earnings grid — live from leads so OEM Extra Retained is always in total.
+
+    total = margin + scheme retained + OEM Extra Retained + insurance income + extras
+            − dealer-funded benefit.
+    """
+    leads = await db.leads.find({
+        "$or": [
+            {"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}},
+            {"customerPayable": {"$gt": 0}},
+            {"dealerTotalEarnings": {"$gt": 0}},
+        ]
+    }).to_list(5000)
+    # Fallback extras from dealer_earnings docs when lead mirror is thin.
+    de_by = {r.get("leadId"): r for r in await db.dealer_earnings.find().to_list(5000)}
+    rows = []
+    for l in leads:
+        lid = l.get("leadId")
+        de = de_by.get(lid) or {}
+        oem = ce.compute_oem_extra_support(l)
+        margin = ce.num(l.get("dealerMarginNetExGst") if l.get("dealerMarginNetExGst") is not None
+                        else de.get("dealerMarginNetExGst"))
+        scheme = ce.num(l.get("dealerSchemeRetained") if l.get("dealerSchemeRetained") is not None
+                        else de.get("dealerSchemeRetained"))
+        ins = ce.num(l.get("dealerInsuranceIncome") if l.get("dealerInsuranceIncome") is not None
+                     else de.get("dealerInsuranceIncome"))
+        extra = ce.num(l.get("extraDealerIncomeTotal") if l.get("extraDealerIncomeTotal") is not None
+                       else de.get("extraDealerIncomeTotal"))
+        funded = ce.num(l.get("dealerFundedBenefit") if l.get("dealerFundedBenefit") is not None
+                        else de.get("dealerFundedBenefit"))
+        total = ce.round2(margin + scheme + oem["oemExtraSupportRetained"] + ins + extra - funded)
+        rows.append({
+            "leadId": lid,
+            "customerName": l.get("customerName") or de.get("customerName"),
+            "model": l.get("interestedModel") or de.get("model"),
+            "variant": l.get("variant") or de.get("variant"),
+            "executive": l.get("executive") or de.get("executive"),
+            "currentStage": l.get("currentStatus") or de.get("currentStage"),
+            "dealerMarginNetExGst": margin,
+            "dealerSchemeRetained": scheme,
+            "dealerInsuranceIncome": ins,
+            "dealerFundedBenefit": funded,
+            "extraDealerIncomeTotal": extra,
+            "oemExtraSupportReceived": oem["oemExtraSupportReceived"],
+            "oemExtraSupportPassed": oem["oemExtraSupportPassed"],
+            "oemExtraSupportRetained": oem["oemExtraSupportRetained"],
+            "totalDealerEarnings": total,
+            "dealerTotalEarnings": total,
+        })
+    rows.sort(key=lambda r: (r.get("customerName") or "").lower())
     total = ce.round2(sum(ce.num(r.get("totalDealerEarnings")) for r in rows))
-    return {"rows": [clean(r) for r in rows], "total": total}
+    return {"rows": rows, "total": total}
 
 
 # ---------------------------------------------------------------- integrations status

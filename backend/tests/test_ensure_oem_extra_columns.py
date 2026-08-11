@@ -1,4 +1,4 @@
-"""Owner ensure-OEM-Extra-columns appends headers / creates the register tab."""
+"""Owner ensure-OEM-Extra-columns places trio before Dealer Earnings (total last)."""
 import os
 import sys
 
@@ -42,7 +42,6 @@ class FakeValues:
             lo, hi = (int(x) for x in a1.split(":"))
             out = [list(r) for r in grid[lo - 1:hi]]
         else:
-            # single cell or row range like A1 or BS1:BU1
             start = a1.split(":")[0]
             row_n = int("".join(c for c in start if c.isdigit()) or "1")
             out = [list(grid[row_n - 1])] if row_n - 1 < len(grid) else [[]]
@@ -70,6 +69,7 @@ class FakeService:
     def __init__(self, values):
         self._values = values
         self.created = []
+        self.batch = []
 
     def spreadsheets(self):
         return self
@@ -78,26 +78,63 @@ class FakeService:
         return self._values
 
     def get(self, spreadsheetId=None, fields=None, **kw):
+        if fields and "sheetId" in str(fields):
+            sheets = []
+            for i, title in enumerate(self._values.tabs.keys()):
+                sheets.append({"properties": {"sheetId": 1000 + i, "title": title}})
+            return _Exec({"sheets": sheets})
         sheets = [{"properties": {"title": t}} for t in self._values.tabs.keys()]
         return _Exec({"sheets": sheets})
 
     def batchUpdate(self, spreadsheetId=None, body=None, **kw):
+        title_by_gid = {1000 + i: t for i, t in enumerate(self._values.tabs.keys())}
         for req in body.get("requests") or []:
-            add = req.get("addSheet")
-            if add:
-                title = add["properties"]["title"]
+            self.batch.append(req)
+            if req.get("addSheet"):
+                title = req["addSheet"]["properties"]["title"]
                 self.created.append(title)
                 self._values.tabs.setdefault(title, [])
+            elif req.get("insertDimension"):
+                rng = req["insertDimension"]["range"]
+                tab = title_by_gid.get(rng["sheetId"])
+                if not tab:
+                    continue
+                start, end = rng["startIndex"], rng["endIndex"]
+                n = end - start
+                grid = self._values.tabs[tab]
+                for row in grid:
+                    for _ in range(n):
+                        row.insert(start, "")
+            elif req.get("moveDimension"):
+                src = req["moveDimension"]["source"]
+                dest = req["moveDimension"]["destinationIndex"]
+                tab = title_by_gid.get(src["sheetId"])
+                if not tab:
+                    continue
+                si, ei = src["startIndex"], src["endIndex"]
+                grid = self._values.tabs[tab]
+                for row in grid:
+                    block = row[si:ei]
+                    del row[si:ei]
+                    # destinationIndex is based on coords BEFORE removal when moving right
+                    d = dest
+                    if dest > si:
+                        d = dest - (ei - si)
+                    for i, cell in enumerate(block):
+                        row.insert(d + i, cell)
         return _Exec({})
 
 
-def test_ensure_appends_lead_register_headers_and_creates_oem_tab(monkeypatch):
+def test_ensure_inserts_oem_before_dealer_earnings(monkeypatch):
     tabs = {
-        "Lead Register": [["Lead ID", "Customer Name", "Additional Discount", "Dealer Earnings"]],
-        "Dealer Earnings Register": [
-            ["Lead ID", "Customer Name", "Dealer Margin Net (Ex GST)"]
+        "Lead Register": [
+            ["Lead ID", "Customer Name", "Additional Discount", "Dealer Earnings"],
+            ["LD1", "A", "0", "100"],
         ],
-        # OEM Extra Support Register intentionally missing
+        "Dealer Earnings Register": [
+            ["Lead ID", "TOTAL DEALER EARNINGS", "Claim Status"],
+            ["LD1", "100", ""],
+        ],
     }
     values = FakeValues(tabs)
     svc = FakeService(values)
@@ -112,23 +149,52 @@ def test_ensure_appends_lead_register_headers_and_creates_oem_tab(monkeypatch):
     assert res["changed"] is True
 
     lead_hdr = tabs["Lead Register"][0]
-    assert "OEM Extra Support Received" in lead_hdr
-    assert "OEM Extra Support Passed To Customer" in lead_hdr
-    assert "OEM Extra Support Retained" in lead_hdr
-
-    earn_hdr = tabs["Dealer Earnings Register"][0]
-    assert "OEM Extra Support Received" in earn_hdr
+    # OEM Extra trio then Dealer Earnings last among them
+    assert lead_hdr.index("OEM Extra Support Received") < lead_hdr.index("Dealer Earnings")
+    assert lead_hdr.index("OEM Extra Support Retained") < lead_hdr.index("Dealer Earnings")
+    assert lead_hdr.index("OEM Extra Support Retained") == lead_hdr.index("Dealer Earnings") - 1
 
     assert "OEM Extra Support Register" in tabs
-    assert tabs["OEM Extra Support Register"][0][0] == "Lead ID"
-    assert "OEM Extra Support Retained" in tabs["OEM Extra Support Register"][0]
 
 
-def test_ensure_is_idempotent_when_headers_exist(monkeypatch):
+def test_ensure_moves_dealer_earnings_after_existing_oem_cols(monkeypatch):
+    """Live bug: Dealer Earnings was left of OEM Extra — move it to the right."""
+    tabs = {
+        "Lead Register": [[
+            "Lead ID", "Dealer Earnings",
+            "OEM Extra Support Received", "OEM Extra Support Passed To Customer",
+            "OEM Extra Support Retained",
+        ]],
+        "Dealer Earnings Register": [[
+            "Lead ID", "TOTAL DEALER EARNINGS",
+            "OEM Extra Support Received", "OEM Extra Support Passed To Customer",
+            "OEM Extra Support Retained",
+        ]],
+        "OEM Extra Support Register": [list(gsheets.OEM_EXTRA_REGISTER_COLS)],
+    }
+    values = FakeValues(tabs)
+    svc = FakeService(values)
+    monkeypatch.setattr(gsheets, "_service", svc)
+    monkeypatch.setattr(gsheets, "_status", {"enabled": True})
+    monkeypatch.setattr(gsheets, "_write_blocked", lambda: None)
+    for name in ("_header_cache", "_headerrow_cache", "_idrow_cache", "_formula_cache"):
+        monkeypatch.setattr(gsheets, name, {})
+
+    res = gsheets._ensure_oem_extra_support_columns_sync()
+    assert res["ok"] is True
+    lead_hdr = tabs["Lead Register"][0]
+    assert lead_hdr[-1] == "Dealer Earnings"
+    assert lead_hdr[-4:-1] == list(gsheets.OEM_EXTRA_CANONICAL_HEADERS)
+
+    earn_hdr = tabs["Dealer Earnings Register"][0]
+    assert earn_hdr.index("TOTAL DEALER EARNINGS") > earn_hdr.index("OEM Extra Support Retained")
+
+
+def test_ensure_idempotent_when_order_correct(monkeypatch):
     trio = list(gsheets.OEM_EXTRA_CANONICAL_HEADERS)
     tabs = {
-        "Lead Register": [["Lead ID", *trio]],
-        "Dealer Earnings Register": [["Lead ID", *trio]],
+        "Lead Register": [["Lead ID", *trio, "Dealer Earnings"]],
+        "Dealer Earnings Register": [["Lead ID", *trio, "TOTAL DEALER EARNINGS"]],
         "OEM Extra Support Register": [list(gsheets.OEM_EXTRA_REGISTER_COLS)],
     }
     values = FakeValues(tabs)
@@ -143,4 +209,4 @@ def test_ensure_is_idempotent_when_headers_exist(monkeypatch):
     assert res["ok"] is True
     assert res["changed"] is False
     assert values.updates == []
-    assert svc.created == []
+    assert not any("moveDimension" in r or "insertDimension" in r for r in svc.batch)
