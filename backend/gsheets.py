@@ -52,6 +52,9 @@ SYNC_MAP = {
                "financeFileNumber", "lastPaymentMode", "totalReceived", "consumerDiscount",
                "exchangeBonus", "loyaltyBonus", "insuranceBenefit", "referralBonus", "dsaDiscount",
                "additionalDiscount",
+               # OEM Extra Support trio (Received / Passed / Retained) — same meaning as
+               # Dealer Earnings + OEM Extra Support Register. Headers must exist on the tab.
+               "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
                "totalDiscount", "oemSchemeAmount", "dealerSchemeAmount", "customerOutstanding",
                "companyOutstanding", "insurerName", "invoiceNumber", "chassisNumber", "numberPlate",
                "dealerTotalEarnings",
@@ -132,6 +135,12 @@ SYNC_MAP = {
                            ["incentiveId", "schemeMonth", "executive", "leadId", "bookingId",
                             "model", "variant", "productCategory", "deliveryDate", "incentiveAmount",
                             "status", "paidDate", "remarks", "lastUpdated"], 1),
+    # OEM Extra Support Register — one row per lead when Received > 0.
+    # Received = full OEM claim; Passed = customer portion; Retained = Received − Passed.
+    "oem_extra_support": (_tab("GSHEET_TAB_OEM_EXTRA_SUPPORT", "OEM Extra Support Register"), "leadId",
+                          ["leadId", "bookingId", "customerName", "model", "variant", "bookingDate",
+                           "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
+                           "status", "lastUpdated", "remarks"], 1),
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.
@@ -229,15 +238,15 @@ HEADER_ALIASES = {
     "insurancePayout": ["insurance payout"],
     "dealerSchemeRetained": ["dealer scheme retained"],
     "dealerMarginNetExGst": ["dealer margin net (ex gst)", "dealer margin net ex gst"],
-    "oemExtraSupportRetained": ["oem extra support retained"],
     "rsaIncome": ["rsa income"],
     # Margin components — the register spells out the GST treatment in the header.
     "dealerMarginGrossInclGst": ["dealer margin gross (incl gst)", "dealer margin gross incl gst"],
     "dealerMarginGst": ["dealer margin gst (5%)", "dealer margin gst"],
-    # OEM extra support: Received and Passed To Customer are DIFFERENT columns and must
+    # OEM extra support: Received / Passed / Retained are DIFFERENT columns and must
     # not collapse onto each other (same class of bug as the S/T insurance columns).
     "oemExtraSupportReceived": ["oem extra support received"],
     "oemExtraSupportPassed": ["oem extra support passed to customer"],
+    "oemExtraSupportRetained": ["oem extra support retained"],
     # Per-component scheme retention.
     "consumerRetained": ["consumer retained"],
     "exchangeRetained": ["exchange retained"],

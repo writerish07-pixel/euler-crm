@@ -195,7 +195,8 @@ def compute_commercial_totals(s, scheme_rows=None):
 
     oem_pool = sum_oem_offers(s)
     dealer_pool = sum_dealer_offers(s)
-    oem_extra_passed = max(0.0, num(s.get("oemExtraSupportPassed")))
+    oem_extra = compute_oem_extra_support(s)
+    oem_extra_passed = oem_extra["oemExtraSupportPassed"]
     benefit_mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
 
     if scheme_rows is not None:
@@ -225,6 +226,8 @@ def compute_commercial_totals(s, scheme_rows=None):
         "dealerDiscount": dealer_pool,
         "customerBenefitPassed": passed_oem,
         "oemExtraSupportPassed": oem_extra_passed,
+        "oemExtraSupportReceived": oem_extra["oemExtraSupportReceived"],
+        "oemExtraSupportRetained": oem_extra["oemExtraSupportRetained"],
         "totalPassedToCustomer": total_passed,
         "dealerRetained": dealer_retained,
         "benefitMode": benefit_mode,
@@ -305,7 +308,32 @@ SCHEME_COMPONENT_LABELS = {
     "rtoInsuranceBenefit": "Free RTO + Free Insurance",
     "rtoBenefit": "RTO Benefit",
     "insuranceBenefit": "Insurance Benefit",
+    # Side-ledger (not Scheme Master) — still claimable from OEM like other components.
+    "oemExtraSupport": "OEM Extra Support",
 }
+
+OEM_EXTRA_SUPPORT_KEY = "oemExtraSupport"
+
+
+def compute_oem_extra_support(s):
+    """OEM Extra Support — staff-typed side ledger (NOT a Scheme Master component).
+
+    Received  = amount taken from OEM against the lead → fully claimable from OEM.
+    Passed    = flexible portion given to the customer (≤ Received) → reduces payable.
+    Retained  = Received − Passed → dealer earnings (full Received when Passed is 0).
+    """
+    s = s or {}
+    received = round2(max(0.0, num(s.get("oemExtraSupportReceived"))))
+    passed = round2(max(0.0, min(num(s.get("oemExtraSupportPassed")), received)))
+    retained = round2(max(0.0, received - passed))
+    return {
+        "oemExtraSupportReceived": received,
+        "oemExtraSupportPassed": passed,
+        "oemExtraSupportRetained": retained,
+        "oemClaimable": received,
+        "customerBenefit": passed,
+        "dealerRetained": retained,
+    }
 
 
 def _alnum(v):
@@ -845,6 +873,7 @@ def compute_scheme_claim_shares(s, scheme_rows, approvals=None):
     """Company-share amounts for claim register: display (all) vs eligible (DSA needs approval).
 
     Reads oemClaimable from compute_scheme_allocation — never invents a parallel total.
+    Also folds in OEM Extra Support Received (side ledger, fully claimable from OEM).
     """
     approvals = approvals or {}
     alloc = compute_scheme_allocation(s, scheme_rows)
@@ -867,6 +896,15 @@ def compute_scheme_claim_shares(s, scheme_rows, approvals=None):
             continue
         out["eligibleByComponent"][k] = claimable
         out["eligibleTotal"] = round2(out["eligibleTotal"] + claimable)
+    # OEM Extra Support Received is claimable from OEM exactly like scheme company share.
+    extra = compute_oem_extra_support(s)
+    out["oemExtraSupport"] = extra
+    if extra["oemClaimable"] > 0:
+        k = OEM_EXTRA_SUPPORT_KEY
+        out["displayByComponent"][k] = extra["oemClaimable"]
+        out["eligibleByComponent"][k] = extra["oemClaimable"]
+        out["displayTotal"] = round2(out["displayTotal"] + extra["oemClaimable"])
+        out["eligibleTotal"] = round2(out["eligibleTotal"] + extra["oemClaimable"])
     return out
 
 
@@ -1121,7 +1159,8 @@ def compute_full_commercials(s, scheme_rows=None):
     totals = compute_commercial_totals(s, scheme_rows)
     margin = compute_dealer_margin(s)
     claim = derive_claim(s)
-    result = {**totals, "margin": margin, "claim": claim}
+    extra = compute_oem_extra_support(s)
+    result = {**totals, "margin": margin, "claim": claim, "oemExtraSupport": extra}
     if scheme_rows is not None:
         alloc = compute_scheme_allocation(s, scheme_rows)
         income = compute_scheme_income_breakdown(s, scheme_rows)
@@ -1129,9 +1168,14 @@ def compute_full_commercials(s, scheme_rows=None):
         result["schemeAllocation"] = alloc
         result["schemeIncome"] = income
         result["schemeClaimShares"] = shares
-        # Report-facing truths — all from the single allocation engine
+        # Total OEM claimable = scheme company shares + OEM Extra Support Received.
         result["oemClaimCompanyShare"] = shares["eligibleTotal"]
         result["dealerSchemeRetained"] = income["retainedIncomeTotal"]
         result["schemeCustomerBenefit"] = alloc["totals"]["customerBenefit"]
         result["schemeOemClaimable"] = alloc["totals"]["oemClaimable"]
+        result["oemExtraSupportClaimable"] = extra["oemClaimable"]
+    else:
+        result["oemClaimCompanyShare"] = round2(
+            num(claim.get("claimEligible")) + extra["oemClaimable"])
+        result["oemExtraSupportClaimable"] = extra["oemClaimable"]
     return result

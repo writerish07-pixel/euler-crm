@@ -173,6 +173,9 @@ function Overview({ lead, c }) {
         <KV label="Total Received" value={inr(lead.totalReceived)} tone="text-emerald-600" />
         <KV label="Customer Outstanding" value={inr(lead.customerOutstanding)} tone={lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"} />
         <KV label="OEM Claimable (Company Share)" value={inr(c.oemClaimCompanyShare ?? c.claim.claimEligible)} tone="text-amber-600" />
+        <KV label="OEM Extra Support Received" value={inr(lead.oemExtraSupportReceived || c.oemExtraSupport?.oemExtraSupportReceived || 0)} tone="text-amber-600" />
+        <KV label="OEM Extra Support Passed" value={inr(lead.oemExtraSupportPassed || c.oemExtraSupport?.oemExtraSupportPassed || 0)} />
+        <KV label="OEM Extra Support Retained" value={inr(lead.oemExtraSupportRetained || c.oemExtraSupport?.oemExtraSupportRetained || 0)} tone="text-emerald-600" />
         <KV label="Dealer Scheme Retained" value={inr(c.dealerSchemeRetained ?? c.dealerRetained)} />
         <KV label="Dealer-Funded Benefit" value={inr(c.dealerFundedBenefit ?? lead.dealerFundedBenefit ?? 0)} tone="text-rose-600" />
         <KV label="Dealer Margin (Net)" value={inr(c.margin.marginNetExGst)} />
@@ -468,6 +471,13 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     return s + Math.max(0, Math.min(comp.dealerShare, Math.max(0, cb - comp.oemShare)));
   }, 0);
 
+  // OEM Extra Support (NOT Additional Dealer): Received = full OEM claim;
+  // Passed ≤ Received reduces payable; Retained = Received − Passed → earnings.
+  const oemRecv = Math.max(0, +form.oemExtraSupportReceived || 0);
+  const oemPass = Math.max(0, Math.min(+form.oemExtraSupportPassed || 0, oemRecv));
+  const oemRetained = Math.max(0, oemRecv - oemPass);
+  const previewOemTotal = previewOem + oemRecv;
+
   return (
     <div>
       {inactive && <StepLock text="This lead is not Active — scheme is read-only." />}
@@ -480,15 +490,34 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         </div>
       )}
 
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-4 gap-3 mb-2">
         <Field label="Scheme Date">
           <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
         </Field>
-        <Field label="OEM Extra Support Received"><Input type="number" value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} disabled={locked} /></Field>
-        <Field label="OEM Extra Support Passed"><Input type="number" value={form.oemExtraSupportPassed} onChange={set("oemExtraSupportPassed")} disabled={locked} /></Field>
+        <Field label="OEM Extra Support Received">
+          <Input data-testid="oem-extra-received" type="number" value={form.oemExtraSupportReceived}
+            onChange={set("oemExtraSupportReceived")} disabled={locked} />
+        </Field>
+        <Field label="OEM Extra Support Passed">
+          <Input data-testid="oem-extra-passed" type="number" value={form.oemExtraSupportPassed}
+            onChange={set("oemExtraSupportPassed")} disabled={locked} />
+        </Field>
         <Field label="Additional (Dealer)">
           <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount} onChange={set("additionalDiscount")} disabled={locked} />
         </Field>
+      </div>
+      <div className="grid grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
+        <div>
+          <div className="text-[11px] text-ink-faint uppercase">OEM Extra Claim (full Received)</div>
+          <div className="font-mono text-amber-700" data-testid="oem-extra-claim">{inr(oemRecv)}</div>
+        </div>
+        <div>
+          <div className="text-[11px] text-ink-faint uppercase">OEM Extra Retained (earnings)</div>
+          <div className="font-mono text-emerald-700" data-testid="oem-extra-retained">{inr(oemRetained)}</div>
+        </div>
+        <div className="text-[11px] text-ink-faint self-end">
+          Passed comes from Received only. Additional (Dealer) is your margin discount — separate.
+        </div>
       </div>
       {hiddenFields.length > 0 && (
         <div className="text-[11px] text-ink-faint mb-3" data-testid="scheme-unavailable-note">
@@ -570,7 +599,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center">
           <Prev label="Customer Benefit" v={previewCb} />
           <Prev label="Dealer Scheme Retained" v={previewRetained} />
-          <Prev label="OEM Claimable" v={previewOem} />
+          <Prev label="OEM Claimable" v={previewOemTotal} />
           <Prev label="Dealer-Funded Benefit" v={previewFunded} />
           <Prev label="Scheme Available" v={previewAvail} />
         </div>
