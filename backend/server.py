@@ -4050,10 +4050,15 @@ async def reset_transactions(act=Depends(actor)):
     payments, deliveries, finance, insurance, claims, activities, earnings, incentives,
     quotations) and blocks the sample-data re-seed. Master data (price/scheme/incentive
     master, users, Masters list) is preserved. Also clears operational Google Sheet
-    register data rows (headers kept) when sheet sync is writable."""
+    register data rows (headers kept) when sheet sync is writable.
+
+    Also clears sheet_sync_log so a later /integrations/gsheets/retry cannot resurrect
+    deleted leads onto the spreadsheet.
+    """
     counts = {}
     for coll in ["leads", "bookings", "payments", "deliveries", "finance", "insurance",
-                 "claims", "activities", "dealer_earnings", "quotations", "incentive_register"]:
+                 "claims", "activities", "dealer_earnings", "quotations", "incentive_register",
+                 "sheet_sync_log"]:
         r = await db[coll].delete_many({})
         counts[coll] = r.deleted_count
     await db["system"].update_one({"_id": "seed_state"},

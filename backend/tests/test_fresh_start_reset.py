@@ -54,6 +54,7 @@ async def test_reset_clears_incentive_register_and_resets_lead_counter(client):
     assert body["ok"] is True
     assert body["cleared"]["incentive_register"] == before_incentives
     assert body["cleared"]["leads"] >= 1
+    assert "sheet_sync_log" in body["cleared"]
     assert body["nextLeadId"] == "LD26000001"
     assert body["sheetClear"]["ok"] is True
 
