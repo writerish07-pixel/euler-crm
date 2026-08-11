@@ -184,8 +184,11 @@ def test_delete_lead_traces_sync_removes_all_related_rows(fake_sheet):
     tabs, _ = fake_sheet
     res = gsheets._delete_lead_traces_sync("LD_DEL")
     assert res["ok"] is True
-    # lead + 2 act + book + 2 pay + del + 2 claim + ins + fin + earn + inc = 13
-    assert res["rowsDeleted"] == 13
+    # lead + 2 act + book + 2 pay + del + ins + fin + earn + inc = 11
+    # Scheme Claim Register is a permanent ledger — its 2 LD_DEL rows stay forever.
+    assert res["rowsDeleted"] == 11
+    claim_tabs = [t for t in res["tabs"] if t.get("tab") == "Scheme Claim Register"]
+    assert claim_tabs and claim_tabs[0].get("operation") == "preserved"
 
     def col_ids(tab, col=0):
         return [r[col] for r in tabs[tab][1:]]
@@ -196,7 +199,8 @@ def test_delete_lead_traces_sync_removes_all_related_rows(fake_sheet):
     assert col_ids("Booking Register", 1) == ["LD_KEEP"]
     assert col_ids("Payment Ledger", 1) == ["LD_KEEP"]
     assert col_ids("Delivery Tracker") == ["LD_KEEP"]
-    assert col_ids("Scheme Claim Register", 1) == ["LD_KEEP"]
+    # Claim rows for deleted lead remain (eternity ledger).
+    assert col_ids("Scheme Claim Register", 1) == ["LD_KEEP", "LD_DEL", "LD_DEL"]
     assert col_ids("Insurance Register", 1) == ["LD_KEEP"]
     assert col_ids("Finance Register", 1) == ["LD_KEEP"]
     assert col_ids("Dealer Earnings Register") == ["LD_KEEP"]

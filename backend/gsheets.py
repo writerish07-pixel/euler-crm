@@ -1107,8 +1107,11 @@ def _delete_lead_traces_sync(lead_id):
     """Remove every operational register row that belongs to lead_id.
 
     Walks SYNC_MAP tabs. Prefer the Lead ID column when present (covers multi-row
-    entities like payments / claims / activities). Falls back to the entity's
+    entities like payments / activities). Falls back to the entity's
     stable ID column when that column IS leadId (Lead Register, Delivery, Earnings).
+
+    Scheme Claim Register is a permanent ledger: claim rows are never deleted here
+    (or on go-live clear / receipt). Status may be Received; the row stays forever.
     """
     lead_id = str(lead_id or "").strip()
     if not lead_id:
@@ -1116,6 +1119,13 @@ def _delete_lead_traces_sync(lead_id):
     per_tab = {}
     for entity, spec in SYNC_MAP.items():
         tab, id_field, fields = spec[0], spec[1], spec[2]
+        if is_permanent_ledger_tab(tab):
+            per_tab[tab] = {
+                "ok": True, "entity": entity, "operation": "preserved",
+                "row_nums": [], "rowsDeleted": 0,
+                "reason": "permanent ledger — Scheme Claim Register never archives",
+            }
+            continue
         try:
             header_row = _header_row_for(entity, tab)
             # Resolve with leadId included so we can scan multi-row registers.
@@ -1148,6 +1158,9 @@ def _delete_lead_traces_sync(lead_id):
     results = []
     total = 0
     for tab, info in per_tab.items():
+        if info.get("operation") == "preserved":
+            results.append({"tab": tab, **info})
+            continue
         if "error" in info and "row_nums" not in info:
             results.append({"tab": tab, **info})
             continue
@@ -1283,9 +1296,22 @@ async def sync_masters(rows):
 FINANCE_PENDING_TAB = _tab("GSHEET_TAB_FINANCE_PENDING", "Finance Pending")
 FINANCE_OVERDUE_TAB = _tab("GSHEET_TAB_FINANCE_OVERDUE", "Finance Overdue")
 
-# Operational mirrors wiped by go-live reset (headers kept). Masters / Settings never listed.
+# Permanent ledgers — never archived, never cleared on go-live reset, never removed
+# when a lead is deleted or when OEM payment is Received. Claim rows are upsert-only
+# for life; Status may become Received but the row stays forever.
+PERMANENT_LEDGER_TABS = frozenset({
+    SYNC_MAP["claims"][0],  # Scheme Claim Register
+})
+
+
+def is_permanent_ledger_tab(tab: str) -> bool:
+    return str(tab or "").strip() in PERMANENT_LEDGER_TABS
+
+
+# Operational mirrors wiped by go-live reset (headers kept). Masters / Settings never
+# listed. Permanent ledgers (Scheme Claim Register) are intentionally excluded.
 OPERATIONAL_CLEAR_TABS = tuple(dict.fromkeys([
-    *(SYNC_MAP[e][0] for e in SYNC_MAP),
+    *(SYNC_MAP[e][0] for e in SYNC_MAP if not is_permanent_ledger_tab(SYNC_MAP[e][0])),
     "Incentive Register",
     "Quotation Log",
     "OEM Extra Support Register",

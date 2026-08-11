@@ -80,3 +80,6 @@ def test_operational_clear_tabs_exclude_masters():
     assert "Lead Register" in gsheets.OPERATIONAL_CLEAR_TABS
     assert "Dealer Earnings Register" in gsheets.OPERATIONAL_CLEAR_TABS
     assert "Incentive Register" in gsheets.OPERATIONAL_CLEAR_TABS
+    # Scheme Claim Register is a permanent ledger — never wiped on go-live reset.
+    assert "Scheme Claim Register" not in gsheets.OPERATIONAL_CLEAR_TABS
+    assert "Scheme Claim Register" in gsheets.PERMANENT_LEDGER_TABS
