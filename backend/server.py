@@ -1389,7 +1389,11 @@ async def convert_booking(lead_id: str, body: BookingIn):
 @api.delete("/leads/{lead_id}", dependencies=[Depends(owner_only)])
 async def delete_lead(lead_id: str, act=Depends(actor)):
     """Owner-only. Permanently delete a wrongly-posted lead and all related records
-    in Mongo AND every matching row across Google Sheet operational registers."""
+    in Mongo AND every matching row across Google Sheet operational registers.
+
+    Scheme Claim Register rows are preserved (permanent ledger — never archived,
+    even after Received / lead delete).
+    """
     lead = await db.leads.find_one({"leadId": lead_id})
     if not lead:
         raise HTTPException(404, "Lead not found")
