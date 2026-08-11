@@ -5,8 +5,9 @@ Circular EM/08-2026/001 · Turbo Aug'26 Scheme Master values.
 Business rule:
   Scheme Master = eligibility only. Dealer explicitly assigns each component.
   Default: Use Scheme = No ⇒ customerBenefit = 0.
-  dealerRetained = schemeAvailable − customerBenefit
+  dealerRetained = company share KEPT (oemShare − oemPassed). Unused dealer share ≠ income.
   oemClaimable    = OEM/company share (unchanged when CB changes)
+  dealerFundedBenefit = dealer share GIVEN (company-share-first)
   Customer Payable reduction = Σ customerBenefit
   Insurance Payout (premium × rate) is a SEPARATE ledger.
 """
@@ -60,7 +61,8 @@ def _assert_invariants(alloc):
         assert c["customerBenefit"] >= 0
         assert c["dealerRetained"] >= 0
         assert c["customerBenefit"] <= c["schemeAvailable"] + 0.01
-        assert abs(c["schemeAvailable"] - (c["customerBenefit"] + c["dealerRetained"])) < 0.01
+        oem_passed = ce.round2(min(c["oemShare"], c["customerBenefit"]))
+        assert abs(c["dealerRetained"] - (c["oemShare"] - oem_passed)) < 0.01
         assert c["oemClaimable"] <= c["schemeAvailable"] + 0.01
         assert c["oemClaimable"] == c["oemShare"]
         expected_funded = ce.round2(max(
@@ -81,13 +83,13 @@ def _explicit(breakup, used=None):
 
 # ============================================================ unit matrix
 def test_A_eligible_but_not_used():
-    """Both components eligible, Use Scheme = No → CB=0, retained=30k, OEM=20k."""
+    """Both components eligible, Use Scheme = No → CB=0, retained=company kept 20k, OEM=20k."""
     alloc = ce.compute_scheme_allocation(_explicit(
         {"loyaltyBonus": 0, "insuranceBenefit": 0},
         {"loyaltyBonus": False, "insuranceBenefit": False}), TURBO_SCHEME)
     _assert_invariants(alloc)
     assert alloc["totals"] == {
-        "schemeAvailable": 30000.0, "customerBenefit": 0.0, "dealerRetained": 30000.0,
+        "schemeAvailable": 30000.0, "customerBenefit": 0.0, "dealerRetained": 20000.0,
         "oemClaimable": 20000.0, "dealerFundedShare": 10000.0,
         "dealerFundedBenefit": 0.0, "oemShare": 20000.0,
     }
@@ -98,18 +100,20 @@ def test_eligibility_does_not_auto_assign():
     s = {**BASE, "benefitMode": "Full Benefit", "benefitPassedBreakup": {}}
     alloc = ce.compute_scheme_allocation(s, TURBO_SCHEME)
     assert alloc["totals"]["customerBenefit"] == 0
-    assert alloc["totals"]["dealerRetained"] == 30000
+    assert alloc["totals"]["dealerRetained"] == 20000
     assert alloc["totals"]["oemClaimable"] == 20000
 
 
 def test_B_loyalty_full_insurance_unused():
+    """User bug case: loyalty passed, insurance unused → retained = insurance OEM share only."""
     s = _explicit({"loyaltyBonus": 10000, "insuranceBenefit": 0},
                   {"loyaltyBonus": True, "insuranceBenefit": False})
     alloc = ce.compute_scheme_allocation(s, TURBO_SCHEME)
     _assert_invariants(alloc)
     assert alloc["totals"]["customerBenefit"] == 10000
-    assert alloc["totals"]["dealerRetained"] == 20000
+    assert alloc["totals"]["dealerRetained"] == 10000
     assert alloc["totals"]["oemClaimable"] == 20000
+    assert _by(alloc)["insuranceBenefit"]["dealerRetained"] == 10000
 
 
 def test_C_insurance_partial_loyalty_unused():
@@ -118,9 +122,9 @@ def test_C_insurance_partial_loyalty_unused():
     alloc = ce.compute_scheme_allocation(s, TURBO_SCHEME)
     _assert_invariants(alloc)
     assert alloc["totals"]["customerBenefit"] == 5000
-    assert alloc["totals"]["dealerRetained"] == 25000
+    assert alloc["totals"]["dealerRetained"] == 15000  # loy 10k + ins 5k company kept
     assert alloc["totals"]["oemClaimable"] == 20000
-    assert _by(alloc)["insuranceBenefit"]["dealerRetained"] == 15000
+    assert _by(alloc)["insuranceBenefit"]["dealerRetained"] == 5000
 
 
 def test_D_both_full_via_explicit_assignment():
@@ -144,8 +148,8 @@ def test_loyalty_and_insurance_identical_allocation_behaviour():
     b = _by(ce.compute_scheme_allocation(ins, TURBO_SCHEME))
     assert a["loyaltyBonus"]["customerBenefit"] == 5000
     assert b["insuranceBenefit"]["customerBenefit"] == 5000
-    assert a["loyaltyBonus"]["dealerRetained"] == a["loyaltyBonus"]["schemeAvailable"] - 5000
-    assert b["insuranceBenefit"]["dealerRetained"] == b["insuranceBenefit"]["schemeAvailable"] - 5000
+    assert a["loyaltyBonus"]["dealerRetained"] == a["loyaltyBonus"]["oemShare"] - 5000
+    assert b["insuranceBenefit"]["dealerRetained"] == b["insuranceBenefit"]["oemShare"] - 5000
     assert a["loyaltyBonus"]["oemClaimable"] == a["loyaltyBonus"]["oemShare"]
     assert b["insuranceBenefit"]["oemClaimable"] == b["insuranceBenefit"]["oemShare"]
 
@@ -169,7 +173,7 @@ def test_historical_pre_v2_full_benefit_does_not_silently_pass_entitlements():
     by = _by(alloc)
     assert by["loyaltyBonus"]["customerBenefit"] == 10000
     assert by["insuranceBenefit"]["customerBenefit"] == 0
-    assert alloc["totals"]["dealerRetained"] == 20000
+    assert alloc["totals"]["dealerRetained"] == 10000
     assert alloc["totals"]["oemClaimable"] == 20000
 
 
@@ -186,12 +190,14 @@ def test_historical_without_explicit_allocation_unchanged_by_eligibility():
 
 
 def test_dealer_funded_share_is_not_dealer_retained():
+    """Unused insurance: retained = OEM share kept, NOT full available / dealer share."""
     alloc = ce.compute_scheme_allocation(_explicit(
         {"loyaltyBonus": 0, "insuranceBenefit": 0}), TURBO_SCHEME)
     ins = _by(alloc)["insuranceBenefit"]
     assert ins["dealerFundedShare"] == 10000
-    assert ins["dealerRetained"] == 20000
-    assert ins["dealerFundedShare"] != ins["dealerRetained"]
+    assert ins["schemeAvailable"] == 20000
+    assert ins["dealerRetained"] == 10000  # company kept only
+    assert ins["dealerRetained"] != ins["schemeAvailable"]
 
 
 def test_customer_payable_uses_only_customer_benefit():
@@ -302,7 +308,7 @@ async def test_A_api_not_used(client):
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead.get("schemeAllocationExplicit") is True
     assert lead["schemeCustomerBenefit"] == 0
-    assert lead["dealerSchemeRetained"] == 30000
+    assert lead["dealerSchemeRetained"] == 20000
     assert lead["companyOutstanding"] == 20000
     used = json.loads(lead["schemeComponentsUsed"])
     assert used["loyaltyBonus"] is False
@@ -335,7 +341,7 @@ async def test_save_reload_persists_exact_allocation(client):
     await server.recompute_lead(lid)
     again = await server.db.leads.find_one({"leadId": lid})
     assert again["schemeCustomerBenefit"] == 5000
-    assert again["dealerSchemeRetained"] == 25000
+    assert again["dealerSchemeRetained"] == 15000  # loy 10k + ins 5k company kept
     assert again["companyOutstanding"] == 20000
 
 
@@ -346,7 +352,7 @@ async def test_E_insurance_5k_to_20k_deltas(client):
                              used={"loyaltyBonus": False, "insuranceBenefit": True})
     before = await server.db.leads.find_one({"leadId": lid})
     assert before["schemeCustomerBenefit"] == 5000
-    assert before["dealerSchemeRetained"] == 25000
+    assert before["dealerSchemeRetained"] == 15000
     claim_before = before["companyOutstanding"]
 
     await client.put(f"/api/leads/{lid}/scheme", json={
@@ -355,7 +361,10 @@ async def test_E_insurance_5k_to_20k_deltas(client):
         "schemeComponentsUsed": json.dumps({"loyaltyBonus": False, "insuranceBenefit": True})})
     after = await server.db.leads.find_one({"leadId": lid})
     assert ce.round2(before["customerPayable"] - after["customerPayable"]) == 15000
-    assert ce.round2(before["dealerSchemeRetained"] - after["dealerSchemeRetained"]) == 15000
+    # Retained: 15k → 10k (ins company kept goes 5k → 0); funded cost rises separately.
+    assert ce.round2(before["dealerSchemeRetained"] - after["dealerSchemeRetained"]) == 5000
+    assert after["dealerSchemeRetained"] == 10000
+    assert after["dealerFundedBenefit"] == 10000
     assert after["companyOutstanding"] == claim_before == 20000
 
 
@@ -402,12 +411,12 @@ async def test_earnings_no_double_count_scheme_and_payout(client):
     assert lead["dealerTotalEarnings"] == expected_total
     assert lead["dealerInsuranceIncome"] == payout
     assert lead["extraDealerIncomeTotal"] == 1000
-    assert lead["dealerSchemeRetained"] == 25000
+    assert lead["dealerSchemeRetained"] == 15000
     assert lead["dealerFundedBenefit"] == 0
     assert lead["customerInsuranceBenefitPassed"] == 5000
 
     report = (await client.get("/api/reports/dealer-earnings")).json()
-    assert report["totals"]["scheme"] == 25000
+    assert report["totals"]["scheme"] == 15000
     assert report["totals"]["insurance"] == payout
     ins_benefit_amt = next((c["amount"] for c in report["components"]
                             if "insurance benefit passed" in c["label"].lower()), 0)
@@ -456,7 +465,7 @@ async def test_modules_reconcile_turbo_not_used(client):
     await server.db.insurance.delete_many({})
     lid = await turbo_booked(client, "9888810007", deliver=True)
     lead = await server.db.leads.find_one({"leadId": lid})
-    assert lead["dealerSchemeRetained"] == 30000
+    assert lead["dealerSchemeRetained"] == 20000
     assert lead["schemeCustomerBenefit"] == 0
     assert lead["companyOutstanding"] == 20000
     claims = [c for c in (await client.get("/api/claims")).json() if c["leadId"] == lid]
@@ -465,7 +474,7 @@ async def test_modules_reconcile_turbo_not_used(client):
     assert ce.round2(sum(s["value"] for s in dash["schemeWise"])) == \
         ce.round2(dash["valueSummary"]["eligibleClaim"])
     report = (await client.get("/api/reports/dealer-earnings")).json()
-    assert report["totals"]["scheme"] == 30000
+    assert report["totals"]["scheme"] == 20000
     entry = await server.db.insurance.find_one({"leadId": lid})
     assert report["totals"]["insurance"] == entry["expectedPayout"]
 

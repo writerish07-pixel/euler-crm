@@ -3,12 +3,13 @@
 Every scheme component carries a SCHEME ENTITLEMENT (what the circular makes
 available) and a DEALER ALLOCATION (how much of it is passed to the customer):
 
-    dealerRetained = schemeAvailable - customerBenefit      (never negative)
+    dealerRetained = company share KEPT (oemShare - oemPassed); unused dealer share ≠ income
     oemClaimable   = oemShare                               (never schemeAvailable)
+    dealerFundedBenefit = dealer share GIVEN (company-share-first)
 
-Customer Payable falls only by customerBenefit. Dealer Earnings takes only
-dealerRetained. The OEM Claim Register takes only oemClaimable. Nothing is
-special-cased — entitlements allocate exactly like staff-entered offers.
+Customer Payable falls only by customerBenefit. Dealer Earnings takes
+dealerRetained minus dealerFundedBenefit. The OEM Claim Register takes only
+oemClaimable. Nothing is special-cased — entitlements allocate like offers.
 
 Scheme Master rows here come from the LIVE workbook's Turbo Aug'26 rows, which match
 circular EM/08-2026/001: Loyalty 0/10,000/10,000 and Insurance 10,000/10,000/20,000.
@@ -75,8 +76,8 @@ def test_case2_loyalty_pass_full():
 
 
 # ------------------------------------------------------------------ CASES 3-5
-@pytest.mark.parametrize("passed,retained", [(0, 20000), (5000, 15000),
-                                             (10000, 10000), (20000, 0)])
+@pytest.mark.parametrize("passed,retained", [(0, 10000), (5000, 5000),
+                                             (10000, 0), (15000, 0), (20000, 0)])
 def test_cases3to5_insurance_allocation_across_the_full_range(passed, retained):
     c = comp(allocate(loyaltyBonus=0, insuranceBenefit=passed), "insuranceBenefit")
     assert c["schemeAvailable"] == 20000
@@ -93,7 +94,7 @@ def test_case6_multiple_components():
     res = allocate(loyaltyBonus=0, insuranceBenefit=5000)
     t = res["totals"]
     assert t["customerBenefit"] == 5000
-    assert t["dealerRetained"] == 25000        # 10,000 loyalty + 15,000 insurance
+    assert t["dealerRetained"] == 15000        # 10,000 loyalty + 5,000 insurance company kept
     assert t["oemClaimable"] == 20000          # 10,000 + 10,000
     assert t["schemeAvailable"] == 30000
 
@@ -103,25 +104,26 @@ def test_retained_is_never_negative_and_benefit_is_clamped():
     over = comp(allocate(insuranceBenefit=999999), "insuranceBenefit")
     assert over["customerBenefit"] == 20000 and over["dealerRetained"] == 0
     under = comp(allocate(insuranceBenefit=-5000), "insuranceBenefit")
-    assert under["customerBenefit"] == 0 and under["dealerRetained"] == 20000
+    assert under["customerBenefit"] == 0 and under["dealerRetained"] == 10000
 
 
 def test_identity_holds_for_every_component():
     res = allocate(loyaltyBonus=3000, insuranceBenefit=7000)
     for c in res["components"]:
-        assert c["dealerRetained"] == ce.round2(c["schemeAvailable"] - c["customerBenefit"])
+        oem_passed = ce.round2(min(c["oemShare"], c["customerBenefit"]))
+        assert c["dealerRetained"] == ce.round2(c["oemShare"] - oem_passed)
         assert c["oemClaimable"] == c["oemShare"]
         assert c["dealerRetained"] >= 0
     assert len({c["key"] for c in res["components"]}) == len(res["components"]), "component counted twice"
 
 
 def test_no_component_is_special_cased():
-    """Insurance allocates by exactly the same rule as Loyalty."""
+    """Insurance and Loyalty both use company-kept retained."""
     res = allocate(loyaltyBonus=5000, insuranceBenefit=5000)
     for key in ("loyaltyBonus", "insuranceBenefit"):
         c = comp(res, key)
         assert c["customerBenefit"] == 5000
-        assert c["dealerRetained"] == c["schemeAvailable"] - 5000
+        assert c["dealerRetained"] == ce.round2(c["oemShare"] - min(c["oemShare"], 5000))
 
 
 # ============================ end-to-end through the API ====================
@@ -172,12 +174,12 @@ async def test_case8_dealer_earnings_take_the_retained_portion(client):
                      json={"allocation": {"loyaltyBonus": 0, "insuranceBenefit": 5000}})
     lead = await server.db.leads.find_one({"leadId": lid})
 
-    assert lead["dealerSchemeRetained"] == 25000          # 10,000 + 15,000
+    assert lead["dealerSchemeRetained"] == 15000          # 10,000 + 5,000 company kept
     assert lead["schemeOemClaimableTotal"] == 20000       # separate from earnings
     # Insurance CB ₹5,000 ≤ OEM share ₹10,000 → dealer-funded benefit cost ₹0
     assert lead["dealerFundedBenefit"] == 0
     assert lead["dealerTotalEarnings"] == ce.round2(
-        lead["dealerMarginNetExGst"] + 25000
+        lead["dealerMarginNetExGst"] + 15000
         + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
         - lead["dealerFundedBenefit"])
     # OEM claim receivable is NOT dealer income
@@ -243,10 +245,11 @@ async def test_case12_repeat_operations_create_no_duplicates(client):
     await client.post(f"/api/leads/{lid}/payments",
                       json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
     delivery = {"insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes",
-                "rc": "Yes", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-24",
-                "chassisNumber": "CH-24", "numberPlate": "RJ14-24", "delivered": "Yes"}
+                "rc": "Yes", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-24-DUP",
+                "chassisNumber": "CH-24-DUP", "numberPlate": "RJ14-24-DUP", "delivered": "Yes"}
     for _ in range(3):
-        await client.put(f"/api/leads/{lid}/delivery", json=delivery)
+        r = await client.put(f"/api/leads/{lid}/delivery", json=delivery)
+        assert r.status_code == 200, r.text
         await server.recompute_lead(lid)
 
     assert await server.db.insurance.count_documents({"leadId": lid}) == 1
@@ -305,7 +308,7 @@ async def test_scheme_rules_exposes_the_same_allocation_the_engine_produces(clie
     rules = (await client.get(f"/api/leads/{lid}/scheme-rules")).json()
     ins = rules["allocation"]["byKey"]["insuranceBenefit"]
     assert ins["customerBenefit"] == 7500
-    assert ins["dealerRetained"] == 12500
+    assert ins["dealerRetained"] == 2500   # company kept = 10000 - 7500
     assert ins["oemClaimable"] == 10000
     lead = await server.db.leads.find_one({"leadId": lid})
     assert rules["allocation"]["totals"]["dealerRetained"] == lead["dealerSchemeRetained"]
