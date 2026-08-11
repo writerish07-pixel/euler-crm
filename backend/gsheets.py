@@ -52,6 +52,9 @@ SYNC_MAP = {
                "financeFileNumber", "lastPaymentMode", "totalReceived", "consumerDiscount",
                "exchangeBonus", "loyaltyBonus", "insuranceBenefit", "referralBonus", "dsaDiscount",
                "additionalDiscount",
+               # OEM Extra Support trio (Received / Passed / Retained) — same meaning as
+               # Dealer Earnings + OEM Extra Support Register. Headers must exist on the tab.
+               "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
                "totalDiscount", "oemSchemeAmount", "dealerSchemeAmount", "customerOutstanding",
                "companyOutstanding", "insurerName", "invoiceNumber", "chassisNumber", "numberPlate",
                "dealerTotalEarnings",
@@ -132,6 +135,12 @@ SYNC_MAP = {
                            ["incentiveId", "schemeMonth", "executive", "leadId", "bookingId",
                             "model", "variant", "productCategory", "deliveryDate", "incentiveAmount",
                             "status", "paidDate", "remarks", "lastUpdated"], 1),
+    # OEM Extra Support Register — one row per lead when Received > 0.
+    # Received = full OEM claim; Passed = customer portion; Retained = Received − Passed.
+    "oem_extra_support": (_tab("GSHEET_TAB_OEM_EXTRA_SUPPORT", "OEM Extra Support Register"), "leadId",
+                          ["leadId", "bookingId", "customerName", "model", "variant", "bookingDate",
+                           "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
+                           "status", "lastUpdated", "remarks"], 1),
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.
@@ -229,15 +238,15 @@ HEADER_ALIASES = {
     "insurancePayout": ["insurance payout"],
     "dealerSchemeRetained": ["dealer scheme retained"],
     "dealerMarginNetExGst": ["dealer margin net (ex gst)", "dealer margin net ex gst"],
-    "oemExtraSupportRetained": ["oem extra support retained"],
     "rsaIncome": ["rsa income"],
     # Margin components — the register spells out the GST treatment in the header.
     "dealerMarginGrossInclGst": ["dealer margin gross (incl gst)", "dealer margin gross incl gst"],
     "dealerMarginGst": ["dealer margin gst (5%)", "dealer margin gst"],
-    # OEM extra support: Received and Passed To Customer are DIFFERENT columns and must
+    # OEM extra support: Received / Passed / Retained are DIFFERENT columns and must
     # not collapse onto each other (same class of bug as the S/T insurance columns).
     "oemExtraSupportReceived": ["oem extra support received"],
     "oemExtraSupportPassed": ["oem extra support passed to customer"],
+    "oemExtraSupportRetained": ["oem extra support retained"],
     # Per-component scheme retention.
     "consumerRetained": ["consumer retained"],
     "exchangeRetained": ["exchange retained"],
@@ -664,6 +673,123 @@ def invalidate_header_cache(tab=None):
         _idrow_cache.clear()
         _headerrow_cache.clear()
         _formula_cache.clear()
+
+
+# ---------------------------------------------------------------- OEM Extra Support column ensure
+OEM_EXTRA_CANONICAL_HEADERS = (
+    "OEM Extra Support Received",
+    "OEM Extra Support Passed To Customer",
+    "OEM Extra Support Retained",
+)
+
+OEM_EXTRA_REGISTER_COLS = (
+    "Lead ID", "Booking ID", "Customer Name", "Vehicle Model", "Variant", "Booking Date",
+    *OEM_EXTRA_CANONICAL_HEADERS,
+    "Status", "Last Updated", "Remarks",
+)
+
+
+def _sheet_titles():
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    meta = _with_retry(lambda: _service.spreadsheets().get(
+        spreadsheetId=sheet_id, fields="sheets(properties(title))").execute())
+    return {sh["properties"]["title"] for sh in meta.get("sheets", [])}
+
+
+def _create_sheet_tab(title):
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    _with_retry(lambda: _service.spreadsheets().batchUpdate(
+        spreadsheetId=sheet_id,
+        body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
+    ).execute())
+
+
+def _append_missing_headers(tab, required_headers, header_row=1):
+    """Append any missing header labels to the end of the header row. Never renames."""
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    existing = _read_header_row(tab, header_row)
+    by_norm = {_norm(h): h for h in existing if str(h or "").strip()}
+    to_add = []
+    for h in required_headers:
+        if _norm(h) not in by_norm:
+            to_add.append(h)
+    if not to_add:
+        return {"tab": tab, "added": [], "alreadyPresent": list(required_headers)}
+    start_col = len(existing)  # 0-based index of first empty header cell
+    # Prefer trailing blanks in the header row if present.
+    while start_col > 0 and not str(existing[start_col - 1] or "").strip():
+        start_col -= 1
+    letter = _col_letter(start_col)
+    end_letter = _col_letter(start_col + len(to_add) - 1)
+    rng = f"'{tab}'!{letter}{header_row}:{end_letter}{header_row}"
+    _with_retry(lambda: _service.spreadsheets().values().update(
+        spreadsheetId=sheet_id, range=rng, valueInputOption="RAW",
+        body={"values": [to_add]},
+    ).execute())
+    invalidate_header_cache(tab)
+    return {"tab": tab, "added": to_add, "headerRow": header_row,
+            "startColumn": letter}
+
+
+def _ensure_oem_extra_support_columns_sync():
+    """Create/append OEM Extra Support headers on related operational tabs.
+
+    Lead Register + Dealer Earnings get the Received/Passed/Retained trio.
+    OEM Extra Support Register is created (if missing) with full header row.
+    """
+    titles = _sheet_titles()
+    results = []
+    lead_tab = SYNC_MAP["leads"][0]
+    earn_tab = SYNC_MAP["dealer_earnings"][0]
+    oem_tab = SYNC_MAP["oem_extra_support"][0]
+
+    if lead_tab in titles:
+        results.append(_append_missing_headers(lead_tab, OEM_EXTRA_CANONICAL_HEADERS, 1))
+    else:
+        results.append({"tab": lead_tab, "ok": False, "error": "tab not found"})
+
+    if earn_tab in titles:
+        results.append(_append_missing_headers(earn_tab, OEM_EXTRA_CANONICAL_HEADERS, 1))
+    else:
+        results.append({"tab": earn_tab, "ok": False, "error": "tab not found"})
+
+    if oem_tab not in titles:
+        _create_sheet_tab(oem_tab)
+        sheet_id = os.environ.get("GSHEET_ID", "")
+        _with_retry(lambda: _service.spreadsheets().values().update(
+            spreadsheetId=sheet_id, range=f"'{oem_tab}'!A1",
+            valueInputOption="RAW", body={"values": [list(OEM_EXTRA_REGISTER_COLS)]},
+        ).execute())
+        invalidate_header_cache(oem_tab)
+        results.append({"tab": oem_tab, "created": True,
+                        "added": list(OEM_EXTRA_REGISTER_COLS)})
+    else:
+        results.append(_append_missing_headers(oem_tab, OEM_EXTRA_REGISTER_COLS, 1))
+
+    added_any = any(r.get("added") or r.get("created") for r in results)
+    return {"ok": True, "changed": added_any, "tabs": results}
+
+
+async def ensure_oem_extra_support_columns():
+    """Owner helper: make OEM Extra Support columns visible on the live workbook."""
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled"), "tabs": []}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
+    try:
+        detail = await asyncio.to_thread(_ensure_oem_extra_support_columns_sync)
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
+        return detail
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
 # ---------------------------------------------------------------- upsert (GS-2/GS-3)

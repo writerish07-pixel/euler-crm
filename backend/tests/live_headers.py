@@ -7,7 +7,7 @@ live read-only pull.
 LIVE_HEADERS = {
     'Lead Register': (
         1,
-        ['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', 'City', 'Lead Source', 'Interested Model', 'Variant', 'Executive', 'Current Status', 'Priority', 'Budget', 'Last Activity', 'Next Follow-up Date', 'Next Follow-up Time', 'Booking Date', 'Booking Amount', 'Finance Required', 'Exchange Required', 'Delivery Status', 'Delivery Date', 'Outstanding Amount', 'Remarks', 'Last Updated', 'Last Updated By', 'Account Status', 'Closed Date', 'Close Reason', 'Final Outstanding', 'Closed By', 'Close Timestamp', 'Ex Showroom', 'RTO', 'Insurance Amount', 'Accessories Amount', 'Handling Charges', 'TRC', 'Fastag', 'Extended Warranty', 'Other Charges', 'Gross Vehicle Cost', 'Customer Payable', 'Financer Name', 'Finance File Number', 'Last Payment Mode', 'Total Received', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Insurance Benefit', 'Referral Bonus', 'DSA Bonus', 'Additional Discount', 'Total Discount', 'OEM Scheme Amount', 'Dealer Scheme Amount', 'Customer Outstanding', 'Company Outstanding', 'Insurer Name', 'Invoice Number', 'Chassis Number', 'Number Plate', 'Insurance Status', 'Registration Status', 'Invoice Status', 'RC Status', 'PDI Status', 'Dealer Earnings'],
+        ['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', 'City', 'Lead Source', 'Interested Model', 'Variant', 'Executive', 'Current Status', 'Priority', 'Budget', 'Last Activity', 'Next Follow-up Date', 'Next Follow-up Time', 'Booking Date', 'Booking Amount', 'Finance Required', 'Exchange Required', 'Delivery Status', 'Delivery Date', 'Outstanding Amount', 'Remarks', 'Last Updated', 'Last Updated By', 'Account Status', 'Closed Date', 'Close Reason', 'Final Outstanding', 'Closed By', 'Close Timestamp', 'Ex Showroom', 'RTO', 'Insurance Amount', 'Accessories Amount', 'Handling Charges', 'TRC', 'Fastag', 'Extended Warranty', 'Other Charges', 'Gross Vehicle Cost', 'Customer Payable', 'Financer Name', 'Finance File Number', 'Last Payment Mode', 'Total Received', 'Consumer Discount', 'Exchange Bonus', 'Loyalty Bonus', 'Insurance Benefit', 'Referral Bonus', 'DSA Bonus', 'Additional Discount', 'OEM Extra Support Received', 'OEM Extra Support Passed To Customer', 'OEM Extra Support Retained', 'Total Discount', 'OEM Scheme Amount', 'Dealer Scheme Amount', 'Customer Outstanding', 'Company Outstanding', 'Insurer Name', 'Invoice Number', 'Chassis Number', 'Number Plate', 'Insurance Status', 'Registration Status', 'Invoice Status', 'RC Status', 'PDI Status', 'Dealer Earnings'],
     ),
     'Activity Log': (
         1,
@@ -40,5 +40,17 @@ LIVE_HEADERS = {
     'Dealer Earnings Register': (
         1,
         ['Lead ID', 'Booking ID', 'Customer Name', 'Executive', 'Team Leader', 'Lead Source', 'Vehicle Model', 'Variant', 'Colour', 'Current Stage', 'Booking Date', 'Delivery Date', 'Invoice Number', 'Customer Payable', 'OEM Eligible Scheme', 'Customer Scheme Benefit Passed', 'Dealer Scheme Retained', 'Insurance Payout', 'Customer Insurance Benefit Passed', 'Dealer Insurance Income', 'Finance Incentive', 'Accessories Margin', 'Exchange Margin', 'Documentation Income', 'Warranty Income', 'RSA Income', 'Referral Income', 'Campaign Incentive', 'Other Income', 'TOTAL DEALER EARNINGS', 'Claim Status', 'Insurance Status', 'Last Updated', 'Created By', 'Modified By', 'Timestamp', 'Remarks', 'Consumer Retained', 'Exchange Retained', 'Loyalty Retained', 'Referral Retained', 'DSA Retained', 'Scheme Retained Breakup', 'Dealer Margin Gross (Incl GST)', 'Dealer Margin GST (5%)', 'Dealer Margin Net (Ex GST)', 'OEM Extra Support Received', 'OEM Extra Support Passed To Customer', 'OEM Extra Support Retained'],
+    ),
+    'OEM Extra Support Register': (
+        1,
+        ['Lead ID', 'Booking ID', 'Customer Name', 'Vehicle Model', 'Variant', 'Booking Date',
+         'OEM Extra Support Received', 'OEM Extra Support Passed To Customer',
+         'OEM Extra Support Retained', 'Status', 'Last Updated', 'Remarks'],
+    ),
+    'Incentive Register': (
+        1,
+        ['Incentive ID', 'Scheme Month', 'Executive', 'Lead ID', 'Booking ID', 'Model', 'Variant',
+         'Product Category', 'Delivery Date', 'Incentive Amount', 'Status', 'Paid Date',
+         'Remarks', 'Last Updated'],
     ),
 }

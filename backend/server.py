@@ -397,9 +397,10 @@ async def recompute_lead(lead_id):
     # allocation engines were merged onto one path.
     customer_payable = totals["customerPayable"]
     customer_outstanding = ce.round2(max(0.0, customer_payable - total_received)) if customer_payable > 0 else 0.0
-    oem_extra_recv = max(0.0, ce.num(lead.get("oemExtraSupportReceived")))
-    oem_extra_pass = max(0.0, min(ce.num(lead.get("oemExtraSupportPassed")), oem_extra_recv))
-    oem_extra_retained = ce.round2(max(0.0, oem_extra_recv - oem_extra_pass))
+    oem_extra = ce.compute_oem_extra_support(lead)
+    oem_extra_recv = oem_extra["oemExtraSupportReceived"]
+    oem_extra_pass = oem_extra["oemExtraSupportPassed"]
+    oem_extra_retained = oem_extra["oemExtraSupportRetained"]
     # Extra dealer income lines — customerInsuranceBenefitPassed is CUSTOMER
     # benefit/discount, NOT dealer income, and must not enter this sum.
     extra_income = ce.round2(
@@ -448,6 +449,8 @@ async def recompute_lead(lead_id):
         "schemeOemClaimableTotal": alloc["totals"]["oemClaimable"],
         "schemeAvailableTotal": alloc["totals"]["schemeAvailable"],
         "dealerFundedBenefit": _dealer_funded_benefit,
+        "oemExtraSupportReceived": oem_extra_recv,
+        "oemExtraSupportPassed": oem_extra_pass,
         "oemExtraSupportRetained": oem_extra_retained,
         "dealerMarginNetExGst": margin["marginNetExGst"],
         "dealerMarginGrossInclGst": margin["marginGrossInclGst"],
@@ -603,13 +606,33 @@ async def recompute_lead(lead_id):
                 "ageingDays": _claim_ageing_days(
                     (_ex or {}).get("submittedDate") or merged.get("deliveryDate", ""),
                     (_ex or {}).get("claimStatus", "Pending")),
-                # How this claim row came to exist: derived from the Scheme Master split,
-                # versus a manually raised claim. Distinguishable today, never recorded.
-                "source": "Manual" if (_ex or {}).get("manual") else "Derived (Scheme Master)",
+                # How this claim row came to exist.
+                "source": (
+                    "Manual" if (_ex or {}).get("manual")
+                    else ("OEM Extra Support" if _key == ce.OEM_EXTRA_SUPPORT_KEY
+                          else "Derived (Scheme Master)")
+                ),
                 # DSA is the one component whose claim needs explicit approval.
                 "dsaApproval": (_ex or {}).get("approvalStatus", "") if _key == "dsaDiscount" else "",
                 "claimReceivedDate": (_ex or {}).get("claimReceivedDate", ""),
                 "claimRemarks": (_ex or {}).get("claimRemarks", ""),
+            })
+        # OEM Extra Support Register — Received is the claim; Passed/Retained track usage.
+        if oem_extra_recv > 0:
+            _bk = await db.bookings.find_one({"leadId": lead_id}) or {}
+            await sheet_sync("oem_extra_support", {
+                "leadId": lead_id,
+                "bookingId": _bk.get("bookingId", "") or merged.get("bookingId", ""),
+                "customerName": merged.get("customerName", ""),
+                "model": merged.get("interestedModel", ""),
+                "variant": merged.get("variant", ""),
+                "bookingDate": merged.get("bookingDate", ""),
+                "oemExtraSupportReceived": oem_extra_recv,
+                "oemExtraSupportPassed": oem_extra_pass,
+                "oemExtraSupportRetained": oem_extra_retained,
+                "status": "Open",
+                "lastUpdated": updates["lastUpdated"],
+                "remarks": "",
             })
         if str(merged.get("exchangeRequired") or "").lower() == "yes" or ce.num(merged.get("finalExchangeValue")) > 0:
             await sheet_sync("exchange", {
@@ -1568,6 +1591,12 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
         payload["benefitPassedBreakup"] = _json.dumps(clean_bk)
         payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
         payload["schemeComponentsUsed"] = _json.dumps({k: (v > 0) for k, v in clean_bk.items()})
+
+    # OEM Extra Support: Received = full OEM claim; Passed ≤ Received; Retained derived in recompute.
+    # Additional (Dealer) stays untouched here — separate dealer-funded discount.
+    _oem = ce.compute_oem_extra_support(payload)
+    payload["oemExtraSupportReceived"] = _oem["oemExtraSupportReceived"]
+    payload["oemExtraSupportPassed"] = _oem["oemExtraSupportPassed"]
 
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
@@ -3574,6 +3603,19 @@ async def gsheets_preflight():
     could not find. Nothing is written. Run this first against the real spreadsheet —
     any entity with willSync=false will refuse to write rather than guess a column."""
     return gsheets.preflight()
+
+
+@api.post("/integrations/gsheets/ensure-oem-extra-columns", dependencies=[Depends(owner_only)])
+async def gsheets_ensure_oem_extra_columns(act=Depends(actor)):
+    """Owner-only: create/append OEM Extra Support Received / Passed / Retained headers
+    on Lead Register + Dealer Earnings, and create OEM Extra Support Register if missing.
+
+    The CRM cannot show values in columns that do not exist yet — this is the one-time
+    sheet structure step. After it succeeds, re-save Scheme (or run Backfill) to fill rows.
+    """
+    result = await gsheets.ensure_oem_extra_support_columns()
+    await write_audit(act, "ensure", "gsheets-oem-extra-columns", new=result)
+    return result
 
 
 @api.get("/integrations/gsheets/verify-lead/{lead_id}", dependencies=[Depends(owner_only)])
