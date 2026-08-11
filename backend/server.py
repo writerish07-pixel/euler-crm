@@ -1364,21 +1364,55 @@ async def convert_booking(lead_id: str, body: BookingIn):
 
 @api.delete("/leads/{lead_id}", dependencies=[Depends(owner_only)])
 async def delete_lead(lead_id: str, act=Depends(actor)):
-    """Owner-only. Permanently delete a wrongly-posted lead and all its related records."""
+    """Owner-only. Permanently delete a wrongly-posted lead and all related records
+    in Mongo AND every matching row across Google Sheet operational registers."""
     lead = await db.leads.find_one({"leadId": lead_id})
     if not lead:
         raise HTTPException(404, "Lead not found")
+    # Collect related IDs for sync-log cleanup before cascade delete.
+    related_ids = {lead_id}
+    for coll, id_field in (
+        ("payments", "receiptNumber"), ("bookings", "bookingId"),
+        ("claims", "claimId"), ("insurance", "entryId"),
+        ("finance", "financeFileNumber"), ("activities", "activityId"),
+        ("incentive_register", "incentiveId"),
+    ):
+        async for doc in db[coll].find({"leadId": lead_id}, {id_field: 1}):
+            val = str(doc.get(id_field) or "").strip()
+            if val:
+                related_ids.add(val)
+
+    # Sheet first (while we still know the lead exists) — remove all register traces.
+    sheet_result = await gsheets.delete_lead_traces(lead_id)
+
     counts = {}
     for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
                  "activities", "dealer_earnings", "incentive_register"]:
         r = await db[coll].delete_many({"leadId": lead_id})
         counts[coll] = r.deleted_count
     await db.leads.delete_one({"leadId": lead_id})
+    # Drop pending/OK sync-log rows for this lead and its related entity IDs.
+    sync_log = await db.sheet_sync_log.delete_many({
+        "$or": [
+            {"entityId": {"$in": list(related_ids)}},
+            {"payload.leadId": lead_id},
+        ]
+    })
+    counts["sheet_sync_log"] = sync_log.deleted_count
+    # Derived finance views must drop any file that belonged to this lead.
+    fin_views = await rebuild_finance_views()
     await write_audit(act, "delete", "lead", leadId=lead_id,
                       old={"customerName": lead.get("customerName"), "mobile": lead.get("mobile"),
                            "currentStatus": lead.get("currentStatus"), "customerPayable": lead.get("customerPayable")},
-                      new={"cascadeDeleted": counts})
-    return {"ok": True, "deleted": {"lead": 1, **counts}}
+                      new={"cascadeDeleted": counts,
+                           "sheet": {"rowsDeleted": sheet_result.get("rowsDeleted", 0),
+                                     "ok": sheet_result.get("ok"),
+                                     "operation": sheet_result.get("operation") or (
+                                         "deleted" if sheet_result.get("ok") else sheet_result.get("error")),
+                                     "tabs": sheet_result.get("tabs") or []},
+                           "financeViews": fin_views})
+    return {"ok": True, "deleted": {"lead": 1, **counts},
+            "sheet": sheet_result, "financeViews": fin_views}
 
 
 @api.put("/leads/{lead_id}/price-structure")
@@ -3104,7 +3138,9 @@ async def production_audit():
             f"writes={h.get('writes')}, failures={h.get('failures')}, lastError={h.get('lastError')}", "", module="gsheets")
     except Exception as e:
         chk(c, "gsheets status", "WARNING", str(e)[:150], "Medium", module="gsheets")
-    chk(c, "2-way sync (edits/deletes)", "WARNING", "append-only; updates & deletes not propagated", "Low", module="gsheets")
+    chk(c, "2-way sync (edits/deletes)", "PASS",
+        "upserts by stable ID; owner lead delete removes matching sheet rows across registers",
+        "", module="gsheets")
 
     # ---------------- 15. Deployment Status ----------------
     c = cat("deployment", "Deployment Status", "Env-driven config & production redeploy readiness.")

@@ -24,6 +24,10 @@ def _block_live_google_sheet_writes(monkeypatch):
     async def _no_clear():
         return {"ok": True, "tabs": [], "clearedRanges": [], "reason": "pytest-autouse-mock"}
 
+    async def _no_delete_lead_traces(lead_id):
+        return {"ok": True, "operation": "skipped", "reason": "pytest-autouse-mock",
+                "leadId": lead_id, "rowsDeleted": 0, "tabs": []}
+
     # Import inside fixture so each test module's server/gsheets binding is patched.
     try:
         import server
@@ -34,6 +38,7 @@ def _block_live_google_sheet_writes(monkeypatch):
         import gsheets
         monkeypatch.setattr(gsheets, "sync", _no_sync, raising=False)
         monkeypatch.setattr(gsheets, "clear_operational_register_rows", _no_clear, raising=False)
+        monkeypatch.setattr(gsheets, "delete_lead_traces", _no_delete_lead_traces, raising=False)
     except Exception:
         pass
     yield

@@ -827,6 +827,163 @@ async def sync(entity: str, doc: dict):
         return {"ok": False, "operation": "error", "tab": SYNC_MAP[entity][0], "error": str(e)[:500]}
 
 
+# ---------------------------------------------------------------- delete by lead (owner cascade)
+def _gid_for_tab(tab):
+    """Numeric sheetId (gid) for deleteDimension requests."""
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    meta = _with_retry(lambda: _service.spreadsheets().get(
+        spreadsheetId=sheet_id, fields="sheets(properties(sheetId,title))").execute())
+    for sh in meta.get("sheets", []):
+        props = sh.get("properties") or {}
+        if props.get("title") == tab:
+            return props.get("sheetId")
+    return None
+
+
+def _find_all_rows_by_value(tab, col_idx, value, start_row=2):
+    """All 1-based row numbers whose column equals value (exact string match)."""
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    letter = _col_letter(col_idx)
+    target = str(value or "").strip()
+    if not target:
+        return []
+    res = _with_retry(lambda: _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=f"'{tab}'!{letter}:{letter}").execute())
+    rows = []
+    for i, row in enumerate(res.get("values", []), start=1):
+        if i < start_row:
+            continue
+        if row and str(row[0]).strip() == target:
+            rows.append(i)
+    return rows
+
+
+def _delete_sheet_rows(tab, row_nums):
+    """Physically delete 1-based rows from a tab (bottom → top)."""
+    nums = sorted({int(n) for n in row_nums if int(n) >= 2}, reverse=True)
+    if not nums:
+        return {"ok": True, "operation": "noop", "tab": tab, "rowsDeleted": 0}
+    gid = _gid_for_tab(tab)
+    if gid is None:
+        return {"ok": False, "operation": "refused", "tab": tab,
+                "error": f"tab '{tab}' not found in spreadsheet"}
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    reqs = [{
+        "deleteDimension": {
+            "range": {
+                "sheetId": gid,
+                "dimension": "ROWS",
+                "startIndex": r - 1,
+                "endIndex": r,
+            }
+        }
+    } for r in nums]
+    _with_retry(lambda: _service.spreadsheets().batchUpdate(
+        spreadsheetId=sheet_id, body={"requests": reqs}).execute())
+    invalidate_header_cache(tab)
+    # Drop ID-row caches for this tab (row numbers shifted).
+    for key in list(_idrow_cache.keys()):
+        if key[0] == tab:
+            _idrow_cache.pop(key, None)
+    for key in list(_formula_cache.keys()):
+        if key[0] == tab:
+            _formula_cache.pop(key, None)
+    return {"ok": True, "operation": "deleted", "tab": tab, "rowsDeleted": len(nums),
+            "rows": sorted(nums)}
+
+
+def _delete_lead_traces_sync(lead_id):
+    """Remove every operational register row that belongs to lead_id.
+
+    Walks SYNC_MAP tabs. Prefer the Lead ID column when present (covers multi-row
+    entities like payments / claims / activities). Falls back to the entity's
+    stable ID column when that column IS leadId (Lead Register, Delivery, Earnings).
+    """
+    lead_id = str(lead_id or "").strip()
+    if not lead_id:
+        return {"ok": False, "error": "leadId required", "tabs": []}
+    per_tab = {}
+    for entity, spec in SYNC_MAP.items():
+        tab, id_field, fields = spec[0], spec[1], spec[2]
+        try:
+            header_row = _header_row_for(entity, tab)
+            # Resolve with leadId included so we can scan multi-row registers.
+            want = list(dict.fromkeys([*fields, "leadId", id_field]))
+            mapping, missing = _resolve_columns(tab, want, use_cache=False, header_row=header_row)
+            row_nums = []
+            if "leadId" in mapping:
+                row_nums = _find_all_rows_by_value(
+                    tab, mapping["leadId"], lead_id, start_row=header_row + 1)
+            elif id_field == "leadId" and id_field in mapping:
+                hit = _find_row_by_id(tab, mapping[id_field], lead_id, start_row=header_row + 1)
+                if hit:
+                    row_nums = [hit]
+            else:
+                per_tab[tab] = {"ok": False, "entity": entity, "operation": "skipped",
+                                "error": "no Lead ID column to match", "missingHeaders": missing}
+                continue
+        except Exception as e:
+            per_tab[tab] = {"ok": False, "entity": entity, "operation": "error",
+                            "error": str(e)[:300]}
+            continue
+        # Same physical tab may appear for one entity only in SYNC_MAP today, but
+        # accumulate in case env overrides collide.
+        existing = per_tab.get(tab, {"entity": entity, "row_nums": []})
+        existing["entity"] = entity
+        existing.setdefault("row_nums", [])
+        existing["row_nums"].extend(row_nums)
+        per_tab[tab] = existing
+
+    results = []
+    total = 0
+    for tab, info in per_tab.items():
+        if "error" in info and "row_nums" not in info:
+            results.append({"tab": tab, **info})
+            continue
+        try:
+            res = _delete_sheet_rows(tab, info.get("row_nums") or [])
+        except Exception as e:
+            res = {"ok": False, "operation": "error", "tab": tab, "error": str(e)[:300],
+                   "rowsDeleted": 0}
+        res["entity"] = info.get("entity")
+        results.append(res)
+        total += int(res.get("rowsDeleted") or 0)
+    # Walk completed; per-tab failures are reported in tabs[] (do not abort the cascade).
+    return {"ok": True, "operation": "deleted" if total else "noop",
+            "leadId": lead_id, "rowsDeleted": total, "tabs": results}
+
+
+async def delete_lead_traces(lead_id: str):
+    """Owner lead delete → remove the lead and all related register rows from Sheets.
+
+    Never raises. Honours the same write-safety gates as sync().
+    """
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": True, "operation": "skipped", "reason": _status.get("reason", "sync disabled"),
+                "rowsDeleted": 0, "tabs": []}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "operation": "blocked", "error": blocked, "rowsDeleted": 0, "tabs": []}
+    try:
+        res = await asyncio.to_thread(_delete_lead_traces_sync, lead_id)
+        if res.get("ok"):
+            _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                            "lastError": None, "writes": _health["writes"] + 1})
+        else:
+            _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                            "lastError": str(res.get("error"))[:300], "failures": _health["failures"] + 1})
+        return res
+    except Exception as e:
+        invalidate_header_cache()
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return {"ok": False, "operation": "error", "error": str(e)[:500], "rowsDeleted": 0, "tabs": []}
+
+
 async def append(entity: str, doc: dict):
     """Back-compat shim: the old append-only entry point is now an idempotent
     upsert. Kept so no call site can accidentally re-introduce duplicate rows."""
