@@ -859,8 +859,10 @@ function BillingSummaryPanel({ summary }) {
       </div>
 
       <div id="billing-summary-print">
-        <h1 className="sr-only">{summary.title}</h1>
-        <div className="disc sr-only">{summary.disclaimer}</div>
+        <h1 style={{ fontSize: "18px", fontWeight: 700, marginBottom: 4 }}>Delivery Billing Summary</h1>
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5 mb-3">
+          {summary.disclaimer || "For Tally cross-check only — not a GST tax invoice."}
+        </div>
 
         <div className="grid grid-cols-2 gap-3 text-sm mb-3">
           <div>
