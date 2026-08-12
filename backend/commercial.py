@@ -295,6 +295,7 @@ def derive_claim(s, approvals=None):
 # CommercialEngineService.gs (computeSchemeIncomeBreakdown_, computeSchemeClaimShares_)
 # ===========================================================================
 import re
+import os
 from datetime import datetime, timezone
 
 # component key -> master label used for byComponent output
@@ -1179,3 +1180,224 @@ def compute_full_commercials(s, scheme_rows=None):
             num(claim.get("claimEligible")) + extra["oemClaimable"])
         result["oemExtraSupportClaimable"] = extra["oemClaimable"]
     return result
+
+
+# ===========================================================================
+# DELIVERY BILLING SUMMARY — accounts cross-check for Tally (not a tax invoice)
+# ===========================================================================
+
+def _gst_rate_fraction():
+    """Optional env BILLING_GST_RATE as percent (5) or fraction (0.05). Default 5% EV."""
+    raw = str(os.environ.get("BILLING_GST_RATE", "5") or "5").strip()
+    try:
+        v = float(raw)
+    except Exception:
+        v = 5.0
+    if v > 1:
+        v = v / 100.0
+    return max(0.0, min(v, 0.5))
+
+
+def build_delivery_billing_summary(lead, *, gst_rate=None):
+    """Build a Delivery Billing Summary for accounts to cross-check Tally entry.
+
+    Shows only customer-facing charges and passed benefits. OEM claims, scheme
+    retained, and dealer earnings are listed under doNotPostInTally so they are
+    not mistaken for customer invoice lines.
+
+    This is intentionally NOT a GST tax invoice — Tally remains the legal books.
+    """
+    lead = lead or {}
+    rate = _gst_rate_fraction() if gst_rate is None else float(gst_rate)
+    if rate > 1:
+        rate = rate / 100.0
+
+    ex = round2(num(lead.get("exShowroom")))
+    rto = round2(num(lead.get("rto")))
+    insurance = round2(num(lead.get("insuranceAmount")))
+    accessories = round2(num(lead.get("accessoriesAmount")))
+    handling = round2(num(lead.get("handlingCharges")))
+    trc = round2(num(lead.get("trc")))
+    fastag = round2(num(lead.get("fastag")))
+    ew = round2(num(lead.get("extendedWarranty")))
+    rsa = round2(num(lead.get("rsaAmc")))
+    other = round2(num(lead.get("otherCharges")))
+    gross = round2(num(lead.get("grossVehicleCost")))
+    if gross <= 0:
+        gross = round2(ex + rto + insurance + accessories + handling + trc + fastag + ew + rsa + other)
+
+    charge_lines = [
+        {"code": "exShowroom", "label": "Ex-Showroom", "amount": ex},
+        {"code": "rto", "label": "RTO / Registration", "amount": rto},
+        {"code": "insurance", "label": "Insurance premium", "amount": insurance},
+    ]
+    for code, label, amt in (
+        ("accessoriesAmount", "Accessories", accessories),
+        ("handlingCharges", "Handling charges", handling),
+        ("trc", "TRC", trc),
+        ("fastag", "Fastag", fastag),
+        ("extendedWarranty", "Extended warranty", ew),
+        ("rsaAmc", "RSA / AMC", rsa),
+        ("otherCharges", "Other charges", other),
+    ):
+        if amt > 0:
+            charge_lines.append({"code": code, "label": label, "amount": amt})
+
+    discount_lines = []
+    alloc = lead.get("schemeAllocationSummary")
+    if isinstance(alloc, str):
+        try:
+            import json as _json
+            alloc = _json.loads(alloc)
+        except Exception:
+            alloc = None
+    comps = (alloc or {}).get("components") if isinstance(alloc, dict) else None
+    if comps:
+        for c in comps:
+            passed = round2(num(c.get("customerBenefit")))
+            if passed <= 0:
+                continue
+            oem_b = round2(num(c.get("oemShare")))
+            dealer_b = round2(num(c.get("dealerFundedBenefit")))
+            if dealer_b > 0 and oem_b > 0:
+                fund = "Mixed (OEM + dealer-funded)"
+            elif dealer_b > 0:
+                fund = "Dealer-funded"
+            else:
+                fund = "OEM / scheme"
+            discount_lines.append({
+                "code": c.get("key") or "",
+                "label": f"Less: {c.get('label') or SCHEME_COMPONENT_LABELS.get(c.get('key'), c.get('key'))}",
+                "amount": round2(-passed),
+                "fundHint": fund,
+            })
+    else:
+        breakup = lead.get("benefitPassedBreakup")
+        if isinstance(breakup, str):
+            try:
+                import json as _json
+                breakup = _json.loads(breakup)
+            except Exception:
+                breakup = {}
+        if isinstance(breakup, dict):
+            for key, amt in breakup.items():
+                passed = round2(num(amt))
+                if passed <= 0:
+                    continue
+                discount_lines.append({
+                    "code": key,
+                    "label": f"Less: {SCHEME_COMPONENT_LABELS.get(key, key)}",
+                    "amount": round2(-passed),
+                    "fundHint": "Scheme (passed to customer)",
+                })
+
+    oem_extra = compute_oem_extra_support(lead)
+    if oem_extra["customerBenefit"] > 0:
+        discount_lines.append({
+            "code": OEM_EXTRA_SUPPORT_KEY,
+            "label": "Less: OEM Extra Support (passed to customer)",
+            "amount": round2(-oem_extra["customerBenefit"]),
+            "fundHint": "OEM Extra Support",
+        })
+
+    benefit_total = round2(sum(-ln["amount"] for ln in discount_lines))
+    # Prefer live CRM payable; fall back to gross − benefits.
+    payable = round2(num(lead.get("customerPayable")))
+    if payable <= 0 and gross > 0:
+        payable = round2(max(0.0, gross - benefit_total))
+    received = round2(num(lead.get("totalReceived")))
+    cust_os = round2(num(lead.get("customerOutstanding")))
+    if cust_os <= 0 and payable > 0:
+        cust_os = round2(max(0.0, payable - received))
+
+    # GST reference on net vehicle (ex-showroom after discounts attributed to vehicle).
+    # Discounts reduce ex-showroom first for reference math.
+    vehicle_discounts = benefit_total  # all passed benefits reduce what customer pays on the deal
+    net_vehicle_incl = round2(max(0.0, ex - min(ex, vehicle_discounts)))
+    taxable = round2(net_vehicle_incl / (1 + rate)) if rate > 0 else net_vehicle_incl
+    gst_amt = round2(net_vehicle_incl - taxable)
+    cgst = round2(gst_amt / 2)
+    sgst = round2(gst_amt - cgst)
+
+    do_not_post = []
+    retained = round2(num(lead.get("dealerSchemeRetained")))
+    if retained > 0:
+        do_not_post.append({
+            "label": "Scheme retained (dealer earnings — not customer discount)",
+            "amount": retained,
+        })
+    if oem_extra["dealerRetained"] > 0:
+        do_not_post.append({
+            "label": "OEM Extra Support retained (dealer earnings)",
+            "amount": oem_extra["dealerRetained"],
+        })
+    company_os = round2(num(lead.get("companyOutstanding")))
+    if company_os > 0:
+        do_not_post.append({
+            "label": "OEM / company claims outstanding (Claim Register)",
+            "amount": company_os,
+        })
+    oem_claim = round2(num(lead.get("oemClaimCompanyShare") or lead.get("schemeOemClaimableTotal")))
+    if oem_claim > 0 and company_os <= 0:
+        do_not_post.append({
+            "label": "OEM claimable (Claim Register — do not add to customer bill)",
+            "amount": oem_claim,
+        })
+    dealer_funded = round2(num(lead.get("dealerFundedBenefit")))
+    if dealer_funded > 0:
+        # Informational: already reflected in discount lines when passed; flag funding.
+        do_not_post.append({
+            "label": "Of which dealer-funded benefit (already in discounts above if passed)",
+            "amount": dealer_funded,
+        })
+
+    return {
+        "kind": "delivery_billing_summary",
+        "title": "Delivery Billing Summary",
+        "disclaimer": "For Tally cross-check only — not a GST tax invoice. Create the final bill in Tally.",
+        "summaryId": f"BILL-{lead.get('leadId') or 'UNKNOWN'}",
+        "leadId": lead.get("leadId") or "",
+        "invoiceNumber": lead.get("invoiceNumber") or "",
+        "deliveryDate": lead.get("deliveryDate") or "",
+        "bookingDate": lead.get("bookingDate") or "",
+        "customer": {
+            "name": lead.get("customerName") or "",
+            "mobile": lead.get("mobile") or "",
+            "village": lead.get("village") or "",
+            "city": lead.get("city") or "",
+            "executive": lead.get("executive") or "",
+            "leadSource": lead.get("leadSource") or "",
+        },
+        "vehicle": {
+            "model": lead.get("interestedModel") or "",
+            "variant": lead.get("variant") or "",
+            "chassisNumber": lead.get("chassisNumber") or "",
+            "numberPlate": lead.get("numberPlate") or "",
+            "financerName": lead.get("financerName") or "",
+            "financeRequired": lead.get("financeRequired") or "",
+            "insurerName": lead.get("insurerName") or "",
+            "insuranceArrangedBy": lead.get("insuranceArrangedBy") or "",
+        },
+        "chargeLines": charge_lines,
+        "discountLines": discount_lines,
+        "totals": {
+            "grossVehicleCost": gross,
+            "customerBenefitPassed": benefit_total,
+            "netAfterBenefits": round2(gross - benefit_total),
+            "customerPayable": payable,
+            "totalReceived": received,
+            "customerOutstanding": cust_os,
+            "bookingAmount": round2(num(lead.get("bookingAmount"))),
+        },
+        "gstReference": {
+            "ratePct": round2(rate * 100),
+            "netVehicleInclGst": net_vehicle_incl,
+            "taxableValue": taxable,
+            "cgst": cgst,
+            "sgst": sgst,
+            "note": "GST figures are reference only — enter the legal tax invoice in Tally.",
+        },
+        "doNotPostInTally": do_not_post,
+        "reconOk": abs(round2(gross - benefit_total) - payable) < 0.05
+                   or abs(payable - round2(num(lead.get("customerPayable")))) < 0.05,
+    }

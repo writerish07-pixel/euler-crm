@@ -1055,10 +1055,12 @@ async def customer_360(lead_id: str):
     delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
     booking = clean(await db.bookings.find_one({"leadId": lead_id}) or {})
     claims = [clean(c) for c in await db.claims.find({"leadId": lead_id}).to_list(100)]
+    billing_summary = clean(await db.billing_summaries.find_one({"leadId": lead_id}) or {})
     return {
         "lead": lead, "commercials": commercials, "payments": payments,
         "activities": activities, "delivery": delivery, "booking": booking,
         "claims": claims, "actions": lead_actions(lead),
+        "billingSummary": billing_summary or None,
     }
 
 
@@ -1415,7 +1417,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 
     counts = {}
     for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
-                 "activities", "dealer_earnings", "incentive_register"]:
+                 "activities", "dealer_earnings", "incentive_register", "billing_summaries"]:
         r = await db[coll].delete_many({"leadId": lead_id})
         counts[coll] = r.deleted_count
     await db.leads.delete_one({"leadId": lead_id})
@@ -2274,7 +2276,47 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor)):
         await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
         await rebuild_finance_views()
         await recompute_lead(lead_id)
+        await _upsert_delivery_billing_summary(lead_id)
     return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
+async def _upsert_delivery_billing_summary(lead_id):
+    """Snapshot Delivery Billing Summary for accounts (Tally cross-check) after Mark Delivered."""
+    lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    summary = ce.build_delivery_billing_summary(lead)
+    summary["createdAt"] = now_iso()
+    summary["updatedAt"] = now_iso()
+    await db.billing_summaries.update_one(
+        {"leadId": lead_id},
+        {"$set": summary, "$setOnInsert": {"summaryId": summary["summaryId"]}},
+        upsert=True,
+    )
+    return summary
+
+
+@api.get("/leads/{lead_id}/billing-summary")
+async def get_billing_summary(lead_id: str):
+    """Delivery Billing Summary for Tally cross-check (not a tax invoice).
+
+    Prefer the snapshot stored at Mark Delivered; if missing but lead is delivered,
+    rebuild live from current lead commercial fields.
+    """
+    lead = await get_lead_or_404(lead_id)
+    stored = await db.billing_summaries.find_one({"leadId": lead_id})
+    if stored:
+        return clean(stored)
+    if not _is_delivered(lead):
+        raise HTTPException(
+            409,
+            "Billing summary is created when the lead is marked Delivered. "
+            "Mark delivery first, then open this summary for Tally cross-check.",
+        )
+    summary = ce.build_delivery_billing_summary(lead)
+    summary["createdAt"] = now_iso()
+    summary["updatedAt"] = now_iso()
+    await db.billing_summaries.update_one(
+        {"leadId": lead_id}, {"$set": summary}, upsert=True)
+    return summary
 
 
 async def _upsert_insurance_on_delivery(lead_id, delivery_date):
@@ -2926,6 +2968,7 @@ CRITICAL_ENDPOINTS = [
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
     ("PUT", "/api/leads/{lead_id}/scheme"), ("POST", "/api/leads/{lead_id}/close"),
     ("POST", "/api/leads/{lead_id}/payments"), ("PUT", "/api/leads/{lead_id}/delivery"),
+    ("GET", "/api/leads/{lead_id}/billing-summary"),
     ("GET", "/api/payments"), ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),
     ("GET", "/api/claims"), ("POST", "/api/claims/settle"), ("POST", "/api/claims/receipt"),
@@ -4271,7 +4314,7 @@ async def reset_transactions(act=Depends(actor)):
     counts = {}
     for coll in ["leads", "bookings", "payments", "deliveries", "finance", "insurance",
                  "claims", "activities", "dealer_earnings", "quotations", "incentive_register",
-                 "sheet_sync_log"]:
+                 "billing_summaries", "sheet_sync_log"]:
         r = await db[coll].delete_many({})
         counts[coll] = r.deleted_count
     await db["system"].update_one({"_id": "seed_state"},

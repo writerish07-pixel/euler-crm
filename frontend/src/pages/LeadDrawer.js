@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2 } from "lucide-react";
+import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText } from "lucide-react";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
@@ -108,7 +108,16 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       {tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
       {tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} onSaved={refresh} />}
-      {tab === "delivery" && <DeliveryTab lead={lead} actions={actions} isOwner={isOwner} delivery={data.delivery} onSaved={refresh} />}
+      {tab === "delivery" && (
+        <DeliveryTab
+          lead={lead}
+          actions={actions}
+          isOwner={isOwner}
+          delivery={data.delivery}
+          billingSummary={data.billingSummary}
+          onSaved={refresh}
+        />
+      )}
       {tab === "insurance" && isOwner && <InsuranceTab lead={lead} masters={masters} />}
       {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} />}
     </Drawer>
@@ -719,7 +728,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
 
 /* -------------------------------------------------- Delivery */
 const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
-function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, onSaved }) {
+function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
   const locked = alreadyDelivered || closedOrInactive;
@@ -729,13 +738,32 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, onSaved })
     DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
     return f;
   });
+  const [summary, setSummary] = useState(billingSummary || null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+
+  useEffect(() => { setSummary(billingSummary || null); }, [billingSummary]);
+
+  useEffect(() => {
+    if (!alreadyDelivered) return;
+    if (billingSummary && billingSummary.leadId) return;
+    let cancelled = false;
+    setSummaryLoading(true);
+    get(`/leads/${lead.leadId}/billing-summary`)
+      .then((s) => { if (!cancelled) setSummary(s); })
+      .catch(() => { if (!cancelled) setSummary(null); })
+      .finally(() => { if (!cancelled) setSummaryLoading(false); });
+    return () => { cancelled = true; };
+  }, [alreadyDelivered, lead.leadId, billingSummary]);
+
   const toggle = (k) => { if (!locked) setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" })); };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
     if (form.delivered === "Yes" && !form.deliveryDate) return toast.error("Delivery date is required");
     try {
       await put(`/leads/${lead.leadId}/delivery`, form);
-      toast.success("Delivery status updated");
+      toast.success(form.delivered === "Yes"
+        ? "Delivered — billing summary ready for Tally cross-check"
+        : "Delivery status updated");
       onSaved();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Delivery update failed");
@@ -768,7 +796,161 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, onSaved })
         </Field>
       </div>
       <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save} disabled={locked || (!alreadyDelivered && !canMarkDelivered)}>Save Delivery</Button></div>
+
+      {alreadyDelivered && (
+        <div className="mt-6" data-testid="billing-summary-section">
+          {summaryLoading && <div className="text-sm text-ink-faint">Loading billing summary…</div>}
+          {!summaryLoading && summary && <BillingSummaryPanel summary={summary} />}
+          {!summaryLoading && !summary && (
+            <div className="text-sm text-ink-soft border border-line rounded-lg px-3 py-3">
+              Billing summary not found. Open again after refresh, or call billing-summary API.
+            </div>
+          )}
+        </div>
+      )}
     </div>
+  );
+}
+
+function BillingSummaryPanel({ summary }) {
+  const printSummary = () => {
+    const el = document.getElementById("billing-summary-print");
+    if (!el) return;
+    const w = window.open("", "_blank", "noopener,noreferrer,width=900,height=1000");
+    if (!w) {
+      toast.error("Pop-up blocked — allow pop-ups to print");
+      return;
+    }
+    w.document.write(`<!DOCTYPE html><html><head><title>${summary.title || "Billing Summary"} — ${summary.leadId}</title>
+      <style>
+        body{font-family:ui-sans-serif,system-ui,sans-serif;color:#111;padding:24px;max-width:800px;margin:0 auto}
+        h1{font-size:18px;margin:0 0 4px} .disc{font-size:12px;color:#444;margin-bottom:16px;padding:8px 10px;border:1px solid #ccc;background:#faf8f5}
+        table{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+        th,td{padding:6px 4px;border-bottom:1px solid #e5e5e5;text-align:left}
+        td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+        .muted{color:#666;font-size:11px} .grand td{font-weight:700;border-top:2px solid #111;padding-top:10px}
+        h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;margin:18px 0 6px;color:#333}
+        @media print{body{padding:0}}
+      </style></head><body>${el.innerHTML}
+      <script>window.onload=function(){window.print();}</script></body></html>`);
+    w.document.close();
+  };
+
+  const t = summary.totals || {};
+  const cust = summary.customer || {};
+  const veh = summary.vehicle || {};
+  const gst = summary.gstReference || {};
+
+  return (
+    <Card className="p-4 border-line" data-testid="billing-summary-panel">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <FileText size={16} className="text-ink-soft" />
+            <h3 className="font-heading text-base font-bold text-ink">Delivery Billing Summary</h3>
+          </div>
+          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5 mt-2 max-w-xl">
+            {summary.disclaimer || "For Tally cross-check only — not a GST tax invoice."}
+          </p>
+        </div>
+        <Button variant="secondary" data-testid="print-billing-summary-btn" onClick={printSummary} className="!py-1.5 !px-2.5 text-xs shrink-0">
+          <Printer size={14} /> Print for accounts
+        </Button>
+      </div>
+
+      <div id="billing-summary-print">
+        <h1 style={{ fontSize: "18px", fontWeight: 700, marginBottom: 4 }}>Delivery Billing Summary</h1>
+        <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5 mb-3">
+          {summary.disclaimer || "For Tally cross-check only — not a GST tax invoice."}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 text-sm mb-3">
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-ink-faint">Customer</div>
+            <div className="font-semibold text-ink">{cust.name}</div>
+            <div className="text-xs text-ink-soft">{cust.mobile || "—"} · {cust.city || cust.village || "—"}</div>
+            <div className="text-xs text-ink-faint">Exec: {cust.executive || "—"} · Source: {cust.leadSource || "—"}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] uppercase tracking-wide text-ink-faint">Invoice / Delivery</div>
+            <div className="font-mono font-semibold">{summary.invoiceNumber || "—"}</div>
+            <div className="text-xs text-ink-soft">{fmtDate(summary.deliveryDate) || "—"}</div>
+            <div className="text-xs text-ink-faint">{summary.leadId} · {veh.model} {veh.variant}</div>
+            <div className="text-xs text-ink-faint">Chassis: {veh.chassisNumber || "—"}</div>
+          </div>
+        </div>
+
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Charges (before customer benefits)</h2>
+        <table className="w-full text-sm">
+          <tbody>
+            {(summary.chargeLines || []).map((ln) => (
+              <tr key={ln.code}>
+                <td>{ln.label}</td>
+                <td className="text-right font-mono">{inr(ln.amount)}</td>
+              </tr>
+            ))}
+            <tr className="font-semibold">
+              <td>Gross Vehicle Cost</td>
+              <td className="text-right font-mono">{inr(t.grossVehicleCost)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Customer discounts (passed only)</h2>
+        <table className="w-full text-sm">
+          <tbody>
+            {(summary.discountLines || []).length === 0 && (
+              <tr><td colSpan={2} className="text-ink-faint text-xs">No customer benefits passed</td></tr>
+            )}
+            {(summary.discountLines || []).map((ln) => (
+              <tr key={ln.code + ln.label}>
+                <td>{ln.label}{ln.fundHint ? <span className="text-ink-faint text-xs ml-1">({ln.fundHint})</span> : null}</td>
+                <td className="text-right font-mono">{inr(ln.amount)}</td>
+              </tr>
+            ))}
+            <tr className="font-semibold">
+              <td>Total customer benefit</td>
+              <td className="text-right font-mono">− {inr(t.customerBenefitPassed)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">C. Customer settlement (enter in Tally)</h2>
+        <table className="w-full text-sm">
+          <tbody>
+            <tr><td>Customer Payable</td><td className="text-right font-mono font-bold">{inr(t.customerPayable)}</td></tr>
+            <tr><td>Amount received</td><td className="text-right font-mono">{inr(t.totalReceived)}</td></tr>
+            <tr><td>Customer outstanding</td><td className="text-right font-mono">{inr(t.customerOutstanding)}</td></tr>
+          </tbody>
+        </table>
+
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">D. GST reference (optional — Tally is final)</h2>
+        <table className="w-full text-sm">
+          <tbody>
+            <tr><td>Assumed rate</td><td className="text-right font-mono">{gst.ratePct}%</td></tr>
+            <tr><td>Taxable value (ref.)</td><td className="text-right font-mono">{inr(gst.taxableValue)}</td></tr>
+            <tr><td>CGST / SGST (ref.)</td><td className="text-right font-mono">{inr(gst.cgst)} / {inr(gst.sgst)}</td></tr>
+          </tbody>
+        </table>
+        <p className="text-[11px] text-ink-faint mt-1">{gst.note}</p>
+
+        {(summary.doNotPostInTally || []).length > 0 && (
+          <>
+            <h2 className="text-[11px] font-semibold uppercase tracking-wide text-red-700/80 mt-4 mb-1">E. Do not post on customer bill in Tally</h2>
+            <table className="w-full text-sm">
+              <tbody>
+                {(summary.doNotPostInTally || []).map((ln, i) => (
+                  <tr key={i}>
+                    <td className="text-ink-soft">{ln.label}</td>
+                    <td className="text-right font-mono text-ink-soft">{inr(ln.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+    </Card>
   );
 }
 
