@@ -166,3 +166,91 @@ async def test_owner_can_create_asm_user(client):
     })
     assert r.status_code == 200, r.text
     assert r.json()["role"] == "asm"
+
+
+@pytest.mark.asyncio
+async def test_scoreboard_bookings_survive_delivery(client):
+    """Delivered leads must still count as bookings — Conv % must not drop to 0."""
+    await server.db.leads.delete_many({})
+    ym = "2026-08"
+    await server.db.leads.insert_many([
+        {
+            "leadId": "LD2600BOOK",
+            "customerName": "Booked Only",
+            "executive": "Riya",
+            "leadSource": "Walk-in",
+            "interestedModel": "HiLoad",
+            "currentStatus": "Booked",
+            "accountStatus": "Active",
+            "createdDate": f"{ym}-02",
+            "bookingDate": f"{ym}-05",
+            "deliveryStatus": "",
+        },
+        {
+            "leadId": "LD2600DELV",
+            "customerName": "Delivered Deal",
+            "executive": "Riya",
+            "leadSource": "Walk-in",
+            "interestedModel": "Turbo Max",
+            "currentStatus": "Delivered",
+            "accountStatus": "Active",
+            "createdDate": f"{ym}-03",
+            "bookingDate": f"{ym}-06",
+            "deliveryDate": f"{ym}-10",
+            "deliveryStatus": "Delivered",
+        },
+    ])
+    orig_this_month = server.this_month
+    server.this_month = lambda: ym
+    try:
+        await _login(client, "asm@euler.com")
+        r = await client.get("/api/field/dashboard")
+        assert r.status_code == 200, r.text
+        board = {row["executive"]: row for row in r.json()["executiveScoreboard"]}
+        riya = board["Riya"]
+        assert riya["leadsMtd"] == 2
+        assert riya["bookingsMtd"] == 2, riya  # delivered still counts as booked
+        assert riya["deliveriesMtd"] == 1
+        assert riya["conversion"] == 100.0
+        assert riya["deliveryConversion"] == 50.0
+        assert r.json()["kpis"]["bookingsMtd"] == 2
+        assert r.json()["kpis"]["leadToBookPct"] == 100.0
+    finally:
+        server.this_month = orig_this_month
+
+
+@pytest.mark.asyncio
+async def test_asm_lead_360_hides_commercials(client):
+    await _login(client, "owner@euler.com")
+    created = await client.post("/api/leads", json={
+        "customerName": "Secret Money",
+        "mobile": "9333333333",
+        "leadSource": "Walk-in",
+        "interestedModel": "HiLoad",
+        "variant": "Cargo",
+        "executive": "Executive",
+    })
+    assert created.status_code == 200, created.text
+    lead_id = created.json()["leadId"]
+    await server.db.leads.update_one(
+        {"leadId": lead_id},
+        {"$set": {"customerPayable": 790000, "customerOutstanding": 0, "totalReceived": 790000}},
+    )
+
+    await _login(client, "asm@euler.com")
+    r = await client.get(f"/api/leads/{lead_id}/360")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("fieldView") is True
+    assert body["commercials"] == {}
+    assert body["payments"] == []
+    assert body["claims"] == []
+    assert body["billingSummary"] is None
+    assert "customerPayable" not in body["lead"]
+    assert "customerOutstanding" not in body["lead"]
+    assert body["actions"].get("canBook") is False
+
+    listing = await client.get("/api/leads")
+    assert listing.status_code == 200
+    row = next(x for x in listing.json() if x["leadId"] == lead_id)
+    assert "customerPayable" not in row

@@ -881,6 +881,80 @@ async def reseed():
     return res
 
 
+# ---------------------------------------------------------------- dashboard helpers
+def _is_delivered_lead(lead) -> bool:
+    st = (lead.get("currentStatus") or "").lower()
+    return "deliver" in st or (lead.get("deliveryStatus") or "").lower() == "delivered"
+
+
+def _is_booked_lead(lead) -> bool:
+    """True once converted to booking — stays true after Finance Process / Delivered / Sold."""
+    if _is_delivered_lead(lead):
+        return True
+    st = (lead.get("currentStatus") or "").lower()
+    if "book" in st or "finance" in st:
+        return True
+    if lead.get("bookingDate") or lead.get("bookingId"):
+        return True
+    return False
+
+
+def _norm_name(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _leads_for_executive(leads, user) -> list:
+    """Match lead.executive to the logged-in executive's name (or email local-part)."""
+    name = _norm_name(user.get("name"))
+    email_local = _norm_name((user.get("email") or "").split("@")[0].replace(".", " ").replace("_", " "))
+    out = []
+    for l in leads:
+        ex = _norm_name(l.get("executive"))
+        if not ex:
+            continue
+        if name and (ex == name or name in ex or ex in name):
+            out.append(l)
+        elif email_local and (ex == email_local or email_local in ex or ex in email_local):
+            out.append(l)
+    return out
+
+
+def _status_bucket(lead) -> str:
+    st = (lead.get("currentStatus") or "New").strip()
+    low = st.lower()
+    if "lost" in low:
+        return "Lost"
+    if _is_delivered_lead(lead):
+        return "Delivered"
+    if "finance" in low:
+        return "Finance Process"
+    if "book" in low:
+        return "Booked"
+    if "progress" in low:
+        return "In Progress"
+    if "follow" in low:
+        return "Follow-up"
+    if "contact" in low:
+        return "Contacted"
+    if st:
+        return st
+    return "New"
+
+
+FIELD_LEAD_SAFE_KEYS = {
+    "leadId", "customerName", "mobile", "altMobile", "village", "city",
+    "leadSource", "interestedModel", "variant", "executive", "currentStatus",
+    "accountStatus", "priority", "createdDate", "bookingDate", "deliveryDate",
+    "nextFollowupDate", "nextFollowup", "financeRequired", "exchangeRequired",
+    "remarks", "deliveryStatus", "bookingId",
+}
+
+
+def _field_safe_lead(lead: dict) -> dict:
+    """Pipeline-only snapshot for ASM/RM — no commercial / money fields."""
+    return {k: lead.get(k) for k in FIELD_LEAD_SAFE_KEYS if k in lead or lead.get(k) is not None}
+
+
 # ---------------------------------------------------------------- dashboard
 @api.get("/dashboard")
 async def dashboard():
@@ -895,9 +969,9 @@ async def dashboard():
     def is_today(d):
         return str(d) == td
 
-    booked = [l for l in leads if "book" in (l.get("currentStatus") or "").lower()]
-    delivered = [l for l in leads if (l.get("deliveryStatus") or "").lower() == "delivered" or (l.get("currentStatus") or "").lower() == "delivered"]
-    active_booked = [l for l in booked if (l.get("deliveryStatus") or "").lower() != "delivered"]
+    booked = [l for l in leads if _is_booked_lead(l)]
+    delivered = [l for l in leads if _is_delivered_lead(l)]
+    active_booked = [l for l in booked if not _is_delivered_lead(l)]
 
     monthly_leads = [l for l in leads if in_month(l.get("createdDate"))]
     monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
@@ -1076,48 +1150,6 @@ async def accounts_dashboard():
     }
 
 
-def _norm_name(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
-
-
-def _leads_for_executive(leads, user) -> list:
-    """Match lead.executive to the logged-in executive's name (or email local-part)."""
-    name = _norm_name(user.get("name"))
-    email_local = _norm_name((user.get("email") or "").split("@")[0].replace(".", " ").replace("_", " "))
-    out = []
-    for l in leads:
-        ex = _norm_name(l.get("executive"))
-        if not ex:
-            continue
-        if name and (ex == name or name in ex or ex in name):
-            out.append(l)
-        elif email_local and (ex == email_local or email_local in ex or ex in email_local):
-            out.append(l)
-    return out
-
-
-def _status_bucket(lead) -> str:
-    st = (lead.get("currentStatus") or "New").strip()
-    low = st.lower()
-    if "lost" in low:
-        return "Lost"
-    if "deliver" in low or (lead.get("deliveryStatus") or "").lower() == "delivered":
-        return "Delivered"
-    if "finance" in low:
-        return "Finance Process"
-    if "book" in low:
-        return "Booked"
-    if "progress" in low:
-        return "In Progress"
-    if "follow" in low:
-        return "Follow-up"
-    if "contact" in low:
-        return "Contacted"
-    if st:
-        return st
-    return "New"
-
-
 @api.get("/executive/dashboard")
 async def executive_dashboard(user=Depends(current_user)):
     """Pipeline home for a dealership executive — scoped to their assigned leads."""
@@ -1138,19 +1170,12 @@ async def executive_dashboard(user=Depends(current_user)):
         return str(l.get("nextFollowupDate") or l.get("nextFollowup") or "")[:10]
 
     active = [l for l in mine if (l.get("accountStatus") or "Active") == "Active"]
-    booked = [l for l in mine if "book" in (l.get("currentStatus") or "").lower()
-              or (l.get("bookingDate"))]
-    # Prefer status-booked for conversion; bookingDate catches booked deals
-    booked_status = [l for l in mine if "book" in (l.get("currentStatus") or "").lower()]
-    delivered = [l for l in mine
-                 if (l.get("deliveryStatus") or "").lower() == "delivered"
-                 or (l.get("currentStatus") or "").lower() == "delivered"]
-    active_booked = [l for l in booked_status
-                     if (l.get("deliveryStatus") or "").lower() != "delivered"
-                     and (l.get("currentStatus") or "").lower() != "delivered"]
+    booked = [l for l in mine if _is_booked_lead(l)]
+    delivered = [l for l in mine if _is_delivered_lead(l)]
+    active_booked = [l for l in booked if not _is_delivered_lead(l)]
 
     monthly_leads = [l for l in mine if in_month(l.get("createdDate"))]
-    monthly_bookings = [l for l in booked_status if in_month(l.get("bookingDate"))]
+    monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
     monthly_deliveries = [l for l in delivered if in_month(l.get("deliveryDate"))]
 
     funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
@@ -1257,17 +1282,13 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
         return str(l.get("nextFollowupDate") or l.get("nextFollowup") or "")[:10]
 
     active = [l for l in leads if (l.get("accountStatus") or "Active") == "Active"]
-    booked_status = [l for l in leads if "book" in (l.get("currentStatus") or "").lower()]
-    delivered = [l for l in leads
-                 if (l.get("deliveryStatus") or "").lower() == "delivered"
-                 or (l.get("currentStatus") or "").lower() == "delivered"]
-    active_booked = [l for l in booked_status
-                     if (l.get("deliveryStatus") or "").lower() != "delivered"
-                     and (l.get("currentStatus") or "").lower() != "delivered"]
+    booked = [l for l in leads if _is_booked_lead(l)]
+    delivered = [l for l in leads if _is_delivered_lead(l)]
+    active_booked = [l for l in booked if not _is_delivered_lead(l)]
     lost = [l for l in leads if "lost" in (l.get("currentStatus") or "").lower()]
 
     monthly_leads = [l for l in leads if in_month(l.get("createdDate"))]
-    monthly_bookings = [l for l in booked_status if in_month(l.get("bookingDate"))]
+    monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
     monthly_deliveries = [l for l in delivered if in_month(l.get("deliveryDate"))]
 
     funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
@@ -1293,11 +1314,10 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
     finance_overdue_count = len(finance_overdue)
     finance_overdue_amt = ce.round2(sum(ce.num(f.get("fileOutstanding")) for f in finance_overdue))
 
-    # Scheme use rate on active/booked (schemeUse Yes)
+    # Scheme use rate on booked+delivered deals
     schemed = 0
-    scheme_eligible = 0
-    for l in booked_status + delivered:
-        scheme_eligible += 1
+    scheme_eligible = len(booked)
+    for l in booked:
         use = (l.get("schemeUse") or l.get("schemeApplied") or "").strip().lower()
         if use in ("yes", "y", "true", "1") or ce.num(l.get("totalSchemeBenefit") or l.get("schemeBenefit")) > 0:
             schemed += 1
@@ -1329,7 +1349,7 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
         m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
         models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0})["deliveries"] += 1
 
-    # Executive scoreboard
+    # Executive scoreboard — bookings stay counted after delivery/sold
     execs: dict = {}
     for l in leads:
         name = (l.get("executive") or "Unassigned").strip() or "Unassigned"
@@ -1340,20 +1360,23 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
         row["leads"] += 1
         if in_month(l.get("createdDate")):
             row["leadsMtd"] += 1
-        st = (l.get("currentStatus") or "").lower()
-        if "book" in st and in_month(l.get("bookingDate")):
+        if _is_booked_lead(l) and in_month(l.get("bookingDate")):
             row["bookingsMtd"] += 1
-        if (("deliver" in st) or (l.get("deliveryStatus") or "").lower() == "delivered") and in_month(l.get("deliveryDate")):
+        if _is_delivered_lead(l) and in_month(l.get("deliveryDate")):
             row["deliveriesMtd"] += 1
         if (l.get("accountStatus") or "Active") == "Active":
             fd = followup_date(l)
             if fd and fd < td:
                 row["followupOverdue"] += 1
-        if "book" in st and (l.get("deliveryStatus") or "").lower() != "delivered" and "deliver" not in st:
+        if _is_booked_lead(l) and not _is_delivered_lead(l):
             row["pendingDeliveries"] += 1
     scoreboard = sorted(execs.values(), key=lambda x: (-x["deliveriesMtd"], -x["bookingsMtd"], -x["leadsMtd"]))
     for row in scoreboard:
+        # Lead → book conversion (delivered deals still count as bookings)
         row["conversion"] = round((row["bookingsMtd"] / row["leadsMtd"] * 100), 1) if row["leadsMtd"] else 0.0
+        row["deliveryConversion"] = (
+            round((row["deliveriesMtd"] / row["bookingsMtd"] * 100), 1) if row["bookingsMtd"] else 0.0
+        )
 
     book_conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
     deliver_conv = round((len(monthly_deliveries) / len(monthly_bookings) * 100), 1) if monthly_bookings else 0.0
@@ -1388,7 +1411,7 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
 
 # ---------------------------------------------------------------- leads
 @api.get("/leads")
-async def list_leads(status: Optional[str] = None, q: Optional[str] = None):
+async def list_leads(status: Optional[str] = None, q: Optional[str] = None, user=Depends(current_user)):
     query = {}
     if status and status != "all":
         query["currentStatus"] = status
@@ -1399,7 +1422,10 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None):
             {"leadId": {"$regex": q, "$options": "i"}},
         ]
     leads = await db.leads.find(query).sort("leadId", -1).to_list(3000)
-    return [clean(l) for l in leads]
+    rows = [clean(l) for l in leads]
+    if user.get("role") in authmod.FIELD_ROLES:
+        return [_field_safe_lead(l) for l in rows]
+    return rows
 
 
 @api.post("/leads")
@@ -1442,13 +1468,49 @@ async def create_lead(body: LeadIn, _sales=Depends(sales_staff_only)):
 
 
 @api.get("/leads/{lead_id}")
-async def get_lead(lead_id: str):
-    return await get_lead_or_404(lead_id)
+async def get_lead(lead_id: str, user=Depends(current_user)):
+    lead = await get_lead_or_404(lead_id)
+    if user.get("role") in authmod.FIELD_ROLES:
+        return _field_safe_lead(lead)
+    return lead
 
 
 @api.get("/leads/{lead_id}/360")
-async def customer_360(lead_id: str):
+async def customer_360(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
+    # ASM / RM — pipeline snapshot only (no commercials, payments, claims)
+    if user.get("role") in authmod.FIELD_ROLES:
+        delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
+        booking = clean(await db.bookings.find_one({"leadId": lead_id}) or {})
+        activities = [clean(a) for a in await db.activities.find({"leadId": lead_id}).sort("activityId", -1).to_list(500)]
+        safe_delivery = {}
+        if delivery:
+            for k in ("leadId", "deliveryDate", "deliveryStatus", "chassisNumber",
+                      "engineNumber", "invoiceNumber", "rcStatus"):
+                if delivery.get(k) not in (None, ""):
+                    safe_delivery[k] = delivery.get(k)
+        safe_booking = {}
+        if booking:
+            for k in ("bookingId", "leadId", "bookingDate", "bookingStatus", "model", "variant"):
+                if booking.get(k) not in (None, ""):
+                    safe_booking[k] = booking.get(k)
+        return {
+            "lead": _field_safe_lead(lead),
+            "commercials": {},
+            "payments": [],
+            "activities": activities,
+            "delivery": safe_delivery,
+            "booking": safe_booking,
+            "claims": [],
+            "actions": {
+                **lead_actions(lead),
+                "canBook": False, "canPrice": False, "canScheme": False,
+                "canPayment": False, "canDelivery": False, "canClose": False,
+                "fieldView": True,
+            },
+            "billingSummary": None,
+            "fieldView": True,
+        }
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
     commercials = ce.compute_full_commercials(snap, scheme_rows)
@@ -2960,8 +3022,19 @@ async def list_incentive_master():
 
 
 @api.get("/bookings")
-async def list_bookings():
-    return [clean(b) for b in await db.bookings.find().sort("bookingId", -1).to_list(1000)]
+async def list_bookings(user=Depends(current_user)):
+    rows = [clean(b) for b in await db.bookings.find().sort("bookingId", -1).to_list(1000)]
+    if user.get("role") in authmod.FIELD_ROLES:
+        safe = []
+        for b in rows:
+            safe.append({
+                k: b.get(k) for k in (
+                    "bookingId", "leadId", "customerName", "model", "variant",
+                    "bookingDate", "bookingStatus", "executive",
+                ) if b.get(k) is not None
+            })
+        return safe
+    return rows
 
 
 @api.get("/activities")

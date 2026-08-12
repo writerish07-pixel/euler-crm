@@ -96,7 +96,7 @@ export default function FieldDashboard() {
 
       <Card className="p-5 mt-6">
         <h3 className="font-heading font-bold text-ink mb-1">Executive scoreboard</h3>
-        <p className="text-xs text-ink-soft mb-3">MTD performance by sales executive — coach on overdue follow-ups and pending deliveries</p>
+        <p className="text-xs text-ink-soft mb-3">MTD · Book % = bookings÷leads (includes delivered) · Del % = deliveries÷bookings</p>
         <Table
           rowKey="executive"
           empty="No executives on leads yet"
@@ -105,7 +105,8 @@ export default function FieldDashboard() {
             { key: "leadsMtd", label: "Leads", align: "right" },
             { key: "bookingsMtd", label: "Books", align: "right" },
             { key: "deliveriesMtd", label: "Del.", align: "right" },
-            { key: "conversion", label: "Conv %", align: "right", render: (r) => `${r.conversion || 0}%` },
+            { key: "conversion", label: "Book %", align: "right", render: (r) => `${r.conversion || 0}%` },
+            { key: "deliveryConversion", label: "Del %", align: "right", render: (r) => `${r.deliveryConversion || 0}%` },
             { key: "followupOverdue", label: "FU overdue", align: "right", render: (r) => (
               r.followupOverdue ? <Badge tone="bg-red-50 text-red-700 ring-red-600/20">{r.followupOverdue}</Badge> : "—"
             ) },
