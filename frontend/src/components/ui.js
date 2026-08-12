@@ -13,12 +13,12 @@ export function Card({ className, children, ...rest }) {
 
 export function PageHeader({ title, subtitle, actions }) {
   return (
-    <div className="flex items-start justify-between gap-4 mb-6">
-      <div>
-        <h1 className="font-heading text-2xl font-extrabold tracking-tight text-ink">{title}</h1>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4 mb-5 sm:mb-6">
+      <div className="min-w-0">
+        <h1 className="font-heading text-xl sm:text-2xl font-extrabold tracking-tight text-ink">{title}</h1>
         {subtitle && <p className="text-sm text-ink-soft mt-1">{subtitle}</p>}
       </div>
-      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
+      {actions && <div className="flex flex-wrap items-center gap-2 shrink-0">{actions}</div>}
     </div>
   );
 }
@@ -120,17 +120,17 @@ export function Drawer({ open, onClose, title, subtitle, children, width = "max-
     <div className="fixed inset-0 z-50">
       <div className="absolute inset-0 bg-ink/40 backdrop-blur-[2px]" onClick={onClose} data-testid="drawer-overlay" />
       <div className={cx("absolute inset-y-0 right-0 w-full bg-white shadow-drawer flex flex-col animate-drawer-in", width)}>
-        <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-line shrink-0">
-          <div>
-            <h2 className="font-heading text-lg font-bold text-ink">{title}</h2>
-            {subtitle && <p className="text-xs text-ink-soft mt-0.5">{subtitle}</p>}
+        <div className="flex items-start justify-between gap-3 px-4 sm:px-6 py-4 border-b border-line shrink-0">
+          <div className="min-w-0">
+            <h2 className="font-heading text-base sm:text-lg font-bold text-ink truncate">{title}</h2>
+            {subtitle && <p className="text-xs text-ink-soft mt-0.5 break-words">{subtitle}</p>}
           </div>
-          <button onClick={onClose} data-testid="drawer-close" className="rounded-lg p-1.5 text-ink-faint hover:bg-zinc-100 hover:text-ink transition-colors">
+          <button onClick={onClose} data-testid="drawer-close" className="rounded-lg p-1.5 text-ink-faint hover:bg-zinc-100 hover:text-ink transition-colors shrink-0">
             <X size={18} />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
-        {footer && <div className="border-t border-line px-6 py-3 bg-zinc-50/60 shrink-0">{footer}</div>}
+        <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5">{children}</div>
+        {footer && <div className="border-t border-line px-4 sm:px-6 py-3 bg-zinc-50/60 shrink-0 overflow-x-auto">{footer}</div>}
       </div>
     </div>
   );
@@ -174,7 +174,7 @@ export function StatCard({ label, value, sub, icon: Icon, tone = "text-cobalt" }
 
 export function Tabs({ tabs, active, onChange }) {
   return (
-    <div className="flex gap-1 border-b border-line -mx-6 px-6 mb-5 overflow-x-auto">
+    <div className="flex gap-1 border-b border-line -mx-4 px-4 sm:-mx-6 sm:px-6 mb-5 overflow-x-auto overscroll-x-contain">
       {tabs.map((t) => (
         <button
           key={t.key}

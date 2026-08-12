@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from "react";
-import { NavLink, Link } from "react-router-dom";
+import { NavLink, Link, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
-  BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map,
+  BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -50,18 +50,34 @@ const NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, open, onNavigate, onClose }) {
   const deskLabel = isAccounts ? "Accounts desk" : isField ? "Field desk" : "EV Dealership";
   return (
-    <aside className="w-64 fixed inset-y-0 left-0 z-40 flex flex-col border-r border-line bg-white">
+    <aside
+      data-testid="app-sidebar"
+      className={cx(
+        "fixed inset-y-0 left-0 z-50 w-64 flex flex-col border-r border-line bg-white transition-transform duration-200 ease-out",
+        "lg:translate-x-0 lg:z-40",
+        open ? "translate-x-0 shadow-drawer" : "-translate-x-full lg:translate-x-0",
+      )}
+    >
       <div className="h-16 flex items-center gap-2.5 px-5 border-b border-line shrink-0">
         <div className="h-9 w-9 rounded-lg bg-cobalt flex items-center justify-center"><Zap size={20} className="text-white" fill="white" /></div>
-        <div>
+        <div className="min-w-0 flex-1">
           <div className="font-heading font-extrabold text-ink leading-none tracking-tight">Euler CRM</div>
           <div className="text-[10px] uppercase tracking-widest text-ink-faint mt-0.5">{deskLabel}</div>
         </div>
+        <button
+          type="button"
+          data-testid="sidebar-close"
+          onClick={onClose}
+          className="lg:hidden rounded-lg p-2 text-ink-faint hover:bg-zinc-100 hover:text-ink"
+          aria-label="Close menu"
+        >
+          <X size={18} />
+        </button>
       </div>
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
+      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5 overscroll-contain">
         {NAV.map((group) => {
           if (group.ownerOnly && !isOwner) return null;
           if (group.moneyDesk && !isMoneyDesk) return null;
@@ -71,7 +87,6 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk }) {
             if (i.salesOnly && !isSalesStaff) return false;
             if (i.moneyDesk && !isMoneyDesk) return false;
             if (i.accountsHome && !isAccounts && !isOwner) return false;
-            // Field home: ASM/RM always; Owner shortcut
             if (i.fieldHome && !isField && !isOwner) return false;
             return true;
           });
@@ -83,7 +98,8 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk }) {
                 {items.map((item) => (
                   <NavLink key={item.to} to={item.to} end={item.end}
                     data-testid={`nav-${item.label.toLowerCase().replace(/\s+/g, "-")}`}
-                    className={({ isActive }) => cx("group flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors", isActive ? "bg-cobalt-tint text-cobalt" : "text-ink-soft hover:bg-zinc-100 hover:text-ink")}>
+                    onClick={onNavigate}
+                    className={({ isActive }) => cx("group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors", isActive ? "bg-cobalt-tint text-cobalt" : "text-ink-soft hover:bg-zinc-100 hover:text-ink")}>
                     <item.icon size={17} className="shrink-0" />
                     <span className="truncate">{item.label}</span>
                     {item.ownerOnly && <span className="ml-auto text-[9px] font-bold uppercase text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Owner</span>}
@@ -124,15 +140,17 @@ function SyncBadge() {
     tone = "bg-amber-50 text-amber-700 ring-amber-600/20"; dot = "bg-amber-500"; label = "Sync Off";
     title = s.reason || "Google Sheet sync not enabled";
   }
+  const short = failed ? "Err" : (s.enabled && s.canWrite ? "OK" : "Off");
   return (
-    <div data-testid="sync-badge" title={title} className={cx("flex items-center gap-2 rounded-full px-3 py-1.5 ring-1 ring-inset", tone)}>
-      <span className={cx("h-1.5 w-1.5 rounded-full", dot)} />
-      <span className="text-xs font-medium">{label}</span>
+    <div data-testid="sync-badge" title={title} className={cx("flex items-center gap-2 rounded-full ring-1 ring-inset px-2.5 sm:px-3 py-1.5", tone)}>
+      <span className={cx("h-1.5 w-1.5 rounded-full shrink-0", dot)} />
+      <span className="text-xs font-medium whitespace-nowrap sm:hidden">{short}</span>
+      <span className="text-xs font-medium whitespace-nowrap hidden sm:inline">{label}</span>
     </div>
   );
 }
 
-function Topbar() {
+function Topbar({ onMenuOpen }) {
   const { user, logout, isAccounts, isField } = useAuth();
   const [menu, setMenu] = useState(false);
   const [dl, setDl] = useState(false);
@@ -143,14 +161,35 @@ function Topbar() {
   };
   const initials = (user?.name || user?.email || "U").slice(0, 2).toUpperCase();
   return (
-    <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-line bg-white/80 backdrop-blur px-6">
-      <div className="relative flex-1 max-w-md">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint" />
-        <input placeholder="Search…" className="w-full rounded-lg bg-zinc-100 border-0 py-2 pl-9 pr-3 text-sm text-ink placeholder:text-ink-faint focus:ring-2 focus:ring-cobalt focus:bg-white transition-all" />
+    <header className="sticky top-0 z-30 flex h-14 sm:h-16 items-center gap-2 sm:gap-4 border-b border-line bg-white/80 backdrop-blur px-3 sm:px-6">
+      <button
+        type="button"
+        data-testid="mobile-menu-btn"
+        onClick={onMenuOpen}
+        className="lg:hidden shrink-0 rounded-lg p-2 text-ink hover:bg-zinc-100"
+        aria-label="Open menu"
+      >
+        <Menu size={20} />
+      </button>
+      <div className="relative flex-1 min-w-0 max-w-md">
+        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
+        <input
+          placeholder="Search…"
+          className="w-full rounded-lg bg-zinc-100 border-0 py-2 pl-9 pr-3 text-sm text-ink placeholder:text-ink-faint focus:ring-2 focus:ring-cobalt focus:bg-white transition-all"
+        />
       </div>
-      <div className="ml-auto flex items-center gap-3">
+      <div className="ml-auto flex items-center gap-1.5 sm:gap-3 shrink-0">
         {!isAccounts && !isField && (
-          <Button variant="secondary" data-testid="export-btn" onClick={exportXlsx} disabled={dl}><Download size={15} /> {dl ? "Exporting…" : "Export"}</Button>
+          <Button
+            variant="secondary"
+            data-testid="export-btn"
+            onClick={exportXlsx}
+            disabled={dl}
+            className="!px-2.5 sm:!px-3.5"
+          >
+            <Download size={15} />
+            <span className="hidden sm:inline">{dl ? "Exporting…" : "Export"}</span>
+          </Button>
         )}
         <SyncBadge />
         <div className="relative">
@@ -177,12 +216,47 @@ function Topbar() {
 
 export default function Layout({ children }) {
   const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk } = useAuth();
+  const [navOpen, setNavOpen] = useState(false);
+  const location = useLocation();
+
+  // Close mobile drawer on route change
+  useEffect(() => { setNavOpen(false); }, [location.pathname]);
+
+  // Lock body scroll while mobile menu is open
+  useEffect(() => {
+    if (!navOpen) return undefined;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [navOpen]);
+
   return (
-    <div className="min-h-screen bg-app">
-      <Sidebar isOwner={isOwner} isAccounts={isAccounts} isSalesStaff={isSalesStaff} isField={isField} isMoneyDesk={isMoneyDesk} />
-      <div className="ml-64 flex flex-col min-h-screen">
-        <Topbar />
-        <main className="flex-1 p-6 lg:p-8 animate-fade-up">{children}</main>
+    <div className="min-h-screen bg-app" data-testid="app-shell">
+      {/* Mobile backdrop */}
+      {navOpen && (
+        <button
+          type="button"
+          data-testid="sidebar-backdrop"
+          aria-label="Close menu"
+          className="fixed inset-0 z-40 bg-ink/40 backdrop-blur-[2px] lg:hidden"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
+
+      <Sidebar
+        isOwner={isOwner}
+        isAccounts={isAccounts}
+        isSalesStaff={isSalesStaff}
+        isField={isField}
+        isMoneyDesk={isMoneyDesk}
+        open={navOpen}
+        onClose={() => setNavOpen(false)}
+        onNavigate={() => setNavOpen(false)}
+      />
+
+      <div className="lg:ml-64 flex flex-col min-h-screen min-w-0">
+        <Topbar onMenuOpen={() => setNavOpen(true)} />
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 animate-fade-up min-w-0 overflow-x-hidden">{children}</main>
       </div>
     </div>
   );

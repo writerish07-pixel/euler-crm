@@ -28,5 +28,16 @@ body {
 ::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 999px; border: 2px solid #f4f4f5; }
 ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
 
+/* Safer default for mobile tables / filters */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+
+@media (max-width: 1023px) {
+  body {
+    overflow-x: hidden;
+  }
+}
+
 .font-heading { font-family: "Cabinet Grotesk", system-ui, sans-serif; }
 .tabular { font-variant-numeric: tabular-nums; }
