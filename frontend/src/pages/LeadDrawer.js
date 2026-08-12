@@ -18,7 +18,7 @@ const SCHEME_FIELDS = [
 ];
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner } = useAuth();
+  const { isOwner, isField } = useAuth();
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
@@ -39,32 +39,45 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const lead = data.lead;
   const c = data.commercials;
   const actions = data.actions || {};
+  const fieldView = isField || !!data.fieldView || !!actions.fieldView;
   const leadLocked = !!actions.isLocked || !actions.isActive || !!actions.isDelivered;
 
-  const tabs = [
-    { key: "overview", label: "Overview" },
-    { key: "price", label: "Price Structure" },
-    { key: "scheme", label: "Scheme" },
-    { key: "payments", label: `Payments (${data.payments.length})` },
-    { key: "delivery", label: "Delivery" },
-    ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
-    { key: "activity", label: `Activity (${data.activities.length})` },
-  ];
+  const tabs = fieldView
+    ? [
+        { key: "overview", label: "Overview" },
+        { key: "delivery", label: "Delivery" },
+        { key: "activity", label: `Activity (${(data.activities || []).length})` },
+      ]
+    : [
+        { key: "overview", label: "Overview" },
+        { key: "price", label: "Price Structure" },
+        { key: "scheme", label: "Scheme" },
+        { key: "payments", label: `Payments (${data.payments.length})` },
+        { key: "delivery", label: "Delivery" },
+        ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
+        { key: "activity", label: `Activity (${data.activities.length})` },
+      ];
 
   return (
     <Drawer open onClose={onClose} width="max-w-3xl"
       title={lead.customerName}
       subtitle={`${lead.leadId} · ${lead.interestedModel} ${lead.variant} · ${lead.mobile}`}
-      footer={<DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => advance("price")} />}
+      footer={fieldView
+        ? <div className="flex items-center gap-2 text-sm text-ink-soft">
+            {actions.isBooked && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
+            {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+            <span className="ml-auto text-xs">Field view · pipeline only</span>
+          </div>
+        : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => advance("price")} />}
     >
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
         {leadLocked && <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="lead-locked-badge">Locked</Badge>}
-        {!leadLocked && (
+        {!fieldView && !leadLocked && (
           <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
         )}
-        {isOwner && (
+        {!fieldView && isOwner && (
           <Button variant="secondary" data-testid="delete-lead-btn"
             onClick={async () => {
               if (!window.confirm(`Permanently DELETE lead ${lead.leadId} (${lead.customerName}) and all its bookings, payments, claims, insurance & delivery records? This cannot be undone.`)) return;
@@ -77,13 +90,15 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             }}
             className="!py-1 !px-2.5 text-xs !text-red-600 hover:!bg-red-50"><Trash2 size={13} /> Delete</Button>
         )}
-        <div className="ml-auto text-right">
-          <div className="text-xs text-ink-faint">Outstanding</div>
-          <div className={`font-mono font-bold ${lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{inr(lead.customerOutstanding)}</div>
-        </div>
+        {!fieldView && (
+          <div className="ml-auto text-right">
+            <div className="text-xs text-ink-faint">Outstanding</div>
+            <div className={`font-mono font-bold ${lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{inr(lead.customerOutstanding)}</div>
+          </div>
+        )}
       </div>
 
-      {editing && !leadLocked && (
+      {editing && !leadLocked && !fieldView && (
         <EditLeadModal
           lead={lead}
           masters={masters}
@@ -98,29 +113,78 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         />
       )}
 
-      {leadLocked && (
+      {fieldView && (
+        <StepLock text="ASM / RM field view — pipeline status only. Commercial amounts, payments and claims are hidden." />
+      )}
+
+      {!fieldView && leadLocked && (
         <StepLock text="This lead is Delivered or Closed — vehicle details and commercial steps are locked. Only Active leads can be edited." />
       )}
 
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
-      {tab === "overview" && <Overview lead={lead} c={c} />}
-      {tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
-      {tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
-      {tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} onSaved={refresh} />}
+      {tab === "overview" && (fieldView
+        ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
+        : <Overview lead={lead} c={c} />)}
+      {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
+      {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
+      {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} onSaved={refresh} />}
       {tab === "delivery" && (
-        <DeliveryTab
-          lead={lead}
-          actions={actions}
-          isOwner={isOwner}
-          delivery={data.delivery}
-          billingSummary={data.billingSummary}
-          onSaved={refresh}
-        />
+        fieldView
+          ? <FieldDeliveryReadOnly delivery={data.delivery} lead={lead} />
+          : (
+            <DeliveryTab
+              lead={lead}
+              actions={actions}
+              isOwner={isOwner}
+              delivery={data.delivery}
+              billingSummary={data.billingSummary}
+              onSaved={refresh}
+            />
+          )
       )}
-      {tab === "insurance" && isOwner && <InsuranceTab lead={lead} masters={masters} />}
-      {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} />}
+      {!fieldView && tab === "insurance" && isOwner && <InsuranceTab lead={lead} masters={masters} />}
+      {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} readOnly={fieldView} />}
     </Drawer>
+  );
+}
+
+function FieldOverview({ lead, booking, delivery }) {
+  return (
+    <div className="grid grid-cols-1 gap-5" data-testid="field-lead-overview">
+      <Card className="p-4">
+        <h4 className="font-heading font-bold text-ink text-sm mb-2">Pipeline</h4>
+        <div className="grid grid-cols-2 gap-x-6">
+          <KV label="Executive" value={lead.executive || "—"} />
+          <KV label="Priority" value={lead.priority || "—"} />
+          <KV label="Lead Source" value={lead.leadSource || "—"} />
+          <KV label="Status" value={lead.currentStatus || "—"} />
+          <KV label="Created" value={fmtDate(lead.createdDate)} />
+          <KV label="Next Follow-up" value={fmtDate(lead.nextFollowupDate || lead.nextFollowup)} />
+          <KV label="Booking Date" value={fmtDate(lead.bookingDate || booking?.bookingDate)} />
+          <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+          <KV label="Finance Required" value={lead.financeRequired || "—"} />
+          <KV label="Exchange" value={lead.exchangeRequired || "—"} />
+        </div>
+        {lead.remarks && <div className="mt-2 text-sm text-ink-soft bg-zinc-50 rounded-lg p-3">{lead.remarks}</div>}
+      </Card>
+    </div>
+  );
+}
+
+function FieldDeliveryReadOnly({ delivery, lead }) {
+  return (
+    <Card className="p-4" data-testid="field-delivery-readonly">
+      <h4 className="font-heading font-bold text-ink text-sm mb-2">Delivery status</h4>
+      <div className="grid grid-cols-2 gap-x-6">
+        <KV label="Status" value={lead.deliveryStatus || lead.currentStatus || "—"} />
+        <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+        <KV label="Invoice" value={delivery?.invoiceNumber || lead.invoiceNumber || "—"} />
+        <KV label="Chassis" value={delivery?.chassisNumber || "—"} />
+        <KV label="Engine" value={delivery?.engineNumber || "—"} />
+        <KV label="RC Status" value={delivery?.rcStatus || "—"} />
+      </div>
+    </Card>
   );
 }
 
@@ -1100,7 +1164,7 @@ function InsuranceTab({ lead, masters }) {
 }
 
 /* -------------------------------------------------- Activity */
-function ActivityTab({ lead, activities, masters, onSaved }) {
+function ActivityTab({ lead, activities, masters, onSaved, readOnly = false }) {
   const [form, setForm] = useState({ activityType: "Call", discussion: "", nextFollowup: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const add = async () => {
@@ -1113,17 +1177,19 @@ function ActivityTab({ lead, activities, masters, onSaved }) {
   };
   return (
     <div>
-      <Card className="p-4 mb-4">
-        <div className="grid grid-cols-5 gap-3 items-end">
-          <Field label="Type"><Select value={form.activityType} onChange={set("activityType")}>{(masters?.activityTypes || []).map((t) => <option key={t}>{t}</option>)}</Select></Field>
-          <Field label="Date"><Input data-testid="activity-date" type="date" value={form.date} onChange={set("date")} /></Field>
-          <Field label="Next Follow-up"><Input data-testid="activity-followup" type="date" value={form.nextFollowup} onChange={set("nextFollowup")} /></Field>
-          <div className="col-span-2"><Field label="Discussion"><Input data-testid="activity-note" value={form.discussion} onChange={set("discussion")} /></Field></div>
-        </div>
-        <div className="flex justify-end mt-3">
-          <Button data-testid="add-activity-btn" onClick={add}>Log</Button>
-        </div>
-      </Card>
+      {!readOnly && (
+        <Card className="p-4 mb-4">
+          <div className="grid grid-cols-5 gap-3 items-end">
+            <Field label="Type"><Select value={form.activityType} onChange={set("activityType")}>{(masters?.activityTypes || []).map((t) => <option key={t}>{t}</option>)}</Select></Field>
+            <Field label="Date"><Input data-testid="activity-date" type="date" value={form.date} onChange={set("date")} /></Field>
+            <Field label="Next Follow-up"><Input data-testid="activity-followup" type="date" value={form.nextFollowup} onChange={set("nextFollowup")} /></Field>
+            <div className="col-span-2"><Field label="Discussion"><Input data-testid="activity-note" value={form.discussion} onChange={set("discussion")} /></Field></div>
+          </div>
+          <div className="flex justify-end mt-3">
+            <Button data-testid="add-activity-btn" onClick={add}>Log</Button>
+          </div>
+        </Card>
+      )}
       <div className="space-y-2">
         {activities.map((a) => (
           <div key={a.activityId} className="flex gap-3 bg-white border border-line rounded-lg px-4 py-2.5">
@@ -1134,6 +1200,7 @@ function ActivityTab({ lead, activities, masters, onSaved }) {
             </div>
           </div>
         ))}
+        {!activities.length && <div className="text-sm text-ink-faint py-6 text-center">No activities yet</div>}
       </div>
     </div>
   );

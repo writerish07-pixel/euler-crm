@@ -6,10 +6,12 @@ import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
 import LeadImport from "./LeadImport";
+import { useAuth } from "../context/AuthContext";
 
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"];
 
 export default function Leads() {
+  const { isField } = useAuth();
   const [leads, setLeads] = useState([]);
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
@@ -25,15 +27,33 @@ export default function Leads() {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters); }, []);
 
+  const columns = [
+    { key: "leadId", label: "Lead ID", mono: true, render: (r) => <span className="font-semibold text-cobalt">{r.leadId}</span> },
+    { key: "customerName", label: "Customer", render: (r) => (
+      <div>
+        <div className="font-semibold text-ink">{r.customerName}</div>
+        <div className="text-xs text-ink-faint flex items-center gap-1"><Phone size={10} />{r.mobile || "—"}</div>
+      </div>
+    )},
+    { key: "vehicle", label: "Vehicle", render: (r) => <div className="text-sm"><div>{r.interestedModel || "—"}</div><div className="text-xs text-ink-faint">{r.variant}</div></div> },
+    { key: "executive", label: "Executive" },
+    { key: "currentStatus", label: "Status", render: (r) => <Badge>{r.currentStatus}</Badge> },
+    ...(!isField ? [
+      { key: "customerPayable", label: "Payable", align: "right", mono: true, render: (r) => inr(r.customerPayable) },
+      { key: "customerOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.customerOutstanding > 0 ? "text-red-600 font-semibold" : "text-emerald-600"}>{inr(r.customerOutstanding)}</span> },
+    ] : []),
+    { key: "go", label: "", align: "right", render: () => <ChevronRight size={16} className="text-ink-faint inline" /> },
+  ];
+
   return (
     <div>
       <PageHeader
         title="Lead Register"
-        subtitle={`${leads.length} leads in pipeline`}
-        actions={<div className="flex gap-2">
+        subtitle={`${leads.length} leads in pipeline${isField ? " · field view" : ""}`}
+        actions={!isField ? <div className="flex gap-2">
           <Button variant="secondary" data-testid="import-leads-btn" onClick={() => setShowImport(true)}><Upload size={16} /> Import</Button>
           <Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> New Lead</Button>
-        </div>}
+        </div> : null}
       />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -57,21 +77,7 @@ export default function Leads() {
       <Table
         rowKey="leadId"
         onRowClick={(r) => setActive(r.leadId)}
-        columns={[
-          { key: "leadId", label: "Lead ID", mono: true, render: (r) => <span className="font-semibold text-cobalt">{r.leadId}</span> },
-          { key: "customerName", label: "Customer", render: (r) => (
-            <div>
-              <div className="font-semibold text-ink">{r.customerName}</div>
-              <div className="text-xs text-ink-faint flex items-center gap-1"><Phone size={10} />{r.mobile || "—"}</div>
-            </div>
-          )},
-          { key: "vehicle", label: "Vehicle", render: (r) => <div className="text-sm"><div>{r.interestedModel || "—"}</div><div className="text-xs text-ink-faint">{r.variant}</div></div> },
-          { key: "executive", label: "Executive" },
-          { key: "currentStatus", label: "Status", render: (r) => <Badge>{r.currentStatus}</Badge> },
-          { key: "customerPayable", label: "Payable", align: "right", mono: true, render: (r) => inr(r.customerPayable) },
-          { key: "customerOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.customerOutstanding > 0 ? "text-red-600 font-semibold" : "text-emerald-600"}>{inr(r.customerOutstanding)}</span> },
-          { key: "go", label: "", align: "right", render: () => <ChevronRight size={16} className="text-ink-faint inline" /> },
-        ]}
+        columns={columns}
         rows={leads}
         empty="No leads match this filter"
       />
