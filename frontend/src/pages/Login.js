@@ -25,7 +25,10 @@ export default function Login() {
     try {
       const u = await login(email.trim(), password);
       toast.success("Welcome back");
-      nav(u?.role === "accounts" ? "/accounts" : "/");
+      const role = u?.role;
+      if (role === "accounts") nav("/accounts");
+      else if (role === "asm" || role === "rm") nav("/field");
+      else nav("/");
     } catch (err) {
       toast.error(fmtErr(err.response?.data?.detail) || "Login failed");
     } finally { setBusy(false); }
@@ -44,7 +47,7 @@ export default function Login() {
           <h1 className="font-heading text-4xl font-extrabold leading-tight">EV Dealership<br />Operations Console</h1>
           <p className="text-zinc-400 mt-4 max-w-sm">Leads, bookings, commercial pricing, schemes, claims, finance & dealer earnings — one fast database, synced to your Google Sheet.</p>
         </div>
-        <div className="text-zinc-500 text-sm relative">Full-stack migration · v2.2</div>
+        <div className="text-zinc-500 text-sm relative">Full-stack migration · v2.4</div>
       </div>
 
       <div className="flex items-center justify-center p-8">
@@ -61,8 +64,7 @@ export default function Login() {
             <Button data-testid="login-submit" type="submit" disabled={busy} className="w-full"><LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}</Button>
           </div>
           <p className="text-xs text-ink-faint mt-6 text-center">
-            Owner / Executive / Accounts · pwd euler@123<br />
-            accounts@euler.com for the money desk
+            owner / executive / accounts / asm / rm · pwd euler@123
           </p>
         </form>
       </div>
