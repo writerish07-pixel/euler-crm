@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, Link } from "react-router-dom";
 import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
@@ -144,6 +144,10 @@ function Topbar() {
                 <div className="text-xs text-ink-faint truncate">{user?.email}</div>
                 <div className="text-[10px] uppercase font-bold text-cobalt mt-1">{user?.role}</div>
               </div>
+              <Link to="/settings" data-testid="change-password-menu" onClick={() => setMenu(false)}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-ink hover:bg-zinc-50 transition-colors">
+                Change password
+              </Link>
               <button data-testid="logout-btn" onClick={logout} className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"><LogOut size={15} /> Sign out</button>
             </div>
           )}
