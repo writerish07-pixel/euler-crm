@@ -56,20 +56,20 @@ export default function Leads() {
         </div> : null}
       />
 
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <div className="flex flex-wrap gap-1 bg-white rounded-lg p-1 border border-line shadow-card">
+      <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="flex gap-1 overflow-x-auto bg-white rounded-lg p-1 border border-line shadow-card scrollbar-thin -mx-1 px-1 sm:mx-0 sm:flex-wrap">
           {STATUS_FILTERS.map((s) => (
             <button
               key={s}
               data-testid={`filter-${s}`}
               onClick={() => setStatus(s)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${status === s ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}
+              className={`shrink-0 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${status === s ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}
             >
               {s === "all" ? "All" : s}
             </button>
           ))}
         </div>
-        <div className="flex-1 min-w-[200px]">
+        <div className="w-full sm:flex-1 sm:min-w-[200px]">
           <Input data-testid="lead-search" placeholder="Search name / mobile / ID…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
       </div>
@@ -122,8 +122,8 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   return (
     <Drawer open onClose={onClose} width="max-w-xl" title="New Lead" subtitle="Capture a fresh enquiry"
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit}>Create Lead</Button></div>}>
-      <div className="grid grid-cols-2 gap-4">
-        <div className="col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
         <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
         <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
         <Field label="Mobile"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
@@ -134,7 +134,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <Field label="Variant"><Select value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}</option>)}</Select></Field>
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Budget (₹)"><Input type="number" value={form.budget} onChange={set("budget")} /></Field>
-        <div className="col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
+        <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
       </div>
     </Drawer>
   );

@@ -195,14 +195,14 @@ function StepLock({ text }) {
 function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
   const [modal, setModal] = useState(null);
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {actions.canBook && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
       {actions.isBooked && !actions.canBook && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
       {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
       {actions.canClose && (
         <Button variant="secondary" data-testid="close-lead-btn" onClick={() => setModal("close")}><XCircle size={15} /> Close Lead</Button>
       )}
-      <div className="ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
+      <div className="w-full sm:w-auto sm:ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
       {modal === "book" && <BookingModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); (onBooked || refresh)(); }} />}
       {modal === "close" && <CloseModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); onClose(); }} />}
     </div>
@@ -228,7 +228,7 @@ function KV({ label, value, tone }) {
 
 function Overview({ lead, c }) {
   return (
-    <div className="grid grid-cols-2 gap-5">
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
       <Card className="p-4">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Commercial Breakup</h4>
         <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
@@ -254,9 +254,9 @@ function Overview({ lead, c }) {
         <KV label="Dealer Margin (Net)" value={inr(c.margin.marginNetExGst)} />
         <KV label="Lead Source" value={lead.leadSource || "—"} tone="text-ink" />
       </Card>
-      <Card className="p-4 col-span-2">
+      <Card className="p-4 sm:col-span-2">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
-        <div className="grid grid-cols-3 gap-x-6">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6">
           <KV label="Executive" value={lead.executive || "—"} />
           <KV label="Priority" value={lead.priority} />
           <KV label="Created" value={fmtDate(lead.createdDate)} />
@@ -1179,11 +1179,11 @@ function ActivityTab({ lead, activities, masters, onSaved, readOnly = false }) {
     <div>
       {!readOnly && (
         <Card className="p-4 mb-4">
-          <div className="grid grid-cols-5 gap-3 items-end">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
             <Field label="Type"><Select value={form.activityType} onChange={set("activityType")}>{(masters?.activityTypes || []).map((t) => <option key={t}>{t}</option>)}</Select></Field>
             <Field label="Date"><Input data-testid="activity-date" type="date" value={form.date} onChange={set("date")} /></Field>
             <Field label="Next Follow-up"><Input data-testid="activity-followup" type="date" value={form.nextFollowup} onChange={set("nextFollowup")} /></Field>
-            <div className="col-span-2"><Field label="Discussion"><Input data-testid="activity-note" value={form.discussion} onChange={set("discussion")} /></Field></div>
+            <div className="sm:col-span-2"><Field label="Discussion"><Input data-testid="activity-note" value={form.discussion} onChange={set("discussion")} /></Field></div>
           </div>
           <div className="flex justify-end mt-3">
             <Button data-testid="add-activity-btn" onClick={add}>Log</Button>
