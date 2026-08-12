@@ -104,7 +104,7 @@ export default function Settings() {
         </div>
         <p className="text-sm text-ink-soft mb-3">
           Signed in as <span className="font-mono text-ink">{user?.email}</span>
-          {user?.role ? ` (${user.role})` : ""}. Owner and executive can each change their own login password.
+          {user?.role ? ` (${user.role})` : ""}. Each user can change their own login password.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
           <Field label="Current password">
@@ -195,7 +195,11 @@ export default function Settings() {
             <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
             <Field label="Email"><Input data-testid="new-user-email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
             <Field label="Password"><Input data-testid="new-user-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
-            <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="executive">Executive</option><option value="owner">Owner</option></Select></Field>
+            <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+              <option value="executive">Executive</option>
+              <option value="accounts">Accounts</option>
+              <option value="owner">Owner</option>
+            </Select></Field>
             <Button data-testid="add-user-btn" onClick={addUser}><UserPlus size={15} /> Add User</Button>
           </div>
           <Table
@@ -203,7 +207,14 @@ export default function Settings() {
             columns={[
               { key: "name", label: "Name", render: (r) => <span className="font-semibold">{r.name || "—"}</span> },
               { key: "email", label: "Email", mono: true },
-              { key: "role", label: "Role", render: (r) => <Badge tone={r.role === "owner" ? "bg-amber-50 text-amber-700 ring-amber-600/20" : "bg-blue-50 text-blue-700 ring-blue-600/20"}>{r.role}</Badge> },
+              { key: "role", label: "Role", render: (r) => {
+                const tone = r.role === "owner"
+                  ? "bg-amber-50 text-amber-700 ring-amber-600/20"
+                  : r.role === "accounts"
+                    ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
+                    : "bg-blue-50 text-blue-700 ring-blue-600/20";
+                return <Badge tone={tone}>{r.role}</Badge>;
+              } },
               { key: "act", label: "", align: "right", render: (r) => <button data-testid={`del-user-${r.email}`} onClick={() => removeUser(r.userId)} className="text-red-500 hover:text-red-700"><Trash2 size={15} /></button> },
             ]}
             rows={users}
