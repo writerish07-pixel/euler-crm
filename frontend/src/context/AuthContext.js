@@ -26,5 +26,18 @@ export function AuthProvider({ children }) {
     window.location.href = "/login";
   };
 
-  return <AuthCtx.Provider value={{ user, login, logout, isOwner: user?.role === "owner" }}>{children}</AuthCtx.Provider>;
+  const role = user?.role || "";
+  return (
+    <AuthCtx.Provider value={{
+      user,
+      login,
+      logout,
+      isOwner: role === "owner",
+      isAccounts: role === "accounts",
+      isExecutive: role === "executive",
+      isSalesStaff: role === "owner" || role === "executive",
+    }}>
+      {children}
+    </AuthCtx.Provider>
+  );
 }

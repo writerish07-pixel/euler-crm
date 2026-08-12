@@ -23,9 +23,9 @@ export default function Login() {
     e.preventDefault();
     setBusy(true);
     try {
-      await login(email.trim(), password);
+      const u = await login(email.trim(), password);
       toast.success("Welcome back");
-      nav("/");
+      nav(u?.role === "accounts" ? "/accounts" : "/");
     } catch (err) {
       toast.error(fmtErr(err.response?.data?.detail) || "Login failed");
     } finally { setBusy(false); }
@@ -60,7 +60,10 @@ export default function Login() {
             <Field label="Password"><Input data-testid="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" /></Field>
             <Button data-testid="login-submit" type="submit" disabled={busy} className="w-full"><LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}</Button>
           </div>
-          <p className="text-xs text-ink-faint mt-6 text-center">Owner: owner@euler.com · Executive: executive@euler.com · pwd euler@123</p>
+          <p className="text-xs text-ink-faint mt-6 text-center">
+            Owner / Executive / Accounts · pwd euler@123<br />
+            accounts@euler.com for the money desk
+          </p>
         </form>
       </div>
     </div>

@@ -1,4 +1,4 @@
-"""JWT email+password auth with Owner / Executive roles (Bearer token)."""
+"""JWT email+password auth with Owner / Executive / Accounts roles (Bearer token)."""
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -63,6 +63,9 @@ class ChangePasswordIn(BaseModel):
     newPassword: str
 
 
+ALLOWED_ROLES = ("owner", "executive", "accounts")
+
+
 def build_router(db):
     router = APIRouter(prefix="/api/auth")
 
@@ -82,6 +85,16 @@ def build_router(db):
             raise HTTPException(403, "Owner access required")
         return user
 
+    async def sales_staff_only(user=Depends(current_user)):
+        """Owner + Executive — commercial / pipeline edits. Accounts is money-only."""
+        if user.get("role") not in ("owner", "executive"):
+            raise HTTPException(
+                403,
+                "Accounts role cannot edit sales pipeline or commercial steps. "
+                "Use Payments, Finance, Claims, Insurance, or Billing Summaries.",
+            )
+        return user
+
     @router.post("/login")
     async def login(body: LoginIn):
         email = body.email.strip().lower()
@@ -97,7 +110,7 @@ def build_router(db):
 
     @router.post("/change-password")
     async def change_password(body: ChangePasswordIn, user=Depends(current_user)):
-        """Any logged-in user (owner or executive) can change their own password."""
+        """Any logged-in user (owner, executive, or accounts) can change their own password."""
         new_pw = (body.newPassword or "").strip()
         if len(new_pw) < 6:
             raise HTTPException(422, "New password must be at least 6 characters")
@@ -125,7 +138,7 @@ def build_router(db):
         email = body.email.strip().lower()
         if await db.users.find_one({"email": email}):
             raise HTTPException(400, "Email already exists")
-        role = body.role if body.role in ("owner", "executive") else "executive"
+        role = body.role if body.role in ALLOWED_ROLES else "executive"
         doc = {"userId": str(uuid.uuid4()), "email": email, "passwordHash": hash_password(body.password),
                "name": body.name, "role": role, "createdAt": datetime.now(timezone.utc).isoformat()}
         await db.users.insert_one(doc)
@@ -145,6 +158,7 @@ def build_router(db):
 
     router.current_user = current_user
     router.owner_only = owner_only
+    router.sales_staff_only = sales_staff_only
     return router
 
 
@@ -165,4 +179,11 @@ async def seed_users(db):
         await db.users.insert_one({
             "userId": str(uuid.uuid4()), "email": exec_email, "passwordHash": hash_password("euler@123"),
             "name": "Executive", "role": "executive", "createdAt": datetime.now(timezone.utc).isoformat(),
+        })
+    acct_email = "accounts@euler.com"
+    if not await db.users.find_one({"email": acct_email}):
+        await db.users.insert_one({
+            "userId": str(uuid.uuid4()), "email": acct_email, "passwordHash": hash_password("euler@123"),
+            "name": "Accounts", "role": "accounts",
+            "createdAt": datetime.now(timezone.utc).isoformat(),
         })

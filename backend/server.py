@@ -41,6 +41,7 @@ _finance_index_status = {
 auth_router = authmod.build_router(db)
 current_user = auth_router.current_user
 owner_only = auth_router.owner_only
+sales_staff_only = auth_router.sales_staff_only
 
 api = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
 public = APIRouter(prefix="/api")
@@ -984,6 +985,95 @@ async def dashboard():
     }
 
 
+@api.get("/accounts/dashboard")
+async def accounts_dashboard():
+    """Money desk home — Tally cross-check KPIs (Accounts / Owner / Executive)."""
+    leads = await db.leads.find().to_list(5000)
+    cust_os = ce.round2(sum(ce.num(l.get("customerOutstanding")) for l in leads))
+    company_os = ce.round2(sum(ce.num(l.get("companyOutstanding")) for l in leads))
+
+    finance_os = 0.0
+    finance_pending = 0
+    for f in await db.finance.find().to_list(5000):
+        os_amt = ce.num(f.get("fileOutstanding"))
+        finance_os += os_amt
+        if os_amt > 0.01 and f.get("status") != "Received":
+            finance_pending += 1
+    finance_os = ce.round2(finance_os)
+
+    oem_claim_open = 0.0
+    oem_claim_count = 0
+    for c in await db.claims.find().to_list(5000):
+        elig = ce.num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount"))
+        recv = ce.num(c.get("receivedAmount"))
+        due = ce.round2(max(0.0, elig - recv))
+        if due > 0.01:
+            oem_claim_open += due
+            oem_claim_count += 1
+    oem_claim_open = ce.round2(oem_claim_open)
+
+    insurance_due = 0.0
+    insurance_open = 0
+    for e in await db.insurance.find().to_list(5000):
+        due = ce.num(e.get("payoutOutstanding"))
+        if due > 0.01:
+            insurance_due += due
+            insurance_open += 1
+    insurance_due = ce.round2(insurance_due)
+
+    # Delivered leads for Tally — prefer stored billing summaries, else live build.
+    delivered = [
+        l for l in leads
+        if (l.get("deliveryStatus") or "").lower() == "delivered"
+        or (l.get("currentStatus") or "").lower() == "delivered"
+    ]
+    delivered.sort(key=lambda l: str(l.get("deliveryDate") or ""), reverse=True)
+    tally_rows = []
+    do_not_post_total_retained = 0.0
+    do_not_post_claims = company_os
+    for l in delivered[:40]:
+        stored = await db.billing_summaries.find_one({"leadId": l["leadId"]})
+        summary = clean(stored) if stored else ce.build_delivery_billing_summary(l)
+        t = summary.get("totals") or {}
+        for item in summary.get("doNotPostInTally") or []:
+            label = (item.get("label") or "").lower()
+            if "retained" in label:
+                do_not_post_total_retained += ce.num(item.get("amount"))
+        tally_rows.append({
+            "leadId": l["leadId"],
+            "customerName": l.get("customerName") or "",
+            "model": l.get("interestedModel") or "",
+            "variant": l.get("variant") or "",
+            "invoiceNumber": summary.get("invoiceNumber") or l.get("invoiceNumber") or "",
+            "deliveryDate": summary.get("deliveryDate") or l.get("deliveryDate") or "",
+            "customerPayable": t.get("customerPayable", ce.num(l.get("customerPayable"))),
+            "totalReceived": t.get("totalReceived", ce.num(l.get("totalReceived"))),
+            "customerOutstanding": t.get("customerOutstanding", ce.num(l.get("customerOutstanding"))),
+            "hasSummary": True,
+        })
+
+    return {
+        "kpis": {
+            "customerOutstanding": cust_os,
+            "financeOutstanding": finance_os,
+            "financePendingFiles": finance_pending,
+            "oemClaimsOpen": oem_claim_open,
+            "oemClaimsOpenCount": oem_claim_count,
+            "insurancePayoutDue": insurance_due,
+            "insuranceOpenCount": insurance_open,
+            "companyOutstanding": company_os,
+            "deliveredForTally": len(delivered),
+        },
+        "tallyQueue": tally_rows,
+        "doNotPost": {
+            "oemClaimsOutstanding": do_not_post_claims,
+            "schemeOrOemExtraRetained": ce.round2(do_not_post_total_retained),
+            "note": "Do not add these to the customer Tally sales invoice — settle via Claim Register / earnings.",
+        },
+        "lastUpdated": now_iso(),
+    }
+
+
 # ---------------------------------------------------------------- leads
 @api.get("/leads")
 async def list_leads(status: Optional[str] = None, q: Optional[str] = None):
@@ -1001,7 +1091,7 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None):
 
 
 @api.post("/leads")
-async def create_lead(body: LeadIn):
+async def create_lead(body: LeadIn, _sales=Depends(sales_staff_only)):
     # Duplicate mobile guard (port of LeadService create: block reused 10-digit mobile)
     import re as _re
     mob = _re.sub(r"\D", "", body.mobile or "")
@@ -1125,7 +1215,7 @@ async def _validate_lead_update_choices(payload, lead):
 
 
 @api.put("/leads/{lead_id}")
-async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor)):
+async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     """Partial update: only fields present in the request body are touched — every
     other field on the lead (including system/financial fields, which aren't even
     part of this model) is left exactly as it was. See LEAD_SYSTEM_FIELDS."""
@@ -1313,7 +1403,7 @@ async def price_preview(lead_id: str):
 
 
 @api.post("/leads/{lead_id}/convert-booking")
-async def convert_booking(lead_id: str, body: BookingIn):
+async def convert_booking(lead_id: str, body: BookingIn, _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canBook", "conversion to booking")
     # A booking is only valid once its commercial structure is resolved. If the lead
@@ -1446,7 +1536,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 
 
 @api.put("/leads/{lead_id}/price-structure")
-async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor)):
+async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)")
     _require_owner_reedit(act, _is_priced(lead), "Price structure")
@@ -1496,7 +1586,7 @@ async def scheme_rules(lead_id: str):
 
 
 @api.put("/leads/{lead_id}/scheme")
-async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor)):
+async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)")
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
@@ -1631,7 +1721,7 @@ class ExtraIncomeIn(BaseModel):
 
 
 @api.put("/leads/{lead_id}/scheme-allocation")
-async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depends(actor)):
+async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     """Record how much of EACH scheme component the dealer passes to the customer.
 
     Validation is per component against Scheme Master: a benefit is never negative and
@@ -1690,7 +1780,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
 
 
 @api.put("/leads/{lead_id}/extra-income")
-async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)):
+async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     """Dealer extra-income lines:
     Documentation / Warranty / RSA / Referral / Other / Finance Incentive /
     Accessories Margin / Exchange Margin / Campaign Incentive.
@@ -1717,7 +1807,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
 
 
 @api.post("/leads/{lead_id}/close")
-async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor)):
+async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canClose", "closing (only Active leads)")
     if not str(body.closeReason or "").strip():
@@ -1831,7 +1921,8 @@ def _parse_import_bytes(filename: str, content: bytes, mapping: dict = None):
 
 
 @api.post("/leads/import/preview")
-async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
+async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
+                         _sales=Depends(sales_staff_only)):
     import json as _json
     content = await file.read()
     try:
@@ -1846,7 +1937,8 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
 
 
 @api.post("/leads/import/commit")
-async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = Form(None)):
+async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
+                        _sales=Depends(sales_staff_only)):
     import json as _json
     content = await file.read()
     try:
@@ -2231,7 +2323,7 @@ async def list_deliveries():
 
 
 @api.put("/leads/{lead_id}/delivery")
-async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor)):
+async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
     # Delivered / Closed leads are fully frozen — no paperwork re-edits (vehicle is unique).
@@ -2567,7 +2659,7 @@ async def list_activities(lead_id: Optional[str] = None):
 
 
 @api.post("/leads/{lead_id}/activities")
-async def add_activity(lead_id: str, body: ActivityIn):
+async def add_activity(lead_id: str, body: ActivityIn, _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "logging activity (only Active leads)")
     payload = body.model_dump()
@@ -2963,7 +3055,7 @@ async def oem_claim_dashboard():
 
 
 CRITICAL_ENDPOINTS = [
-    ("GET", "/api/dashboard"), ("GET", "/api/leads"), ("POST", "/api/leads"),
+    ("GET", "/api/dashboard"), ("GET", "/api/accounts/dashboard"), ("GET", "/api/leads"), ("POST", "/api/leads"),
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
     ("PUT", "/api/leads/{lead_id}/scheme"), ("POST", "/api/leads/{lead_id}/close"),
@@ -4254,7 +4346,7 @@ async def list_quotations():
 
 
 @api.post("/quotations")
-async def create_quotation(body: QuotationIn):
+async def create_quotation(body: QuotationIn, _sales=Depends(sales_staff_only)):
     totals = ce.compute_commercial_totals(body.model_dump())
     claim = ce.derive_claim(body.model_dump())
     quote_id = await next_id("snapshot", "QT26")
