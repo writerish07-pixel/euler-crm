@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
-  BarChart3, ShieldAlert, PieChart, ScrollText, Calculator,
+  BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -14,15 +14,16 @@ import { downloadFile, get } from "../lib/api";
 const NAV = [
   { section: "Overview", items: [
     { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, salesOnly: true },
+    { to: "/field", label: "Field Dashboard", icon: Map, fieldHome: true },
     { to: "/accounts", label: "Accounts Dashboard", icon: Calculator, accountsHome: true },
   ]},
-  { section: "Sales Pipeline", salesOnly: true, items: [
+  { section: "Sales Pipeline", pipeline: true, items: [
     { to: "/leads", label: "Lead Register", icon: Users },
     { to: "/bookings", label: "Bookings", icon: ClipboardList },
-    { to: "/quotations", label: "Quotations", icon: FileText },
-    { to: "/activities", label: "Activity Log", icon: Activity },
+    { to: "/quotations", label: "Quotations", icon: FileText, salesOnly: true },
+    { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
   ]},
-  { section: "Money", items: [
+  { section: "Money", moneyDesk: true, items: [
     { to: "/payments", label: "Payment Ledger", icon: Wallet },
     { to: "/finance", label: "Finance Register", icon: Landmark },
     { to: "/insurance", label: "Insurance Payouts", icon: ShieldCheck },
@@ -30,7 +31,7 @@ const NAV = [
   ]},
   { section: "Fulfilment", items: [{ to: "/deliveries", label: "Delivery Tracker", icon: Truck }] },
   { section: "OEM & Commercial", items: [
-    { to: "/claims", label: "OEM Claims", icon: ReceiptText },
+    { to: "/claims", label: "OEM Claims", icon: ReceiptText, moneyDesk: true },
     { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, salesOnly: true },
     { to: "/dealer-earnings", label: "Dealer Earnings", icon: Coins, ownerOnly: true },
@@ -49,27 +50,29 @@ const NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk }) {
+  const deskLabel = isAccounts ? "Accounts desk" : isField ? "Field desk" : "EV Dealership";
   return (
     <aside className="w-64 fixed inset-y-0 left-0 z-40 flex flex-col border-r border-line bg-white">
       <div className="h-16 flex items-center gap-2.5 px-5 border-b border-line shrink-0">
         <div className="h-9 w-9 rounded-lg bg-cobalt flex items-center justify-center"><Zap size={20} className="text-white" fill="white" /></div>
         <div>
           <div className="font-heading font-extrabold text-ink leading-none tracking-tight">Euler CRM</div>
-          <div className="text-[10px] uppercase tracking-widest text-ink-faint mt-0.5">
-            {isAccounts ? "Accounts desk" : "EV Dealership"}
-          </div>
+          <div className="text-[10px] uppercase tracking-widest text-ink-faint mt-0.5">{deskLabel}</div>
         </div>
       </div>
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
         {NAV.map((group) => {
           if (group.ownerOnly && !isOwner) return null;
-          if (group.salesOnly && !isSalesStaff) return null;
+          if (group.moneyDesk && !isMoneyDesk) return null;
+          if (group.pipeline && !isSalesStaff && !isField) return null;
           const items = group.items.filter((i) => {
             if (i.ownerOnly && !isOwner) return false;
             if (i.salesOnly && !isSalesStaff) return false;
-            // Accounts home link: show for accounts always; also for owner as shortcut
+            if (i.moneyDesk && !isMoneyDesk) return false;
             if (i.accountsHome && !isAccounts && !isOwner) return false;
+            // Field home: ASM/RM always; Owner shortcut
+            if (i.fieldHome && !isField && !isOwner) return false;
             return true;
           });
           if (!items.length) return null;
@@ -91,7 +94,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff }) {
           );
         })}
       </nav>
-      <div className="px-5 py-3 border-t border-line text-[11px] text-ink-faint shrink-0"><span className="font-mono">v2.3</span> · Full-stack</div>
+      <div className="px-5 py-3 border-t border-line text-[11px] text-ink-faint shrink-0"><span className="font-mono">v2.4</span> · Full-stack</div>
     </aside>
   );
 }
@@ -130,7 +133,7 @@ function SyncBadge() {
 }
 
 function Topbar() {
-  const { user, logout, isAccounts } = useAuth();
+  const { user, logout, isAccounts, isField } = useAuth();
   const [menu, setMenu] = useState(false);
   const [dl, setDl] = useState(false);
   const exportXlsx = async () => {
@@ -146,7 +149,7 @@ function Topbar() {
         <input placeholder="Search…" className="w-full rounded-lg bg-zinc-100 border-0 py-2 pl-9 pr-3 text-sm text-ink placeholder:text-ink-faint focus:ring-2 focus:ring-cobalt focus:bg-white transition-all" />
       </div>
       <div className="ml-auto flex items-center gap-3">
-        {!isAccounts && (
+        {!isAccounts && !isField && (
           <Button variant="secondary" data-testid="export-btn" onClick={exportXlsx} disabled={dl}><Download size={15} /> {dl ? "Exporting…" : "Export"}</Button>
         )}
         <SyncBadge />
@@ -173,10 +176,10 @@ function Topbar() {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk } = useAuth();
   return (
     <div className="min-h-screen bg-app">
-      <Sidebar isOwner={isOwner} isAccounts={isAccounts} isSalesStaff={isSalesStaff} />
+      <Sidebar isOwner={isOwner} isAccounts={isAccounts} isSalesStaff={isSalesStaff} isField={isField} isMoneyDesk={isMoneyDesk} />
       <div className="ml-64 flex flex-col min-h-screen">
         <Topbar />
         <main className="flex-1 p-6 lg:p-8 animate-fade-up">{children}</main>

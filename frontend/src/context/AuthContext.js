@@ -35,7 +35,11 @@ export function AuthProvider({ children }) {
       isOwner: role === "owner",
       isAccounts: role === "accounts",
       isExecutive: role === "executive",
+      isAsm: role === "asm",
+      isRm: role === "rm",
+      isField: role === "asm" || role === "rm",
       isSalesStaff: role === "owner" || role === "executive",
+      isMoneyDesk: role === "owner" || role === "executive" || role === "accounts",
     }}>
       {children}
     </AuthCtx.Provider>

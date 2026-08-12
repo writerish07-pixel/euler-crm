@@ -6,6 +6,8 @@ import Layout from "./components/Layout";
 import Login from "./pages/Login";
 import Share from "./pages/Share";
 import Dashboard from "./pages/Dashboard";
+import ExecutiveDashboard from "./pages/ExecutiveDashboard";
+import FieldDashboard from "./pages/FieldDashboard";
 import AccountsDashboard from "./pages/AccountsDashboard";
 import Leads from "./pages/Leads";
 import PriceMaster from "./pages/PriceMaster";
@@ -29,30 +31,48 @@ import ClaimExceptions from "./pages/ClaimExceptions";
 import ERPProductionAudit from "./pages/ERPProductionAudit";
 import AuditLog from "./pages/AuditLog";
 
-function Protected({ children, ownerOnly, salesOnly, accountsOk }) {
-  const { user, isOwner, isAccounts, isSalesStaff } = useAuth();
+function homePath(auth) {
+  if (auth.isAccounts) return "/accounts";
+  if (auth.isField) return "/field";
+  return "/";
+}
+
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, fieldOk, fieldOnly, accountsHome }) {
+  const auth = useAuth();
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts } = auth;
   const loc = useLocation();
   if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
-  if (ownerOnly && !isOwner) {
-    return <Navigate to={isAccounts ? "/accounts" : "/"} replace />;
+  if (ownerOnly && !isOwner) return <Navigate to={homePath(auth)} replace />;
+  if (fieldOnly && !isField && !isOwner) return <Navigate to={homePath(auth)} replace />;
+  if (accountsHome && !isAccounts && !isOwner && !isSalesStaff) {
+    return <Navigate to={homePath(auth)} replace />;
   }
-  if (salesOnly && !isSalesStaff) {
-    return <Navigate to={isAccounts ? "/accounts" : "/"} replace />;
+  if (moneyDesk && !isMoneyDesk) return <Navigate to={homePath(auth)} replace />;
+  if (salesOnly && !isSalesStaff && !(fieldOk && isField)) {
+    return <Navigate to={homePath(auth)} replace />;
   }
-  // accountsOk routes: money desk — available to all authenticated roles
   return <Layout>{children}</Layout>;
 }
 
 function HomeRedirect() {
-  const { isAccounts } = useAuth();
+  const { isAccounts, isField, isExecutive } = useAuth();
   if (isAccounts) return <Navigate to="/accounts" replace />;
+  if (isField) return <Navigate to="/field" replace />;
+  if (isExecutive) return <ExecutiveDashboard />;
   return <Dashboard />;
 }
 
 function AppRoutes() {
   const P = (el, opts = {}) => (
-    <Protected ownerOnly={opts.ownerOnly} salesOnly={opts.salesOnly} accountsOk={opts.accountsOk}>
+    <Protected
+      ownerOnly={opts.ownerOnly}
+      salesOnly={opts.salesOnly}
+      moneyDesk={opts.moneyDesk}
+      fieldOk={opts.fieldOk}
+      fieldOnly={opts.fieldOnly}
+      accountsHome={opts.accountsHome}
+    >
       {el}
     </Protected>
   );
@@ -61,16 +81,17 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/share" element={<Share />} />
       <Route path="/" element={P(<HomeRedirect />)} />
-      <Route path="/accounts" element={P(<AccountsDashboard />, { accountsOk: true })} />
-      <Route path="/leads" element={P(<Leads />, { salesOnly: true })} />
-      <Route path="/bookings" element={P(<Bookings />, { salesOnly: true })} />
+      <Route path="/accounts" element={P(<AccountsDashboard />, { accountsHome: true })} />
+      <Route path="/field" element={P(<FieldDashboard />, { fieldOnly: true })} />
+      <Route path="/leads" element={P(<Leads />, { salesOnly: true, fieldOk: true })} />
+      <Route path="/bookings" element={P(<Bookings />, { salesOnly: true, fieldOk: true })} />
       <Route path="/quotations" element={P(<Quotations />, { salesOnly: true })} />
       <Route path="/activities" element={P(<Activities />, { salesOnly: true })} />
-      <Route path="/payments" element={P(<Payments />, { accountsOk: true })} />
-      <Route path="/finance" element={P(<Finance />, { accountsOk: true })} />
-      <Route path="/insurance" element={P(<Insurance />, { accountsOk: true })} />
-      <Route path="/deliveries" element={P(<Deliveries />, { accountsOk: true })} />
-      <Route path="/claims" element={P(<Claims />, { accountsOk: true })} />
+      <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
+      <Route path="/finance" element={P(<Finance />, { moneyDesk: true })} />
+      <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
+      <Route path="/deliveries" element={P(<Deliveries />)} />
+      <Route path="/claims" element={P(<Claims />, { moneyDesk: true })} />
       <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />
       <Route path="/incentive-master" element={P(<IncentiveMaster />, { salesOnly: true })} />
       <Route path="/dealer-earnings" element={P(<DealerEarnings />, { ownerOnly: true })} />
@@ -82,7 +103,7 @@ function AppRoutes() {
       <Route path="/erp-audit" element={P(<ERPProductionAudit />, { ownerOnly: true })} />
       <Route path="/audit-log" element={P(<AuditLog />, { ownerOnly: true })} />
       <Route path="/price-master" element={P(<PriceMaster />, { salesOnly: true })} />
-      <Route path="/settings" element={P(<Settings />, { accountsOk: true })} />
+      <Route path="/settings" element={P(<Settings />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

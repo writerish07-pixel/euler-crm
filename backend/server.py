@@ -42,6 +42,8 @@ auth_router = authmod.build_router(db)
 current_user = auth_router.current_user
 owner_only = auth_router.owner_only
 sales_staff_only = auth_router.sales_staff_only
+money_desk_only = auth_router.money_desk_only
+field_viewer_only = auth_router.field_viewer_only
 
 api = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
 public = APIRouter(prefix="/api")
@@ -1074,6 +1076,316 @@ async def accounts_dashboard():
     }
 
 
+def _norm_name(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _leads_for_executive(leads, user) -> list:
+    """Match lead.executive to the logged-in executive's name (or email local-part)."""
+    name = _norm_name(user.get("name"))
+    email_local = _norm_name((user.get("email") or "").split("@")[0].replace(".", " ").replace("_", " "))
+    out = []
+    for l in leads:
+        ex = _norm_name(l.get("executive"))
+        if not ex:
+            continue
+        if name and (ex == name or name in ex or ex in name):
+            out.append(l)
+        elif email_local and (ex == email_local or email_local in ex or ex in email_local):
+            out.append(l)
+    return out
+
+
+def _status_bucket(lead) -> str:
+    st = (lead.get("currentStatus") or "New").strip()
+    low = st.lower()
+    if "lost" in low:
+        return "Lost"
+    if "deliver" in low or (lead.get("deliveryStatus") or "").lower() == "delivered":
+        return "Delivered"
+    if "finance" in low:
+        return "Finance Process"
+    if "book" in low:
+        return "Booked"
+    if "progress" in low:
+        return "In Progress"
+    if "follow" in low:
+        return "Follow-up"
+    if "contact" in low:
+        return "Contacted"
+    if st:
+        return st
+    return "New"
+
+
+@api.get("/executive/dashboard")
+async def executive_dashboard(user=Depends(current_user)):
+    """Pipeline home for a dealership executive — scoped to their assigned leads."""
+    if user.get("role") not in ("executive", "owner"):
+        raise HTTPException(403, "Executive dashboard is for Executive (and Owner).")
+    leads_all = await db.leads.find().to_list(5000)
+    mine = _leads_for_executive(leads_all, user) if user.get("role") == "executive" else leads_all
+    ym = this_month()
+    td = today()
+
+    def in_month(d):
+        return bool(d) and str(d).startswith(ym)
+
+    def is_today(d):
+        return str(d) == td
+
+    def followup_date(l):
+        return str(l.get("nextFollowupDate") or l.get("nextFollowup") or "")[:10]
+
+    active = [l for l in mine if (l.get("accountStatus") or "Active") == "Active"]
+    booked = [l for l in mine if "book" in (l.get("currentStatus") or "").lower()
+              or (l.get("bookingDate"))]
+    # Prefer status-booked for conversion; bookingDate catches booked deals
+    booked_status = [l for l in mine if "book" in (l.get("currentStatus") or "").lower()]
+    delivered = [l for l in mine
+                 if (l.get("deliveryStatus") or "").lower() == "delivered"
+                 or (l.get("currentStatus") or "").lower() == "delivered"]
+    active_booked = [l for l in booked_status
+                     if (l.get("deliveryStatus") or "").lower() != "delivered"
+                     and (l.get("currentStatus") or "").lower() != "delivered"]
+
+    monthly_leads = [l for l in mine if in_month(l.get("createdDate"))]
+    monthly_bookings = [l for l in booked_status if in_month(l.get("bookingDate"))]
+    monthly_deliveries = [l for l in delivered if in_month(l.get("deliveryDate"))]
+
+    funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
+    funnel = {k: 0 for k in funnel_order}
+    for l in active:
+        b = _status_bucket(l)
+        funnel[b] = funnel.get(b, 0) + 1
+
+    followup_due = [l for l in active if followup_date(l) == td]
+    followup_overdue = [l for l in active if followup_date(l) and followup_date(l) < td]
+
+    # Finance stuck on my booked deals
+    my_ids = {l["leadId"] for l in mine}
+    finance_stuck = 0
+    for f in await db.finance.find().to_list(5000):
+        if f.get("leadId") not in my_ids:
+            continue
+        if ce.num(f.get("fileOutstanding")) > 0.01 and f.get("status") != "Received":
+            finance_stuck += 1
+
+    # Source + model mix (MTD leads)
+    sources: dict = {}
+    models: dict = {}
+    for l in monthly_leads or mine:
+        src = (l.get("leadSource") or "Unknown").strip() or "Unknown"
+        sources[src] = sources.get(src, 0) + 1
+        m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
+        row = models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})
+        row["leads"] += 1
+    for l in monthly_bookings:
+        m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
+        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})["bookings"] += 1
+    for l in monthly_deliveries:
+        m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
+        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})["deliveries"] += 1
+    for l in active_booked:
+        m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
+        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})["pending"] += 1
+
+    cust_os = ce.round2(sum(ce.num(l.get("customerOutstanding")) for l in mine))
+
+    worklist = []
+    for l in followup_overdue[:15]:
+        worklist.append({
+            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "kind": "Follow-up overdue", "date": followup_date(l),
+            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
+        })
+    for l in followup_due[:10]:
+        worklist.append({
+            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "kind": "Follow-up today", "date": followup_date(l),
+            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
+        })
+    for l in active_booked[:10]:
+        worklist.append({
+            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "kind": "Pending delivery", "date": str(l.get("bookingDate") or "")[:10],
+            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
+        })
+
+    conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
+
+    return {
+        "scope": {
+            "executiveName": user.get("name") or "",
+            "matchedLeads": len(mine),
+            "note": "Scoped to leads where Executive matches your name."
+                    if user.get("role") == "executive"
+                    else "Owner view — all dealership leads.",
+        },
+        "kpis": {
+            "myLeadsMtd": len(monthly_leads),
+            "myBookingsMtd": len(monthly_bookings),
+            "myDeliveriesMtd": len(monthly_deliveries),
+            "conversion": conv,
+            "followupDue": len(followup_due),
+            "followupOverdue": len(followup_overdue),
+            "pendingDeliveries": len(active_booked),
+            "financeStuck": finance_stuck,
+            "customerOutstanding": cust_os,
+            "todayLeads": len([l for l in mine if is_today(l.get("createdDate"))]),
+            "activeBookings": len(active_booked),
+        },
+        "funnel": [{"status": k, "count": funnel.get(k, 0)} for k in funnel_order],
+        "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
+        "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
+        "worklist": worklist[:25],
+        "lastUpdated": now_iso(),
+    }
+
+
+@api.get("/field/dashboard")
+async def field_dashboard(_field=Depends(field_viewer_only)):
+    """Shared ASM / RM company field board — retail + pipeline hygiene (read-only)."""
+    leads = await db.leads.find().to_list(5000)
+    ym = this_month()
+    td = today()
+
+    def in_month(d):
+        return bool(d) and str(d).startswith(ym)
+
+    def followup_date(l):
+        return str(l.get("nextFollowupDate") or l.get("nextFollowup") or "")[:10]
+
+    active = [l for l in leads if (l.get("accountStatus") or "Active") == "Active"]
+    booked_status = [l for l in leads if "book" in (l.get("currentStatus") or "").lower()]
+    delivered = [l for l in leads
+                 if (l.get("deliveryStatus") or "").lower() == "delivered"
+                 or (l.get("currentStatus") or "").lower() == "delivered"]
+    active_booked = [l for l in booked_status
+                     if (l.get("deliveryStatus") or "").lower() != "delivered"
+                     and (l.get("currentStatus") or "").lower() != "delivered"]
+    lost = [l for l in leads if "lost" in (l.get("currentStatus") or "").lower()]
+
+    monthly_leads = [l for l in leads if in_month(l.get("createdDate"))]
+    monthly_bookings = [l for l in booked_status if in_month(l.get("bookingDate"))]
+    monthly_deliveries = [l for l in delivered if in_month(l.get("deliveryDate"))]
+
+    funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
+    funnel = {k: 0 for k in funnel_order}
+    for l in active:
+        b = _status_bucket(l)
+        funnel[b] = funnel.get(b, 0) + 1
+
+    followup_overdue = len([l for l in active if followup_date(l) and followup_date(l) < td])
+    followup_due = len([l for l in active if followup_date(l) == td])
+
+    finance_pending = 0
+    finance_overdue_amt = 0.0
+    finance_rows = await db.finance.find().to_list(5000)
+    finance_pending_files = []
+    for f in finance_rows:
+        os_amt = ce.num(f.get("fileOutstanding"))
+        if os_amt > 0.01 and f.get("status") != "Received":
+            finance_pending += 1
+            finance_pending_files.append(clean(f))
+    finance_overdue = await _enrich_finance_with_delivery(finance_pending_files)
+    finance_overdue = [f for f in finance_overdue if f.get("overdue")]
+    finance_overdue_count = len(finance_overdue)
+    finance_overdue_amt = ce.round2(sum(ce.num(f.get("fileOutstanding")) for f in finance_overdue))
+
+    # Scheme use rate on active/booked (schemeUse Yes)
+    schemed = 0
+    scheme_eligible = 0
+    for l in booked_status + delivered:
+        scheme_eligible += 1
+        use = (l.get("schemeUse") or l.get("schemeApplied") or "").strip().lower()
+        if use in ("yes", "y", "true", "1") or ce.num(l.get("totalSchemeBenefit") or l.get("schemeBenefit")) > 0:
+            schemed += 1
+    scheme_use_rate = round((schemed / scheme_eligible * 100), 1) if scheme_eligible else 0.0
+
+    oem_claim_open = 0.0
+    oem_claim_count = 0
+    for c in await db.claims.find().to_list(5000):
+        elig = ce.num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount"))
+        recv = ce.num(c.get("receivedAmount"))
+        due = ce.round2(max(0.0, elig - recv))
+        if due > 0.01:
+            oem_claim_open += due
+            oem_claim_count += 1
+    oem_claim_open = ce.round2(oem_claim_open)
+
+    sources: dict = {}
+    models: dict = {}
+    for l in monthly_leads or leads:
+        src = (l.get("leadSource") or "Unknown").strip() or "Unknown"
+        sources[src] = sources.get(src, 0) + 1
+        m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
+        row = models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0})
+        row["leads"] += 1
+    for l in monthly_bookings:
+        m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
+        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0})["bookings"] += 1
+    for l in monthly_deliveries:
+        m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
+        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0})["deliveries"] += 1
+
+    # Executive scoreboard
+    execs: dict = {}
+    for l in leads:
+        name = (l.get("executive") or "Unassigned").strip() or "Unassigned"
+        row = execs.setdefault(name, {
+            "executive": name, "leads": 0, "leadsMtd": 0, "bookingsMtd": 0,
+            "deliveriesMtd": 0, "followupOverdue": 0, "pendingDeliveries": 0,
+        })
+        row["leads"] += 1
+        if in_month(l.get("createdDate")):
+            row["leadsMtd"] += 1
+        st = (l.get("currentStatus") or "").lower()
+        if "book" in st and in_month(l.get("bookingDate")):
+            row["bookingsMtd"] += 1
+        if (("deliver" in st) or (l.get("deliveryStatus") or "").lower() == "delivered") and in_month(l.get("deliveryDate")):
+            row["deliveriesMtd"] += 1
+        if (l.get("accountStatus") or "Active") == "Active":
+            fd = followup_date(l)
+            if fd and fd < td:
+                row["followupOverdue"] += 1
+        if "book" in st and (l.get("deliveryStatus") or "").lower() != "delivered" and "deliver" not in st:
+            row["pendingDeliveries"] += 1
+    scoreboard = sorted(execs.values(), key=lambda x: (-x["deliveriesMtd"], -x["bookingsMtd"], -x["leadsMtd"]))
+    for row in scoreboard:
+        row["conversion"] = round((row["bookingsMtd"] / row["leadsMtd"] * 100), 1) if row["leadsMtd"] else 0.0
+
+    book_conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
+    deliver_conv = round((len(monthly_deliveries) / len(monthly_bookings) * 100), 1) if monthly_bookings else 0.0
+
+    return {
+        "kpis": {
+            "leadsMtd": len(monthly_leads),
+            "bookingsMtd": len(monthly_bookings),
+            "deliveriesMtd": len(monthly_deliveries),
+            "leadToBookPct": book_conv,
+            "bookToDeliverPct": deliver_conv,
+            "followupDue": followup_due,
+            "followupOverdue": followup_overdue,
+            "pendingDeliveries": len(active_booked),
+            "financePending": finance_pending,
+            "financeOverdueCount": finance_overdue_count,
+            "financeOverdueAmount": finance_overdue_amt,
+            "lostCount": len(lost),
+            "schemeUseRate": scheme_use_rate,
+            "oemClaimsOpen": oem_claim_open,
+            "oemClaimsOpenCount": oem_claim_count,
+            "activeBookings": len(active_booked),
+            "totalLeads": len(leads),
+        },
+        "funnel": [{"status": k, "count": funnel.get(k, 0)} for k in funnel_order],
+        "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
+        "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
+        "executiveScoreboard": scoreboard,
+        "lastUpdated": now_iso(),
+    }
+
+
 # ---------------------------------------------------------------- leads
 @api.get("/leads")
 async def list_leads(status: Optional[str] = None, q: Optional[str] = None):
@@ -2040,7 +2352,7 @@ async def list_payments(lead_id: Optional[str] = None):
 
 
 @api.post("/leads/{lead_id}/payments")
-async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor)):
+async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _money=Depends(money_desk_only)):
     lead = await get_lead_or_404(lead_id)
     if body.paymentMode == "Finance":
         _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)")
@@ -2276,7 +2588,7 @@ class ReceiptIn(BaseModel):
 
 
 @api.post("/finance/{file_number}/receipt")
-async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends(actor)):
+async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends(actor), _money=Depends(money_desk_only)):
     """Record money actually disbursed by the financer against a file. Does NOT change customer outstanding."""
     f = await db.finance.find_one({"fileNumber": file_number})
     if not f:
@@ -2736,7 +3048,7 @@ def _insurance_derive(body: dict):
 
 
 @api.post("/insurance")
-async def create_insurance(body: InsuranceIn, act=Depends(actor)):
+async def create_insurance(body: InsuranceIn, act=Depends(actor), _money=Depends(money_desk_only)):
     is_owner = act.get("role") == "owner"
     data = body.model_dump()
     if not is_owner:
@@ -2779,7 +3091,7 @@ async def delete_insurance(entry_id: str, act=Depends(actor)):
 
 
 @api.post("/insurance/{entry_id}/receipt")
-async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(actor)):
+async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(actor), _money=Depends(money_desk_only)):
     """Record insurer payout received against an entry; accrues receivedPayout + keeps a receipt history."""
     e = await db.insurance.find_one({"entryId": entry_id})
     if not e:
@@ -3055,7 +3367,9 @@ async def oem_claim_dashboard():
 
 
 CRITICAL_ENDPOINTS = [
-    ("GET", "/api/dashboard"), ("GET", "/api/accounts/dashboard"), ("GET", "/api/leads"), ("POST", "/api/leads"),
+    ("GET", "/api/dashboard"), ("GET", "/api/accounts/dashboard"),
+    ("GET", "/api/executive/dashboard"), ("GET", "/api/field/dashboard"),
+    ("GET", "/api/leads"), ("POST", "/api/leads"),
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
     ("PUT", "/api/leads/{lead_id}/scheme"), ("POST", "/api/leads/{lead_id}/close"),
@@ -3544,7 +3858,7 @@ class ManualClaimIn(BaseModel):
 
 
 @api.post("/claims/manual")
-async def create_manual_claim(body: ManualClaimIn, act=Depends(actor)):
+async def create_manual_claim(body: ManualClaimIn, act=Depends(actor), _money=Depends(money_desk_only)):
     """Manually record a claim (e.g. OEM incentive received as a claim). Both Owner and staff can add.
     Appears in the claim register; received amounts are recorded later via /claims/receipt."""
     if body.claimAmount <= 0:
@@ -3586,7 +3900,7 @@ class ClaimSettleIn(BaseModel):
 
 
 @api.post("/claims/settle")
-async def settle_claim(body: ClaimSettleIn, act=Depends(actor)):
+async def settle_claim(body: ClaimSettleIn, act=Depends(actor), _money=Depends(money_desk_only)):
     existing = await db.claims.find_one({"leadId": body.leadId, "componentKey": body.componentKey}) or {}
     payload = body.model_dump()
     # default lifecycle dates
@@ -3620,7 +3934,7 @@ class ClaimReceiptIn(BaseModel):
 
 
 @api.post("/claims/receipt")
-async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor)):
+async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=Depends(money_desk_only)):
     """Record OEM money received against ONE claim (scheme component or manual claim);
     accrues receivedAmount + keeps a receipt history."""
     if body.amount <= 0:

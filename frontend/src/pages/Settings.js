@@ -198,6 +198,8 @@ export default function Settings() {
             <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
               <option value="executive">Executive</option>
               <option value="accounts">Accounts</option>
+              <option value="asm">ASM</option>
+              <option value="rm">RM</option>
               <option value="owner">Owner</option>
             </Select></Field>
             <Button data-testid="add-user-btn" onClick={addUser}><UserPlus size={15} /> Add User</Button>
@@ -212,7 +214,9 @@ export default function Settings() {
                   ? "bg-amber-50 text-amber-700 ring-amber-600/20"
                   : r.role === "accounts"
                     ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
-                    : "bg-blue-50 text-blue-700 ring-blue-600/20";
+                    : r.role === "asm" || r.role === "rm"
+                      ? "bg-sky-50 text-sky-700 ring-sky-600/20"
+                      : "bg-blue-50 text-blue-700 ring-blue-600/20";
                 return <Badge tone={tone}>{r.role}</Badge>;
               } },
               { key: "act", label: "", align: "right", render: (r) => <button data-testid={`del-user-${r.email}`} onClick={() => removeUser(r.userId)} className="text-red-500 hover:text-red-700"><Trash2 size={15} /></button> },

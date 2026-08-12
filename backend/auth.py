@@ -1,4 +1,4 @@
-"""JWT email+password auth with Owner / Executive / Accounts roles (Bearer token)."""
+"""JWT email+password auth — Owner / Executive / Accounts / ASM / RM (Bearer token)."""
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -11,6 +11,12 @@ from pydantic import BaseModel, EmailStr
 
 JWT_ALGORITHM = "HS256"
 bearer = HTTPBearer(auto_error=False)
+
+# Dealership staff + company field managers + money desk
+ALLOWED_ROLES = ("owner", "executive", "accounts", "asm", "rm")
+SALES_ROLES = ("owner", "executive")
+MONEY_ROLES = ("owner", "executive", "accounts")
+FIELD_ROLES = ("asm", "rm")
 
 
 def _secret():
@@ -63,9 +69,6 @@ class ChangePasswordIn(BaseModel):
     newPassword: str
 
 
-ALLOWED_ROLES = ("owner", "executive", "accounts")
-
-
 def build_router(db):
     router = APIRouter(prefix="/api/auth")
 
@@ -86,13 +89,27 @@ def build_router(db):
         return user
 
     async def sales_staff_only(user=Depends(current_user)):
-        """Owner + Executive — commercial / pipeline edits. Accounts is money-only."""
-        if user.get("role") not in ("owner", "executive"):
+        """Owner + Executive — commercial / pipeline edits."""
+        if user.get("role") not in SALES_ROLES:
             raise HTTPException(
                 403,
-                "Accounts role cannot edit sales pipeline or commercial steps. "
-                "Use Payments, Finance, Claims, Insurance, or Billing Summaries.",
+                "Only Owner / Executive can edit sales pipeline or commercial steps.",
             )
+        return user
+
+    async def money_desk_only(user=Depends(current_user)):
+        """Owner / Executive / Accounts — record payments, finance, claims, insurance."""
+        if user.get("role") not in MONEY_ROLES:
+            raise HTTPException(
+                403,
+                "ASM / RM cannot record money movements. Use the Field Dashboard.",
+            )
+        return user
+
+    async def field_viewer_only(user=Depends(current_user)):
+        """ASM / RM (shared field board) + Owner shortcut."""
+        if user.get("role") not in (*FIELD_ROLES, "owner"):
+            raise HTTPException(403, "Field dashboard is for ASM / RM (and Owner).")
         return user
 
     @router.post("/login")
@@ -110,7 +127,7 @@ def build_router(db):
 
     @router.post("/change-password")
     async def change_password(body: ChangePasswordIn, user=Depends(current_user)):
-        """Any logged-in user (owner, executive, or accounts) can change their own password."""
+        """Any logged-in user can change their own password."""
         new_pw = (body.newPassword or "").strip()
         if len(new_pw) < 6:
             raise HTTPException(422, "New password must be at least 6 characters")
@@ -159,6 +176,8 @@ def build_router(db):
     router.current_user = current_user
     router.owner_only = owner_only
     router.sales_staff_only = sales_staff_only
+    router.money_desk_only = money_desk_only
+    router.field_viewer_only = field_viewer_only
     return router
 
 
@@ -174,16 +193,17 @@ async def seed_users(db):
         })
     # Never reset an existing owner's password on startup — that would undo
     # Settings → Change password after every deploy/restart.
-    exec_email = "executive@euler.com"
-    if not await db.users.find_one({"email": exec_email}):
-        await db.users.insert_one({
-            "userId": str(uuid.uuid4()), "email": exec_email, "passwordHash": hash_password("euler@123"),
-            "name": "Executive", "role": "executive", "createdAt": datetime.now(timezone.utc).isoformat(),
-        })
-    acct_email = "accounts@euler.com"
-    if not await db.users.find_one({"email": acct_email}):
-        await db.users.insert_one({
-            "userId": str(uuid.uuid4()), "email": acct_email, "passwordHash": hash_password("euler@123"),
-            "name": "Accounts", "role": "accounts",
-            "createdAt": datetime.now(timezone.utc).isoformat(),
-        })
+    demos = [
+        ("executive@euler.com", "Executive", "executive"),
+        ("accounts@euler.com", "Accounts", "accounts"),
+        ("asm@euler.com", "ASM", "asm"),
+        ("rm@euler.com", "RM", "rm"),
+    ]
+    for email, name, role in demos:
+        if not await db.users.find_one({"email": email}):
+            await db.users.insert_one({
+                "userId": str(uuid.uuid4()), "email": email,
+                "passwordHash": hash_password("euler@123"),
+                "name": name, "role": role,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+            })
