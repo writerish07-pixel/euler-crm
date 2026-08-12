@@ -58,6 +58,11 @@ class UserIn(BaseModel):
     role: str = "executive"
 
 
+class ChangePasswordIn(BaseModel):
+    currentPassword: str
+    newPassword: str
+
+
 def build_router(db):
     router = APIRouter(prefix="/api/auth")
 
@@ -89,6 +94,26 @@ def build_router(db):
     @router.get("/me")
     async def me(user=Depends(current_user)):
         return user
+
+    @router.post("/change-password")
+    async def change_password(body: ChangePasswordIn, user=Depends(current_user)):
+        """Any logged-in user (owner or executive) can change their own password."""
+        new_pw = (body.newPassword or "").strip()
+        if len(new_pw) < 6:
+            raise HTTPException(422, "New password must be at least 6 characters")
+        if body.currentPassword == new_pw:
+            raise HTTPException(422, "New password must be different from the current password")
+        row = await db.users.find_one({"userId": user["userId"]})
+        if not row or not verify_password(body.currentPassword, row["passwordHash"]):
+            raise HTTPException(401, "Current password is incorrect")
+        await db.users.update_one(
+            {"userId": user["userId"]},
+            {"$set": {
+                "passwordHash": hash_password(new_pw),
+                "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+        return {"ok": True, "message": "Password updated"}
 
     @router.get("/users")
     async def list_users(user=Depends(owner_only)):
@@ -133,9 +158,8 @@ async def seed_users(db):
             "userId": str(uuid.uuid4()), "email": owner_email, "passwordHash": hash_password(owner_pw),
             "name": "Owner", "role": "owner", "createdAt": datetime.now(timezone.utc).isoformat(),
         })
-    elif not verify_password(owner_pw, existing["passwordHash"]):
-        await db.users.update_one({"email": owner_email}, {"$set": {"passwordHash": hash_password(owner_pw)}})
-    # a demo executive
+    # Never reset an existing owner's password on startup — that would undo
+    # Settings → Change password after every deploy/restart.
     exec_email = "executive@euler.com"
     if not await db.users.find_one({"email": exec_email}):
         await db.users.insert_one({
