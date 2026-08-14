@@ -326,9 +326,35 @@ def _col_letter(idx0):
 # mounted read-only at /etc/secrets/<filename>, which is why an unset
 # GSHEET_CREDENTIALS_PATH previously produced "credentials JSON not found" on Render
 # even though the secret file was correctly configured — the old resolver looked at
-# nothing else. The credential is never committed; these are runtime locations only.
+# nothing else. Railway / other hosts often inject the key as GSHEET_CREDENTIALS_JSON
+# (raw JSON string) instead of a file — that is materialised under /tmp when present.
+# The credential is never committed; these are runtime locations only.
 _SECRET_FILE_NAME = "gsheets_credentials.json"
+_JSON_ENV_TMP = Path("/tmp") / _SECRET_FILE_NAME
+
+
+def _materialize_credentials_json_env():
+    """If GSHEET_CREDENTIALS_JSON is set, write it to /tmp and return that path."""
+    raw = os.environ.get("GSHEET_CREDENTIALS_JSON", "").strip()
+    if not raw:
+        return ""
+    try:
+        import json as _json
+        info = _json.loads(raw)
+        if not isinstance(info, dict) or info.get("type") != "service_account":
+            return ""
+        _JSON_ENV_TMP.write_text(_json.dumps(info), encoding="utf-8")
+        try:
+            os.chmod(_JSON_ENV_TMP, 0o600)
+        except OSError:
+            pass
+        return str(_JSON_ENV_TMP)
+    except Exception:
+        return ""
+
+
 _CRED_CANDIDATES = [
+    ("env:GSHEET_CREDENTIALS_JSON", _materialize_credentials_json_env),
     ("env:GSHEET_CREDENTIALS_PATH", lambda: os.environ.get("GSHEET_CREDENTIALS_PATH", "").strip()),
     ("render-secret-file", lambda: f"/etc/secrets/{_SECRET_FILE_NAME}"),
     ("backend-local", lambda: str(Path(__file__).resolve().parent / _SECRET_FILE_NAME)),
@@ -416,9 +442,11 @@ def _init():
     if not path:
         tried = ", ".join(f"{lbl}" for lbl, _ in _CRED_CANDIDATES)
         _status = {"enabled": False, "email": None, "credentialFound": False, "credentialSource": None,
-                   "reason": f"credentials JSON not found — looked at: {tried}. On Render add a Secret "
-                             f"File named {_SECRET_FILE_NAME} (mounted at /etc/secrets/{_SECRET_FILE_NAME}) "
-                             f"or set GSHEET_CREDENTIALS_PATH."}
+                   "reason": f"credentials JSON not found — looked at: {tried}. "
+                             f"On Railway set GSHEET_CREDENTIALS_JSON to the full service-account "
+                             f"JSON (and remove a bad GSHEET_CREDENTIALS_PATH). On Render add a "
+                             f"Secret File named {_SECRET_FILE_NAME} or set GSHEET_CREDENTIALS_PATH "
+                             f"to a real file path."}
         _service = None
         return
     if not sheet_id:
