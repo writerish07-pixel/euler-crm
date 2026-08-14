@@ -954,7 +954,7 @@ function BillingSummaryPanel({ summary }) {
           </div>
         </div>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Charges (before customer benefits)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Customer charges (full amount on Tally)</h2>
         <table className="w-full text-sm">
           <tbody>
             {(summary.chargeLines || []).map((ln) => (
@@ -964,17 +964,17 @@ function BillingSummaryPanel({ summary }) {
               </tr>
             ))}
             <tr className="font-semibold">
-              <td>Gross Vehicle Cost</td>
+              <td>Gross (before passed benefits)</td>
               <td className="text-right font-mono">{inr(t.grossVehicleCost)}</td>
             </tr>
           </tbody>
         </table>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Customer discounts (passed only)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Benefit passed to customer (only these on Tally)</h2>
         <table className="w-full text-sm">
           <tbody>
             {(summary.discountLines || []).length === 0 && (
-              <tr><td colSpan={2} className="text-ink-faint text-xs">No customer benefits passed</td></tr>
+              <tr><td colSpan={2} className="text-ink-faint text-xs">No benefit passed — do not show any scheme/discount line on the Tally invoice</td></tr>
             )}
             {(summary.discountLines || []).map((ln) => (
               <tr key={ln.code + ln.label}>
@@ -983,18 +983,23 @@ function BillingSummaryPanel({ summary }) {
               </tr>
             ))}
             <tr className="font-semibold">
-              <td>Total customer benefit</td>
+              <td>Total benefit passed</td>
               <td className="text-right font-mono">− {inr(t.customerBenefitPassed)}</td>
             </tr>
           </tbody>
         </table>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">C. Customer settlement (enter in Tally)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">C. Tally bill total (= amount from customer)</h2>
         <table className="w-full text-sm">
           <tbody>
-            <tr><td>Customer Payable</td><td className="text-right font-mono font-bold">{inr(t.customerPayable)}</td></tr>
+            <tr><td>Tally / customer bill</td><td className="text-right font-mono font-bold">{inr(t.tallyBillTotal ?? t.netAfterBenefits ?? t.customerPayable)}</td></tr>
+            <tr><td>Customer payable (CRM)</td><td className="text-right font-mono">{inr(t.customerPayable)}</td></tr>
             <tr><td>Amount received</td><td className="text-right font-mono">{inr(t.totalReceived)}</td></tr>
             <tr><td>Customer outstanding</td><td className="text-right font-mono">{inr(t.customerOutstanding)}</td></tr>
+            {(Number(t.excessReceived) > 0) && (
+              <tr><td>Excess received</td><td className="text-right font-mono text-amber-700">{inr(t.excessReceived)}</td></tr>
+            )}
+            <tr><td>Booking advance</td><td className="text-right font-mono">{inr(t.bookingAmount)}</td></tr>
           </tbody>
         </table>
 
@@ -1038,17 +1043,23 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
     currentStatus: lead.currentStatus || "New", priority: lead.priority || "Normal", budget: lead.budget || 0,
     remarks: lead.remarks || "", financeRequired: lead.financeRequired || "No",
     exchangeRequired: lead.exchangeRequired || "No", nextFollowupDate: lead.nextFollowupDate || "",
+    bookingAmount: lead.bookingAmount ?? 0,
   });
   const [variants, setVariants] = useState([]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   useEffect(() => { if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants); }, [form.interestedModel]);
+  const isBookedLead = Boolean(lead.bookingDate)
+    || ["booked", "finance process", "delivered", "close won"].includes(String(lead.currentStatus || "").toLowerCase());
 
   const save = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
     const vehicleChanged = form.interestedModel !== (lead.interestedModel || "")
       || form.variant !== (lead.variant || "");
     try {
-      await put(`/leads/${lead.leadId}`, { ...form, budget: Number(form.budget) });
+      const body = { ...form, budget: Number(form.budget) };
+      if (isBookedLead) body.bookingAmount = Number(form.bookingAmount) || 0;
+      else delete body.bookingAmount;
+      await put(`/leads/${lead.leadId}`, body);
       toast.success(vehicleChanged
         ? "Lead updated — Ex-Showroom & scheme recalculated from masters"
         : "Lead updated");
@@ -1084,7 +1095,15 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           <Field label="Budget (₹)"><Input type="number" value={form.budget} onChange={set("budget")} /></Field>
           <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
           <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
+          {isBookedLead && (
+            <Field label="Booking advance (₹)">
+              <Input data-testid="edit-booking-amount" type="number" min="0" value={form.bookingAmount} onChange={set("bookingAmount")} />
+            </Field>
+          )}
           <Field label="Next Follow-up"><Input type="date" value={form.nextFollowupDate || ""} onChange={set("nextFollowupDate")} /></Field>
+          {isBookedLead && (
+            <p className="col-span-3 text-xs text-ink-soft -mt-1">Set booking advance to 0 if there was no token payment (corrects the old ₹5,000 default). Updates the booking advance receipt when present.</p>
+          )}
           <div className="col-span-3"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         </div>
         <div className="flex justify-end gap-2 mt-5">
@@ -1218,7 +1237,7 @@ function ActivityTab({ lead, activities, masters, onSaved, readOnly = false }) {
 
 /* -------------------------------------------------- Modals */
 function BookingModal({ lead, onClose, onDone }) {
-  const [form, setForm] = useState({ bookingAmount: lead.bookingAmount || 5000, paymentMode: "UPI", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO() });
+  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO() });
   // Commercial gate: a booking may only be confirmed once the backend has resolved
   // the vehicle against Price Master. All figures below come from the API — nothing
   // is calculated or defaulted in React, so there is no path to a silent zero.
@@ -1320,7 +1339,10 @@ function BookingModal({ lead, onClose, onDone }) {
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Booking Date"><Input data-testid="booking-date" type="date" value={form.bookingDate} onChange={set("bookingDate")} /></Field>
-        <Field label="Advance Amount (₹)"><Input data-testid="booking-amount" type="number" value={form.bookingAmount} onChange={set("bookingAmount")} /></Field>
+        <Field label="Booking advance (₹)">
+          <Input data-testid="booking-amount" type="number" min="0" value={form.bookingAmount} onChange={set("bookingAmount")} />
+        </Field>
+        <p className="col-span-2 text-xs text-ink-soft -mt-1">Use 0 when the customer pays the full amount with no separate booking advance (default is 0, not ₹5,000).</p>
         <Field label="Payment Mode"><Select value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
         <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
         <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>

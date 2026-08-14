@@ -54,15 +54,56 @@ def test_build_summary_passed_discounts_only():
     }
     s = ce.build_delivery_billing_summary(lead)
     assert s["kind"] == "delivery_billing_summary"
-    assert "Tally" in s["disclaimer"]
+    assert "full amount" in s["disclaimer"].lower() or "Tally" in s["disclaimer"]
     assert s["totals"]["customerPayable"] == 825000
     assert s["totals"]["customerBenefitPassed"] == 9499
+    assert s["totals"]["tallyBillTotal"] == 825000
+    assert s["noBenefitPassed"] is False
     codes = [d["code"] for d in s["discountLines"]]
     assert "additionalDiscount" in codes
     assert "loyaltyBonus" not in codes  # Use=No / not passed
     assert any("retained" in x["label"].lower() or "claim" in x["label"].lower()
                for x in s["doNotPostInTally"])
     assert s["gstReference"]["ratePct"] == 5.0
+
+
+def test_build_summary_zero_passed_has_no_discount_line():
+    lead = {
+        "leadId": "LD_BILL_0",
+        "customerName": "No Pass",
+        "exShowroom": 770000,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "additionalDiscount": 0,
+        "loyaltyBonus": 10000,
+        "benefitPassedBreakup": {"loyaltyBonus": 0},
+        "oemExtraSupportReceived": 7000,
+        "oemExtraSupportPassed": 0,
+        "customerPayable": 794500,
+        "totalReceived": 0,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    assert s["discountLines"] == []
+    assert s["noBenefitPassed"] is True
+    assert s["totals"]["tallyBillTotal"] == 794500
+    assert s["totals"]["grossVehicleCost"] == 794500
+
+
+def test_build_summary_uses_lead_additional_discount_when_breakup_empty():
+    lead = {
+        "leadId": "LD_BILL_ADD",
+        "exShowroom": 770000,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "additionalDiscount": 4500,
+        "benefitPassedBreakup": {"loyaltyBonus": 0},
+        "customerPayable": 790000,
+        "totalReceived": 790000,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    assert s["totals"]["customerBenefitPassed"] == 4500
+    assert s["totals"]["tallyBillTotal"] == 790000
+    assert any(d["code"] == "additionalDiscount" for d in s["discountLines"])
 
 
 def test_build_summary_vaibhav_style_two_passed_benefits():
