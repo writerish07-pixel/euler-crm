@@ -261,3 +261,36 @@ async def test_scheme_additional_discount_refreshes_billing_summary(client):
     r = await client.get(f"/api/leads/{lid}/360")
     bs = (r.json().get("billingSummary") or {})
     assert bs.get("totals", {}).get("customerBenefitPassed") == 8500
+
+
+@pytest.mark.asyncio
+async def test_billing_summary_upsert_no_set_setoninsert_conflict(client):
+    """Re-upsert must not use overlapping $set / $setOnInsert paths (Mongo code 40)."""
+    lid = await _booked_priced_lead(client, "9111100093")
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-93",
+        "chassisNumber": "CH-BILL-93",
+        "numberPlate": "RJ14-BILL-93",
+        "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+
+    first = await server.db.billing_summaries.find_one({"leadId": lid})
+    assert first is not None
+    created = first.get("createdAt")
+
+    # Second rebuild (same path as GET /billing-summary and /360 for Delivered).
+    summary = await server._upsert_delivery_billing_summary(lid)
+    assert summary["summaryId"] == f"BILL-{lid}"
+    stored = await server.db.billing_summaries.find_one({"leadId": lid})
+    assert stored["createdAt"] == created
+    assert stored.get("updatedAt")
+
+    r = await client.get(f"/api/leads/{lid}/billing-summary")
+    assert r.status_code == 200, r.text
+    r = await client.get(f"/api/leads/{lid}/360")
+    assert r.status_code == 200, r.text
+    assert (r.json().get("billingSummary") or {}).get("leadId") == lid

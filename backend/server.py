@@ -26,6 +26,8 @@ import gsheets
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
 
+logger = logging.getLogger("euler.server")
+
 client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 
@@ -1539,8 +1541,14 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
     claims = [clean(c) for c in await db.claims.find({"leadId": lead_id}).to_list(100)]
     # Always rebuild from current commercials when delivered so scheme/Additional
     # (Dealer) edits are not stuck on the Mark-Delivered snapshot.
+    billing_summary = {}
     if _is_delivered(lead):
-        billing_summary = clean(await _upsert_delivery_billing_summary(lead_id) or {})
+        try:
+            billing_summary = clean(await _upsert_delivery_billing_summary(lead_id) or {})
+        except Exception as exc:
+            # Lead drawer must still open; billing panel can show stale/empty.
+            logger.exception("billing summary rebuild failed for %s: %s", lead_id, exc)
+            billing_summary = clean(await db.billing_summaries.find_one({"leadId": lead_id}) or {})
     else:
         billing_summary = clean(await db.billing_summaries.find_one({"leadId": lead_id}) or {})
     return {
@@ -2842,20 +2850,21 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sal
 
 
 async def _upsert_delivery_billing_summary(lead_id):
-    """Refresh Delivery Billing Summary from current lead commercials (Tally bill)."""
+    """Refresh Delivery Billing Summary from current lead commercials (Tally bill).
+
+    Use a single $set only — putting summaryId/createdAt in both $set and
+    $setOnInsert makes MongoDB raise ConflictingUpdateOperators (code 40),
+    which broke /leads/{id}/360 for every Delivered lead in production.
+    """
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
     summary = ce.build_delivery_billing_summary(lead)
     now = now_iso()
     summary["updatedAt"] = now
     existing = await db.billing_summaries.find_one({"leadId": lead_id}) or {}
-    if not existing.get("createdAt"):
-        summary["createdAt"] = now
+    summary["createdAt"] = existing.get("createdAt") or now
     await db.billing_summaries.update_one(
         {"leadId": lead_id},
-        {"$set": summary, "$setOnInsert": {
-            "summaryId": summary["summaryId"],
-            "createdAt": summary.get("createdAt") or now,
-        }},
+        {"$set": summary},
         upsert=True,
     )
     return summary
