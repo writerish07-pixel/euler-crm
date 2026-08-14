@@ -712,6 +712,8 @@ class LeadUpdateIn(BaseModel):
     exchangeRequired: Optional[str] = None
     nextFollowupDate: Optional[str] = None
     bookingDate: Optional[str] = None
+    # Editable so staff can correct a mistaken default booking advance (e.g. 5000 → 0).
+    bookingAmount: Optional[float] = None
 
 
 class BookingIn(BaseModel):
@@ -1556,7 +1558,7 @@ LEAD_SYSTEM_FIELDS = {
     "customerPayable", "grossVehicleCost", "totalDiscount", "consumerDiscount", "exchangeBonus",
     "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount", "exShowroom", "rto",
     "insuranceAmount", "accessoriesAmount", "handlingCharges", "trc", "fastag", "extendedWarranty",
-    "otherCharges", "bookingAmount", "oemSchemeAmount", "dealerSchemeAmount", "oemClaimCompanyShare",
+    "otherCharges", "oemSchemeAmount", "dealerSchemeAmount", "oemClaimCompanyShare",
     "schemeCompanyTotal", "dealerSchemeRetained", "oemExtraSupportRetained", "dealerMarginNetExGst",
     "extraDealerIncomeTotal", "dealerTotalEarnings",
 }
@@ -1643,11 +1645,20 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
         _require_owner_reedit(act, True, "Model / variant")
 
     old = {k: lead.get(k) for k in payload.keys()}
+    old_booking_amount = ce.num(lead.get("bookingAmount"))
+    if "bookingAmount" in payload:
+        try:
+            payload["bookingAmount"] = max(0.0, float(payload["bookingAmount"] or 0))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "bookingAmount must be a number ≥ 0")
     payload["lastUpdated"] = now_iso()
     # Lead Register "Last Updated By": the acting user was already resolved for the
     # audit log, but was never written onto the lead, so the column had no source.
     payload["lastUpdatedBy"] = act.get("email", "")
     await db.leads.update_one({"leadId": lead_id}, {"$set": payload})
+    if "bookingAmount" in payload:
+        await _sync_booking_amount_edit(
+            lead_id, lead, old_booking_amount, ce.num(payload["bookingAmount"]), act)
     if vehicle_changed:
         await _cascade_vehicle_or_price_change(lead_id, refresh_price=True, realign_scheme=True)
     else:
@@ -1659,6 +1670,52 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
     # sheet_sync upserts on leadId, so this updates in place — it never appends.
     await sheet_sync("leads", clean(dict(updated)))
     return clean(updated)
+
+
+async def _sync_booking_amount_edit(lead_id, lead, old_amount, new_amount, act=None):
+    """Keep bookings row + Booking advance receipt aligned when bookingAmount is corrected."""
+    new_amount = max(0.0, ce.num(new_amount))
+    old_amount = max(0.0, ce.num(old_amount))
+    if abs(old_amount - new_amount) < 0.005:
+        return
+    booking = await db.bookings.find_one({"leadId": lead_id})
+    if booking:
+        await db.bookings.update_one(
+            {"leadId": lead_id},
+            {"$set": {"bookingAmount": new_amount, "amountReceived": new_amount}},
+        )
+        await sheet_sync("bookings", {
+            "bookingId": booking.get("bookingId"), "leadId": lead_id,
+            "customerName": lead.get("customerName"),
+            "bookingDate": booking.get("bookingDate") or lead.get("bookingDate"),
+            "model": lead.get("interestedModel"), "variant": lead.get("variant"),
+            "bookingAmount": new_amount,
+            "paymentMode": booking.get("paymentMode") or lead.get("lastPaymentMode") or "Cash",
+            "bookingStatus": booking.get("bookingStatus") or "Booked",
+        })
+    adv = await db.payments.find_one({
+        "leadId": lead_id,
+        "narration": {"$regex": r"^booking advance", "$options": "i"},
+    })
+    if new_amount <= 0:
+        if adv:
+            await db.payments.delete_one({"_id": adv["_id"]})
+            if adv.get("paymentId") or adv.get("receiptNumber"):
+                # Soft sheet cleanup is best-effort; lead recompute fixes outstanding.
+                pass
+        return
+    if adv:
+        await db.payments.update_one(
+            {"_id": adv["_id"]},
+            {"$set": {"amount": new_amount, "lastUpdated": now_iso()}},
+        )
+    elif _is_booked(lead) or lead.get("bookingDate"):
+        await _add_payment_internal(lead_id, PaymentIn(
+            amount=new_amount,
+            paymentMode=lead.get("lastPaymentMode") or "Cash",
+            date=lead.get("bookingDate") or today(),
+            narration="Booking advance",
+        ))
 
 
 async def _price_master_row(model, variant):
