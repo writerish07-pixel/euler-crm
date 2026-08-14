@@ -52,6 +52,7 @@ const STATUS_TONES = {
   Booked: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
   "Finance Process": "bg-indigo-50 text-indigo-700 ring-indigo-600/20",
   Delivered: "bg-teal-50 text-teal-700 ring-teal-600/20",
+  "Close Won": "bg-emerald-50 text-emerald-800 ring-emerald-600/20",
   Lost: "bg-red-50 text-red-700 ring-red-600/20",
   Active: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
   Closed: "bg-zinc-100 text-zinc-600 ring-zinc-500/20",
