@@ -14,7 +14,7 @@ services:
       # Public API base only. CRA inlines REACT_APP_* into the browser bundle,
       # so no secret may ever be placed here.
       - key: REACT_APP_BACKEND_URL
-        value: https://euler-crm-api.onrender.com
+        value: https://euler-crm-production.up.railway.app
       - key: NODE_VERSION
         value: "22"
     routes:
