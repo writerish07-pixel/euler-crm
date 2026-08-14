@@ -145,7 +145,10 @@ export default function Settings() {
             )}
             {!gs.enabled && !gs.canRead && (
               <div className="text-xs text-ink-faint mt-2 bg-amber-50 rounded-lg p-3 ring-1 ring-amber-200">
-                Add the service account JSON key at <span className="font-mono">/app/backend/gsheets_credentials.json</span> and share the Euler Master sheet with the service account email as <b>Editor</b>.
+                On Railway set <span className="font-mono">GSHEET_CREDENTIALS_JSON</span> to the full service-account JSON
+                (and remove a bad <span className="font-mono">GSHEET_CREDENTIALS_PATH</span>). Or place the key file at{" "}
+                <span className="font-mono">/app/backend/gsheets_credentials.json</span>. Share the Euler Master sheet
+                with the service account email as <b>Editor</b>.
               </div>
             )}
             {gs.enabled && (
