@@ -40,7 +40,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const c = data.commercials;
   const actions = data.actions || {};
   const fieldView = isField || !!data.fieldView || !!actions.fieldView;
-  const leadLocked = !!actions.isLocked || !actions.isActive || !!actions.isDelivered;
+  const leadLocked = !!actions.isLocked || !actions.isActive;
 
   const tabs = fieldView
     ? [
@@ -118,7 +118,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       )}
 
       {!fieldView && leadLocked && (
-        <StepLock text="This lead is Delivered or Closed — vehicle details and commercial steps are locked. Only Active leads can be edited." />
+        <StepLock text="This lead is Closed — commercial steps are locked. Active leads (including Delivered) can still be edited by the owner." />
       )}
 
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
@@ -795,7 +795,8 @@ const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"
 function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
-  const locked = alreadyDelivered || closedOrInactive;
+  // Staff freeze after Mark Delivered; owner may edit delivery paperwork until closed.
+  const locked = closedOrInactive || (alreadyDelivered && !isOwner);
   const canMarkDelivered = actions.canDeliver;   // active + booked + not delivered
   const [form, setForm] = useState(() => {
     const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || todayISO() };
@@ -835,7 +836,8 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   };
   return (
     <div>
-      {alreadyDelivered && <StepLock text="Vehicle delivered — this lead is locked. No further delivery or commercial edits." />}
+      {alreadyDelivered && !isOwner && <StepLock text="Vehicle delivered — this lead is locked. No further delivery or commercial edits." />}
+      {alreadyDelivered && isOwner && !closedOrInactive && <StepLock text="Delivered — owner may still edit until the lead is closed." />}
       {!alreadyDelivered && closedOrInactive && <StepLock text="This lead is Closed — delivery cannot be changed." />}
       {!alreadyDelivered && !closedOrInactive && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
       <div className="flex flex-wrap gap-2 mb-4">

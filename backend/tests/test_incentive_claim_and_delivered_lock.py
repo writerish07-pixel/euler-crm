@@ -140,7 +140,7 @@ async def test_mark_paid_opens_oem_claim_and_syncs_sheet(client):
 
 
 @pytest.mark.asyncio
-async def test_delivered_lead_is_fully_locked_even_for_owner(client):
+async def test_delivered_lead_locked_for_staff_editable_for_owner(client):
     await _login(client)
     lid = await _booked_priced_lead(client, "9111100003")
     await client.put(f"/api/leads/{lid}/delivery", json={
@@ -149,32 +149,41 @@ async def test_delivered_lead_is_fully_locked_even_for_owner(client):
         "numberPlate": "RJ14-LOCK-1", "delivered": "Yes", "deliveryDate": "2026-08-11",
     })
     lead = await server.db.leads.find_one({"leadId": lid})
-    acts = server.lead_actions(lead)
-    assert acts["isLocked"] is True
-    assert acts["canEditLead"] is False
-    assert acts["canPrice"] is False
-    assert acts["canScheme"] is False
-    assert acts["canPayment"] is False
-    assert acts["canClose"] is True
 
-    r = await client.put(f"/api/leads/{lid}", json={"customerName": "Hacked"})
-    assert r.status_code == 409
+    # Staff / no-role view: still frozen after delivery
+    staff = server.lead_actions(lead, {"role": "executive"})
+    assert staff["isLocked"] is True
+    assert staff["canEditLead"] is False
+    assert staff["canPrice"] is False
+    assert staff["canScheme"] is False
+    assert staff["canPayment"] is False
+    assert staff["canClose"] is True
+
+    # Owner: editable until closed
+    owner = server.lead_actions(lead, {"role": "owner"})
+    assert owner["isLocked"] is False
+    assert owner["canEditLead"] is True
+    assert owner["canPrice"] is True
+    assert owner["canScheme"] is True
+    assert owner["canPayment"] is True
+    assert owner["canClose"] is True
+    assert owner["isDelivered"] is True
+
+    r = await client.put(f"/api/leads/{lid}", json={"customerName": "Owner Fix"})
+    assert r.status_code == 200, r.text
     r = await client.put(f"/api/leads/{lid}/price-structure",
-                         json={"exShowroom": 1, "rto": 0, "insuranceAmount": 0,
+                         json={"exShowroom": lead.get("exShowroom") or 1, "rto": lead.get("rto") or 0,
+                               "insuranceAmount": lead.get("insuranceAmount") or 0,
                                "accessoriesAmount": 0, "handlingCharges": 0, "trc": 0,
                                "fastag": 0, "extendedWarranty": 0, "otherCharges": 0,
                                "rsaAmc": 0, "tcsApplicable": "No", "finalExchangeValue": 0})
-    assert r.status_code == 409
-    r = await client.put(f"/api/leads/{lid}/scheme", json={
-        "loyaltyBonus": 0, "benefitMode": "Partial Benefit",
-        "benefitPassedBreakup": "{}", "schemeComponentsUsed": "{}"})
-    assert r.status_code == 409
+    assert r.status_code == 200, r.text
     r = await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
         "insurerName": "ICICI", "invoiceNumber": "INV-LOCK-1", "chassisNumber": "CH-LOCK-1",
         "numberPlate": "RJ14-LOCK-1", "delivered": "Yes", "deliveryDate": "2026-08-11",
     })
-    assert r.status_code == 409
+    assert r.status_code == 200, r.text
 
 
 @pytest.mark.asyncio
@@ -186,7 +195,7 @@ async def test_closed_lead_cannot_be_edited(client):
     assert r.status_code == 200, r.text
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["accountStatus"] == "Closed"
-    acts = server.lead_actions(lead)
+    acts = server.lead_actions(lead, {"role": "owner"})
     assert acts["isLocked"] is True
     assert acts["canEditLead"] is False
     r = await client.put(f"/api/leads/{lid}", json={"remarks": "nope"})
@@ -198,7 +207,7 @@ async def test_active_non_delivered_still_editable(client):
     await _login(client)
     lid = await _booked_priced_lead(client, "9111100005")
     lead = await server.db.leads.find_one({"leadId": lid})
-    acts = server.lead_actions(lead)
+    acts = server.lead_actions(lead, {"role": "owner"})
     assert acts["isLocked"] is False
     assert acts["canEditLead"] is True
     r = await client.put(f"/api/leads/{lid}", json={"remarks": "ok"})
