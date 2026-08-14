@@ -20,11 +20,19 @@ const SCHEME_FIELDS = [
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const { isOwner, isField } = useAuth();
   const [data, setData] = useState(null);
+  const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
 
   const load = useCallback(() => {
-    get(`/leads/${leadId}/360`).then(setData);
+    setLoadError(null);
+    get(`/leads/${leadId}/360`)
+      .then(setData)
+      .catch((e) => {
+        const msg = e?.response?.data?.detail || e?.message || "Failed to load lead";
+        setLoadError(typeof msg === "string" ? msg : "Failed to load lead");
+        toast.error("Could not open this lead");
+      });
   }, [leadId]);
   useEffect(() => { load(); }, [load]);
 
@@ -34,6 +42,19 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
     if (nextTab) setTab(nextTab);
   }, [refresh]);
 
+  if (loadError && !data) {
+    return (
+      <Drawer open onClose={onClose} title="Lead">
+        <div className="space-y-3 text-sm">
+          <p className="text-ink-soft">{loadError}</p>
+          <div className="flex gap-2">
+            <Button onClick={load}>Retry</Button>
+            <Button variant="ghost" onClick={onClose}>Close</Button>
+          </div>
+        </div>
+      </Drawer>
+    );
+  }
   if (!data) return <Drawer open onClose={onClose} title="Loading…"><div className="text-ink-faint text-sm">Fetching lead…</div></Drawer>;
 
   const lead = data.lead;
