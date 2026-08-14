@@ -2217,6 +2217,7 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Dep
         await _assert_unique_vehicle_identifiers(lead_id, number_plate=plate)
     close_updates = {
         "accountStatus": "Closed",
+        "currentStatus": "Close Won",
         "closedDate": str(body.closedDate or "").strip() or today(),
         "closeReason": body.closeReason,
         "finalOutstanding": lead.get("customerOutstanding", 0), "lastUpdated": now_iso(),

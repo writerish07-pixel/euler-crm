@@ -195,6 +195,7 @@ async def test_closed_lead_cannot_be_edited(client):
     assert r.status_code == 200, r.text
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["accountStatus"] == "Closed"
+    assert lead["currentStatus"] == "Close Won"
     acts = server.lead_actions(lead, {"role": "owner"})
     assert acts["isLocked"] is True
     assert acts["canEditLead"] is False

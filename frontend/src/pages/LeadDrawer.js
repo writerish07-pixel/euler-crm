@@ -64,8 +64,14 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       subtitle={`${lead.leadId} · ${lead.interestedModel} ${lead.variant} · ${lead.mobile}`}
       footer={fieldView
         ? <div className="flex items-center gap-2 text-sm text-ink-soft">
-            {actions.isBooked && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
-            {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+            {(!actions.isActive || String(lead.accountStatus || "").toLowerCase() === "closed")
+              ? <Badge data-testid="close-won-badge" tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Close Won</Badge>
+              : (
+                <>
+                  {actions.isBooked && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
+                  {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+                </>
+              )}
             <span className="ml-auto text-xs">Field view · pipeline only</span>
           </div>
         : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => advance("price")} />}
@@ -194,11 +200,13 @@ function StepLock({ text }) {
 
 function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
   const [modal, setModal] = useState(null);
+  const closed = !actions.isActive || String(lead.accountStatus || "").toLowerCase() === "closed";
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {actions.canBook && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
-      {actions.isBooked && !actions.canBook && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
-      {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+      {closed && <Badge data-testid="close-won-badge" tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Close Won</Badge>}
+      {!closed && actions.canBook && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
+      {!closed && actions.isBooked && !actions.canBook && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
+      {!closed && actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
       {actions.canClose && (
         <Button variant="secondary" data-testid="close-lead-btn" onClick={() => setModal("close")}><XCircle size={15} /> Close Lead</Button>
       )}
