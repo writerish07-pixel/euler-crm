@@ -189,19 +189,22 @@ def _is_priced(lead):
     return ce.num((lead or {}).get("exShowroom")) > 0
 
 
-def lead_actions(lead):
+def lead_actions(lead, act=None):
     """Which workflow steps a lead is eligible for (faithful to PICKER_STAGE + requireActiveLead_).
 
-    Delivered / Closed / Cancelled / Archived leads are frozen for commercial edits —
-    the vehicle is unique; only Active, non-delivered leads may change.
+    Staff: Active + not Delivered may change commercial fields (vehicle uniqueness).
+    Owner: Active leads stay editable after Mark Delivered; freeze only when Closed /
+    Cancelled / Archived (accountStatus != Active).
     Close remains available on Active (including Delivered) so the lifecycle can exit.
     Finance / claim receipts stay allowed after close (not Archived).
     """
+    role = ((act or {}).get("role") or "").strip().lower()
     active = _acct(lead) == "Active"
     booked = _is_booked(lead)
     delivered = _is_delivered(lead)
     not_archived = _acct(lead) != "Archived"
-    mutable = active and not delivered
+    # Owner may correct commercials after delivery until the lead is closed.
+    mutable = active if role == "owner" else (active and not delivered)
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
     return {
@@ -231,14 +234,27 @@ def _require_owner_reedit(act, completed, step_label):
         )
 
 
-def _require_mutable_lead(lead, verb="edits"):
-    """Strict freeze: only Active AND not Delivered may change commercial/workflow fields."""
-    if _acct(lead) != "Active" or _is_delivered(lead):
+def _require_mutable_lead(lead, verb="edits", act=None):
+    """Freeze commercial/workflow edits.
+
+    Everyone: accountStatus must be Active.
+    Staff: also blocked after Mark Delivered.
+    Owner: may edit after delivery until the lead is closed.
+    """
+    if _acct(lead) != "Active":
         raise HTTPException(
             409,
             f"This lead is locked for {verb} "
             f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
-            f"Only Active, non-delivered leads can be changed.",
+            f"Only Active leads can be changed.",
+        )
+    role = ((act or {}).get("role") or "").strip().lower()
+    if role != "owner" and _is_delivered(lead):
+        raise HTTPException(
+            409,
+            f"This lead is locked for {verb} "
+            f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
+            f"Only Active, non-delivered leads can be changed (owner may edit until closed).",
         )
 
 
@@ -293,8 +309,8 @@ async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chas
             )
 
 
-def _require_action(lead, key, verb):
-    acts = lead_actions(lead)
+def _require_action(lead, key, verb, act=None):
+    acts = lead_actions(lead, act)
     if not acts.get(key):
         raise HTTPException(409, f"This lead is not eligible for {verb} (status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}).")
 
@@ -1503,7 +1519,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
             "booking": safe_booking,
             "claims": [],
             "actions": {
-                **lead_actions(lead),
+                **lead_actions(lead, user),
                 "canBook": False, "canPrice": False, "canScheme": False,
                 "canPayment": False, "canDelivery": False, "canClose": False,
                 "fieldView": True,
@@ -1523,7 +1539,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
     return {
         "lead": lead, "commercials": commercials, "payments": payments,
         "activities": activities, "delivery": delivery, "booking": booking,
-        "claims": claims, "actions": lead_actions(lead),
+        "claims": claims, "actions": lead_actions(lead, user),
         "billingSummary": billing_summary or None,
     }
 
@@ -1594,7 +1610,7 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
     other field on the lead (including system/financial fields, which aren't even
     part of this model) is left exactly as it was. See LEAD_SYSTEM_FIELDS."""
     lead = await get_lead_or_404(lead_id)
-    _require_mutable_lead(lead, "lead edits")
+    _require_mutable_lead(lead, "lead edits", act)
     payload = body.model_dump(exclude_unset=True)
     payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
 
@@ -1777,9 +1793,9 @@ async def price_preview(lead_id: str):
 
 
 @api.post("/leads/{lead_id}/convert-booking")
-async def convert_booking(lead_id: str, body: BookingIn, _sales=Depends(sales_staff_only)):
+async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canBook", "conversion to booking")
+    _require_action(lead, "canBook", "conversion to booking", act)
     # A booking is only valid once its commercial structure is resolved. If the lead
     # has no price structure yet, load it from the authoritative Price Master. If the
     # vehicle has no Price Master row, refuse the booking with a precise message
@@ -1912,7 +1928,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 @api.put("/leads/{lead_id}/price-structure")
 async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canPrice", "price-structure edits (only Active leads)")
+    _require_action(lead, "canPrice", "price-structure edits (only Active leads)", act)
     _require_owner_reedit(act, _is_priced(lead), "Price structure")
     payload = body.model_dump()
     payload["insuranceArrangedBy"] = ce.normalize_insurance_arranged_by(
@@ -1962,7 +1978,7 @@ async def scheme_rules(lead_id: str):
 @api.put("/leads/{lead_id}/scheme")
 async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canScheme", "scheme edits (only Active leads)")
+    _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
     payload = body.model_dump()
     if payload.get("benefitPassedBreakup") is None:
@@ -2102,7 +2118,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
     never exceeds schemeAvailable. The OEM claimable share is NOT editable here — it is
     fixed by the circular — and neither are the Scheme Master values themselves."""
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canScheme", "scheme edits (only Active leads)")
+    _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
     scheme_rows = await get_scheme_rows()
     alloc = ce.compute_scheme_allocation(lead_to_snapshot(lead), scheme_rows)
@@ -2164,7 +2180,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
 
     Never affects Customer Payable / Outstanding."""
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canScheme", "extra-income edits (only Active leads)")
+    _require_action(lead, "canScheme", "extra-income edits (only Active leads)", act)
     _extra_keys = (
         "documentationIncome", "warrantyIncome", "rsaIncome", "referralIncome",
         "otherIncome", "financeIncentive", "accessoriesMargin", "exchangeMargin",
@@ -2183,7 +2199,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
 @api.post("/leads/{lead_id}/close")
 async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canClose", "closing (only Active leads)")
+    _require_action(lead, "canClose", "closing (only Active leads)", act)
     if not str(body.closeReason or "").strip():
         raise HTTPException(422, "Close Reason is required to close a lead.")
     # RC + Number Plate mandatory when closing a DELIVERED lead (port of validateCloseLeadRcFields_)
@@ -2201,6 +2217,7 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Dep
         await _assert_unique_vehicle_identifiers(lead_id, number_plate=plate)
     close_updates = {
         "accountStatus": "Closed",
+        "currentStatus": "Close Won",
         "closedDate": str(body.closedDate or "").strip() or today(),
         "closeReason": body.closeReason,
         "finalOutstanding": lead.get("customerOutstanding", 0), "lastUpdated": now_iso(),
@@ -2417,9 +2434,9 @@ async def list_payments(lead_id: Optional[str] = None):
 async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _money=Depends(money_desk_only)):
     lead = await get_lead_or_404(lead_id)
     if body.paymentMode == "Finance":
-        _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)")
+        _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)", act)
     else:
-        _require_action(lead, "canPayment", "customer payment (only Active leads)")
+        _require_action(lead, "canPayment", "customer payment (only Active leads)", act)
     rec = await _add_payment_internal(lead_id, body)
     await recompute_lead(lead_id)
     await write_audit(act, "receipt", "payment", leadId=lead_id, paymentId=rec.get("receiptNumber"),
@@ -2700,16 +2717,25 @@ async def list_deliveries():
 async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
-    # Delivered / Closed leads are fully frozen — no paperwork re-edits (vehicle is unique).
-    if _is_delivered(lead) or _acct(lead) != "Active":
+    role = ((act or {}).get("role") or "").strip().lower()
+    # Closed leads are frozen for everyone. After Mark Delivered, staff stay locked;
+    # owner may still correct paperwork until the lead is closed.
+    if _acct(lead) != "Active":
         raise HTTPException(
             409,
             f"This lead is locked for delivery edits "
             f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
-            f"Delivered and closed leads cannot be changed.",
+            f"Closed leads cannot be changed.",
+        )
+    if _is_delivered(lead) and role != "owner":
+        raise HTTPException(
+            409,
+            f"This lead is locked for delivery edits "
+            f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
+            f"Delivered leads cannot be changed (owner may edit until closed).",
         )
     if delivered and not _is_delivered(lead):
-        _require_action(lead, "canDeliver", "delivery (not booked/active)")
+        _require_action(lead, "canDeliver", "delivery (not booked/active)", act)
         errs = _validate_delivery_ready(lead, body)
         if errs:
             raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
@@ -3044,9 +3070,9 @@ async def list_activities(lead_id: Optional[str] = None):
 
 
 @api.post("/leads/{lead_id}/activities")
-async def add_activity(lead_id: str, body: ActivityIn, _sales=Depends(sales_staff_only)):
+async def add_activity(lead_id: str, body: ActivityIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canScheme", "logging activity (only Active leads)")
+    _require_action(lead, "canScheme", "logging activity (only Active leads)", act)
     payload = body.model_dump()
     act_date = str(payload.pop("date", None) or "").strip() or today()
     doc = {

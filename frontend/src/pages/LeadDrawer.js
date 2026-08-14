@@ -40,7 +40,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const c = data.commercials;
   const actions = data.actions || {};
   const fieldView = isField || !!data.fieldView || !!actions.fieldView;
-  const leadLocked = !!actions.isLocked || !actions.isActive || !!actions.isDelivered;
+  const leadLocked = !!actions.isLocked || !actions.isActive;
 
   const tabs = fieldView
     ? [
@@ -64,8 +64,14 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       subtitle={`${lead.leadId} · ${lead.interestedModel} ${lead.variant} · ${lead.mobile}`}
       footer={fieldView
         ? <div className="flex items-center gap-2 text-sm text-ink-soft">
-            {actions.isBooked && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
-            {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+            {(!actions.isActive || String(lead.accountStatus || "").toLowerCase() === "closed")
+              ? <Badge data-testid="close-won-badge" tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Close Won</Badge>
+              : (
+                <>
+                  {actions.isBooked && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
+                  {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+                </>
+              )}
             <span className="ml-auto text-xs">Field view · pipeline only</span>
           </div>
         : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => advance("price")} />}
@@ -118,7 +124,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       )}
 
       {!fieldView && leadLocked && (
-        <StepLock text="This lead is Delivered or Closed — vehicle details and commercial steps are locked. Only Active leads can be edited." />
+        <StepLock text="This lead is Closed — commercial steps are locked. Active leads (including Delivered) can still be edited by the owner." />
       )}
 
       <Tabs tabs={tabs} active={tab} onChange={setTab} />
@@ -194,11 +200,13 @@ function StepLock({ text }) {
 
 function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
   const [modal, setModal] = useState(null);
+  const closed = !actions.isActive || String(lead.accountStatus || "").toLowerCase() === "closed";
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {actions.canBook && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
-      {actions.isBooked && !actions.canBook && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
-      {actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
+      {closed && <Badge data-testid="close-won-badge" tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Close Won</Badge>}
+      {!closed && actions.canBook && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
+      {!closed && actions.isBooked && !actions.canBook && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
+      {!closed && actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
       {actions.canClose && (
         <Button variant="secondary" data-testid="close-lead-btn" onClick={() => setModal("close")}><XCircle size={15} /> Close Lead</Button>
       )}
@@ -795,7 +803,8 @@ const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"
 function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
-  const locked = alreadyDelivered || closedOrInactive;
+  // Staff freeze after Mark Delivered; owner may edit delivery paperwork until closed.
+  const locked = closedOrInactive || (alreadyDelivered && !isOwner);
   const canMarkDelivered = actions.canDeliver;   // active + booked + not delivered
   const [form, setForm] = useState(() => {
     const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || todayISO() };
@@ -835,7 +844,8 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   };
   return (
     <div>
-      {alreadyDelivered && <StepLock text="Vehicle delivered — this lead is locked. No further delivery or commercial edits." />}
+      {alreadyDelivered && !isOwner && <StepLock text="Vehicle delivered — this lead is locked. No further delivery or commercial edits." />}
+      {alreadyDelivered && isOwner && !closedOrInactive && <StepLock text="Delivered — owner may still edit until the lead is closed." />}
       {!alreadyDelivered && closedOrInactive && <StepLock text="This lead is Closed — delivery cannot be changed." />}
       {!alreadyDelivered && !closedOrInactive && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
       <div className="flex flex-wrap gap-2 mb-4">
