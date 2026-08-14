@@ -2234,7 +2234,9 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Dep
     await db.leads.update_one({"leadId": lead_id}, {"$set": close_updates})
     await write_audit(act, "close", "lead", leadId=lead_id,
                       old={"accountStatus": lead.get("accountStatus")}, new=close_updates)
-    return clean(await db.leads.find_one({"leadId": lead_id}))
+    updated = clean(await db.leads.find_one({"leadId": lead_id}))
+    await sheet_sync("leads", updated)
+    return updated
 
 
 # ---------------------------------------------------------------- lead bulk import
@@ -4944,6 +4946,30 @@ async def _ensure_finance_unique_indexes():
     }
     return findings
 
+async def _backfill_close_won_status():
+    """Closed leads that still show Booked/Delivered/etc. → Close Won, then push Lead Register."""
+    keep = {"close won", "lost", "cancelled", "archived"}
+    fixed = 0
+    cursor = db.leads.find({"accountStatus": {"$regex": "^closed$", "$options": "i"}})
+    for lead in await cursor.to_list(5000):
+        cs = str(lead.get("currentStatus") or "").strip()
+        if cs.lower() in keep:
+            continue
+        lid = lead.get("leadId")
+        if not lid:
+            continue
+        await db.leads.update_one(
+            {"leadId": lid},
+            {"$set": {"currentStatus": "Close Won", "lastUpdated": now_iso()}},
+        )
+        updated = clean(await db.leads.find_one({"leadId": lid}))
+        await sheet_sync("leads", updated)
+        fixed += 1
+    if fixed:
+        logging.info("CLOSE_WON_BACKFILL: updated %s closed lead(s) to Close Won", fixed)
+    return fixed
+
+
 @app.on_event("startup")
 async def startup():
     global _finance_index_status
@@ -4985,6 +5011,11 @@ async def startup():
             "auditCounts": {},
         }
         logging.exception("FINANCE_UNIQUE_INDEX_AUDIT_ERROR: finance uniqueness audit failed")
+    # Closed leads must show Close Won (not leftover Booked/Delivered) in app + sheet.
+    try:
+        await _backfill_close_won_status()
+    except Exception:
+        logging.exception("CLOSE_WON_BACKFILL_ERROR")
     # Insurance rate consistency migration (INS-1)
     try:
         await _migrate_insurance_rates()

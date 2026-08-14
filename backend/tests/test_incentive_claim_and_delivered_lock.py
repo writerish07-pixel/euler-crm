@@ -201,6 +201,28 @@ async def test_closed_lead_cannot_be_edited(client):
     assert acts["canEditLead"] is False
     r = await client.put(f"/api/leads/{lid}", json={"remarks": "nope"})
     assert r.status_code == 409
+    synced = [s for s in client._sync_calls if s["entity"] == "leads" and s["doc"].get("leadId") == lid]
+    assert synced, "Close must sync Lead Register to Google Sheet"
+    assert synced[-1]["doc"]["currentStatus"] == "Close Won"
+    assert synced[-1]["doc"]["accountStatus"] == "Closed"
+
+
+@pytest.mark.asyncio
+async def test_backfill_sets_close_won_and_syncs_sheet(client):
+    await _login(client)
+    await server.db.leads.insert_one({
+        "leadId": "LD-BACKFILL-1", "customerName": "Closed Booked", "mobile": "9111100099",
+        "currentStatus": "Booked", "accountStatus": "Closed", "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)", "executive": "Amit",
+    })
+    n = await server._backfill_close_won_status()
+    assert n >= 1
+    lead = await server.db.leads.find_one({"leadId": "LD-BACKFILL-1"})
+    assert lead["currentStatus"] == "Close Won"
+    synced = [s for s in client._sync_calls
+              if s["entity"] == "leads" and s["doc"].get("leadId") == "LD-BACKFILL-1"]
+    assert synced
+    assert synced[-1]["doc"]["currentStatus"] == "Close Won"
 
 
 @pytest.mark.asyncio

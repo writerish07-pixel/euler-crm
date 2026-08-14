@@ -1071,7 +1071,7 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
         </p>
         <div className="grid grid-cols-3 gap-3">
           <div className="col-span-2"><Field label="Customer Name *"><Input data-testid="edit-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
-          <Field label="Status"><Select data-testid="edit-status" value={form.currentStatus} onChange={set("currentStatus")}>{(m.statuses || ["New","Contacted","Follow-up","In Progress","Booked","Finance Process","Delivered","Lost"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
+          <Field label="Status"><Select data-testid="edit-status" value={form.currentStatus} onChange={set("currentStatus")}>{(m.statuses || ["New","Contacted","Follow-up","In Progress","Booked","Finance Process","Delivered","Close Won","Lost"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Mobile"><Input data-testid="edit-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
           <Field label="Alt Mobile"><Input value={form.altMobile} onChange={set("altMobile")} /></Field>
           <Field label="City"><Input value={form.city} onChange={set("city")} /></Field>

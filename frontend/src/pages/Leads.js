@@ -8,7 +8,7 @@ import LeadDrawer from "./LeadDrawer";
 import LeadImport from "./LeadImport";
 import { useAuth } from "../context/AuthContext";
 
-const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"];
+const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
 export default function Leads() {
   const { isField } = useAuth();

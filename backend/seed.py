@@ -460,7 +460,7 @@ EDITABLE_MASTER_CATEGORIES = ["executives", "financers", "leadSources", "priorit
 
 MASTERS = {
     "leadSources": ["Walk-in", "WhatsApp", "Referral", "Website", "Phone", "Social Media", "Visit"],
-    "statuses": ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"],
+    "statuses": ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"],
     "accountStatuses": ["Active", "Closed", "Cancelled", "Archived"],
     "executives": ["Lokesh", "Sanjay", "Amit", "Dharmendra", "Prasun", "Harish Bhatnagar"],
     "paymentModes": ["Cash", "UPI", "Cheque", "NEFT", "Finance", "Card"],
