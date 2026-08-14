@@ -207,3 +207,57 @@ async def test_delivery_creates_billing_summary(client):
     assert r.status_code == 200
     bs = r.json().get("billingSummary") or {}
     assert bs.get("leadId") == lid
+
+
+@pytest.mark.asyncio
+async def test_scheme_additional_discount_refreshes_billing_summary(client):
+    """Dealer extra changed after delivery must show on Tally summary (not frozen snapshot)."""
+    lid = await _booked_priced_lead(client, "9111100092")
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-92",
+        "chassisNumber": "CH-BILL-92",
+        "numberPlate": "RJ14-BILL-92",
+        "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+
+    # Stale snapshot with old Additional Discount
+    await server.db.billing_summaries.update_one(
+        {"leadId": lid},
+        {"$set": {
+            "discountLines": [{"code": "additionalDiscount", "label": "Less: Additional Discount",
+                               "amount": -3500, "fundHint": "Dealer-funded"}],
+            "totals.customerBenefitPassed": 3500,
+        }},
+    )
+
+    lead = await server.db.leads.find_one({"leadId": lid})
+    r = await client.put(f"/api/leads/{lid}/scheme", json={
+        "loyaltyBonus": ce.num(lead.get("loyaltyBonus")),
+        "consumerDiscount": 0, "exchangeBonus": 0, "referralBonus": 0, "dsaDiscount": 0,
+        "additionalDiscount": 8500,
+        "benefitMode": "Partial Benefit",
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "oemExtraSupportReceived": ce.num(lead.get("oemExtraSupportReceived")),
+        "oemExtraSupportPassed": ce.num(lead.get("oemExtraSupportPassed")),
+    })
+    assert r.status_code == 200, r.text
+
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("additionalDiscount")) == 8500
+
+    r = await client.get(f"/api/leads/{lid}/billing-summary")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["totals"]["customerBenefitPassed"] == 8500
+    codes = {d["code"]: d for d in body["discountLines"]}
+    assert "additionalDiscount" in codes
+    assert abs(codes["additionalDiscount"]["amount"] + 8500) < 0.05
+
+    r = await client.get(f"/api/leads/{lid}/360")
+    bs = (r.json().get("billingSummary") or {})
+    assert bs.get("totals", {}).get("customerBenefitPassed") == 8500

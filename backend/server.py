@@ -1537,7 +1537,12 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
     delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
     booking = clean(await db.bookings.find_one({"leadId": lead_id}) or {})
     claims = [clean(c) for c in await db.claims.find({"leadId": lead_id}).to_list(100)]
-    billing_summary = clean(await db.billing_summaries.find_one({"leadId": lead_id}) or {})
+    # Always rebuild from current commercials when delivered so scheme/Additional
+    # (Dealer) edits are not stuck on the Mark-Delivered snapshot.
+    if _is_delivered(lead):
+        billing_summary = clean(await _upsert_delivery_billing_summary(lead_id) or {})
+    else:
+        billing_summary = clean(await db.billing_summaries.find_one({"leadId": lead_id}) or {})
     return {
         "lead": lead, "commercials": commercials, "payments": payments,
         "activities": activities, "delivery": delivery, "booking": booking,
@@ -2015,6 +2020,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
         await _cascade_vehicle_or_price_change(lead_id, refresh_price=False, realign_scheme=True)
     else:
         await recompute_lead(lead_id)
+    await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "update", "price-structure", leadId=lead_id, old=old, new=payload)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
@@ -2145,6 +2151,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _sales=De
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
+    await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "update", "scheme", leadId=lead_id, old=old, new=payload)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
@@ -2219,6 +2226,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
         "lastUpdated": now_iso(),
         "lastUpdatedBy": act.get("email", "")}})
     await recompute_lead(lead_id)
+    await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "update", "scheme-allocation", leadId=lead_id,
                       old={"schemeAllocation": old}, new={"schemeAllocation": merged})
     updated = await db.leads.find_one({"leadId": lead_id})
@@ -2249,6 +2257,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
     old = {k: lead.get(k) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
     await recompute_lead(lead_id)
+    await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "update", "extra-income", leadId=lead_id, old=old, new=payload)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
@@ -2498,6 +2507,7 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _money=
         _require_action(lead, "canPayment", "customer payment (only Active leads)", act)
     rec = await _add_payment_internal(lead_id, body)
     await recompute_lead(lead_id)
+    await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "receipt", "payment", leadId=lead_id, paymentId=rec.get("receiptNumber"),
                       financeFileNumber=rec.get("financeFileNumber") or "",
                       new={"amount": rec.get("amount"), "mode": body.paymentMode, "runningTotal": rec.get("runningTotal")})
@@ -2832,42 +2842,48 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sal
 
 
 async def _upsert_delivery_billing_summary(lead_id):
-    """Snapshot Delivery Billing Summary for accounts (Tally cross-check) after Mark Delivered."""
+    """Refresh Delivery Billing Summary from current lead commercials (Tally bill)."""
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
     summary = ce.build_delivery_billing_summary(lead)
-    summary["createdAt"] = now_iso()
-    summary["updatedAt"] = now_iso()
+    now = now_iso()
+    summary["updatedAt"] = now
+    existing = await db.billing_summaries.find_one({"leadId": lead_id}) or {}
+    if not existing.get("createdAt"):
+        summary["createdAt"] = now
     await db.billing_summaries.update_one(
         {"leadId": lead_id},
-        {"$set": summary, "$setOnInsert": {"summaryId": summary["summaryId"]}},
+        {"$set": summary, "$setOnInsert": {
+            "summaryId": summary["summaryId"],
+            "createdAt": summary.get("createdAt") or now,
+        }},
         upsert=True,
     )
     return summary
 
 
+async def _refresh_billing_summary_if_delivered(lead_id):
+    """After commercial edits, keep Tally summary in sync for delivered leads."""
+    lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    if _is_delivered(lead):
+        return await _upsert_delivery_billing_summary(lead_id)
+    return None
+
+
 @api.get("/leads/{lead_id}/billing-summary")
 async def get_billing_summary(lead_id: str):
-    """Delivery Billing Summary for Tally cross-check (not a tax invoice).
+    """Delivery Billing Summary for Tally (full customer amount − benefits passed).
 
-    Prefer the snapshot stored at Mark Delivered; if missing but lead is delivered,
-    rebuild live from current lead commercial fields.
+    Always rebuilds from the current lead when Delivered, so scheme / Additional
+    (Dealer) changes are reflected immediately (not stuck on the first snapshot).
     """
     lead = await get_lead_or_404(lead_id)
-    stored = await db.billing_summaries.find_one({"leadId": lead_id})
-    if stored:
-        return clean(stored)
     if not _is_delivered(lead):
         raise HTTPException(
             409,
             "Billing summary is created when the lead is marked Delivered. "
             "Mark delivery first, then open this summary for Tally cross-check.",
         )
-    summary = ce.build_delivery_billing_summary(lead)
-    summary["createdAt"] = now_iso()
-    summary["updatedAt"] = now_iso()
-    await db.billing_summaries.update_one(
-        {"leadId": lead_id}, {"$set": summary}, upsert=True)
-    return summary
+    return clean(await _upsert_delivery_billing_summary(lead_id))
 
 
 async def _upsert_insurance_on_delivery(lead_id, delivery_date):
