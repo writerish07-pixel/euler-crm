@@ -1,11 +1,35 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { Landmark } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card } from "../components/ui";
+import { useAuth } from "../context/AuthContext";
+
+function financerRollup(rows) {
+  const map = new Map();
+  for (const r of rows || []) {
+    const key = (r.financer || "—").trim() || "—";
+    const cur = map.get(key) || {
+      financer: key,
+      files: 0,
+      pendingFiles: 0,
+      sanctionedAmount: 0,
+      receivedAgainstFile: 0,
+      fileOutstanding: 0,
+    };
+    cur.files += 1;
+    cur.sanctionedAmount += Number(r.sanctionedAmount) || 0;
+    cur.receivedAgainstFile += Number(r.receivedAgainstFile) || 0;
+    cur.fileOutstanding += Number(r.fileOutstanding) || 0;
+    if ((Number(r.fileOutstanding) || 0) > 0 && r.status !== "Received") cur.pendingFiles += 1;
+    map.set(key, cur);
+  }
+  return [...map.values()].sort((a, b) => b.fileOutstanding - a.fileOutstanding || a.financer.localeCompare(b.financer));
+}
 
 export default function Finance() {
+  const { isMoneyDesk, isField } = useAuth();
   const [rows, setRows] = useState([]);
   const [view, setView] = useState("all");
   const [receipt, setReceipt] = useState(false);
@@ -13,10 +37,21 @@ export default function Finance() {
   useEffect(() => { load(); }, [load]);
   const views = [["all", "All Files"], ["pending", "Pending"], ["overdue", "Overdue"]];
   const [allFiles, setAllFiles] = useState([]);
-  useEffect(() => { get("/finance", { view: "pending" }).then(setAllFiles); }, [receipt]);
+  useEffect(() => {
+    if (!isMoneyDesk) return undefined;
+    get("/finance", { view: "pending" }).then(setAllFiles);
+    return undefined;
+  }, [receipt, isMoneyDesk]);
+
+  const byFinancer = useMemo(() => financerRollup(rows), [rows]);
+
   return (
-    <div>
-      <PageHeader title="Finance Register" subtitle="Financer files — committed vs disbursed"
+    <div data-testid="finance-register">
+      <PageHeader
+        title="Finance Register"
+        subtitle={isField && !isMoneyDesk
+          ? "Read-only · which financer has paid vs still outstanding"
+          : "Financer files — committed vs disbursed"}
         actions={
           <div className="flex items-center gap-2">
             <div className="flex gap-1 bg-white rounded-lg p-1 border border-line shadow-card">
@@ -24,9 +59,38 @@ export default function Finance() {
                 <button key={k} onClick={() => setView(k)} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${view === k ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}>{l}</button>
               ))}
             </div>
-            <Button data-testid="record-financer-receipt-btn" onClick={() => setReceipt(true)}><Landmark size={16} /> Record Financer Receipt</Button>
+            {isMoneyDesk && (
+              <Button data-testid="record-financer-receipt-btn" onClick={() => setReceipt(true)}>
+                <Landmark size={16} /> Record Financer Receipt
+              </Button>
+            )}
           </div>
-        } />
+        }
+      />
+
+      {byFinancer.length > 0 && (
+        <Card className="p-5 mb-6" data-testid="finance-by-financer">
+          <h3 className="font-heading font-bold text-ink mb-1">By financer</h3>
+          <p className="text-xs text-ink-soft mb-3">Disbursed vs remaining for the current view</p>
+          <Table
+            rowKey="financer"
+            columns={[
+              { key: "financer", label: "Financer", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge> },
+              { key: "files", label: "Files", align: "right" },
+              { key: "pendingFiles", label: "Pending", align: "right", render: (r) => (
+                r.pendingFiles ? <span className="text-amber-700 font-semibold">{r.pendingFiles}</span> : "—"
+              ) },
+              { key: "sanctionedAmount", label: "Committed", align: "right", mono: true, render: (r) => inr(r.sanctionedAmount) },
+              { key: "receivedAgainstFile", label: "Received", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedAgainstFile)}</span> },
+              { key: "fileOutstanding", label: "Remaining", align: "right", mono: true, render: (r) => (
+                <span className={r.fileOutstanding > 0 ? "text-red-600 font-semibold" : ""}>{inr(r.fileOutstanding)}</span>
+              ) },
+            ]}
+            rows={byFinancer}
+          />
+        </Card>
+      )}
+
       <Table
         rowKey="fileNumber"
         columns={[
@@ -42,7 +106,9 @@ export default function Finance() {
         rows={rows}
         empty="No finance files — created automatically when a Finance-mode payment is recorded on a lead"
       />
-      {receipt && <FinanceReceiptModal files={allFiles} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />}
+      {receipt && isMoneyDesk && (
+        <FinanceReceiptModal files={allFiles} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />
+      )}
     </div>
   );
 }

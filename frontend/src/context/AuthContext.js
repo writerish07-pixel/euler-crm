@@ -40,6 +40,9 @@ export function AuthProvider({ children }) {
       isField: role === "asm" || role === "rm",
       isSalesStaff: role === "owner" || role === "executive",
       isMoneyDesk: role === "owner" || role === "executive" || role === "accounts",
+      // ASM/RM may view Finance Register (disbursed vs remaining); writes stay money-desk.
+      canViewFinance: role === "owner" || role === "executive" || role === "accounts"
+        || role === "asm" || role === "rm",
     }}>
       {children}
     </AuthCtx.Provider>

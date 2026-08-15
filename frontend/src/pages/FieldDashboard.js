@@ -47,6 +47,7 @@ export default function FieldDashboard() {
         <Link to="/leads"><Button variant="secondary" data-testid="field-go-leads"><Users size={14} /> Lead Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="field-go-bookings"><ClipboardCheck size={14} /> Bookings</Button></Link>
         <Link to="/deliveries"><Button variant="secondary" data-testid="field-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>
+        <Link to="/finance"><Button variant="secondary" data-testid="field-go-finance"><Landmark size={14} /> Finance Register</Button></Link>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">

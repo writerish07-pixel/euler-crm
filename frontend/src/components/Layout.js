@@ -23,10 +23,10 @@ const NAV = [
     { to: "/quotations", label: "Quotations", icon: FileText, salesOnly: true },
     { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
   ]},
-  { section: "Money", moneyDesk: true, items: [
-    { to: "/payments", label: "Payment Ledger", icon: Wallet },
-    { to: "/finance", label: "Finance Register", icon: Landmark },
-    { to: "/insurance", label: "Insurance Payouts", icon: ShieldCheck },
+  { section: "Money", items: [
+    { to: "/payments", label: "Payment Ledger", icon: Wallet, moneyDesk: true },
+    { to: "/finance", label: "Finance Register", icon: Landmark, financeView: true },
+    { to: "/insurance", label: "Insurance Payouts", icon: ShieldCheck, moneyDesk: true },
     { to: "/insurance-report", label: "Payout Report", icon: TrendingUp, ownerOnly: true },
   ]},
   { section: "Fulfilment", items: [{ to: "/deliveries", label: "Delivery Tracker", icon: Truck }] },
@@ -50,7 +50,7 @@ const NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, open, onNavigate, onClose }) {
   const deskLabel = isAccounts ? "Accounts desk" : isField ? "Field desk" : "EV Dealership";
   return (
     <aside
@@ -80,12 +80,12 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, open
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5 overscroll-contain">
         {NAV.map((group) => {
           if (group.ownerOnly && !isOwner) return null;
-          if (group.moneyDesk && !isMoneyDesk) return null;
           if (group.pipeline && !isSalesStaff && !isField) return null;
           const items = group.items.filter((i) => {
             if (i.ownerOnly && !isOwner) return false;
             if (i.salesOnly && !isSalesStaff) return false;
             if (i.moneyDesk && !isMoneyDesk) return false;
+            if (i.financeView && !canViewFinance) return false;
             if (i.accountsHome && !isAccounts && !isOwner) return false;
             if (i.fieldHome && !isField && !isOwner) return false;
             return true;
@@ -215,7 +215,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const location = useLocation();
 
@@ -249,6 +249,7 @@ export default function Layout({ children }) {
         isSalesStaff={isSalesStaff}
         isField={isField}
         isMoneyDesk={isMoneyDesk}
+        canViewFinance={canViewFinance}
         open={navOpen}
         onClose={() => setNavOpen(false)}
         onNavigate={() => setNavOpen(false)}
