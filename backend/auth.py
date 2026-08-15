@@ -17,6 +17,8 @@ ALLOWED_ROLES = ("owner", "executive", "accounts", "asm", "rm")
 SALES_ROLES = ("owner", "executive")
 MONEY_ROLES = ("owner", "executive", "accounts")
 FIELD_ROLES = ("asm", "rm")
+# Money desk can write; ASM/RM may view Finance Register (disbursed vs remaining).
+FINANCE_VIEW_ROLES = (*MONEY_ROLES, *FIELD_ROLES)
 
 
 def _secret():
@@ -106,6 +108,12 @@ def build_router(db):
             )
         return user
 
+    async def finance_viewer_only(user=Depends(current_user)):
+        """Money desk + ASM/RM — read Finance Register (committed / disbursed / outstanding)."""
+        if user.get("role") not in FINANCE_VIEW_ROLES:
+            raise HTTPException(403, "Finance Register is for money desk and ASM / RM.")
+        return user
+
     async def field_viewer_only(user=Depends(current_user)):
         """ASM / RM (shared field board) + Owner shortcut."""
         if user.get("role") not in (*FIELD_ROLES, "owner"):
@@ -177,6 +185,7 @@ def build_router(db):
     router.owner_only = owner_only
     router.sales_staff_only = sales_staff_only
     router.money_desk_only = money_desk_only
+    router.finance_viewer_only = finance_viewer_only
     router.field_viewer_only = field_viewer_only
     return router
 

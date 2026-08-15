@@ -46,6 +46,7 @@ owner_only = auth_router.owner_only
 sales_staff_only = auth_router.sales_staff_only
 money_desk_only = auth_router.money_desk_only
 field_viewer_only = auth_router.field_viewer_only
+finance_viewer_only = auth_router.finance_viewer_only
 
 api = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
 public = APIRouter(prefix="/api")
@@ -2666,7 +2667,7 @@ async def _enrich_finance_with_delivery(files):
 
 
 @api.get("/finance")
-async def list_finance(view: str = "all"):
+async def list_finance(view: str = "all", _viewer=Depends(finance_viewer_only)):
     files = [clean(f) for f in await db.finance.find().to_list(1000)]
     pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
     if view == "pending":

@@ -37,9 +37,9 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, fieldOk, fieldOnly, accountsHome }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance } = auth;
   const loc = useLocation();
   if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
@@ -48,6 +48,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, fieldOk, fieldOn
   if (accountsHome && !isAccounts && !isOwner && !isSalesStaff) {
     return <Navigate to={homePath(auth)} replace />;
   }
+  if (financeView && !canViewFinance) return <Navigate to={homePath(auth)} replace />;
   if (moneyDesk && !isMoneyDesk) return <Navigate to={homePath(auth)} replace />;
   if (salesOnly && !isSalesStaff && !(fieldOk && isField)) {
     return <Navigate to={homePath(auth)} replace />;
@@ -69,6 +70,7 @@ function AppRoutes() {
       ownerOnly={opts.ownerOnly}
       salesOnly={opts.salesOnly}
       moneyDesk={opts.moneyDesk}
+      financeView={opts.financeView}
       fieldOk={opts.fieldOk}
       fieldOnly={opts.fieldOnly}
       accountsHome={opts.accountsHome}
@@ -88,7 +90,7 @@ function AppRoutes() {
       <Route path="/quotations" element={P(<Quotations />, { salesOnly: true })} />
       <Route path="/activities" element={P(<Activities />, { salesOnly: true })} />
       <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
-      <Route path="/finance" element={P(<Finance />, { moneyDesk: true })} />
+      <Route path="/finance" element={P(<Finance />, { financeView: true })} />
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
       <Route path="/deliveries" element={P(<Deliveries />)} />
       <Route path="/claims" element={P(<Claims />, { moneyDesk: true })} />

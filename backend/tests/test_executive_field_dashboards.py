@@ -254,3 +254,43 @@ async def test_asm_lead_360_hides_commercials(client):
     assert listing.status_code == 200
     row = next(x for x in listing.json() if x["leadId"] == lead_id)
     assert "customerPayable" not in row
+
+
+@pytest.mark.asyncio
+async def test_asm_can_view_finance_register_readonly(client):
+    """ASM/RM need Finance Register to see financer disbursed vs remaining — read only."""
+    import server as srv
+    await srv.db.finance.delete_many({"fileNumber": "ASM-FIN-1"})
+    await srv.db.finance.insert_one({
+        "fileNumber": "ASM-FIN-1",
+        "leadId": "LD-ASM-FIN",
+        "customerName": "Field View Cust",
+        "financer": "HDFC",
+        "sanctionedAmount": 100000,
+        "receivedAgainstFile": 40000,
+        "fileOutstanding": 60000,
+        "status": "Partial",
+        "lastPaymentDate": "2026-08-10",
+    })
+
+    await _login(client, "asm@euler.com")
+    r = await client.get("/api/finance")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert any(f.get("fileNumber") == "ASM-FIN-1" for f in rows)
+    hit = next(f for f in rows if f["fileNumber"] == "ASM-FIN-1")
+    assert hit["receivedAgainstFile"] == 40000
+    assert hit["fileOutstanding"] == 60000
+
+    pending = await client.get("/api/finance", params={"view": "pending"})
+    assert pending.status_code == 200
+    assert any(f.get("fileNumber") == "ASM-FIN-1" for f in pending.json())
+
+    # Writes stay money-desk only
+    blocked = await client.post("/api/finance/ASM-FIN-1/receipt", json={
+        "amount": 1000, "date": "2026-08-11",
+    })
+    assert blocked.status_code == 403, blocked.text
+
+    await _login(client, "rm@euler.com")
+    assert (await client.get("/api/finance")).status_code == 200
