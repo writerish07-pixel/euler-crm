@@ -7,6 +7,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 
 import { get } from "../lib/api";
 import { inr, compactInr, num } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge } from "../components/ui";
+import OwnerPriceEditor from "../components/OwnerPriceEditor";
 
 export default function Dashboard() {
   const [d, setD] = useState(null);
@@ -15,26 +16,30 @@ export default function Dashboard() {
     get("/dashboard").then(setD).catch(() => {});
   }, []);
 
-  if (!d) return <div className="text-ink-faint text-sm">Loading dashboard…</div>;
-
-  const k = d.kpis;
+  const k = d?.kpis;
   const payColors = { Cash: "#059669", UPI: "#1D4ED8", Finance: "#7C3AED", Other: "#A1A1AA" };
-  const payData = Object.entries(d.payments).map(([name, value]) => ({ name, value }));
+  const payData = Object.entries(d?.payments || {}).map(([name, value]) => ({ name, value }));
 
   return (
-    <div>
+    <div data-testid="owner-dashboard">
       <PageHeader
         title="Operations Dashboard"
-        subtitle={`Live pipeline snapshot · updated ${new Date(d.lastUpdated).toLocaleTimeString("en-IN")}`}
+        subtitle={d?.lastUpdated
+          ? `Live pipeline snapshot · updated ${new Date(d.lastUpdated).toLocaleTimeString("en-IN")}`
+          : "Live pipeline snapshot"}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Active Bookings" value={num(k.activeBookings)} sub={`${k.monthlyBookings} new this month`} icon={ClipboardCheck} tone="text-emerald-600" />
-        <StatCard label="Total Leads" value={num(k.totalLeads)} sub={`${k.monthlyLeads} new this month`} icon={Users} />
-        <StatCard label="Conversion" value={`${k.conversion}%`} sub="bookings ÷ monthly leads" icon={TrendingUp} tone="text-violet-600" />
-        <StatCard label="Revenue (MTD)" value={compactInr(k.revenue)} sub="payments this month" icon={IndianRupee} tone="text-cobalt" />
+        <StatCard label="Active Bookings" value={d ? num(k.activeBookings) : "—"} sub={d ? `${k.monthlyBookings} new this month` : "loading"} icon={ClipboardCheck} tone="text-emerald-600" />
+        <StatCard label="Total Leads" value={d ? num(k.totalLeads) : "—"} sub={d ? `${k.monthlyLeads} new this month` : "loading"} icon={Users} />
+        <StatCard label="Conversion" value={d ? `${k.conversion}%` : "—"} sub="bookings ÷ monthly leads" icon={TrendingUp} tone="text-violet-600" />
+        <StatCard label="Revenue (MTD)" value={d ? compactInr(k.revenue) : "—"} sub="payments this month" icon={IndianRupee} tone="text-cobalt" />
       </div>
 
+      <OwnerPriceEditor />
+
+      {!d ? <div className="text-ink-faint text-sm mt-6">Loading dashboard…</div> : (
+      <>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
         <Card className="p-5 lg:col-span-2">
           <div className="flex items-center justify-between mb-4">
@@ -99,6 +104,8 @@ export default function Dashboard() {
           rowKey="model"
         />
       </div>
+      </>
+      )}
     </div>
   );
 }
