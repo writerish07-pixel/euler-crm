@@ -2317,11 +2317,26 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Dep
 # ---------------------------------------------------------------- lead bulk import
 IMPORT_COLUMNS = [
     ("Customer Name", "customerName"), ("Mobile", "mobile"), ("Alternate Mobile", "altMobile"),
-    ("Village", "village"), ("City", "city"), ("Lead Source", "leadSource"),
+    ("Village", "village"), ("City", "city"), ("Lead Date", "createdDate"),
+    ("Next Follow-up", "nextFollowupDate"), ("Lead Source", "leadSource"),
     ("Interested Model", "interestedModel"), ("Variant", "variant"), ("Executive", "executive"),
     ("Current Status", "currentStatus"), ("Priority", "priority"), ("Budget", "budget"),
     ("Remarks", "remarks"), ("Finance Required", "financeRequired"), ("Exchange Required", "exchangeRequired"),
 ]
+IMPORT_DATE_FIELDS = ("createdDate", "nextFollowupDate")
+# A bulk row may only land in the pre-booking part of the funnel. Booked / Finance
+# Process / Delivered / Close Won are owned by the workflow endpoints that also write
+# the money side (booking, price structure, payments, delivery), so they can never be
+# reached by typing a status into a spreadsheet.
+IMPORT_STATUSES = ["New", "Contacted", "Follow-up", "In Progress"]
+IMPORT_YES_NO = ["Yes", "No"]
+# Same fallbacks the New Lead form applies, so a blank optional cell behaves exactly
+# like the form's pre-selected value instead of inventing something (the old import
+# wrote leadSource="Import", which is not a Settings value and broke source reports).
+IMPORT_DEFAULTS = {"leadSource": "Walk-in", "currentStatus": "New", "priority": "Normal",
+                   "financeRequired": "No", "exchangeRequired": "No"}
+# Every other column is optional; these two identify the customer.
+IMPORT_REQUIRED_FIELDS = ("customerName", "mobile")
 
 
 def _read_rows(filename: str, content: bytes):
@@ -2350,12 +2365,45 @@ def _suggest_mapping(headers):
     return mapping
 
 
+def _import_date(value):
+    """Spreadsheet date -> ISO. Accepts real dates, YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY.
+
+    Returns "" for blank and None when the cell cannot be read as a date, so the
+    caller can report the bad cell instead of silently importing today's date.
+    """
+    if value in (None, ""):
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    s = str(value).strip()
+    if not s:
+        return ""
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        y, mo, d = m.groups()
+    else:
+        m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", s)
+        if not m:
+            return None
+        d, mo, y = m.groups()
+    try:
+        return date(int(y), int(mo), int(d)).isoformat()
+    except ValueError:
+        return None
+
+
 def _coerce(field, v):
     if field == "budget":
         try:
             return float(v) if v not in (None, "") else 0
         except (ValueError, TypeError):
             return 0
+    if field in IMPORT_DATE_FIELDS:
+        iso = _import_date(v)
+        # Keep the raw text when unparseable so validation can name the bad cell.
+        return iso if iso is not None else str(v).strip()
     if field in ("mobile", "altMobile"):
         if isinstance(v, float):
             v = str(int(v))
@@ -2373,7 +2421,7 @@ def _parse_import_bytes(filename: str, content: bytes, mapping: dict = None):
     if not mapping:
         mapping = _suggest_mapping(header)
     out = []
-    for r in rows[1:]:
+    for row_no, r in enumerate(rows[1:], start=2):
         if not any(c not in (None, "", "None") for c in r):
             continue
         d = {}
@@ -2384,8 +2432,317 @@ def _parse_import_bytes(filename: str, content: bytes, mapping: dict = None):
             d[field] = _coerce(field, v)
         if not d.get("customerName"):
             continue
+        # Spreadsheet row number so an error can point at the row the user sees.
+        d["__row"] = row_no
         out.append(d)
     return header, out
+
+
+def _import_match(value, allowed):
+    """Case / spacing-insensitive lookup -> the canonical master value, else None."""
+    v = re.sub(r"\s+", " ", str(value or "").strip()).lower()
+    for a in allowed:
+        if re.sub(r"\s+", " ", str(a).strip()).lower() == v:
+            return a
+    return None
+
+
+async def _import_allowed_values():
+    """Live dropdown values for the bulk-upload template AND row validation.
+
+    One source for both so a downloaded template can never allow a value the
+    upload then rejects. Models / variants come from Price Master, the same list
+    the New Lead form uses; the rest come from Settings masters.
+    """
+    vehicles, seen = [], set()
+    for r in await db.price_master.find().to_list(2000):
+        model = str(r.get("model") or "").strip()
+        variant = str(r.get("variant") or "").strip()
+        if not model:
+            continue
+        key = (model.lower(), variant.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        vehicles.append({"model": model, "variant": variant})
+    vehicles.sort(key=lambda v: (v["model"], v["variant"]))
+    masters_now = dict(seeder.MASTERS)
+    for cat in EDITABLE_MASTER_CATEGORIES:
+        vals = await _masters_list_values(cat)
+        if vals:
+            masters_now[cat] = vals
+    return {
+        "leadSources": masters_now.get("leadSources", []),
+        "executives": masters_now.get("executives", []),
+        "priorities": masters_now.get("priorities", []),
+        "statuses": list(IMPORT_STATUSES),
+        "yesNo": list(IMPORT_YES_NO),
+        "models": sorted({v["model"] for v in vehicles}),
+        "variants": sorted({v["variant"] for v in vehicles if v["variant"]}),
+        "vehicles": vehicles,
+    }
+
+
+async def _existing_lead_mobiles():
+    """last-10-digits -> leadId, for the same duplicate guard POST /leads applies."""
+    out = {}
+    for l in await db.leads.find().to_list(5000):
+        digits = re.sub(r"\D", "", str(l.get("mobile") or ""))
+        if len(digits) >= 10:
+            out[digits[-10:]] = l.get("leadId")
+    return out
+
+
+def _validate_import_rows(rows, allowed, existing_mobiles):
+    """Canonicalise every row against the live masters and collect per-row errors.
+
+    A value that is present but not in its master list is an ERROR, never a silent
+    fix — that mismatch is exactly what makes imported leads unusable downstream
+    (Price Master lookups, executive scoreboards, source reports). Blank optional
+    cells fall back to IMPORT_DEFAULTS, matching the New Lead form.
+    """
+    pairs = {(v["model"].lower(), v["variant"].lower()) for v in allowed["vehicles"]}
+    variants_by_model = {}
+    for v in allowed["vehicles"]:
+        variants_by_model.setdefault(v["model"].lower(), []).append(v["variant"])
+    list_fields = [
+        ("leadSource", "leadSources", "Lead Source"),
+        ("executive", "executives", "Executive"),
+        ("priority", "priorities", "Priority"),
+        ("currentStatus", "statuses", "Current Status"),
+        ("financeRequired", "yesNo", "Finance Required"),
+        ("exchangeRequired", "yesNo", "Exchange Required"),
+    ]
+    seen_mobiles = {}
+    out = []
+    for d in rows:
+        row = dict(d)
+        errors = []
+        row_no = row.get("__row") or (len(out) + 2)
+
+        row["customerName"] = str(row.get("customerName") or "").strip()
+        if not row["customerName"]:
+            errors.append("Customer Name is required")
+
+        mob = re.sub(r"\D", "", str(row.get("mobile") or ""))
+        if not mob:
+            errors.append("Mobile is required")
+        elif len(mob) < 10:
+            errors.append("Mobile must be at least 10 digits")
+        else:
+            mob = mob[-10:]
+            if mob in existing_mobiles:
+                errors.append(f"Mobile already used by lead {existing_mobiles[mob]}")
+            elif mob in seen_mobiles:
+                errors.append(f"Duplicate mobile — same number as row {seen_mobiles[mob]}")
+            else:
+                seen_mobiles[mob] = row_no
+        row["mobile"] = mob
+        row["altMobile"] = re.sub(r"\D", "", str(row.get("altMobile") or ""))
+
+        for field, key, label in list_fields:
+            raw = str(row.get(field) or "").strip()
+            if not raw:
+                row[field] = IMPORT_DEFAULTS.get(field, "")
+                continue
+            canonical = _import_match(raw, allowed[key])
+            if canonical is None:
+                errors.append(f"{label} '{raw}' is not in the {label} list "
+                              f"(allowed: {', '.join(allowed[key]) or 'none configured'})")
+                row[field] = raw
+            else:
+                row[field] = canonical
+
+        model_raw = str(row.get("interestedModel") or "").strip()
+        variant_raw = str(row.get("variant") or "").strip()
+        model = _import_match(model_raw, allowed["models"]) if model_raw else ""
+        if model_raw and model is None:
+            errors.append(f"Interested Model '{model_raw}' is not in Price Master")
+            model = model_raw
+        variant = variant_raw
+        if variant_raw and not model_raw:
+            errors.append("Variant needs an Interested Model in the same row")
+        elif variant_raw and model:
+            options = variants_by_model.get(str(model).lower(), [])
+            match = _import_match(variant_raw, [o for o in options if o])
+            if match is None and (str(model).lower(), variant_raw.lower()) not in pairs:
+                errors.append(f"Variant '{variant_raw}' does not belong to {model} "
+                              f"(allowed: {', '.join([o for o in options if o]) or 'none in Price Master'})")
+            else:
+                variant = match or variant_raw
+        row["interestedModel"] = model or ""
+        row["variant"] = variant
+
+        for field, label in (("createdDate", "Lead Date"), ("nextFollowupDate", "Next Follow-up")):
+            raw = row.get(field)
+            iso = _import_date(raw)
+            if iso is None:
+                errors.append(f"{label} '{raw}' is not a date (use YYYY-MM-DD)")
+                row[field] = ""
+            else:
+                row[field] = iso
+        if not row.get("createdDate"):
+            row["createdDate"] = today()
+
+        try:
+            budget = float(row.get("budget") or 0)
+        except (ValueError, TypeError):
+            budget = 0.0
+        if budget < 0:
+            errors.append("Budget cannot be negative")
+        row["budget"] = budget
+
+        row["__row"] = row_no
+        row["__errors"] = errors
+        out.append(row)
+    return out
+
+
+def _import_error_report(rows):
+    return [{"row": r.get("__row"), "customerName": r.get("customerName", ""),
+             "mobile": r.get("mobile", ""), "errors": r.get("__errors", [])}
+            for r in rows if r.get("__errors")]
+
+
+@api.get("/leads/import/template")
+async def import_template(_sales=Depends(sales_staff_only)):
+    """Bulk-upload workbook with dropdowns wired to the live masters.
+
+    The dropdown values and the upload validation both come from
+    _import_allowed_values(), so a freshly downloaded template can never offer a
+    value the upload would reject.
+
+    Excel and Google Sheets cannot express "Variant depends on Interested Model"
+    in a portable way (Sheets ignores INDIRECT in validation), so Variant lists
+    every variant and the model+variant PAIR is checked on upload instead. The
+    Lists sheet shows the valid pairs so staff can see which variant belongs where.
+    """
+    import openpyxl
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    allowed = await _import_allowed_values()
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Leads"
+    lists = wb.create_sheet("Lists")
+    guide = wb.create_sheet("How to use")
+
+    list_columns = [
+        ("Lead Source", allowed["leadSources"]),
+        ("Executive", allowed["executives"]),
+        ("Interested Model", allowed["models"]),
+        ("Variant", allowed["variants"]),
+        ("Priority", allowed["priorities"]),
+        ("Current Status", allowed["statuses"]),
+        ("Yes / No", allowed["yesNo"]),
+    ]
+    list_ranges = {}
+    for idx, (title, values) in enumerate(list_columns, start=1):
+        col = get_column_letter(idx)
+        cell = lists[f"{col}1"]
+        cell.value = title
+        cell.font = Font(bold=True)
+        for offset, value in enumerate(values, start=2):
+            lists[f"{col}{offset}"] = value
+        last_row = len(values) + 1 if values else 2
+        list_ranges[title] = f"=Lists!${col}$2:${col}${last_row}"
+        lists.column_dimensions[col].width = 24
+
+    pair_col = get_column_letter(len(list_columns) + 2)
+    pair_col2 = get_column_letter(len(list_columns) + 3)
+    lists[f"{pair_col}1"].value = "Valid Model"
+    lists[f"{pair_col2}1"].value = "Valid Variant for that Model"
+    lists[f"{pair_col}1"].font = Font(bold=True)
+    lists[f"{pair_col2}1"].font = Font(bold=True)
+    for offset, v in enumerate(allowed["vehicles"], start=2):
+        lists[f"{pair_col}{offset}"] = v["model"]
+        lists[f"{pair_col2}{offset}"] = v["variant"]
+    lists.column_dimensions[pair_col].width = 24
+    lists.column_dimensions[pair_col2].width = 30
+    lists.freeze_panes = "A2"
+
+    header_fill = PatternFill("solid", fgColor="1F3A93")
+    for idx, (label, field) in enumerate(IMPORT_COLUMNS, start=1):
+        col = get_column_letter(idx)
+        cell = ws[f"{col}1"]
+        cell.value = label
+        cell.fill = header_fill
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.column_dimensions[col].width = 22 if field != "remarks" else 34
+    ws.freeze_panes = "A2"
+    ws.row_dimensions[1].height = 22
+
+    LAST_ROW = 500
+    dropdown_fields = {
+        "leadSource": "Lead Source",
+        "executive": "Executive",
+        "interestedModel": "Interested Model",
+        "variant": "Variant",
+        "priority": "Priority",
+        "currentStatus": "Current Status",
+        "financeRequired": "Yes / No",
+        "exchangeRequired": "Yes / No",
+    }
+    field_col = {field: get_column_letter(i) for i, (_, field) in enumerate(IMPORT_COLUMNS, start=1)}
+    for field, list_title in dropdown_fields.items():
+        # showDropDown is intentionally left unset: in OOXML a truthy value HIDES
+        # the in-cell arrow, which is the opposite of what the name suggests.
+        dv = DataValidation(type="list", formula1=list_ranges[list_title], allow_blank=True)
+        dv.errorTitle = "Not a Euler CRM value"
+        dv.error = f"Pick from the {list_title} list on the Lists sheet."
+        dv.promptTitle = list_title
+        dv.prompt = "Choose from the list so the upload matches the app."
+        ws.add_data_validation(dv)
+        col = field_col[field]
+        dv.add(f"{col}2:{col}{LAST_ROW}")
+
+    for field in IMPORT_DATE_FIELDS:
+        col = field_col[field]
+        for r in range(2, LAST_ROW + 1):
+            ws[f"{col}{r}"].number_format = "yyyy-mm-dd"
+    # Text format keeps a 10-digit mobile from becoming 9.8e+09.
+    for field in ("mobile", "altMobile"):
+        col = field_col[field]
+        for r in range(2, LAST_ROW + 1):
+            ws[f"{col}{r}"].number_format = "@"
+
+    guide_lines = [
+        ("Euler CRM — bulk lead upload", True),
+        ("", False),
+        ("1. Type one lead per row on the 'Leads' sheet. Do not rename or reorder the header row.", False),
+        ("2. Grey-list columns have dropdowns. Pick a value — typing your own is rejected on upload.", False),
+        ("3. Required: Customer Name and Mobile (10 digits, not already in the CRM).", False),
+        ("4. Lead Date / Next Follow-up: use YYYY-MM-DD. Blank Lead Date becomes today.", False),
+        ("5. Variant must belong to the Interested Model — see 'Valid Model / Valid Variant' on Lists.", False),
+        (f"6. Current Status can only be: {', '.join(IMPORT_STATUSES)}. "
+         "Booking and delivery are done inside the app so the money side stays correct.", False),
+        ("7. Blank Lead Source / Priority / Status / Finance / Exchange use the New Lead defaults "
+         f"({IMPORT_DEFAULTS['leadSource']} / {IMPORT_DEFAULTS['priority']} / "
+         f"{IMPORT_DEFAULTS['currentStatus']} / No / No).", False),
+        ("8. Upload in the app: Lead Register → Import. Rows with problems are listed and skipped; "
+         "correct them and upload again.", False),
+        ("", False),
+        (f"Lists generated on {today()} from Settings masters and Price Master. "
+         "Download a fresh template after adding an executive, source or vehicle.", False),
+    ]
+    for i, (text, bold) in enumerate(guide_lines, start=1):
+        cell = guide[f"A{i}"]
+        cell.value = text
+        if bold:
+            cell.font = Font(bold=True, size=14)
+    guide.column_dimensions["A"].width = 120
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"euler_lead_upload_template_{today()}.xlsx"
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @api.post("/leads/import/preview")
@@ -2399,14 +2756,23 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
         _, rows = _parse_import_bytes(file.filename, content, mp)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
+    allowed = await _import_allowed_values()
+    checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
+    valid = [r for r in checked if not r["__errors"]]
     return {"detectedHeaders": [h for h in headers if h],
             "targetFields": [{"label": lbl, "field": fld} for lbl, fld in IMPORT_COLUMNS],
-            "suggestedMapping": mp, "rowCount": len(rows), "sample": rows[:8]}
+            "suggestedMapping": mp, "rowCount": len(checked),
+            "validCount": len(valid), "errorCount": len(checked) - len(valid),
+            "allowedValues": allowed,
+            "requiredFields": list(IMPORT_REQUIRED_FIELDS),
+            "errors": _import_error_report(checked)[:100],
+            "sample": checked[:12]}
 
 
 @api.post("/leads/import/commit")
 async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
                         _sales=Depends(sales_staff_only)):
+    """Insert only the rows that pass validation; report the rest untouched."""
     import json as _json
     content = await file.read()
     try:
@@ -2414,18 +2780,27 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
         _, rows = _parse_import_bytes(file.filename, content, mp)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
+    allowed = await _import_allowed_values()
+    checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
     created = 0
-    for d in rows:
+    created_ids = []
+    for d in checked:
+        if d["__errors"]:
+            continue
         lead_id = await next_id("lead", "LD26")
         doc = {
-            "leadId": lead_id, "createdDate": today(),
+            "leadId": lead_id, "createdDate": d.get("createdDate") or today(),
             "customerName": d.get("customerName", ""), "mobile": d.get("mobile", ""),
             "altMobile": d.get("altMobile", ""), "village": d.get("village", ""), "city": d.get("city", ""),
-            "leadSource": d.get("leadSource") or "Import", "interestedModel": d.get("interestedModel", ""),
+            "leadSource": d.get("leadSource") or IMPORT_DEFAULTS["leadSource"],
+            "interestedModel": d.get("interestedModel", ""),
             "variant": d.get("variant", ""), "executive": d.get("executive", ""),
-            "currentStatus": d.get("currentStatus") or "New", "priority": d.get("priority") or "Normal",
+            "currentStatus": d.get("currentStatus") or IMPORT_DEFAULTS["currentStatus"],
+            "priority": d.get("priority") or IMPORT_DEFAULTS["priority"],
+            "nextFollowupDate": d.get("nextFollowupDate", ""),
             "budget": d.get("budget", 0), "remarks": d.get("remarks", ""),
-            "financeRequired": d.get("financeRequired") or "No", "exchangeRequired": d.get("exchangeRequired") or "No",
+            "financeRequired": d.get("financeRequired") or IMPORT_DEFAULTS["financeRequired"],
+            "exchangeRequired": d.get("exchangeRequired") or IMPORT_DEFAULTS["exchangeRequired"],
             "accountStatus": "Active", "deliveryStatus": "",
             "outstandingAmount": 0, "customerOutstanding": 0, "companyOutstanding": 0, "totalReceived": 0,
             "customerPayable": 0, "grossVehicleCost": 0, "totalDiscount": 0,
@@ -2437,7 +2812,10 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
         await db.leads.insert_one(doc)
         await sheet_sync("leads", doc)
         created += 1
-    return {"created": created}
+        created_ids.append(lead_id)
+    errors = _import_error_report(checked)
+    return {"created": created, "skipped": len(errors), "rowCount": len(checked),
+            "leadIds": created_ids, "errors": errors[:100]}
 
 
 # ---------------------------------------------------------------- payments
