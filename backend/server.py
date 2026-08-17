@@ -407,26 +407,18 @@ async def recompute_lead(lead_id):
     income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
     shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
     alloc = income.get("allocation") or ce.compute_scheme_allocation(snap, scheme_rows)
-    # total received from payments (refunds are negative rows, so this is already net)
+    # total received from payments
     agg = await db.payments.aggregate([
         {"$match": {"leadId": lead_id}},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     total_received = ce.round2(agg[0]["total"]) if agg else 0.0
-    refund_agg = await db.payments.aggregate([
-        {"$match": {"leadId": lead_id, "entryType": "Refund"}},
-        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
-    ]).to_list(1)
-    refunded_amount = ce.round2(-refund_agg[0]["total"]) if refund_agg else 0.0
     # Customer Payable comes solely from compute_commercial_totals(…, scheme_rows),
     # which already reduces by Σ customerBenefit across offers + entitlements.
     # Do NOT subtract entitlement benefits again — that double-counted after the
     # allocation engines were merged onto one path.
     customer_payable = totals["customerPayable"]
     customer_outstanding = ce.round2(max(0.0, customer_payable - total_received)) if customer_payable > 0 else 0.0
-    # Surplus still held for the customer. Refundable at any time, including after
-    # delivery/closure, so it must be visible on the lead rather than inferred.
-    excess_received = ce.round2(max(0.0, total_received - customer_payable)) if customer_payable > 0 else 0.0
     oem_extra = ce.compute_oem_extra_support(lead)
     oem_extra_recv = oem_extra["oemExtraSupportReceived"]
     oem_extra_pass = oem_extra["oemExtraSupportPassed"]
@@ -468,8 +460,6 @@ async def recompute_lead(lead_id):
         "totalReceived": total_received,
         "customerOutstanding": customer_outstanding,
         "outstandingAmount": customer_outstanding,
-        "excessReceived": excess_received,
-        "refundedAmount": refunded_amount,
         # OEM claimable = OEM COMPANY share (per Scheme Master), not the raw offer sum
         "companyOutstanding": shares["eligibleTotal"],
         "oemClaimCompanyShare": shares["eligibleTotal"],
@@ -780,19 +770,6 @@ class PaymentIn(BaseModel):
     narration: str = ""
     financerName: str = ""
     financeFileNumber: str = ""
-    # Collecting MORE than Customer Payable is a real situation (round figure paid,
-    # charge reduced later). It stays blocked by default so a mistyped amount is still
-    # caught; the UI asks for confirmation and re-sends with this set. The surplus is
-    # then visible as Excess Received and can be refunded.
-    allowExcess: bool = False
-
-
-class RefundIn(BaseModel):
-    amount: float
-    paymentMode: str = "Cash"
-    date: Optional[str] = None
-    narration: str = ""
-    reference: str = ""
 
 
 class DeliveryIn(BaseModel):
@@ -1598,8 +1575,6 @@ LEAD_SYSTEM_FIELDS = {
     "otherCharges", "oemSchemeAmount", "dealerSchemeAmount", "oemClaimCompanyShare",
     "schemeCompanyTotal", "dealerSchemeRetained", "oemExtraSupportRetained", "dealerMarginNetExGst",
     "extraDealerIncomeTotal", "dealerTotalEarnings",
-    # Derived from the payment ledger by recompute_lead / POST /leads/{id}/refund.
-    "excessReceived", "refundedAmount",
 }
 
 # The literal placeholder Swagger/OpenAPI "Try it out" fills into required-string
@@ -2874,14 +2849,11 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
     snap = lead_to_snapshot(lead) if lead else {}
     payable = ce.compute_commercial_totals(snap)["customerPayable"] if lead else 0
     # Over-payment guard (port of BusinessRulesService.validatePaymentAmount_): a receipt may
-    # never push total received above Customer Payable *by accident*. Provisional allowed only
-    # when payable is still ₹0 (slim booking, price deferred to Price Structure). Staff can
-    # deliberately record a surplus with allowExcess — it lands in Excess Received and is
-    # refundable, including after delivery or closure.
-    if payable > 0 and running > payable + 0.01 and not body.allowExcess:
+    # never push total received above Customer Payable. Provisional allowed only when payable is
+    # still ₹0 (slim booking, price deferred to Price Structure).
+    if payable > 0 and running > payable + 0.01:
         room = ce.round2(max(0.0, payable - (running - body.amount)))
-        raise HTTPException(422, f"Amount ₹{ce.round2(body.amount)} exceeds the balance. Customer payable is ₹{payable}; "
-                                 f"only ₹{room} can still be collected. Confirm it as an excess payment to record the surplus.")
+        raise HTTPException(422, f"Amount ₹{ce.round2(body.amount)} exceeds the balance. Customer payable is ₹{payable}; only ₹{room} can still be collected.")
     outstanding = ce.round2(max(0.0, payable - running)) if payable > 0 else 0.0
     finance_file_number = body.financeFileNumber
     if body.paymentMode == "Finance":
@@ -2928,82 +2900,6 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _money=
                       financeFileNumber=rec.get("financeFileNumber") or "",
                       new={"amount": rec.get("amount"), "mode": body.paymentMode, "runningTotal": rec.get("runningTotal")})
     return rec
-
-
-async def _refund_position(lead_id, lead=None):
-    """Money held above Customer Payable, and how much of it has been returned.
-
-    Excess is net of refunds because a refund is stored as a negative ledger row, so
-    the same number is both "surplus still held" and "still refundable".
-    """
-    lead = lead or await db.leads.find_one({"leadId": lead_id}) or {}
-    payable = ce.compute_commercial_totals(lead_to_snapshot(lead), await get_scheme_rows())["customerPayable"]
-    rows = await db.payments.find({"leadId": lead_id}).to_list(2000)
-    received = ce.round2(sum(ce.num(p.get("amount")) for p in rows))
-    refunded = ce.round2(sum(-ce.num(p.get("amount")) for p in rows if p.get("entryType") == "Refund"))
-    excess = ce.round2(max(0.0, received - payable)) if payable > 0 else 0.0
-    return {"customerPayable": ce.round2(payable), "totalReceived": received,
-            "refundedAmount": refunded, "excessReceived": excess}
-
-
-@api.get("/leads/{lead_id}/refund-position")
-async def get_refund_position(lead_id: str, _money=Depends(money_desk_only)):
-    lead = await get_lead_or_404(lead_id)
-    return await _refund_position(lead_id, lead)
-
-
-@api.post("/leads/{lead_id}/refund")
-async def refund_excess_payment(lead_id: str, body: RefundIn, act=Depends(actor), _money=Depends(money_desk_only)):
-    """Return surplus money to the customer as a negative ledger entry.
-
-    Deliberately NOT gated on lead status: an excess is the customer's money, so it
-    stays refundable after Mark Delivered and after the lead is closed. Capped at the
-    surplus so a refund can never re-open Customer Outstanding (which would silently
-    turn a delivered lead into a short payment).
-    """
-    lead = await get_lead_or_404(lead_id)
-    amount = ce.round2(body.amount)
-    if amount <= 0:
-        raise HTTPException(422, "Enter a valid refund amount")
-    pos = await _refund_position(lead_id, lead)
-    if pos["excessReceived"] <= 0:
-        raise HTTPException(422, "There is no excess payment on this lead to refund. Only money "
-                                 "collected above Customer Payable can be returned here.")
-    if amount > pos["excessReceived"] + 0.01:
-        raise HTTPException(422, f"Refund ₹{amount} is more than the excess held on this lead "
-                                 f"(₹{pos['excessReceived']}).")
-    refund_date = body.date or today()
-    recent = await db.payments.find_one(
-        {"leadId": lead_id, "entryType": "Refund", "amount": ce.round2(-amount)}, sort=[("_id", -1)])
-    if recent and recent.get("recordedAt"):
-        try:
-            if (datetime.now(timezone.utc) - datetime.fromisoformat(recent["recordedAt"])).total_seconds() < 4:
-                raise HTTPException(409, "Duplicate submission detected — this refund was just recorded.")
-        except HTTPException:
-            raise
-        except (TypeError, ValueError):
-            pass
-    entry_id = await next_id("refund", "RF26")
-    running = ce.round2(pos["totalReceived"] - amount)
-    narration = (body.narration or "").strip() or "Refund of excess payment"
-    if body.reference.strip():
-        narration = f"{narration} · Ref {body.reference.strip()}"
-    doc = {
-        "receiptNumber": entry_id, "leadId": lead_id, "customerName": lead.get("customerName", ""),
-        "date": refund_date, "amount": ce.round2(-amount), "paymentMode": body.paymentMode,
-        "entryType": "Refund", "narration": narration, "runningTotal": running,
-        "outstandingBalance": ce.round2(max(0.0, pos["customerPayable"] - running)),
-        "paymentId": f"RF{uuid.uuid4().hex[:12]}", "financerName": "", "financeFileNumber": "",
-        "refundReference": body.reference.strip(), "recordedAt": now_iso(),
-    }
-    await db.payments.insert_one(doc)
-    await sheet_sync("payments", doc)
-    await recompute_lead(lead_id)
-    await _refresh_billing_summary_if_delivered(lead_id)
-    await write_audit(act, "refund", "payment", leadId=lead_id, paymentId=entry_id,
-                      old={"totalReceived": pos["totalReceived"], "excessReceived": pos["excessReceived"]},
-                      new={"amount": amount, "mode": body.paymentMode, "runningTotal": running})
-    return {"refund": clean(doc), **(await _refund_position(lead_id))}
 
 
 # ---------------------------------------------------------------- finance
@@ -3227,9 +3123,6 @@ class ReceiptIn(BaseModel):
     reference: str = ""
 
 
-FINANCE_RECEIPT_DEDUPE_SECONDS = 10
-
-
 @api.post("/finance/{file_number}/receipt")
 async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends(actor), _money=Depends(money_desk_only)):
     """Record money actually disbursed by the financer against a file. Does NOT change customer outstanding."""
@@ -3239,42 +3132,19 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
     if body.amount <= 0:
         raise HTTPException(422, "Enter a valid receipt amount")
     committed = ce.num(f.get("sanctionedAmount"))
-    amount = ce.round2(body.amount)
-    receipt_date = body.date or today()
-    # A double-click posted this twice: the receipts array grew two identical entries
-    # and receivedAgainstFile doubled, while the Finance tab (upsert keyed on file
-    # number) still showed one row — so the app looked wrong and the sheet looked right.
-    for prior in reversed(f.get("receipts") or []):
-        if ce.round2(ce.num(prior.get("amount"))) != amount or str(prior.get("date") or "") != receipt_date:
-            continue
-        try:
-            prev_at = datetime.fromisoformat(prior["recordedAt"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if (datetime.now(timezone.utc) - prev_at).total_seconds() < FINANCE_RECEIPT_DEDUPE_SECONDS:
-            raise HTTPException(409, "Duplicate submission detected — this financer receipt was just "
-                                     "recorded. Open the file to confirm before recording it again.")
-    received = ce.round2(ce.num(f.get("receivedAgainstFile")) + amount)
-    # Even a late double-click must not book more than the financer committed. Without
-    # this the file read as fully disbursed on half the money (outstanding forced to 0).
-    if committed > 0 and received > committed + 0.01:
-        room = ce.round2(max(0.0, committed - ce.num(f.get("receivedAgainstFile"))))
-        raise HTTPException(422, f"Receipt ₹{amount} is more than this file still expects. "
-                                 f"Committed ₹{ce.round2(committed)}, already received "
-                                 f"₹{ce.round2(ce.num(f.get('receivedAgainstFile')))} — only ₹{room} can be booked. "
-                                 f"Add the extra commitment on the lead first if the financer disbursed more.")
+    received = ce.round2(ce.num(f.get("receivedAgainstFile")) + body.amount)
     outstanding = ce.round2(max(0.0, committed - received))
-    receipt = {"amount": amount, "date": receipt_date,
+    receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
                "reference": body.reference, "recordedAt": now_iso()}
     await db.finance.update_one({"fileNumber": file_number}, {
         "$set": {"receivedAgainstFile": received, "fileOutstanding": outstanding,
                  "status": "Received" if outstanding <= 0 else "Partial",
-                 "lastPaymentDate": receipt_date, "lastUpdated": today()},
+                 "lastPaymentDate": body.date or today(), "lastUpdated": today()},
         "$push": {"receipts": receipt},
     })
     await write_audit(act, "receipt", "finance", leadId=f.get("leadId", ""), financeFileNumber=file_number,
                       old={"receivedAgainstFile": ce.num(f.get("receivedAgainstFile")), "fileOutstanding": ce.num(f.get("fileOutstanding"))},
-                      new={"receivedAgainstFile": received, "fileOutstanding": outstanding, "amount": amount})
+                      new={"receivedAgainstFile": received, "fileOutstanding": outstanding, "amount": ce.round2(body.amount)})
     await sync_finance_file(file_number)
     await rebuild_finance_views()
     return clean(await db.finance.find_one({"fileNumber": file_number}))
@@ -5619,80 +5489,6 @@ async def startup():
         await _backfill_booking_advances()
     except Exception:
         pass
-    # Finance files that recorded one disbursement twice before the dedupe guard.
-    try:
-        await _repair_duplicate_finance_receipts()
-    except Exception:
-        logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
-
-
-def _dedupe_finance_receipts(receipts):
-    """Drop receipts that are the same disbursement posted twice.
-
-    Same amount + same date + same reference recorded within two minutes of each
-    other is a double submit, not two tranches — a financer paying the same amount
-    twice in one day is recorded by staff minutes apart at best, and the entries
-    carry distinct references.
-    """
-    kept = []
-    for r in receipts or []:
-        dup = False
-        for k in kept:
-            if ce.round2(ce.num(k.get("amount"))) != ce.round2(ce.num(r.get("amount"))):
-                continue
-            if str(k.get("date") or "") != str(r.get("date") or ""):
-                continue
-            if str(k.get("reference") or "").strip() != str(r.get("reference") or "").strip():
-                continue
-            try:
-                gap = abs((datetime.fromisoformat(r["recordedAt"])
-                           - datetime.fromisoformat(k["recordedAt"])).total_seconds())
-            except (KeyError, TypeError, ValueError):
-                gap = 0.0
-            if gap <= 120:
-                dup = True
-                break
-        if not dup:
-            kept.append(r)
-    return kept
-
-
-async def _repair_duplicate_finance_receipts():
-    """Heal finance files whose receipts were double-posted before the guard existed.
-
-    Recomputes receivedAgainstFile / fileOutstanding / status from the deduplicated
-    receipts so the app stops showing a disbursement twice (the Google Sheet always
-    showed one row because that sync upserts on file number). Idempotent.
-    """
-    repaired = []
-    for f in await db.finance.find().to_list(5000):
-        receipts = f.get("receipts") or []
-        kept = _dedupe_finance_receipts(receipts)
-        if len(kept) == len(receipts):
-            continue
-        committed = ce.num(f.get("sanctionedAmount"))
-        received = ce.round2(sum(ce.num(r.get("amount")) for r in kept))
-        outstanding = ce.round2(max(0.0, committed - received))
-        await db.finance.update_one({"fileNumber": f["fileNumber"]}, {"$set": {
-            "receipts": kept, "receivedAgainstFile": received, "fileOutstanding": outstanding,
-            "status": ("Received" if committed > 0 and outstanding <= 0
-                       else ("Partial" if received > 0 else "Pending")),
-            "lastUpdated": today(),
-        }})
-        await sync_finance_file(f["fileNumber"])
-        repaired.append({"fileNumber": f["fileNumber"], "removed": len(receipts) - len(kept),
-                         "receivedAgainstFile": received, "fileOutstanding": outstanding})
-    if repaired:
-        logger.info("FINANCE_RECEIPT_DEDUPE: repaired %s", repaired)
-        await rebuild_finance_views()
-    return repaired
-
-
-@api.post("/finance/repair-duplicate-receipts", dependencies=[Depends(owner_only)])
-async def repair_duplicate_finance_receipts():
-    """Owner action for files that were already double-posted (e.g. FN26000101)."""
-    repaired = await _repair_duplicate_finance_receipts()
-    return {"ok": True, "filesRepaired": len(repaired), "files": repaired}
 
 
 async def _backfill_booking_advances():
