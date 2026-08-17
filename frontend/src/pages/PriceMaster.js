@@ -1,17 +1,10 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put, del } from "../lib/api";
+import { get, del } from "../lib/api";
 import { inr } from "../lib/format";
-import { PageHeader, Table, Badge, Select, Button, Drawer, Field, Input } from "../components/ui";
-
-const FIELDS = [
-  ["model", "Model", "text"], ["variant", "Variant", "text"], ["bodyType", "Body Type", "text"],
-  ["exShowroom", "Ex-Showroom", "number"], ["rto", "RTO", "number"], ["insurance", "Insurance", "number"],
-  ["accessories", "Accessories", "number"], ["handlingCharges", "Handling", "number"], ["trc", "TRC", "number"],
-  ["fastag", "Fastag", "number"], ["extendedWarranty", "Ext. Warranty", "number"], ["otherCharges", "Other", "number"],
-  ["gstPercent", "GST %", "number"], ["priceVersion", "Price Version", "text"],
-];
+import { PageHeader, Table, Badge, Select, Button } from "../components/ui";
+import { PriceRowDrawer } from "../components/PriceRowDrawer";
 
 export default function PriceMaster() {
   const [rows, setRows] = useState([]);
@@ -51,36 +44,7 @@ export default function PriceMaster() {
         ]}
         rows={rows}
       />
-      {edit && <EditDrawer row={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
+      {edit && <PriceRowDrawer row={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
     </div>
-  );
-}
-
-function EditDrawer({ row, onClose, onSaved }) {
-  const isNew = !row.priceId;
-  const [form, setForm] = useState(() => {
-    const f = { tcsApplicable: row.tcsApplicable || "No", status: row.status || "active" };
-    FIELDS.forEach(([k, , t]) => (f[k] = row[k] ?? (t === "number" ? 0 : "")));
-    return f;
-  });
-  const set = (k, t) => (e) => setForm((f) => ({ ...f, [k]: t === "number" ? e.target.value : e.target.value }));
-  const save = async () => {
-    if (!form.model || !form.variant) return toast.error("Model & Variant required");
-    const body = { ...form };
-    FIELDS.forEach(([k, , t]) => { if (t === "number") body[k] = +form[k]; });
-    try {
-      if (isNew) await post("/price-master", body); else await put(`/price-master/${row.priceId}`, body);
-      toast.success(isNew ? "Row added" : "Row updated"); onSaved();
-    } catch { toast.error("Save failed"); }
-  };
-  return (
-    <Drawer open onClose={onClose} width="max-w-xl" title={isNew ? "Add Price Row" : "Edit Price Row"}
-      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-price-row-btn" onClick={save}>Save</Button></div>}>
-      <div className="grid grid-cols-2 gap-3">
-        {FIELDS.map(([k, label, t]) => <Field key={k} label={label}><Input data-testid={`pm-${k}`} type={t} value={form[k]} onChange={set(k, t)} /></Field>)}
-        <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={(e) => setForm({ ...form, tcsApplicable: e.target.value })}><option>No</option><option>Yes</option></Select></Field>
-        <Field label="Status"><Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option>active</option><option>inactive</option></Select></Field>
-      </div>
-    </Drawer>
   );
 }
