@@ -27,6 +27,13 @@ import openpyxl  # noqa: E402
 import server  # noqa: E402
 
 HEADERS = [label for label, _ in server.IMPORT_COLUMNS]
+OWNER_EMAIL = "upload-owner@euler.com"
+OWNER_PASSWORD = "upload-owner-pass"
+# The database the auth router captured at import time — users must be written here.
+# Not client[DB_NAME]: another test module reassigns DB_NAME, so that lookup can point
+# at a different database than the one auth actually reads. Captured at import, before
+# any fixture repoints server.db.
+AUTH_DB = server.db
 
 
 def _csv(rows):
@@ -68,10 +75,18 @@ async def client(monkeypatch):
         {"priceId": "PM3", "model": "Storm EV", "variant": "Storm (PV)", "exShowroom": 640000, "status": "Active"},
     ])
     monkeypatch.setattr(server, "db", isolated)
-    await server.authmod.seed_users(server.client[os.environ["DB_NAME"]])
+    await server.authmod.seed_users(AUTH_DB)
+    # Own owner account: the shared owner password is rotated by the change-password
+    # tests, and seed_users deliberately never resets an existing owner.
+    await AUTH_DB.users.update_one(
+        {"email": OWNER_EMAIL},
+        {"$set": {"email": OWNER_EMAIL, "name": "Upload Owner", "role": "owner",
+                  "userId": "upload-owner", "passwordHash": server.authmod.hash_password(OWNER_PASSWORD)}},
+        upsert=True)
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
-        r = await c.post("/api/auth/login", json={"email": "owner@euler.com", "password": "euler@123"})
+        r = await c.post("/api/auth/login", json={"email": OWNER_EMAIL, "password": OWNER_PASSWORD})
+        assert r.status_code == 200, r.text
         c.headers["Authorization"] = f"Bearer {r.json()['token']}"
         yield c
 
@@ -157,7 +172,13 @@ async def test_downloaded_template_uploads_without_column_mapping(client):
 
 @pytest.mark.asyncio
 async def test_template_needs_sales_role(client):
-    r = await client.post("/api/auth/login", json={"email": "asm@euler.com", "password": "euler@123"})
+    await AUTH_DB.users.update_one(
+        {"email": "upload-asm@euler.com"},
+        {"$set": {"email": "upload-asm@euler.com", "name": "Upload ASM", "role": "asm",
+                  "userId": "upload-asm", "passwordHash": server.authmod.hash_password(OWNER_PASSWORD)}},
+        upsert=True)
+    r = await client.post("/api/auth/login", json={"email": "upload-asm@euler.com", "password": OWNER_PASSWORD})
+    assert r.status_code == 200, r.text
     asm = {"Authorization": f"Bearer {r.json()['token']}"}
     assert (await client.get("/api/leads/import/template", headers=asm)).status_code == 403
 

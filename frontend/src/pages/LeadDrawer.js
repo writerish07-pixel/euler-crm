@@ -770,28 +770,59 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
-  const add = async () => {
+  const excess = +(lead.excessReceived || 0);
+  const refunded = +(lead.refundedAmount || 0);
+  const add = async (allowExcess = false) => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     if (!form.date) return toast.error("Payment date is required");
     // The backend requires a financer on Finance receipts (it is what resolves/creates the
     // finance file). Ask for it here so staff get a clear prompt instead of a raw 422.
     if (isFinance && !form.financerName) return toast.error("Select a Financer for a Finance receipt");
-    const saved = await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount });
-    const file = saved?.financeFileNumber ? ` · Finance File ${saved.financeFileNumber}` : "";
-    toast.success(`Receipt added · ${inr(+form.amount)}${file}`);
-    setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
-    onSaved();
+    try {
+      const saved = await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount, allowExcess });
+      const file = saved?.financeFileNumber ? ` · Finance File ${saved.financeFileNumber}` : "";
+      toast.success(`Receipt added · ${inr(+form.amount)}${file}`);
+      setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
+      onSaved();
+    } catch (e) {
+      const detail = e?.response?.data?.detail || "Could not add receipt";
+      // Over-payment is allowed, but only once staff confirm it is deliberate.
+      if (!allowExcess && /excess payment/i.test(detail)) {
+        if (window.confirm(`${detail}\n\nRecord ₹${+form.amount} anyway and hold the surplus as excess?`)) {
+          return add(true);
+        }
+        return undefined;
+      }
+      toast.error(detail);
+    }
+    return undefined;
   };
   return (
     <div>
       {locked && <StepLock text={isFinance ? "This lead is archived — no receipts allowed." : "This lead is not Active — only Finance receipts are allowed."} />}
+      {(excess > 0 || refunded > 0) && (
+        <Card className="p-4 mb-4 border-amber-200 bg-amber-50/60" data-testid="excess-panel">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-ink">
+                Excess held: <span className="font-mono text-amber-700">{inr(excess)}</span>
+              </div>
+              <div className="text-xs text-ink-soft mt-0.5">
+                {refunded > 0 ? `${inr(refunded)} already refunded · ` : ""}
+                Money collected above Customer Payable. Refundable even after delivery or closure.
+              </div>
+            </div>
+          </div>
+          {excess > 0 && <RefundForm lead={lead} excess={excess} onSaved={onSaved} />}
+        </Card>
+      )}
       <Card className="p-4 mb-4">
         <div className="grid grid-cols-5 gap-3 items-end">
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
           <Field label="Date"><Input data-testid="payment-date" type="date" value={form.date} onChange={set("date")} /></Field>
           <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{(masters?.paymentModes || []).map((m) => <option key={m}>{m}</option>)}</Select></Field>
           <Field label="Narration"><Input value={form.narration} onChange={set("narration")} /></Field>
-          <Button data-testid="add-payment-btn" onClick={add} disabled={locked}><Wallet size={15} /> Add Receipt</Button>
+          <Button data-testid="add-payment-btn" onClick={() => add(false)} disabled={locked}><Wallet size={15} /> Add Receipt</Button>
         </div>
         {form.paymentMode === "Finance" && (
           <div className="grid grid-cols-2 gap-3 mt-3">
@@ -802,19 +833,65 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
       </Card>
       <div className="space-y-2">
         {payments.length === 0 && <div className="text-sm text-ink-faint text-center py-6">No payments recorded yet</div>}
-        {payments.map((p) => (
-          <div key={p.receiptNumber} className="flex items-center justify-between bg-white border border-line rounded-lg px-4 py-2.5">
-            <div>
-              <div className="text-sm font-semibold text-ink">{inr(p.amount)} <Badge className="ml-1">{p.paymentMode}</Badge></div>
-              <div className="text-xs text-ink-faint">{p.receiptNumber} · {fmtDate(p.date)} · {p.narration || "—"}{p.financeFileNumber ? ` · ${p.financeFileNumber}` : ""}</div>
+        {payments.map((p) => {
+          const isRefund = p.entryType === "Refund";
+          return (
+            <div key={p.receiptNumber} className={`flex items-center justify-between border rounded-lg px-4 py-2.5 ${isRefund ? "border-amber-200 bg-amber-50/50" : "border-line bg-white"}`}>
+              <div>
+                <div className={`text-sm font-semibold ${isRefund ? "text-amber-700" : "text-ink"}`}>
+                  {inr(p.amount)}
+                  <Badge className="ml-1">{isRefund ? "Refund" : p.paymentMode}</Badge>
+                  {isRefund && p.paymentMode ? <span className="text-xs text-ink-faint ml-1">via {p.paymentMode}</span> : null}
+                </div>
+                <div className="text-xs text-ink-faint">{p.receiptNumber} · {fmtDate(p.date)} · {p.narration || "—"}{p.financeFileNumber ? ` · ${p.financeFileNumber}` : ""}</div>
+              </div>
+              <div className="text-right text-xs text-ink-soft">
+                <div>Running: <span className="font-mono">{inr(p.runningTotal)}</span></div>
+                <div>Balance: <span className="font-mono">{inr(p.outstandingBalance)}</span></div>
+              </div>
             </div>
-            <div className="text-right text-xs text-ink-soft">
-              <div>Running: <span className="font-mono">{inr(p.runningTotal)}</span></div>
-              <div>Balance: <span className="font-mono">{inr(p.outstandingBalance)}</span></div>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+    </div>
+  );
+}
+
+/** Refund of surplus money. Not gated on delivery/closure — the excess is the
+ *  customer's money, so it must be returnable at any point. */
+function RefundForm({ lead, excess, onSaved }) {
+  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", date: todayISO(), reference: "", narration: "" });
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const submit = async () => {
+    if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid refund amount");
+    if (+form.amount > excess + 0.01) return toast.error(`Only ${inr(excess)} is available to refund`);
+    if (!form.date) return toast.error("Refund date is required");
+    setBusy(true);
+    try {
+      await post(`/leads/${lead.leadId}/refund`, { ...form, amount: +form.amount });
+      toast.success(`Refund recorded · ${inr(+form.amount)}`);
+      setForm({ amount: "", paymentMode: "Cash", date: todayISO(), reference: "", narration: "" });
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Refund failed");
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 items-end mt-4 pt-4 border-t border-amber-200">
+      <Field label="Refund (₹)">
+        <Input data-testid="refund-amount" type="number" value={form.amount} onChange={set("amount")} placeholder={String(excess)} />
+      </Field>
+      <Field label="Date"><Input data-testid="refund-date" type="date" value={form.date} onChange={set("date")} /></Field>
+      <Field label="Mode">
+        <Select data-testid="refund-mode" value={form.paymentMode} onChange={set("paymentMode")}>
+          {["Cash", "UPI", "Cheque", "NEFT"].map((m) => <option key={m}>{m}</option>)}
+        </Select>
+      </Field>
+      <Field label="Reference / UTR"><Input value={form.reference} onChange={set("reference")} /></Field>
+      <Button data-testid="refund-btn" onClick={submit} disabled={busy}>
+        <ArrowRightLeft size={15} /> {busy ? "Refunding…" : "Refund Excess"}
+      </Button>
     </div>
   );
 }
