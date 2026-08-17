@@ -44,15 +44,18 @@ def exec_token():
     return r.json()["token"]
 
 
+# Bulk import validates Executive against Settings and Interested Model against
+# Price Master, so these fixtures must use values the live app actually has —
+# an unknown name/model is reported and skipped instead of imported.
 CUSTOM_CSV = (
     "Name,Phone,Town,Vehicle,Sales Person,Budget\n"
-    "Mohan Lal,9811110001,Jaipur,Turbo Max,TEST_Sam,220000\n"
-    "Sita Rani,9811110002,Kota,HiLoad EV,TEST_Sam,280000\n"
+    "Mohan Lal,9811110001,Jaipur,Turbo Max,Amit,220000\n"
+    "Sita Rani,9811110002,Kota,Turbo Max,Amit,280000\n"
 ).encode()
 
 STD_CSV = (
     "Customer Name,Mobile,City,Interested Model,Executive,Budget\n"
-    "TEST_Std_A,9711110001,Delhi,Turbo Max,TEST_Sam,190000\n"
+    "TEST_Std_A,9711110001,Delhi,Turbo Max,Amit,190000\n"
 ).encode()
 
 MAPPING = {

@@ -5,6 +5,8 @@ pymongo==4.5.0
 motor==3.3.1
 pydantic>=2.6.4
 python-multipart>=0.0.9
+# Lead bulk upload (template + .xlsx parsing) and GET /api/export.
+openpyxl>=3.1.2
 
 bcrypt>=4.1.2
 PyJWT>=2.8.0

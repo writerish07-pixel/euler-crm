@@ -40,6 +40,8 @@ def H(tok):
     return {"Authorization": f"Bearer {tok}"}
 
 
+# Bulk import validates Executive against Settings masters and Interested Model
+# against Price Master, so fixtures use values the live app actually has.
 CSV_HEADERS = "Customer Name,Mobile,City,Interested Model,Executive,Budget\n"
 
 
@@ -149,9 +151,9 @@ class TestLeadImport:
 
     def test_preview_csv(self, owner_token):
         data = _csv_bytes([
-            ["TEST_Imp_Alice", "9111111111", "Delhi", "Turbo Max", "TEST_Exec", 250000],
-            ["TEST_Imp_Bob", "9222222222", "Mumbai", "HiLoad EV", "TEST_Exec", 300000],
-            ["", "9333333333", "Chennai", "Turbo Max", "TEST_Exec", 200000],  # skipped no name
+            ["TEST_Imp_Alice", "9111111111", "Delhi", "Turbo Max", "Amit", 250000],
+            ["TEST_Imp_Bob", "9222222222", "Mumbai", "Turbo Max", "Amit", 300000],
+            ["", "9333333333", "Chennai", "Turbo Max", "Amit", 200000],  # skipped no name
         ])
         r = requests.post(f"{API}/leads/import/preview", headers=H(owner_token),
                           files={"file": ("leads.csv", data, "text/csv")})
@@ -164,13 +166,13 @@ class TestLeadImport:
         assert s0["mobile"] == "9111111111"
         assert s0["city"] == "Delhi"
         assert s0["interestedModel"] == "Turbo Max"
-        assert s0["executive"] == "TEST_Exec"
+        assert s0["executive"] == "Amit"
         assert float(s0["budget"]) == 250000
 
     def test_commit_csv(self, owner_token):
         data = _csv_bytes([
-            ["TEST_Imp_Csv_A", "9444444441", "Pune", "Turbo Max", "TEST_Exec", 100000],
-            ["TEST_Imp_Csv_B", "9444444442", "Pune", "HiLoad EV", "TEST_Exec", 150000],
+            ["TEST_Imp_Csv_A", "9444444441", "Pune", "Turbo Max", "Amit", 100000],
+            ["TEST_Imp_Csv_B", "9444444442", "Pune", "Turbo Max", "Amit", 150000],
         ])
         r = requests.post(f"{API}/leads/import/commit", headers=H(owner_token),
                           files={"file": ("leads.csv", data, "text/csv")})
@@ -191,8 +193,8 @@ class TestLeadImport:
 
     def test_commit_xlsx(self, owner_token):
         data = _xlsx_bytes([
-            ["TEST_Imp_Xlsx_A", 9555555551, "Bengaluru", "Turbo Max", "TEST_Exec", 175000],
-            ["", 9555555552, "Bengaluru", "HiLoad EV", "TEST_Exec", 175000],  # skipped
+            ["TEST_Imp_Xlsx_A", 9555555551, "Bengaluru", "Turbo Max", "Amit", 175000],
+            ["", 9555555552, "Bengaluru", "Turbo Max", "Amit", 175000],  # skipped
         ])
         # preview
         rp = requests.post(f"{API}/leads/import/preview", headers=H(owner_token),
