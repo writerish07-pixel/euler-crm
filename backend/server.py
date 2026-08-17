@@ -2690,7 +2690,10 @@ async def import_template(_sales=Depends(sales_staff_only)):
     for field, list_title in dropdown_fields.items():
         # showDropDown is intentionally left unset: in OOXML a truthy value HIDES
         # the in-cell arrow, which is the opposite of what the name suggests.
-        dv = DataValidation(type="list", formula1=list_ranges[list_title], allow_blank=True)
+        # showErrorMessage must be on or Excel keeps the list as a hint only and
+        # silently accepts a typed value.
+        dv = DataValidation(type="list", formula1=list_ranges[list_title], allow_blank=True,
+                            showErrorMessage=True, showInputMessage=True, errorStyle="stop")
         dv.errorTitle = "Not a Euler CRM value"
         dv.error = f"Pick from the {list_title} list on the Lists sheet."
         dv.promptTitle = list_title
@@ -2699,15 +2702,13 @@ async def import_template(_sales=Depends(sales_staff_only)):
         col = field_col[field]
         dv.add(f"{col}2:{col}{LAST_ROW}")
 
+    # Column-level formats: setting these per cell would materialise 500 blank rows
+    # into the sheet the user opens (and inflate the file).
     for field in IMPORT_DATE_FIELDS:
-        col = field_col[field]
-        for r in range(2, LAST_ROW + 1):
-            ws[f"{col}{r}"].number_format = "yyyy-mm-dd"
+        ws.column_dimensions[field_col[field]].number_format = "yyyy-mm-dd"
     # Text format keeps a 10-digit mobile from becoming 9.8e+09.
     for field in ("mobile", "altMobile"):
-        col = field_col[field]
-        for r in range(2, LAST_ROW + 1):
-            ws[f"{col}{r}"].number_format = "@"
+        ws.column_dimensions[field_col[field]].number_format = "@"
 
     guide_lines = [
         ("Euler CRM — bulk lead upload", True),

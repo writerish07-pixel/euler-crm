@@ -94,6 +94,10 @@ async def test_template_has_dropdowns_from_live_masters(client):
     for dv in leads.data_validations.dataValidation:
         assert dv.type == "list"
         assert dv.formula1.startswith("=Lists!")
+        # Without showErrorMessage the list is only a hint and Excel accepts a
+        # typed value; showDropDown must stay falsey or the arrow is hidden.
+        assert dv.showErrorMessage is True and dv.errorStyle == "stop"
+        assert not dv.showDropDown
         validated.update(str(sqref) for sqref in dv.sqref.ranges)
     assert len(validated) == 8, validated
 
@@ -111,6 +115,44 @@ async def test_template_has_dropdowns_from_live_masters(client):
     # Valid model+variant pairs are listed because validation cannot be dependent.
     assert ("Turbo Max", "Maxx (PV)") in list(zip(by_title["Valid Model"],
                                                   by_title["Valid Variant for that Model"]))
+
+
+@pytest.mark.asyncio
+async def test_downloaded_template_uploads_without_column_mapping(client):
+    """Round trip: the file we hand out must import as-is, with no mapping step."""
+    tpl = await client.get("/api/leads/import/template")
+    wb = openpyxl.load_workbook(io.BytesIO(tpl.content))
+    ws = wb["Leads"]
+    assert ws.max_row == 1, "template must ship empty so a sample row is never imported"
+
+    lists = {c[0].value: [x.value for x in c[1:] if x.value]
+             for c in wb["Lists"].iter_cols(min_row=1, max_row=wb["Lists"].max_row) if c[0].value}
+    picked = {
+        "Lead Source": lists["Lead Source"][0],
+        "Executive": lists["Executive"][0],
+        "Interested Model": "Turbo Max",
+        "Variant": "Maxx (PV)",
+        "Priority": lists["Priority"][0],
+        "Current Status": lists["Current Status"][0],
+        "Finance Required": "Yes",
+        "Exchange Required": "No",
+    }
+    row = {"Customer Name": "Round Trip", "Mobile": "9800000099", "City": "Jaipur",
+           "Lead Date": "2026-08-12", **picked}
+    ws.append([row.get(label, "") for label in HEADERS])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    r = await client.post("/api/leads/import/commit", files={
+        "file": ("filled.xlsx", buf.getvalue(),
+                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert r.status_code == 200, r.text
+    assert (r.json()["created"], r.json()["skipped"]) == (1, 0), r.json()
+    lead = await server.db.leads.find_one({"customerName": "Round Trip"})
+    assert lead["leadSource"] == picked["Lead Source"]
+    assert lead["executive"] == picked["Executive"]
+    assert lead["financeRequired"] == "Yes"
+    assert lead["createdDate"] == "2026-08-12"
 
 
 @pytest.mark.asyncio
