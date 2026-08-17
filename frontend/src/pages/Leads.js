@@ -41,6 +41,13 @@ export default function Leads() {
     ...(!isField ? [
       { key: "customerPayable", label: "Payable", align: "right", mono: true, render: (r) => inr(r.customerPayable) },
       { key: "customerOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.customerOutstanding > 0 ? "text-red-600 font-semibold" : "text-emerald-600"}>{inr(r.customerOutstanding)}</span> },
+      // Money held above Customer Payable, and what has already gone back.
+      { key: "excessReceived", label: "Excess / Refund", align: "right", mono: true, render: (r) => (
+        <div className="text-xs">
+          <div className={r.excessReceived > 0 ? "text-amber-700 font-semibold" : "text-ink-faint"}>{inr(r.excessReceived || 0)}</div>
+          {r.refundedAmount > 0 && <div className="text-ink-faint">refunded {inr(r.refundedAmount)}</div>}
+        </div>
+      )},
     ] : []),
     { key: "go", label: "", align: "right", render: () => <ChevronRight size={16} className="text-ink-faint inline" /> },
   ];
