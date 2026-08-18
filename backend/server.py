@@ -5319,10 +5319,38 @@ async def botspace_run_jobs():
     return await wa.run_daily_jobs()
 
 
+class GoogleReviewIn(BaseModel):
+    force: bool = False
+
+
+@api.post("/integrations/botspace/send-delivery-reviews", dependencies=[Depends(owner_only)])
+async def botspace_send_delivery_reviews(body: Optional[GoogleReviewIn] = None):
+    """Owner: send Google-review WhatsApp to all delivered Euler leads not yet messaged."""
+    force = bool(body and body.force)
+    return await wa.send_delivery_reviews(force=force, immediate=True)
+
+
 @api.get("/leads/{lead_id}/whatsapp")
 async def lead_whatsapp_thread(lead_id: str):
     await get_lead_or_404(lead_id)
     return await wa.list_thread(lead_id)
+
+
+@api.post("/leads/{lead_id}/whatsapp/google-review")
+async def lead_whatsapp_google_review(lead_id: str, body: Optional[GoogleReviewIn] = None):
+    """Send delivery + Google review template to this lead. Lead must be Delivered."""
+    await get_lead_or_404(lead_id)
+    force = bool(body and body.force)
+    res = await wa.notify_delivery(lead_id, force=force, immediate=True)
+    if res.get("reason") == "not-delivered":
+        raise HTTPException(422, "Mark the lead Delivered before sending a Google review WhatsApp")
+    if res.get("reason") == "opted-out":
+        raise HTTPException(422, "Customer sent STOP — review WhatsApp will not be sent")
+    if res.get("reason") == "whatsapp-not-configured":
+        raise HTTPException(422, "WhatsApp is not configured. Owner: Settings → WhatsApp (BotSpace).")
+    if not res.get("ok") and not res.get("skipped"):
+        raise HTTPException(502, res.get("reason") or res.get("error") or "WhatsApp send failed")
+    return res
 
 
 @api.post("/leads/{lead_id}/whatsapp/reply")

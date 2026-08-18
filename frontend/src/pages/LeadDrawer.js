@@ -900,6 +900,37 @@ function RefundForm({ lead, excess, onSaved }) {
 }
 
 /* -------------------------------------------------- Delivery */
+function GoogleReviewSend({ leadId, already, onSent }) {
+  const [busy, setBusy] = useState(false);
+  const send = async (force) => {
+    setBusy(true);
+    try {
+      const r = await post(`/leads/${leadId}/whatsapp/google-review`, { force: !!force });
+      if (r.skipped) toast.success("Google review WhatsApp was already sent");
+      else toast.success("Google review WhatsApp sent");
+      if (onSent) onSent();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not send Google review WhatsApp");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card className="p-4 mt-4 mb-2" data-testid="delivery-google-review">
+      <div className="font-heading font-bold text-ink text-sm">Google review WhatsApp</div>
+      <p className="text-xs text-ink-soft mt-1 mb-3">
+        Send the delivered + Google review template to this customer’s WhatsApp.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button data-testid="delivery-send-review-btn" onClick={() => send(false)} disabled={busy}>
+          {busy ? "Sending…" : already ? "Already sent" : "Send Google review"}
+        </Button>
+        {already && <Button variant="secondary" onClick={() => send(true)} disabled={busy}>Send again</Button>}
+      </div>
+    </Card>
+  );
+}
+
 const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
 function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
@@ -971,6 +1002,10 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
         </Field>
       </div>
       <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save} disabled={locked || (!alreadyDelivered && !canMarkDelivered)}>Save Delivery</Button></div>
+
+      {alreadyDelivered && (
+        <GoogleReviewSend leadId={lead.leadId} already={!!lead.whatsappDeliverySentAt} onSent={onSaved} />
+      )}
 
       {alreadyDelivered && (
         <div className="mt-6" data-testid="billing-summary-section">

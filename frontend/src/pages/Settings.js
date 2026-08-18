@@ -304,6 +304,7 @@ function BotspaceCard() {
   });
   const [execs, setExecs] = useState([]);
   const [busy, setBusy] = useState(false);
+  const [reviewBusy, setReviewBusy] = useState(false);
 
   const load = useCallback(() => {
     get("/integrations/botspace").then((d) => {
@@ -348,6 +349,19 @@ function BotspaceCard() {
       toast.success(`Jobs ran — follow-ups ${r.follow?.sent || 0}, finance ${r.finance?.sent || 0}`);
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Job failed");
+    }
+  };
+
+  const sendReviews = async () => {
+    if (!window.confirm("Send the Google review WhatsApp to every delivered Euler lead that has not received it yet? Already-sent leads are skipped.")) return;
+    setReviewBusy(true);
+    try {
+      const r = await post("/integrations/botspace/send-delivery-reviews", { force: false });
+      toast.success(`Google review WhatsApp: sent ${r.sent || 0}, already sent ${r.skipped || 0}, failed ${r.failed || 0}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not send Google review messages");
+    } finally {
+      setReviewBusy(false);
     }
   };
 
@@ -410,8 +424,14 @@ function BotspaceCard() {
       <div className="flex flex-wrap gap-2 mt-4">
         <Button data-testid="botspace-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save WhatsApp settings"}</Button>
         <Button variant="secondary" onClick={runJobs}>Run follow-up jobs now</Button>
+        <Button variant="secondary" data-testid="send-all-delivery-reviews-btn" onClick={sendReviews} disabled={reviewBusy}>
+          {reviewBusy ? "Sending…" : "Send Google review to delivered leads"}
+        </Button>
         <span className="text-xs text-ink-faint self-center">{cfg?.configured ? "Configured" : "Needs API key + channel ID"}</span>
       </div>
+      <p className="text-xs text-ink-faint mt-2">
+        Bulk send covers already-delivered Euler leads that never got the review WhatsApp. Future Mark Delivered still sends automatically.
+      </p>
     </Card>
   );
 }

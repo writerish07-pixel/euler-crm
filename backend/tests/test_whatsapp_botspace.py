@@ -43,6 +43,10 @@ def test_phone_and_followup_rules():
     }, "2026-08-18")
     assert wa.inbound_is_stop("STOP")
     assert wa.inbound_is_stop("stop please")
+    assert wa.lead_is_delivered({"currentStatus": "Delivered"})
+    assert wa.lead_is_delivered({"deliveryStatus": "Delivered", "currentStatus": "Booked"})
+    assert not wa.lead_is_delivered({"currentStatus": "Booked"})
+    assert not wa.lead_is_delivered({"currentStatus": "Delivery pending"})
     recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     assert wa.session_open(recent)
     old = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
@@ -167,3 +171,120 @@ async def test_settings_masks_key(client):
     assert r.json()["channelId"] == "chan-1"
     got = await client.get("/api/integrations/botspace")
     assert "secret_key_value" not in got.text
+
+
+async def _seed_delivered(lead_id, **extra):
+    doc = {
+        "leadId": lead_id, "customerName": "Lal Chand Sharma", "mobile": "9988776655",
+        "accountStatus": "Active", "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "deliveryDate": "2026-08-10", "interestedModel": "Turbo Max", "executive": "Amit",
+    }
+    doc.update(extra)
+    await server.db.leads.insert_one(doc)
+    return doc
+
+
+async def _enable_whatsapp(client):
+    r = await client.put("/api/integrations/botspace", json={
+        "apiKey": "botspace_test_key", "channelId": "chan-review",
+        "reviewUrl": "https://g.page/r/example", "enabled": True,
+    })
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_google_review_rejects_undelivered(client, monkeypatch):
+    await _enable_whatsapp(client)
+    await server.db.leads.insert_one({
+        "leadId": "LDNEW1", "customerName": "New Lead", "mobile": "9000011111",
+        "accountStatus": "Active", "currentStatus": "New",
+    })
+    r = await client.post("/api/leads/LDNEW1/whatsapp/google-review", json={})
+    assert r.status_code == 422
+    assert "Delivered" in r.text
+
+
+@pytest.mark.asyncio
+async def test_google_review_send_then_skip_unless_force(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append({"phone": phone, "template_id": template_id, "variables": variables, "name": name})
+        return {"ok": True, "data": {"id": f"wamid.{len(calls)}"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _enable_whatsapp(client)
+    await _seed_delivered("LD26000013", mobile="9876500013")
+
+    thread = (await client.get("/api/leads/LD26000013/whatsapp")).json()
+    assert thread["delivered"] is True
+    assert thread["canSendReview"] is True
+    assert not thread["deliveryReviewSentAt"]
+
+    r = await client.post("/api/leads/LD26000013/whatsapp/google-review", json={"force": False})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("ok") is True
+    assert not body.get("skipped")
+    assert len(calls) == 1
+    assert calls[0]["template_id"] == "delivery_review"
+    assert calls[0]["phone"] == "9876500013" or "9876500013" in str(calls[0]["phone"])
+
+    lead = await server.db.leads.find_one({"leadId": "LD26000013"})
+    assert lead.get("whatsappDeliverySentAt")
+
+    r2 = await client.post("/api/leads/LD26000013/whatsapp/google-review", json={})
+    assert r2.status_code == 200, r2.text
+    assert r2.json().get("skipped") is True
+    assert r2.json().get("reason") == "already-sent"
+    assert len(calls) == 1
+
+    r3 = await client.post("/api/leads/LD26000013/whatsapp/google-review", json={"force": True})
+    assert r3.status_code == 200, r3.text
+    assert r3.json().get("ok") is True
+    assert not r3.json().get("skipped")
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_google_review_opt_out_blocked(client, monkeypatch):
+    async def fake_send(*a, **k):
+        raise AssertionError("must not send to opted-out customer")
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _enable_whatsapp(client)
+    await _seed_delivered("LDOPT1", whatsappOptOut=True, mobile="9000022222")
+    r = await client.post("/api/leads/LDOPT1/whatsapp/google-review", json={})
+    assert r.status_code == 422
+    assert "STOP" in r.text
+
+
+@pytest.mark.asyncio
+async def test_bulk_google_review_skips_already_sent(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append(phone)
+        return {"ok": True, "data": {"id": "wamid.bulk"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _enable_whatsapp(client)
+    await _seed_delivered("LDDEL1", mobile="9111100001")
+    await _seed_delivered("LDDEL2", mobile="9111100002",
+                          whatsappDeliverySentAt="2026-08-01T10:00:00+00:00")
+    await server.db.leads.insert_one({
+        "leadId": "LDNEW2", "customerName": "Not Delivered", "mobile": "9111100003",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+
+    r = await client.post("/api/integrations/botspace/send-delivery-reviews", json={"force": False})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["sent"] == 1
+    assert out["skipped"] == 1
+    assert out["failed"] == 0
+    assert len(calls) == 1
+    lead1 = await server.db.leads.find_one({"leadId": "LDDEL1"})
+    assert lead1.get("whatsappDeliverySentAt")
+    lead_new = await server.db.leads.find_one({"leadId": "LDNEW2"})
+    assert not lead_new.get("whatsappDeliverySentAt")

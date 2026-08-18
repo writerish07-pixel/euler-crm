@@ -398,30 +398,79 @@ async def notify_booking(lead_id: str):
         await _activity(lead, "WhatsApp booking confirmation sent")
 
 
-async def notify_delivery(lead_id: str):
+def lead_is_delivered(lead: dict) -> bool:
+    st = (lead.get("currentStatus") or "").strip().lower()
+    ds = (lead.get("deliveryStatus") or "").strip().lower()
+    return st == "delivered" or ds == "delivered"
+
+
+async def notify_delivery(lead_id: str, *, force: bool = False, immediate: bool = False):
+    """Send Google-review template to a delivered Euler lead.
+
+    Auto Mark-Delivered uses force=False, immediate=False (quiet hours + once-only).
+    Manual / bulk uses immediate=True so the owner can send now.
+    """
     db = _db()
     lead = await db.leads.find_one({"leadId": lead_id})
-    if not lead or lead.get("whatsappDeliverySentAt"):
-        return
+    if not lead:
+        return {"ok": False, "reason": "lead-not-found"}
+    if not lead_is_delivered(lead):
+        return {"ok": False, "reason": "not-delivered"}
+    if lead.get("whatsappOptOut"):
+        return {"ok": False, "reason": "opted-out"}
+    if lead.get("whatsappDeliverySentAt") and not force:
+        return {"ok": True, "skipped": True, "reason": "already-sent",
+                "sentAt": lead.get("whatsappDeliverySentAt")}
     cfg = await get_config()
     if not cfg["enabled"]:
-        return
+        return {"ok": False, "skipped": True, "reason": "whatsapp-not-configured"}
     vars_ = [
         lead.get("customerName") or "ग्राहक",
         lead.get("interestedModel") or "vehicle",
         str(lead.get("deliveryDate") or today_ist()),
     ]
+    review = cfg.get("reviewUrl") or ""
+    text = f"Delivered + Google review {lead.get('leadId')}"
+    if review:
+        text = f"{text} {review}"
     res = await _enqueue_or_send(
         lead=lead, kind="delivery", phone=lead.get("mobile"),
         template_id=cfg["templates"]["delivery"], variables=vars_,
-        text=f"Delivered + review {lead.get('leadId')}",
-        customer_hours=True,
+        text=text, customer_hours=not immediate,
     )
     if res.get("ok"):
         await db.leads.update_one({"leadId": lead_id}, {"$set": {
             "whatsappDeliverySentAt": datetime.now(timezone.utc).isoformat(),
         }})
         await _activity(lead, "WhatsApp delivery + Google review sent")
+    return {**res, "leadId": lead_id}
+
+
+async def send_delivery_reviews(*, force: bool = False, immediate: bool = True) -> dict:
+    """Send Google-review WhatsApp to every delivered Euler lead that has not had it yet."""
+    cfg = await get_config()
+    if not cfg["enabled"]:
+        return {"ok": False, "skipped": True, "reason": "whatsapp-not-configured", "sent": 0}
+    db = _db()
+    q = {"$or": [
+        {"currentStatus": {"$regex": "^delivered$", "$options": "i"}},
+        {"deliveryStatus": {"$regex": "^delivered$", "$options": "i"}},
+    ]}
+    sent, skipped, failed = 0, 0, 0
+    errors = []
+    for lead in await db.leads.find(q).to_list(5000):
+        if not lead_is_delivered(lead):
+            continue
+        res = await notify_delivery(lead["leadId"], force=force, immediate=immediate)
+        if res.get("skipped"):
+            skipped += 1
+        elif res.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+            if len(errors) < 20:
+                errors.append({"leadId": lead.get("leadId"), "reason": res.get("reason") or res.get("error")})
+    return {"ok": True, "sent": sent, "skipped": skipped, "failed": failed, "errors": errors}
 
 
 async def run_unbooked_followups(today_s: Optional[str] = None) -> dict:
@@ -615,6 +664,7 @@ async def list_thread(lead_id: str) -> dict:
              for r in await db.whatsapp_messages.find({"leadId": lead_id}).sort("createdAt", 1).to_list(500)]
     last_in = next((r["createdAt"] for r in reversed(rows) if r.get("direction") == "inbound"),
                    lead.get("whatsappLastInboundAt"))
+    delivered = lead_is_delivered(lead)
     return {
         "leadId": lead_id,
         "optOut": bool(lead.get("whatsappOptOut")),
@@ -622,6 +672,9 @@ async def list_thread(lead_id: str) -> dict:
         "lastInboundAt": last_in,
         "messages": rows,
         "configured": (await get_config())["configured"],
+        "delivered": delivered,
+        "deliveryReviewSentAt": lead.get("whatsappDeliverySentAt") or "",
+        "canSendReview": delivered and not lead.get("whatsappOptOut"),
     }
 
 
