@@ -157,7 +157,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         : <Overview lead={lead} c={c} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
-      {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} onSaved={refresh} />}
+      {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
       {tab === "delivery" && (
         fieldView
           ? <FieldDeliveryReadOnly delivery={data.delivery} lead={lead} />
@@ -768,7 +768,7 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
 }
 
 /* -------------------------------------------------- Payments */
-function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
+function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, onSaved }) {
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
@@ -799,6 +799,17 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
       toast.error(detail);
     }
     return undefined;
+  };
+  const remove = async (p) => {
+    const label = p.entryType === "Refund" ? "refund" : "receipt";
+    if (!window.confirm(`Permanently delete ${label} ${p.receiptNumber} (${inr(p.amount)})? This cannot be undone. Lead totals will be recalculated.`)) return;
+    try {
+      await del(`/payments/${p.receiptNumber}`);
+      toast.success(`${p.receiptNumber} deleted`);
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Delete failed");
+    }
   };
   return (
     <div>
@@ -851,6 +862,16 @@ function PaymentsTab({ lead, actions = {}, payments, masters, onSaved }) {
               <div className="text-right text-xs text-ink-soft">
                 <div>Running: <span className="font-mono">{inr(p.runningTotal)}</span></div>
                 <div>Balance: <span className="font-mono">{inr(p.outstandingBalance)}</span></div>
+                {isOwner && (
+                  <button
+                    type="button"
+                    data-testid={`delete-payment-${p.receiptNumber}`}
+                    onClick={() => remove(p)}
+                    className="mt-1 text-ink-faint hover:text-red-600 inline-flex items-center gap-1"
+                  >
+                    <Trash2 size={13} /> Delete
+                  </button>
+                )}
               </div>
             </div>
           );

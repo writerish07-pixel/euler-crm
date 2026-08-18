@@ -1236,6 +1236,60 @@ async def delete_lead_traces(lead_id: str):
         return {"ok": False, "operation": "error", "error": str(e)[:500], "rowsDeleted": 0, "tabs": []}
 
 
+def _delete_entity_by_id_sync(entity: str, id_value: str):
+    """Physically delete the sheet row whose stable ID equals id_value."""
+    id_value = str(id_value or "").strip()
+    if entity not in SYNC_MAP:
+        return {"ok": False, "operation": "error", "error": f"unknown entity '{entity}'",
+                "rowsDeleted": 0}
+    if not id_value:
+        return {"ok": False, "operation": "error", "error": "id required", "rowsDeleted": 0}
+    tab, id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
+    header_row = _header_row_for(entity, tab)
+    mapping, missing = _resolve_columns(tab, [id_field, *fields[:1]], use_cache=False,
+                                        header_row=header_row)
+    if id_field not in mapping:
+        return {"ok": False, "operation": "skipped", "tab": tab,
+                "error": f"no {id_field} column", "missingHeaders": missing, "rowsDeleted": 0}
+    row_nums = _find_all_rows_by_value(
+        tab, mapping[id_field], id_value, start_row=header_row + 1)
+    res = _delete_sheet_rows(tab, row_nums)
+    res["entity"] = entity
+    res["entityId"] = id_value
+    return res
+
+
+async def delete_entity_row(entity: str, id_value: str):
+    """Owner delete of one register row (e.g. a payment receipt). Never raises."""
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": True, "operation": "skipped", "reason": _status.get("reason", "sync disabled"),
+                "rowsDeleted": 0, "entity": entity, "entityId": id_value}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "operation": "blocked", "error": blocked, "rowsDeleted": 0,
+                "entity": entity, "entityId": id_value}
+    try:
+        res = await asyncio.to_thread(_delete_entity_by_id_sync, entity, id_value)
+        if res.get("ok"):
+            _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                            "lastError": None, "writes": _health["writes"] + 1})
+        else:
+            _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                            "lastError": str(res.get("error") or "")[:300],
+                            "failures": _health["failures"] + 1})
+        return res
+    except Exception as e:
+        invalidate_header_cache()
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return {"ok": False, "operation": "error", "error": str(e)[:500], "rowsDeleted": 0,
+                "entity": entity, "entityId": id_value}
+
+
 async def append(entity: str, doc: dict):
     """Back-compat shim: the old append-only entry point is now an idempotent
     upsert. Kept so no call site can accidentally re-introduce duplicate rows."""
