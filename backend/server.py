@@ -22,6 +22,7 @@ import commercial as ce
 import seed as seeder
 import auth as authmod
 import gsheets
+import botspace as wa
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -1554,6 +1555,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
             },
             "billingSummary": None,
             "fieldView": True,
+            "whatsapp": {"count": 0, "lastAt": None, "optOut": False, "sessionOpen": False},
         }
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
@@ -1580,6 +1582,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         "activities": activities, "delivery": delivery, "booking": booking,
         "claims": claims, "actions": lead_actions(lead, user),
         "billingSummary": billing_summary or None,
+        "whatsapp": await wa.summary_for_lead(lead_id),
     }
 
 
@@ -1961,6 +1964,8 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
     await db.activities.insert_one(dict(_bk_act))
     await sheet_sync("activities", _bk_act)
     await recompute_lead(lead_id)
+    # WhatsApp booking confirm is fire-and-forget — must never fail this booking.
+    wa.schedule(wa.notify_booking(lead_id))
     return {"bookingId": booking_id, "snapshotId": snapshot_id, "lead": clean(await db.leads.find_one({"leadId": lead_id}))}
 
 
@@ -1993,7 +1998,8 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 
     counts = {}
     for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
-                 "activities", "dealer_earnings", "incentive_register", "billing_summaries"]:
+                 "activities", "dealer_earnings", "incentive_register", "billing_summaries",
+                 "whatsapp_messages", "whatsapp_outbox"]:
         r = await db[coll].delete_many({"leadId": lead_id})
         counts[coll] = r.deleted_count
     await db.leads.delete_one({"leadId": lead_id})
@@ -3321,7 +3327,8 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sal
             f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
             f"Delivered leads cannot be changed (owner may edit until closed).",
         )
-    if delivered and not _is_delivered(lead):
+    first_delivery = delivered and not _is_delivered(lead)
+    if first_delivery:
         _require_action(lead, "canDeliver", "delivery (not booked/active)", act)
         errs = _validate_delivery_ready(lead, body)
         if errs:
@@ -3356,6 +3363,9 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sal
         await rebuild_finance_views()
         await recompute_lead(lead_id)
         await _upsert_delivery_billing_summary(lead_id)
+        if first_delivery:
+            # WhatsApp delivery + review is fire-and-forget — must never fail this save.
+            wa.schedule(wa.notify_delivery(lead_id))
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -5272,6 +5282,96 @@ async def export_xlsx():
     )
 
 
+# ---------------------------------------------------------------- WhatsApp via BotSpace (additive; never blocks sales writes)
+class BotspaceSettingsIn(BaseModel):
+    apiKey: Optional[str] = None
+    channelId: Optional[str] = None
+    reviewUrl: Optional[str] = None
+    enabled: Optional[bool] = None
+    quietStart: Optional[int] = None
+    quietEnd: Optional[int] = None
+    webhookSecret: Optional[str] = None
+    cronToken: Optional[str] = None
+    executives: Optional[List[dict]] = None
+    templates: Optional[dict] = None
+
+
+class WhatsAppReplyIn(BaseModel):
+    text: str = ""
+
+
+@api.get("/integrations/botspace", dependencies=[Depends(owner_only)])
+async def botspace_settings():
+    cfg = await wa.get_config()
+    out = wa.public_config(cfg)
+    origin = os.environ.get("PUBLIC_API_URL") or os.environ.get("REACT_APP_BACKEND_URL") or ""
+    out["webhookUrl"] = f"{origin.rstrip('/')}/api/integrations/botspace/webhook" if origin else "/api/integrations/botspace/webhook"
+    return out
+
+
+@api.put("/integrations/botspace", dependencies=[Depends(owner_only)])
+async def botspace_save_settings(body: BotspaceSettingsIn):
+    return await wa.save_config(body.model_dump(exclude_unset=True))
+
+
+@api.post("/integrations/botspace/run-jobs", dependencies=[Depends(owner_only)])
+async def botspace_run_jobs():
+    return await wa.run_daily_jobs()
+
+
+@api.get("/leads/{lead_id}/whatsapp")
+async def lead_whatsapp_thread(lead_id: str):
+    await get_lead_or_404(lead_id)
+    return await wa.list_thread(lead_id)
+
+
+@api.post("/leads/{lead_id}/whatsapp/reply")
+async def lead_whatsapp_reply(lead_id: str, body: WhatsAppReplyIn, user=Depends(current_user)):
+    await get_lead_or_404(lead_id)
+    try:
+        return await wa.staff_reply(lead_id, body.text, actor_name=(user or {}).get("name") or "")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+
+@public.get("/integrations/botspace/webhook")
+async def botspace_webhook_ping():
+    return {"ok": True}
+
+
+@public.post("/integrations/botspace/webhook")
+async def botspace_webhook(request: Request):
+    """BotSpace callback. Unknown phones (Tata etc.) are ignored. Always 200."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    cfg = await wa.get_config()
+    secret = cfg.get("webhookSecret") or ""
+    if secret:
+        got = request.headers.get("x-botspace-secret") or request.query_params.get("secret") or ""
+        if got != secret:
+            raise HTTPException(401, "Invalid webhook secret")
+    try:
+        return await wa.handle_webhook(body if isinstance(body, dict) else {})
+    except Exception:
+        logger.exception("botspace webhook handler failed")
+        return {"ok": True, "error": "handler-failed"}
+
+
+@public.post("/integrations/botspace/cron")
+async def botspace_cron(request: Request):
+    """Optional Railway / cron-job.org trigger. Token from Settings or BOTSPACE_CRON_TOKEN."""
+    cfg = await wa.get_config()
+    token = cfg.get("cronToken") or ""
+    got = request.headers.get("x-cron-token") or request.query_params.get("token") or ""
+    if not token or got != token:
+        raise HTTPException(401, "Invalid cron token")
+    return await wa.run_daily_jobs()
+
+
 # ---------------------------------------------------------------- public share board (no auth)
 @public.get("/share/dashboard")
 async def share_dashboard():
@@ -5590,6 +5690,9 @@ async def startup():
         await db.incentive_register.create_index("leadId", unique=True)
         await db.masters_list.create_index("id", unique=True)
         await db.masters_list.create_index([("category", 1), ("value", 1)])
+        await db.whatsapp_messages.create_index("leadId")
+        await db.whatsapp_messages.create_index("providerId")
+        await db.whatsapp_messages.create_index("phone")
     except Exception:
         pass
     try:
@@ -5624,6 +5727,11 @@ async def startup():
         await _repair_duplicate_finance_receipts()
     except Exception:
         logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
+    try:
+        if os.environ.get("ENVIRONMENT", "").lower() != "test":
+            asyncio.create_task(wa.scheduler_loop())
+    except Exception:
+        logging.exception("WHATSAPP_SCHEDULER_START_ERROR")
 
 
 def _dedupe_finance_receipts(receipts):

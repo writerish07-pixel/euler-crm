@@ -5,6 +5,7 @@ import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import LeadWhatsApp from "./LeadWhatsApp";
 
 const CHARGE_FIELDS = [
   ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
@@ -76,6 +77,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         { key: "payments", label: `Payments (${data.payments.length})` },
         { key: "delivery", label: "Delivery" },
         ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
+        { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
         { key: "activity", label: `Activity (${data.activities.length})` },
       ];
 
@@ -171,6 +173,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           )
       )}
       {!fieldView && tab === "insurance" && isOwner && <InsuranceTab lead={lead} masters={masters} />}
+      {!fieldView && tab === "whatsapp" && <LeadWhatsApp leadId={lead.leadId} />}
       {tab === "activity" && <ActivityTab lead={lead} activities={data.activities} masters={masters} onSaved={refresh} readOnly={fieldView} />}
     </Drawer>
   );
