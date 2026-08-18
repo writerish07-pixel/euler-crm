@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, del } from "../lib/api";
+import { get, post, del, put } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, Button, Field, Input, Select, Badge, Table } from "../components/ui";
 
@@ -179,6 +179,8 @@ export default function Settings() {
         )}
       </Card>
 
+      {isOwner && <BotspaceCard />}
+
       <Card className="p-5 mb-6">
         <h3 className="font-heading font-bold text-ink mb-3">Company Share Board</h3>
         <p className="text-sm text-ink-soft mb-3">A public, read-only board for company people — active bookings & monthly retail only. No customer or staff data.</p>
@@ -289,6 +291,123 @@ function MastersListCard({ gsEnabled }) {
             </div>
           </div>
         ))}
+      </div>
+    </Card>
+  );
+}
+
+function BotspaceCard() {
+  const [cfg, setCfg] = useState(null);
+  const [form, setForm] = useState({
+    apiKey: "", channelId: "", reviewUrl: "", enabled: true,
+    execName: "", execMobile: "", cronToken: "",
+  });
+  const [execs, setExecs] = useState([]);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    get("/integrations/botspace").then((d) => {
+      setCfg(d);
+      setExecs(d.executives || []);
+      setForm((f) => ({
+        ...f,
+        apiKey: d.apiKeyMasked || "",
+        channelId: d.channelId || "",
+        reviewUrl: d.reviewUrl || "",
+        enabled: d.enabled !== false,
+        cronToken: d.cronToken || "",
+      }));
+    }).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const body = {
+        channelId: form.channelId,
+        reviewUrl: form.reviewUrl,
+        enabled: form.enabled,
+        executives: execs,
+        cronToken: form.cronToken,
+      };
+      if (form.apiKey && !form.apiKey.includes("…") && !form.apiKey.startsWith("•")) {
+        body.apiKey = form.apiKey;
+      }
+      await put("/integrations/botspace", body);
+      toast.success("WhatsApp settings saved");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Save failed");
+    } finally { setBusy(false); }
+  };
+
+  const runJobs = async () => {
+    try {
+      const r = await post("/integrations/botspace/run-jobs", {});
+      toast.success(`Jobs ran — follow-ups ${r.follow?.sent || 0}, finance ${r.finance?.sent || 0}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Job failed");
+    }
+  };
+
+  const addExec = () => {
+    if (!form.execName || !form.execMobile) return toast.error("Executive name and mobile required");
+    setExecs((xs) => [...xs.filter((x) => x.name !== form.execName), { name: form.execName, mobile: form.execMobile }]);
+    setForm((f) => ({ ...f, execName: "", execMobile: "" }));
+  };
+
+  return (
+    <Card className="p-5 mb-6" data-testid="botspace-settings">
+      <h3 className="font-heading font-bold text-ink mb-1">WhatsApp (BotSpace)</h3>
+      <p className="text-sm text-ink-soft mb-3">
+        Euler lead chats only — numbers not in this CRM (Tata etc.) are ignored.
+        Paste the BotSpace API key and Channel ID. Templates must be Meta-approved before auto-send works.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="API key">
+          <Input data-testid="botspace-api-key" type="password" value={form.apiKey}
+            onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="botspace_…" />
+        </Field>
+        <Field label="Channel ID">
+          <Input data-testid="botspace-channel-id" value={form.channelId}
+            onChange={(e) => setForm({ ...form, channelId: e.target.value })} placeholder="From BotSpace channel settings" />
+        </Field>
+        <Field label="Google review URL">
+          <Input data-testid="botspace-review-url" value={form.reviewUrl}
+            onChange={(e) => setForm({ ...form, reviewUrl: e.target.value })} placeholder="https://g.page/r/…" />
+        </Field>
+        <Field label="Cron token (optional)">
+          <Input value={form.cronToken} onChange={(e) => setForm({ ...form, cronToken: e.target.value })}
+            placeholder="For Railway / cron-job.org" />
+        </Field>
+      </div>
+      <div className="mt-3 text-xs text-ink-faint font-mono break-all">
+        Webhook URL: {cfg?.webhookUrl || "/api/integrations/botspace/webhook"}
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3 items-end">
+        <Field label="Executive name (as on lead)">
+          <Input value={form.execName} onChange={(e) => setForm({ ...form, execName: e.target.value })} />
+        </Field>
+        <Field label="Executive WhatsApp">
+          <Input value={form.execMobile} onChange={(e) => setForm({ ...form, execMobile: e.target.value })} placeholder="10-digit mobile" />
+        </Field>
+        <Button variant="secondary" onClick={addExec}>Add executive number</Button>
+      </div>
+      {execs.length > 0 && (
+        <ul className="mt-2 text-sm text-ink-soft space-y-1">
+          {execs.map((x) => (
+            <li key={x.name} className="flex justify-between">
+              <span>{x.name} · {x.mobile}</span>
+              <button className="text-red-500" onClick={() => setExecs((xs) => xs.filter((y) => y.name !== x.name))}>remove</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex flex-wrap gap-2 mt-4">
+        <Button data-testid="botspace-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save WhatsApp settings"}</Button>
+        <Button variant="secondary" onClick={runJobs}>Run follow-up jobs now</Button>
+        <span className="text-xs text-ink-faint self-center">{cfg?.configured ? "Configured" : "Needs API key + channel ID"}</span>
       </div>
     </Card>
   );
