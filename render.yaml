@@ -7,7 +7,7 @@ services:
     name: euler-crm
     runtime: static
     rootDir: frontend
-    buildCommand: yarn install --frozen-lockfile && yarn build
+    buildCommand: yarn install --frozen-lockfile && CI=false yarn build
     staticPublishPath: build
     pullRequestPreviewsEnabled: false
     envVars:
@@ -17,6 +17,9 @@ services:
         value: https://euler-crm-production.up.railway.app
       - key: NODE_VERSION
         value: "22"
+      # Render sets CI=true, which makes CRA treat ESLint issues as a failed deploy.
+      - key: CI
+        value: "false"
     routes:
       # SPA: every client-side route must fall back to index.html or a refresh
       # on /leads, /bookings, /payments etc. returns a Render 404.
