@@ -7,6 +7,7 @@ export default function LeadWhatsApp({ leadId }) {
   const [data, setData] = useState(null);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [reviewBusy, setReviewBusy] = useState(false);
 
   const load = useCallback(() => {
     get(`/leads/${leadId}/whatsapp`).then(setData).catch(() => toast.error("Could not load WhatsApp thread"));
@@ -28,6 +29,20 @@ export default function LeadWhatsApp({ leadId }) {
     }
   };
 
+  const sendReview = async (force) => {
+    setReviewBusy(true);
+    try {
+      const r = await post(`/leads/${leadId}/whatsapp/google-review`, { force: !!force });
+      if (r.skipped) toast.success("Google review WhatsApp was already sent for this lead");
+      else toast.success("Google review WhatsApp sent");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not send Google review WhatsApp");
+    } finally {
+      setReviewBusy(false);
+    }
+  };
+
   if (!data) return <div className="text-sm text-ink-faint">Loading WhatsApp…</div>;
 
   return (
@@ -36,6 +51,25 @@ export default function LeadWhatsApp({ leadId }) {
         Only this Euler lead’s chat. Tata / other BotSpace contacts never appear here.
         {data.optOut ? " Customer sent STOP — auto follow-ups are off." : ""}
       </p>
+
+      {data.canSendReview && (
+        <Card className="p-4 mb-4" data-testid="google-review-card">
+          <div className="font-heading font-bold text-ink text-sm">Google review WhatsApp</div>
+          <p className="text-xs text-ink-soft mt-1 mb-3">
+            Sends the delivered + Google review template to this customer.
+            {data.deliveryReviewSentAt ? ` Last sent ${data.deliveryReviewSentAt.slice(0, 16).replace("T", " ")}.` : " Not sent yet."}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button data-testid="send-google-review-btn" onClick={() => sendReview(false)} disabled={reviewBusy}>
+              {reviewBusy ? "Sending…" : (data.deliveryReviewSentAt ? "Already sent" : "Send Google review")}
+            </Button>
+            {data.deliveryReviewSentAt && (
+              <Button variant="secondary" onClick={() => sendReview(true)} disabled={reviewBusy}>Send again</Button>
+            )}
+          </div>
+        </Card>
+      )}
+
       <div className="space-y-2 max-h-80 overflow-auto mb-4">
         {(data.messages || []).length === 0 && (
           <div className="text-sm text-ink-faint text-center py-6">No WhatsApp messages yet</div>
