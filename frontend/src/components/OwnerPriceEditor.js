@@ -38,7 +38,7 @@ export default function OwnerPriceEditor() {
 
   const selected = rows.find((r) => r.priceId === priceId) || null;
 
-  const pick = (row) => {
+  const pick = useCallback((row) => {
     if (!row) {
       setPriceId("");
       setForm(null);
@@ -47,15 +47,13 @@ export default function OwnerPriceEditor() {
     setModel(row.model);
     setPriceId(row.priceId);
     setForm(priceFormFromRow(row));
-  };
+  }, []);
 
   useEffect(() => {
     if (!rows.length) return;
     if (priceId && rows.some((r) => r.priceId === priceId)) return;
-    const first = rows[0];
-    if (first) pick(first);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows]);
+    pick(rows[0]);
+  }, [rows, priceId, pick]);
 
   const onModelChange = (name) => {
     setModel(name);
