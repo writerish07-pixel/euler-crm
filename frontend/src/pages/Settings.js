@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del, put } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -128,6 +128,8 @@ export default function Settings() {
         </div>
       </Card>
 
+      {isOwner && <BotspaceCard />}
+
       <Card className="p-5 mb-6">
         <div className="flex items-center gap-2 mb-3">
           <h3 className="font-heading font-bold text-ink">Google Sheet Sync</h3>
@@ -178,8 +180,6 @@ export default function Settings() {
           </div>
         )}
       </Card>
-
-      {isOwner && <BotspaceCard />}
 
       <Card className="p-5 mb-6">
         <h3 className="font-heading font-bold text-ink mb-3">Company Share Board</h3>
@@ -359,7 +359,10 @@ function BotspaceCard() {
 
   return (
     <Card className="p-5 mb-6" data-testid="botspace-settings">
-      <h3 className="font-heading font-bold text-ink mb-1">WhatsApp (BotSpace)</h3>
+      <div className="flex items-center gap-2 mb-1">
+        <MessageCircle size={16} className="text-cobalt" />
+        <h3 className="font-heading font-bold text-ink">WhatsApp (BotSpace)</h3>
+      </div>
       <p className="text-sm text-ink-soft mb-3">
         Euler lead chats only — numbers not in this CRM (Tata etc.) are ignored.
         Paste the BotSpace API key and Channel ID. Templates must be Meta-approved before auto-send works.

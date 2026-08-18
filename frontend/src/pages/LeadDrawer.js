@@ -72,12 +72,12 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       ]
     : [
         { key: "overview", label: "Overview" },
+        { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
         { key: "price", label: "Price Structure" },
         { key: "scheme", label: "Scheme" },
         { key: "payments", label: `Payments (${data.payments.length})` },
         { key: "delivery", label: "Delivery" },
         ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
-        { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
         { key: "activity", label: `Activity (${data.activities.length})` },
       ];
 
