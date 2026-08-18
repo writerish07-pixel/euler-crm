@@ -2936,6 +2936,119 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _money=
     return rec
 
 
+async def _rebuild_payment_running_totals(lead_id):
+    """After a receipt is removed, rewrite runningTotal / outstandingBalance in date order."""
+    lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    payable = ce.compute_commercial_totals(lead_to_snapshot(lead), await get_scheme_rows())["customerPayable"]
+    rows = await db.payments.find({"leadId": lead_id}).sort(
+        [("date", 1), ("recordedAt", 1), ("receiptNumber", 1)]
+    ).to_list(2000)
+    running = 0.0
+    for p in rows:
+        running = ce.round2(running + ce.num(p.get("amount")))
+        outstanding = ce.round2(max(0.0, payable - running)) if payable > 0 else 0.0
+        await db.payments.update_one({"_id": p["_id"]}, {"$set": {
+            "runningTotal": running, "outstandingBalance": outstanding,
+        }})
+        await sheet_sync("payments", {
+            **{k: v for k, v in p.items() if k != "_id"},
+            "runningTotal": running, "outstandingBalance": outstanding,
+        })
+
+
+async def _finance_commitment_excluding(lead_id, file_number, exclude_receipt):
+    q = {"leadId": lead_id, "paymentMode": "Finance", "financeFileNumber": file_number,
+         "receiptNumber": {"$ne": exclude_receipt}}
+    remaining = await db.payments.find(q).to_list(2000)
+    return ce.round2(sum(
+        ce.num(p.get("amount")) for p in remaining
+        if ce.num(p.get("amount")) > 0 and (p.get("entryType") or "") != "Refund"
+    ))
+
+
+async def _rebuild_finance_file_from_payments(lead_id, file_number):
+    """Re-derive sanctioned amount from remaining Finance-mode receipts on the lead."""
+    committed = await _finance_commitment_excluding(lead_id, file_number, exclude_receipt="")
+    f = await db.finance.find_one({"fileNumber": file_number, "leadId": lead_id})
+    if not f:
+        return {"ok": True, "removed": False}
+    received = ce.num(f.get("receivedAgainstFile"))
+    receipts = list(f.get("receipts") or [])
+    if committed <= 0.01 and received <= 0.01 and not receipts:
+        await db.finance.delete_one({"fileNumber": file_number, "leadId": lead_id})
+        await gsheets.delete_entity_row("finance", file_number)
+        leftover = await db.finance.find_one({"leadId": lead_id})
+        lead_set = {"lastUpdated": now_iso()}
+        if leftover:
+            lead_set.update({
+                "financeRequired": "Yes",
+                "financerName": leftover.get("financer") or "",
+                "financeFileNumber": leftover.get("fileNumber") or "",
+            })
+        else:
+            lead_set.update({"financerName": "", "financeFileNumber": ""})
+        await db.leads.update_one({"leadId": lead_id}, {"$set": lead_set})
+        await rebuild_finance_views()
+        return {"ok": True, "removed": True, "fileNumber": file_number}
+    outstanding = ce.round2(max(0.0, committed - received))
+    status = "Received" if outstanding <= 0 else ("Partial" if received > 0 else "Pending")
+    await db.finance.update_one({"fileNumber": file_number, "leadId": lead_id}, {"$set": {
+        "sanctionedAmount": committed, "fileOutstanding": outstanding, "status": status,
+        "lastUpdated": today(),
+    }})
+    await sync_finance_file(file_number)
+    await rebuild_finance_views()
+    return {"ok": True, "removed": False, "fileNumber": file_number, "sanctionedAmount": committed}
+
+
+@api.delete("/payments/{receipt_number}", dependencies=[Depends(owner_only)])
+async def delete_payment(receipt_number: str, act=Depends(actor)):
+    """Owner-only. Remove a wrongly posted receipt (or refund) and recalculate the lead."""
+    receipt_number = (receipt_number or "").strip()
+    pay = await db.payments.find_one({"receiptNumber": receipt_number})
+    if not pay:
+        raise HTTPException(404, "Payment not found")
+    lead_id = pay.get("leadId") or ""
+    file_number = (pay.get("financeFileNumber") or "").strip()
+    if (pay.get("paymentMode") or "") == "Finance" and file_number:
+        remaining = await _finance_commitment_excluding(lead_id, file_number, receipt_number)
+        f = await db.finance.find_one({"fileNumber": file_number, "leadId": lead_id}) or {}
+        received = ce.num(f.get("receivedAgainstFile"))
+        if received > remaining + 0.01:
+            raise HTTPException(
+                422,
+                f"Cannot delete this Finance receipt — file {file_number} already has "
+                f"₹{ce.round2(received)} disbursed from the financer, which is more than the "
+                f"₹{remaining} that would remain committed. Reverse the extra financer receipt "
+                f"on the Finance Register first, or leave this customer receipt in place.",
+            )
+    await db.payments.delete_one({"receiptNumber": receipt_number})
+    sheet_result = await gsheets.delete_entity_row("payments", receipt_number)
+    await db.sheet_sync_log.delete_many({"entityType": "payments", "entityId": receipt_number})
+    await _rebuild_payment_running_totals(lead_id)
+    finance_result = None
+    if (pay.get("paymentMode") or "") == "Finance" and file_number:
+        finance_result = await _rebuild_finance_file_from_payments(lead_id, file_number)
+    await recompute_lead(lead_id)
+    await _refresh_billing_summary_if_delivered(lead_id)
+    await write_audit(
+        act, "delete", "payment", leadId=lead_id, paymentId=receipt_number,
+        financeFileNumber=file_number,
+        old={"amount": pay.get("amount"), "mode": pay.get("paymentMode"),
+             "entryType": pay.get("entryType") or "Receipt",
+             "runningTotal": pay.get("runningTotal"), "narration": pay.get("narration")},
+        new={"sheet": sheet_result, "finance": finance_result},
+    )
+    lead = clean(await db.leads.find_one({"leadId": lead_id}) or {})
+    return {
+        "ok": True, "deleted": receipt_number, "leadId": lead_id,
+        "totalReceived": lead.get("totalReceived"),
+        "customerOutstanding": lead.get("customerOutstanding"),
+        "excessReceived": lead.get("excessReceived"),
+        "sheet": sheet_result, "finance": finance_result,
+    }
+
+
 async def _refund_position(lead_id, lead=None):
     """Money held above Customer Payable, and how much of it has been returned.
 
@@ -4076,7 +4189,8 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
     ("PUT", "/api/leads/{lead_id}/scheme"), ("POST", "/api/leads/{lead_id}/close"),
-    ("POST", "/api/leads/{lead_id}/payments"), ("PUT", "/api/leads/{lead_id}/delivery"),
+    ("POST", "/api/leads/{lead_id}/payments"), ("DELETE", "/api/payments/{receipt_number}"),
+    ("PUT", "/api/leads/{lead_id}/delivery"),
     ("GET", "/api/leads/{lead_id}/billing-summary"),
     ("GET", "/api/payments"), ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),
@@ -4093,6 +4207,7 @@ OWNER_ONLY_ENDPOINTS = [
     "/api/dealer-earnings", "/api/reports/owner-commercial", "/api/reports/oem-claim-dashboard",
     "/api/reports/claim-exceptions", "/api/reports/insurance-payout", "/api/reports/dealer-earnings",
     "/api/reports/production-audit", "/api/audit-log",
+    "/api/payments/{receipt_number}",
 ]
 EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "incentive_register",
                         "bookings", "payments", "deliveries", "finance", "insurance", "dealer_earnings",
