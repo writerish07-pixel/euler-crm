@@ -46,6 +46,10 @@ def test_phone_and_followup_rules():
     assert wa.lead_is_delivered({"currentStatus": "Delivered"})
     assert wa.lead_is_delivered({"deliveryStatus": "Delivered", "currentStatus": "Booked"})
     assert not wa.lead_is_delivered({"currentStatus": "Booked"})
+    assert wa.lead_is_booked({"currentStatus": "Booked"})
+    assert wa.lead_is_booked({"bookingDate": "2026-08-10", "currentStatus": "New"})
+    assert wa.lead_is_booked({"currentStatus": "Delivered"})
+    assert not wa.lead_is_booked({"currentStatus": "New"})
     assert not wa.lead_is_delivered({"currentStatus": "Delivery pending"})
     recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     assert wa.session_open(recent)
@@ -288,3 +292,95 @@ async def test_bulk_google_review_skips_already_sent(client, monkeypatch):
     assert lead1.get("whatsappDeliverySentAt")
     lead_new = await server.db.leads.find_one({"leadId": "LDNEW2"})
     assert not lead_new.get("whatsappDeliverySentAt")
+
+
+async def _seed_booked(lead_id, **extra):
+    doc = {
+        "leadId": lead_id, "customerName": "Booked Customer", "mobile": "9988770011",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-08-10", "interestedModel": "Turbo Max", "executive": "Amit",
+    }
+    doc.update(extra)
+    await server.db.leads.insert_one(doc)
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_booking_whatsapp_rejects_unbooked(client):
+    await _enable_whatsapp(client)
+    await server.db.leads.insert_one({
+        "leadId": "LDUNBK", "customerName": "Not Booked", "mobile": "9000033333",
+        "accountStatus": "Active", "currentStatus": "New",
+    })
+    r = await client.post("/api/leads/LDUNBK/whatsapp/booking-confirm", json={})
+    assert r.status_code == 422
+    assert "Booking" in r.text
+
+
+@pytest.mark.asyncio
+async def test_booking_whatsapp_send_then_skip_unless_force(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append({"phone": phone, "template_id": template_id, "variables": variables})
+        return {"ok": True, "data": {"id": f"wamid.b{len(calls)}"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _enable_whatsapp(client)
+    await _seed_booked("LDBK13", mobile="9876500044")
+
+    thread = (await client.get("/api/leads/LDBK13/whatsapp")).json()
+    assert thread["booked"] is True
+    assert thread["canSendBooking"] is True
+    assert not thread["bookingConfirmSentAt"]
+
+    r = await client.post("/api/leads/LDBK13/whatsapp/booking-confirm", json={"force": False})
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True
+    assert not r.json().get("skipped")
+    assert len(calls) == 1
+    assert calls[0]["template_id"] == "booking_confirm"
+
+    lead = await server.db.leads.find_one({"leadId": "LDBK13"})
+    assert lead.get("whatsappBookingSentAt")
+
+    r2 = await client.post("/api/leads/LDBK13/whatsapp/booking-confirm", json={})
+    assert r2.status_code == 200
+    assert r2.json().get("skipped") is True
+    assert len(calls) == 1
+
+    r3 = await client.post("/api/leads/LDBK13/whatsapp/booking-confirm", json={"force": True})
+    assert r3.status_code == 200
+    assert r3.json().get("ok") is True
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_bulk_booking_whatsapp_skips_already_sent(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append(phone)
+        return {"ok": True, "data": {"id": "wamid.bk"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _enable_whatsapp(client)
+    await _seed_booked("LDBK1", mobile="9111100101")
+    await _seed_booked("LDBK2", mobile="9111100102",
+                       whatsappBookingSentAt="2026-08-01T10:00:00+00:00")
+    await server.db.leads.insert_one({
+        "leadId": "LDNEW3", "customerName": "Not Booked", "mobile": "9111100103",
+        "accountStatus": "Active", "currentStatus": "New",
+    })
+
+    r = await client.post("/api/integrations/botspace/send-booking-confirms", json={"force": False})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["sent"] == 1
+    assert out["skipped"] == 1
+    assert out["failed"] == 0
+    assert len(calls) == 1
+    lead1 = await server.db.leads.find_one({"leadId": "LDBK1"})
+    assert lead1.get("whatsappBookingSentAt")
+    lead_new = await server.db.leads.find_one({"leadId": "LDNEW3"})
+    assert not lead_new.get("whatsappBookingSentAt")

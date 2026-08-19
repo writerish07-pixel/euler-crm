@@ -371,14 +371,38 @@ async def _enqueue_or_send(*, lead: dict, kind: str, phone: str, template_id: st
         return {"ok": False, "error": str(e)[:400]}
 
 
-async def notify_booking(lead_id: str):
+def lead_is_booked(lead: dict) -> bool:
+    cs = (lead.get("currentStatus") or "").strip().lower()
+    if "book" in cs or cs == "delivered" or "finance" in cs:
+        return True
+    if str(lead.get("bookingDate") or "").strip():
+        return True
+    try:
+        return float(lead.get("bookingAmount") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+async def notify_booking(lead_id: str, *, force: bool = False, immediate: bool = False):
+    """Send booking_confirm template to a booked Euler lead.
+
+    Auto Convert-to-Booking uses force=False, immediate=False (quiet hours + once-only).
+    Manual / bulk uses immediate=True so the owner can send now.
+    """
     db = _db()
     lead = await db.leads.find_one({"leadId": lead_id})
-    if not lead or lead.get("whatsappBookingSentAt"):
-        return
+    if not lead:
+        return {"ok": False, "reason": "lead-not-found"}
+    if not lead_is_booked(lead):
+        return {"ok": False, "reason": "not-booked"}
+    if lead.get("whatsappOptOut"):
+        return {"ok": False, "reason": "opted-out"}
+    if lead.get("whatsappBookingSentAt") and not force:
+        return {"ok": True, "skipped": True, "reason": "already-sent",
+                "sentAt": lead.get("whatsappBookingSentAt")}
     cfg = await get_config()
     if not cfg["enabled"]:
-        return
+        return {"ok": False, "skipped": True, "reason": "whatsapp-not-configured"}
     vars_ = [
         lead.get("customerName") or "ग्राहक",
         lead.get("interestedModel") or "vehicle",
@@ -389,13 +413,41 @@ async def notify_booking(lead_id: str):
     res = await _enqueue_or_send(
         lead=lead, kind="booking", phone=lead.get("mobile"),
         template_id=cfg["templates"]["booking"], variables=vars_, text=text,
-        customer_hours=True,
+        customer_hours=not immediate,
     )
     if res.get("ok"):
         await db.leads.update_one({"leadId": lead_id}, {"$set": {
             "whatsappBookingSentAt": datetime.now(timezone.utc).isoformat(),
         }})
         await _activity(lead, "WhatsApp booking confirmation sent")
+    return {**res, "leadId": lead_id}
+
+
+async def send_booking_confirms(*, force: bool = False, immediate: bool = True) -> dict:
+    """Send booking-confirm WhatsApp to every booked Euler lead that has not had it yet."""
+    cfg = await get_config()
+    if not cfg["enabled"]:
+        return {"ok": False, "skipped": True, "reason": "whatsapp-not-configured", "sent": 0}
+    db = _db()
+    q = {"$or": [
+        {"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}},
+        {"bookingDate": {"$exists": True, "$nin": [None, ""]}},
+    ]}
+    sent, skipped, failed = 0, 0, 0
+    errors = []
+    for lead in await db.leads.find(q).to_list(5000):
+        if not lead_is_booked(lead):
+            continue
+        res = await notify_booking(lead["leadId"], force=force, immediate=immediate)
+        if res.get("skipped"):
+            skipped += 1
+        elif res.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+            if len(errors) < 20:
+                errors.append({"leadId": lead.get("leadId"), "reason": res.get("reason") or res.get("error")})
+    return {"ok": True, "sent": sent, "skipped": skipped, "failed": failed, "errors": errors}
 
 
 def lead_is_delivered(lead: dict) -> bool:
@@ -665,16 +717,21 @@ async def list_thread(lead_id: str) -> dict:
     last_in = next((r["createdAt"] for r in reversed(rows) if r.get("direction") == "inbound"),
                    lead.get("whatsappLastInboundAt"))
     delivered = lead_is_delivered(lead)
+    booked = lead_is_booked(lead)
+    opted = bool(lead.get("whatsappOptOut"))
     return {
         "leadId": lead_id,
-        "optOut": bool(lead.get("whatsappOptOut")),
+        "optOut": opted,
         "sessionOpen": session_open(last_in),
         "lastInboundAt": last_in,
         "messages": rows,
         "configured": (await get_config())["configured"],
+        "booked": booked,
+        "bookingConfirmSentAt": lead.get("whatsappBookingSentAt") or "",
+        "canSendBooking": booked and not opted,
         "delivered": delivered,
         "deliveryReviewSentAt": lead.get("whatsappDeliverySentAt") or "",
-        "canSendReview": delivered and not lead.get("whatsappOptOut"),
+        "canSendReview": delivered and not opted,
     }
 
 
