@@ -333,7 +333,7 @@ function BotspaceCard() {
       const body = {
         channelId: form.channelId,
         reviewUrl: form.reviewUrl,
-        enabled: form.enabled,
+        enabled: true,
         executives: execs,
         cronToken: form.cronToken,
       };

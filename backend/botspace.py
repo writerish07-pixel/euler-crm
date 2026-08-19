@@ -141,17 +141,20 @@ async def get_config() -> dict:
     env_ch = (os.environ.get("BOTSPACE_CHANNEL_ID") or "").strip()
     api_key = env_key or (doc.get("apiKey") or "").strip()
     channel_id = env_ch or (doc.get("channelId") or "").strip()
+    # Kill switch is env-only. A hidden Settings field used to persist enabled:false
+    # whenever the form loaded before a key existed, which blocked every send while
+    # the UI still said "Configured".
     enabled_env = os.environ.get("BOTSPACE_ENABLED")
-    enabled = True if enabled_env is None else enabled_env.strip().lower() not in {"0", "false", "no", "off"}
-    if "enabled" in doc:
-        enabled = bool(doc.get("enabled"))
+    turned_on = True if enabled_env is None else enabled_env.strip().lower() not in {"0", "false", "no", "off"}
+    configured = bool(api_key) and bool(channel_id)
+    ready = turned_on and configured
     templates = {**DEFAULT_TEMPLATES, **(doc.get("templates") or {})}
     return {
         "apiKey": api_key,
         "channelId": channel_id,
         "reviewUrl": (os.environ.get("BOTSPACE_REVIEW_URL") or doc.get("reviewUrl") or "").strip(),
-        "enabled": enabled and bool(api_key) and bool(channel_id),
-        "configured": bool(api_key) and bool(channel_id),
+        "enabled": ready,
+        "configured": configured,
         "hasKey": bool(api_key),
         "quietStart": int(doc.get("quietStart") or 9),
         "quietEnd": int(doc.get("quietEnd") or 20),
@@ -190,7 +193,15 @@ async def save_config(body: dict) -> dict:
         if k in body:
             updates[k] = str(body.get(k) or "").strip()
     if "enabled" in body:
-        updates["enabled"] = bool(body.get("enabled"))
+        # Never persist false from the Settings form (it had no visible toggle).
+        # Explicit true heals a previous accidental disable.
+        if body.get("enabled"):
+            updates["enabled"] = True
+    # Key + channel on file means WhatsApp should send.
+    will_key = updates.get("apiKey") or existing.get("apiKey")
+    will_ch = updates.get("channelId") if "channelId" in updates else existing.get("channelId")
+    if will_key and will_ch:
+        updates["enabled"] = True
     if "quietStart" in body:
         updates["quietStart"] = int(body.get("quietStart") or 9)
     if "quietEnd" in body:
