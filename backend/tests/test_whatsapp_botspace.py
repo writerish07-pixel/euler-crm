@@ -171,6 +171,24 @@ async def test_settings_masks_key(client):
     assert r.json()["channelId"] == "chan-1"
     got = await client.get("/api/integrations/botspace")
     assert "secret_key_value" not in got.text
+    url = got.json().get("webhookUrl") or ""
+    assert url.startswith("http"), url
+    assert url.endswith("/api/integrations/botspace/webhook")
+    assert "onrender.com" not in url
+
+
+@pytest.mark.asyncio
+async def test_webhook_get_and_head_are_public(client):
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as anon:
+        g = await anon.get("/api/integrations/botspace/webhook")
+        assert g.status_code == 200
+        assert g.json().get("ok") is True
+        h = await anon.head("/api/integrations/botspace/webhook")
+        assert h.status_code == 200
+        p = await anon.post("/api/integrations/botspace/webhook", json={})
+        assert p.status_code == 200
+        assert p.json().get("ok") is True
 
 
 async def _seed_delivered(lead_id, **extra):

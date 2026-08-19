@@ -5398,6 +5398,21 @@ async def export_xlsx():
 
 
 # ---------------------------------------------------------------- WhatsApp via BotSpace (additive; never blocks sales writes)
+# Live API host BotSpace must POST to. Do not use the website URL (Render /
+# Cloudflare) or the retired Render API (euler-crm-api.onrender.com).
+BOTSPACE_PRODUCTION_API = "https://euler-crm-production.up.railway.app"
+BOTSPACE_WEBHOOK_PATH = "/api/integrations/botspace/webhook"
+
+
+def botspace_webhook_public_url() -> str:
+    origin = (os.environ.get("PUBLIC_API_URL") or "").strip().rstrip("/")
+    if origin.endswith("/api"):
+        origin = origin[:-4]
+    if not origin.startswith("http") or "onrender.com" in origin:
+        origin = BOTSPACE_PRODUCTION_API
+    return f"{origin}{BOTSPACE_WEBHOOK_PATH}"
+
+
 class BotspaceSettingsIn(BaseModel):
     apiKey: Optional[str] = None
     channelId: Optional[str] = None
@@ -5419,8 +5434,7 @@ class WhatsAppReplyIn(BaseModel):
 async def botspace_settings():
     cfg = await wa.get_config()
     out = wa.public_config(cfg)
-    origin = os.environ.get("PUBLIC_API_URL") or os.environ.get("REACT_APP_BACKEND_URL") or ""
-    out["webhookUrl"] = f"{origin.rstrip('/')}/api/integrations/botspace/webhook" if origin else "/api/integrations/botspace/webhook"
+    out["webhookUrl"] = botspace_webhook_public_url()
     return out
 
 
@@ -5479,8 +5493,10 @@ async def lead_whatsapp_reply(lead_id: str, body: WhatsAppReplyIn, user=Depends(
         raise HTTPException(502, str(e))
 
 
+@public.head("/integrations/botspace/webhook")
 @public.get("/integrations/botspace/webhook")
 async def botspace_webhook_ping():
+    """BotSpace (and browsers) probe this URL. Must stay unauthenticated and 200."""
     return {"ok": True}
 
 
