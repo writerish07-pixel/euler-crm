@@ -5452,6 +5452,13 @@ class GoogleReviewIn(BaseModel):
     force: bool = False
 
 
+@api.post("/integrations/botspace/send-booking-confirms", dependencies=[Depends(owner_only)])
+async def botspace_send_booking_confirms(body: Optional[GoogleReviewIn] = None):
+    """Owner: send booking-confirm WhatsApp to all booked Euler leads not yet messaged."""
+    force = bool(body and body.force)
+    return await wa.send_booking_confirms(force=force, immediate=True)
+
+
 @api.post("/integrations/botspace/send-delivery-reviews", dependencies=[Depends(owner_only)])
 async def botspace_send_delivery_reviews(body: Optional[GoogleReviewIn] = None):
     """Owner: send Google-review WhatsApp to all delivered Euler leads not yet messaged."""
@@ -5463,6 +5470,23 @@ async def botspace_send_delivery_reviews(body: Optional[GoogleReviewIn] = None):
 async def lead_whatsapp_thread(lead_id: str):
     await get_lead_or_404(lead_id)
     return await wa.list_thread(lead_id)
+
+
+@api.post("/leads/{lead_id}/whatsapp/booking-confirm")
+async def lead_whatsapp_booking_confirm(lead_id: str, body: Optional[GoogleReviewIn] = None):
+    """Send booking confirmation template. Lead must already be booked."""
+    await get_lead_or_404(lead_id)
+    force = bool(body and body.force)
+    res = await wa.notify_booking(lead_id, force=force, immediate=True)
+    if res.get("reason") == "not-booked":
+        raise HTTPException(422, "Convert the lead to a Booking before sending a booking WhatsApp")
+    if res.get("reason") == "opted-out":
+        raise HTTPException(422, "Customer sent STOP — booking WhatsApp will not be sent")
+    if res.get("reason") == "whatsapp-not-configured":
+        raise HTTPException(422, "WhatsApp is not configured. Owner: Settings → WhatsApp (BotSpace).")
+    if not res.get("ok") and not res.get("skipped"):
+        raise HTTPException(502, res.get("reason") or res.get("error") or "WhatsApp send failed")
+    return res
 
 
 @api.post("/leads/{lead_id}/whatsapp/google-review")

@@ -305,6 +305,7 @@ function BotspaceCard() {
   const [execs, setExecs] = useState([]);
   const [busy, setBusy] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [bookingBusy, setBookingBusy] = useState(false);
   const webhookUrl = (cfg?.webhookUrl && String(cfg.webhookUrl).startsWith("http")
     && !String(cfg.webhookUrl).includes("onrender.com"))
     ? cfg.webhookUrl
@@ -366,6 +367,19 @@ function BotspaceCard() {
       toast.error(e?.response?.data?.detail || "Could not send Google review messages");
     } finally {
       setReviewBusy(false);
+    }
+  };
+
+  const sendBookings = async () => {
+    if (!window.confirm("Send the booking confirmation WhatsApp to every booked Euler lead that has not received it yet? Already-sent leads are skipped.")) return;
+    setBookingBusy(true);
+    try {
+      const r = await post("/integrations/botspace/send-booking-confirms", { force: false });
+      toast.success(`Booking WhatsApp: sent ${r.sent || 0}, already sent ${r.skipped || 0}, failed ${r.failed || 0}`);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not send booking WhatsApp");
+    } finally {
+      setBookingBusy(false);
     }
   };
 
@@ -439,13 +453,16 @@ function BotspaceCard() {
       <div className="flex flex-wrap gap-2 mt-4">
         <Button data-testid="botspace-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save WhatsApp settings"}</Button>
         <Button variant="secondary" onClick={runJobs}>Run follow-up jobs now</Button>
+        <Button variant="secondary" data-testid="send-all-booking-confirms-btn" onClick={sendBookings} disabled={bookingBusy}>
+          {bookingBusy ? "Sending…" : "Send booking WhatsApp to booked leads"}
+        </Button>
         <Button variant="secondary" data-testid="send-all-delivery-reviews-btn" onClick={sendReviews} disabled={reviewBusy}>
           {reviewBusy ? "Sending…" : "Send Google review to delivered leads"}
         </Button>
         <span className="text-xs text-ink-faint self-center">{cfg?.configured ? "Configured" : "Needs API key + channel ID"}</span>
       </div>
       <p className="text-xs text-ink-faint mt-2">
-        Bulk send covers already-delivered Euler leads that never got the review WhatsApp. Future Mark Delivered still sends automatically.
+        Bulk send covers already-booked / already-delivered Euler leads that never got the WhatsApp. Future Convert to Booking and Mark Delivered still send automatically.
       </p>
     </Card>
   );

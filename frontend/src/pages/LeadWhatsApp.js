@@ -8,6 +8,7 @@ export default function LeadWhatsApp({ leadId }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [bookingBusy, setBookingBusy] = useState(false);
 
   const load = useCallback(() => {
     get(`/leads/${leadId}/whatsapp`).then(setData).catch(() => toast.error("Could not load WhatsApp thread"));
@@ -26,6 +27,20 @@ export default function LeadWhatsApp({ leadId }) {
       toast.error(e?.response?.data?.detail || "Reply failed");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const sendBooking = async (force) => {
+    setBookingBusy(true);
+    try {
+      const r = await post(`/leads/${leadId}/whatsapp/booking-confirm`, { force: !!force });
+      if (r.skipped) toast.success("Booking WhatsApp was already sent for this lead");
+      else toast.success("Booking confirmation WhatsApp sent");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not send booking WhatsApp");
+    } finally {
+      setBookingBusy(false);
     }
   };
 
@@ -51,6 +66,24 @@ export default function LeadWhatsApp({ leadId }) {
         Only this Euler lead’s chat. Tata / other BotSpace contacts never appear here.
         {data.optOut ? " Customer sent STOP — auto follow-ups are off." : ""}
       </p>
+
+      {data.canSendBooking && (
+        <Card className="p-4 mb-4" data-testid="booking-confirm-card">
+          <div className="font-heading font-bold text-ink text-sm">Booking confirmation WhatsApp</div>
+          <p className="text-xs text-ink-soft mt-1 mb-3">
+            Sends the booked + confirmation template to this customer.
+            {data.bookingConfirmSentAt ? ` Last sent ${data.bookingConfirmSentAt.slice(0, 16).replace("T", " ")}.` : " Not sent yet."}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button data-testid="send-booking-confirm-btn" onClick={() => sendBooking(false)} disabled={bookingBusy}>
+              {bookingBusy ? "Sending…" : (data.bookingConfirmSentAt ? "Already sent" : "Send booking WhatsApp")}
+            </Button>
+            {data.bookingConfirmSentAt && (
+              <Button variant="secondary" onClick={() => sendBooking(true)} disabled={bookingBusy}>Send again</Button>
+            )}
+          </div>
+        </Card>
+      )}
 
       {data.canSendReview && (
         <Card className="p-4 mb-4" data-testid="google-review-card">

@@ -154,7 +154,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
-        : <Overview lead={lead} c={c} />)}
+        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} />}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
@@ -258,7 +258,8 @@ function KV({ label, value, tone }) {
   );
 }
 
-function Overview({ lead, c }) {
+function Overview({ lead, c, actions = {}, onSaved }) {
+  const booked = !!actions.isBooked;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
       <Card className="p-4">
@@ -298,6 +299,11 @@ function Overview({ lead, c }) {
         </div>
         {lead.remarks && <div className="mt-2 text-sm text-ink-soft bg-zinc-50 rounded-lg p-3">{lead.remarks}</div>}
       </Card>
+      {booked && (
+        <div className="sm:col-span-2">
+          <BookingConfirmSend leadId={lead.leadId} already={!!lead.whatsappBookingSentAt} onSent={onSaved} />
+        </div>
+      )}
     </div>
   );
 }
@@ -921,6 +927,37 @@ function RefundForm({ lead, excess, onSaved }) {
 }
 
 /* -------------------------------------------------- Delivery */
+function BookingConfirmSend({ leadId, already, onSent }) {
+  const [busy, setBusy] = useState(false);
+  const send = async (force) => {
+    setBusy(true);
+    try {
+      const r = await post(`/leads/${leadId}/whatsapp/booking-confirm`, { force: !!force });
+      if (r.skipped) toast.success("Booking WhatsApp was already sent");
+      else toast.success("Booking confirmation WhatsApp sent");
+      if (onSent) onSent();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not send booking WhatsApp");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card className="p-4" data-testid="booking-whatsapp-card">
+      <div className="font-heading font-bold text-ink text-sm">Booking WhatsApp</div>
+      <p className="text-xs text-ink-soft mt-1 mb-3">
+        Send the booking confirmation template to this customer’s WhatsApp.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button data-testid="send-booking-whatsapp-btn" onClick={() => send(false)} disabled={busy}>
+          {busy ? "Sending…" : already ? "Already sent" : "Send booking WhatsApp"}
+        </Button>
+        {already && <Button variant="secondary" onClick={() => send(true)} disabled={busy}>Send again</Button>}
+      </div>
+    </Card>
+  );
+}
+
 function GoogleReviewSend({ leadId, already, onSent }) {
   const [busy, setBusy] = useState(false);
   const send = async (force) => {
