@@ -402,3 +402,96 @@ async def test_bulk_booking_whatsapp_skips_already_sent(client, monkeypatch):
     assert lead1.get("whatsappBookingSentAt")
     lead_new = await server.db.leads.find_one({"leadId": "LDNEW3"})
     assert not lead_new.get("whatsappBookingSentAt")
+
+
+async def _seed_stale_disabled_config():
+    """Production bug: Settings form saved enabled:false with no visible toggle."""
+    await server.db.settings.insert_one({
+        "_id": wa.SETTINGS_ID,
+        "apiKey": "botspace_test_key",
+        "channelId": "chan-review",
+        "reviewUrl": "https://g.page/r/example",
+        "enabled": False,
+    })
+
+
+@pytest.mark.asyncio
+async def test_get_config_ignores_mongo_enabled_false(client):
+    await _seed_stale_disabled_config()
+    cfg = await wa.get_config()
+    assert cfg["configured"] is True
+    assert cfg["enabled"] is True
+    r = await client.get("/api/integrations/botspace")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["configured"] is True
+    assert body["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_booking_whatsapp_sends_when_mongo_enabled_false(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append({"phone": phone, "template_id": template_id})
+        return {"ok": True, "data": {"id": "wamid.healed"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _seed_stale_disabled_config()
+    await _seed_booked("LDBKHEAL", mobile="9928880107")
+
+    r = await client.post("/api/leads/LDBKHEAL/whatsapp/booking-confirm", json={"force": False})
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True
+    assert not r.json().get("skipped")
+    assert len(calls) == 1
+    assert calls[0]["template_id"] == "booking_confirm"
+
+
+@pytest.mark.asyncio
+async def test_google_review_sends_when_mongo_enabled_false(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append(template_id)
+        return {"ok": True, "data": {"id": "wamid.del"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _seed_stale_disabled_config()
+    await _seed_delivered("LDDELHEAL", mobile="9928880108")
+
+    r = await client.post("/api/leads/LDDELHEAL/whatsapp/google-review", json={"force": False})
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True
+    assert calls == ["delivery_review"]
+
+
+@pytest.mark.asyncio
+async def test_save_heals_enabled_false_when_key_and_channel_present(client):
+    await _seed_stale_disabled_config()
+    r = await client.put("/api/integrations/botspace", json={
+        "channelId": "chan-review",
+        "enabled": False,
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["enabled"] is True
+    doc = await server.db.settings.find_one({"_id": wa.SETTINGS_ID})
+    assert doc.get("enabled") is True
+
+
+@pytest.mark.asyncio
+async def test_booking_whatsapp_422_when_key_missing(client):
+    await _seed_booked("LDBKNOCFG", mobile="9000044444")
+    r = await client.post("/api/leads/LDBKNOCFG/whatsapp/booking-confirm", json={})
+    assert r.status_code == 422
+    assert "not configured" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_env_kill_switch_blocks_send(client, monkeypatch):
+    monkeypatch.setenv("BOTSPACE_ENABLED", "false")
+    await _seed_stale_disabled_config()
+    await _seed_booked("LDBKKILL", mobile="9000055555")
+    r = await client.post("/api/leads/LDBKKILL/whatsapp/booking-confirm", json={})
+    assert r.status_code == 422
+    assert "not configured" in r.text.lower()
