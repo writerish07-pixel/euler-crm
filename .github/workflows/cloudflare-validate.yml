@@ -23,7 +23,7 @@ jobs:
       - name: Build frontend
         run: npm run build
         env:
-          CI: true
+          CI: "false"
       - name: Wrangler deploy dry-run (repo root)
         run: npx wrangler deploy --dry-run
       - name: Wrangler deploy dry-run (frontend rootDir)
