@@ -306,6 +306,10 @@ function BotspaceCard() {
   const [busy, setBusy] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [bookingBusy, setBookingBusy] = useState(false);
+  const webhookUrl = (cfg?.webhookUrl && String(cfg.webhookUrl).startsWith("http")
+    && !String(cfg.webhookUrl).includes("onrender.com"))
+    ? cfg.webhookUrl
+    : "https://euler-crm-production.up.railway.app/api/integrations/botspace/webhook";
 
   const load = useCallback(() => {
     get("/integrations/botspace").then((d) => {
@@ -413,9 +417,20 @@ function BotspaceCard() {
             placeholder="For Railway / cron-job.org" />
         </Field>
       </div>
-      <div className="mt-3 text-xs text-ink-faint font-mono break-all">
-        Webhook URL: {cfg?.webhookUrl || "/api/integrations/botspace/webhook"}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="text-xs text-ink-faint font-mono break-all" data-testid="botspace-webhook-url">
+          BotSpace webhook URL: {webhookUrl}
+        </div>
+        <Button variant="ghost" className="!py-1 !px-2 text-xs" onClick={() => {
+          navigator.clipboard.writeText(webhookUrl).then(
+            () => toast.success("Webhook URL copied — paste it in BotSpace → Webhooks"),
+            () => toast.error("Could not copy"),
+          );
+        }}><Copy size={12} /> Copy</Button>
       </div>
+      <p className="text-xs text-ink-faint mt-1">
+        Paste this in BotSpace as the callback / webhook URL (POST). Use the Railway API host, not the Euler website address.
+      </p>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3 items-end">
         <Field label="Executive name (as on lead)">
           <Input value={form.execName} onChange={(e) => setForm({ ...form, execName: e.target.value })} />
