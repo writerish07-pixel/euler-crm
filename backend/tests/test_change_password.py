@@ -21,18 +21,34 @@ import auth as authmod  # noqa: E402
 import server  # noqa: E402
 
 
-@pytest_asyncio.fixture
-async def client():
-    await server.startup()
-    # Reset both demo accounts to known passwords so tests are order-independent.
-    for email, pw in (("owner@euler.com", "euler@123"), ("executive@euler.com", "euler@123")):
+DEMO_ACCOUNTS = (("owner@euler.com", "euler@123"), ("executive@euler.com", "euler@123"))
+
+
+async def _restore_demo_passwords():
+    for email, pw in DEMO_ACCOUNTS:
         await server.db.users.update_one(
             {"email": email},
             {"$set": {"passwordHash": authmod.hash_password(pw)}},
         )
+
+
+@pytest_asyncio.fixture
+async def client():
+    await server.startup()
+    # Reset both demo accounts to known passwords so tests are order-independent.
+    await _restore_demo_passwords()
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+    # ...and restore them on the way out.
+    #
+    # server.py binds `db = client[os.environ["DB_NAME"]]` at import time, and every
+    # test module sets DB_NAME with os.environ.setdefault — so only the first module
+    # imported wins and ALL test files share one mongomock database. This file is the
+    # only one that rotates a demo password; without this teardown it leaves
+    # owner@euler.com on "ownerNew1", and every later module whose fixture logs in
+    # with the default password gets no token and errors with KeyError: 'token'.
+    await _restore_demo_passwords()
 
 
 async def _login(c, email, password="euler@123"):
