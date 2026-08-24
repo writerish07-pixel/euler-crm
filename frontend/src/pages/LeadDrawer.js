@@ -997,14 +997,19 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   const locked = closedOrInactive || (alreadyDelivered && !isOwner);
   const canMarkDelivered = actions.canDeliver;   // active + booked + not delivered
   const [form, setForm] = useState(() => {
-    const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", deliveryDate: delivery.deliveryDate || todayISO() };
+    const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", insuranceAgentId: lead.insuranceAgentId || "", deliveryDate: delivery.deliveryDate || todayISO() };
     DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
     return f;
   });
   const [summary, setSummary] = useState(billingSummary || null);
   const [summaryLoading, setSummaryLoading] = useState(false);
+  // Insurance agent is chosen here; it decides the payout slab on the entry
+  // that Mark Delivered opens.
+  const [agents, setAgents] = useState([]);
 
   useEffect(() => { setSummary(billingSummary || null); }, [billingSummary]);
+
+  useEffect(() => { get("/insurance-agents").then(setAgents).catch(() => setAgents([])); }, []);
 
   useEffect(() => {
     if (!alreadyDelivered) return;
@@ -1052,6 +1057,14 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
         <Field label="Chassis Number"><Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked} /></Field>
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>
+        <Field label="Insurance Agent">
+          <Select data-testid="delivery-insurance-agent" value={form.insuranceAgentId}
+            onChange={set("insuranceAgentId")} disabled={locked}>
+            <option value="">— Default agent —</option>
+            {agents.filter((a) => (a.status || "Active").toLowerCase() === "active" || a.agentId === form.insuranceAgentId)
+              .map((a) => <option key={a.agentId} value={a.agentId}>{a.agentName}</option>)}
+          </Select>
+        </Field>
         <Field label="Delivery Date"><Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} disabled={locked} /></Field>
         <Field label="Mark Delivered?">
           <Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")} disabled={locked || alreadyDelivered || !canMarkDelivered}>

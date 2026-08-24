@@ -38,6 +38,21 @@ export default function InsurancePayoutReport() {
         </div>
       </Card>
 
+      <Card className="p-5 mb-6" data-testid="payout-by-agent">
+        <h3 className="font-heading font-bold text-ink mb-1">By Agent</h3>
+        <p className="text-xs text-ink-soft mb-3">Which broker owes what — each agent pays on its own slab</p>
+        <Table rowKey="key"
+          columns={[
+            { key: "key", label: "Agent", render: (r) => <span className="font-semibold">{r.key}</span> },
+            { key: "count", label: "Policies", align: "right" },
+            { key: "premium", label: "Premium", align: "right", mono: true, render: (r) => inr(r.premium) },
+            { key: "expected", label: "Expected", align: "right", mono: true, render: (r) => inr(r.expected) },
+            { key: "received", label: "Received", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.received)}</span> },
+            { key: "outstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.outstanding > 0 ? "text-red-600 font-semibold" : ""}>{inr(r.outstanding)}</span> },
+          ]}
+          rows={d.byAgent || []} empty="No insurance entries yet" />
+      </Card>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div>
           <h3 className="font-heading font-bold text-ink mb-3">By Month</h3>
