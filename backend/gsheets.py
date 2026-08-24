@@ -106,7 +106,10 @@ SYNC_MAP = {
                    "expectedPayout", "receivedPayout", "payoutOutstanding", "status",
                    "policyDate", "deliveryDate", "lastUpdated", "remarks",
                    # Already captured by InsuranceIn and stored via model_dump().
-                   "insuranceExecutive"], None),
+                   "insuranceExecutive",
+                   # Insurance agent (broker) the payout is claimed from, and how the
+                   # rate was decided (agent slab / manual override / legacy default).
+                   "insuranceAgentName", "payoutRateSource", "lastPayoutDate"], None),
     "finance": (_tab("GSHEET_TAB_FINANCE", "Finance Register"), "financeFileNumber",
                 ["financeFileNumber", "leadId", "customerName", "financerName",
                  "committedAmount", "disbursedAmount", "financeOutstanding", "status",
@@ -222,6 +225,9 @@ HEADER_ALIASES = {
     # Insurance Register
     "insuranceCompany": ["insurance company"],
     "payoutRatePct": ["payout rate %", "payout rate"],
+    "insuranceAgentName": ["insurance agent", "agent", "agent name"],
+    "payoutRateSource": ["rate source", "payout rate source"],
+    "lastPayoutDate": ["last payout date", "last receipt date"],
     # Scheme Claim Register
     "claimReference": ["claim reference number", "claim reference"],
     "submittedDate": ["claim submitted date"],

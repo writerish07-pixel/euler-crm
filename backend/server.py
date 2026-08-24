@@ -809,6 +809,7 @@ class DeliveryIn(BaseModel):
     chassisNumber: str = ""
     numberPlate: str = ""
     insurerName: str = ""
+    insuranceAgentId: str = ""     # broker paying the payout; picked at delivery
     feedback: str = ""
 
 
@@ -3461,6 +3462,14 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sal
         "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber,
         "numberPlate": body.numberPlate, "insurerName": body.insurerName, "lastUpdated": now_iso(),
     }
+    # Insurance agent is chosen at delivery. Blank keeps whatever the lead already
+    # had, so re-saving delivery paperwork never wipes the agent off a booked payout.
+    if (body.insuranceAgentId or "").strip():
+        _agent = await _get_insurance_agent(body.insuranceAgentId)
+        if not _agent:
+            raise HTTPException(422, "Selected insurance agent not found")
+        lead_updates["insuranceAgentId"] = _agent["agentId"]
+        lead_updates["insuranceAgentName"] = _agent.get("agentName", "")
     if delivered:
         lead_updates.update({"deliveryStatus": "Delivered", "currentStatus": "Delivered",
                              "deliveryDate": body.deliveryDate or today()})
@@ -3561,6 +3570,11 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
     if premium <= 0:
         return None          # no premium charged -> no payout is due; leave it absent
     existing = await db.insurance.find_one({"leadId": lead_id})
+    # Agent chosen at delivery; fall back to whatever the entry already carries,
+    # then to the default agent, so pre-agent leads still resolve a rate.
+    agent = (await _get_insurance_agent(lead.get("insuranceAgentId"))
+             or await _get_insurance_agent((existing or {}).get("insuranceAgentId"))
+             or await _default_insurance_agent())
     data = {
         "leadId": lead_id,
         "customerName": lead.get("customerName", ""),
@@ -3579,7 +3593,11 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
         "remarks": (existing or {}).get("remarks", ""),
         "lastUpdated": now_iso(),
     }
-    data.update(_insurance_derive(data))
+    # An owner's manual rate must survive re-delivery; anything the server itself
+    # resolved is re-derived from the agent slab so a corrected agent takes effect.
+    if (existing or {}).get("payoutRateSource") != "manual":
+        data["payoutRate"] = 0
+    data.update(_insurance_derive(data, agent))
     if existing:
         await db.insurance.update_one({"entryId": existing["entryId"]}, {"$set": data})
         data["entryId"] = existing["entryId"]
@@ -3587,7 +3605,7 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
         data["entryId"] = await next_id("insurance", "INS26")
         data["policyDate"] = None
         await db.insurance.insert_one(dict(data))
-    await sheet_sync("insurance", {**data, "payoutRatePct": round(ce.num(data.get("payoutRate")) * 100, 1)})
+    await sheet_sync("insurance", _insurance_sheet_row(data))
     return data
 
 
@@ -3819,12 +3837,227 @@ def _strip_payout_for_staff(entry: dict, is_owner: bool):
     return e
 
 
+# ------------------------------------------------- insurance agents (brokers)
+# An insurance agent is the broker between the dealership and the insurer, and
+# each one pays a different share of the premium. Before this existed the payout
+# rate was a single hard-coded pair (49% Storm/Turbo, 36.5% everything else) with
+# nowhere to record WHO was paying it, so a second agent could not be modelled.
+# The insurer (insuranceCompany, e.g. ICICI) stays a separate field.
+class InsuranceSlabIn(BaseModel):
+    modelFamily: str = "*"
+    payoutRatePct: float = 0        # PERCENT here (52 means 52%), fraction on the entry
+    effectiveFrom: str = ""
+    effectiveTo: str = ""
+
+
+class InsuranceAgentIn(BaseModel):
+    agentName: str
+    agentCode: str = ""
+    contactPerson: str = ""
+    mobile: str = ""
+    email: str = ""
+    status: str = "Active"
+    isDefault: bool = False
+    slabs: List[InsuranceSlabIn] = []
+    remarks: str = ""
+
+
+def _agent_doc(body: dict) -> dict:
+    slabs = []
+    for s in (body.get("slabs") or []):
+        fam = ce.normalize_slab_family(s.get("modelFamily"))
+        pct = ce.num(s.get("payoutRatePct"))
+        if pct <= 0:
+            continue
+        slabs.append({"modelFamily": fam, "payoutRatePct": round(pct, 4),
+                      "effectiveFrom": str(s.get("effectiveFrom") or "")[:10],
+                      "effectiveTo": str(s.get("effectiveTo") or "")[:10]})
+    return {
+        "agentName": str(body.get("agentName") or "").strip(),
+        "agentCode": str(body.get("agentCode") or "").strip(),
+        "contactPerson": str(body.get("contactPerson") or "").strip(),
+        "mobile": str(body.get("mobile") or "").strip(),
+        "email": str(body.get("email") or "").strip(),
+        "status": str(body.get("status") or "Active").strip() or "Active",
+        "isDefault": bool(body.get("isDefault")),
+        "slabs": slabs,
+        "remarks": str(body.get("remarks") or "").strip(),
+        "lastUpdated": now_iso(),
+    }
+
+
+async def _clear_other_defaults(agent_id: str):
+    await db.insurance_agents.update_many(
+        {"agentId": {"$ne": agent_id}}, {"$set": {"isDefault": False}})
+
+
+async def _get_insurance_agent(agent_id) -> dict:
+    if not str(agent_id or "").strip():
+        return {}
+    return await db.insurance_agents.find_one({"agentId": str(agent_id).strip()}) or {}
+
+
+async def _default_insurance_agent() -> dict:
+    return (await db.insurance_agents.find_one({"isDefault": True, "status": "Active"})
+            or await db.insurance_agents.find_one({"isDefault": True})
+            or {})
+
+
+@api.get("/insurance-agents")
+async def list_insurance_agents(active_only: bool = False):
+    """Readable by any signed-in user — the delivery screen needs the dropdown."""
+    q = {"status": {"$regex": "^active$", "$options": "i"}} if active_only else {}
+    return [clean(a) for a in
+            await db.insurance_agents.find(q).sort("agentName", 1).to_list(500)]
+
+
+@api.post("/insurance-agents", dependencies=[Depends(owner_only)])
+async def create_insurance_agent(body: InsuranceAgentIn, act=Depends(actor)):
+    data = _agent_doc(body.model_dump())
+    if not data["agentName"]:
+        raise HTTPException(422, "Agent name is required")
+    dupe = await db.insurance_agents.find_one(
+        {"agentName": {"$regex": f"^{re.escape(data['agentName'])}$", "$options": "i"}})
+    if dupe:
+        raise HTTPException(409, f"An insurance agent named '{data['agentName']}' already exists")
+    data["agentId"] = await next_id("insurance_agent", "IA26")
+    data["createdAt"] = now_iso()
+    await db.insurance_agents.insert_one(dict(data))
+    if data["isDefault"]:
+        await _clear_other_defaults(data["agentId"])
+    await write_audit(act, "create", "insurance_agents", new={
+        "agentId": data["agentId"], "agentName": data["agentName"], "slabs": data["slabs"]})
+    return clean(await db.insurance_agents.find_one({"agentId": data["agentId"]}))
+
+
+@api.put("/insurance-agents/{agent_id}", dependencies=[Depends(owner_only)])
+async def update_insurance_agent(agent_id: str, body: InsuranceAgentIn, act=Depends(actor)):
+    existing = await db.insurance_agents.find_one({"agentId": agent_id})
+    if not existing:
+        raise HTTPException(404, "Insurance agent not found")
+    data = _agent_doc(body.model_dump())
+    if not data["agentName"]:
+        raise HTTPException(422, "Agent name is required")
+    await db.insurance_agents.update_one({"agentId": agent_id}, {"$set": data})
+    if data["isDefault"]:
+        await _clear_other_defaults(agent_id)
+    # Existing entries keep their SNAPSHOT rate. Changing a slab must never
+    # silently restate money already booked into dealer earnings.
+    await write_audit(act, "update", "insurance_agents",
+                      old={"slabs": existing.get("slabs"), "agentName": existing.get("agentName")},
+                      new={"slabs": data["slabs"], "agentName": data["agentName"]})
+    return clean(await db.insurance_agents.find_one({"agentId": agent_id}))
+
+
+@api.delete("/insurance-agents/{agent_id}", dependencies=[Depends(owner_only)])
+async def delete_insurance_agent(agent_id: str, act=Depends(actor)):
+    existing = await db.insurance_agents.find_one({"agentId": agent_id})
+    if not existing:
+        raise HTTPException(404, "Insurance agent not found")
+    used = await db.insurance.count_documents({"insuranceAgentId": agent_id})
+    if used:
+        raise HTTPException(
+            409, f"{used} insurance entr{'y' if used == 1 else 'ies'} still reference this agent. "
+                 f"Set the agent to Inactive instead — deleting it would orphan booked payouts.")
+    await db.insurance_agents.delete_one({"agentId": agent_id})
+    await write_audit(act, "delete", "insurance_agents", old={
+        "agentId": agent_id, "agentName": existing.get("agentName")})
+    return {"ok": True}
+
+
 @api.get("/insurance")
-async def list_insurance(lead_id: Optional[str] = None, act=Depends(actor)):
-    q = {"leadId": lead_id} if lead_id else {}
+async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
+                         agent_id: Optional[str] = None, act=Depends(actor)):
+    """Insurance Register, shaped like the Finance Register.
+
+    view=pending  -> payout still owed
+    view=overdue  -> pending AND past the settlement date (10th of the next month)
+    """
+    q = {}
+    if lead_id:
+        q["leadId"] = lead_id
+    if agent_id:
+        q["insuranceAgentId"] = agent_id
     is_owner = act.get("role") == "owner"
-    return [_strip_payout_for_staff(clean(i), is_owner)
+    rows = [_insurance_enrich(clean(i))
             for i in await db.insurance.find(q).sort("entryId", -1).to_list(1000)]
+    if view == "pending":
+        rows = [r for r in rows if r.get("pending")]
+    elif view == "overdue":
+        rows = [r for r in rows if r.get("overdue")]
+    return [_strip_payout_for_staff(r, is_owner) for r in rows]
+
+
+@api.get("/insurance/agents-rollup")
+async def insurance_agents_rollup(view: str = "all", act=Depends(actor)):
+    """Per-agent totals — the insurance twin of the Finance 'By financer' card."""
+    is_owner = act.get("role") == "owner"
+    rows = [_insurance_enrich(clean(i)) for i in await db.insurance.find().to_list(5000)]
+    if view == "pending":
+        rows = [r for r in rows if r.get("pending")]
+    elif view == "overdue":
+        rows = [r for r in rows if r.get("overdue")]
+    buckets = {}
+    for r in rows:
+        key = r.get("insuranceAgentId") or ""
+        name = r.get("insuranceAgentName") or "— No agent —"
+        b = buckets.setdefault(key, {
+            "agentId": key, "agentName": name, "entries": 0, "pendingEntries": 0,
+            "premium": 0.0, "expected": 0.0, "received": 0.0, "outstanding": 0.0,
+            "overdueEntries": 0,
+        })
+        b["entries"] += 1
+        b["premium"] += ce.num(r.get("insuranceAmount"))
+        b["expected"] += ce.num(r.get("expectedPayout"))
+        b["received"] += ce.num(r.get("receivedPayout"))
+        b["outstanding"] += ce.num(r.get("payoutOutstanding"))
+        if r.get("pending"):
+            b["pendingEntries"] += 1
+        if r.get("overdue"):
+            b["overdueEntries"] += 1
+    out = []
+    for b in buckets.values():
+        for k in ("premium", "expected", "received", "outstanding"):
+            b[k] = ce.round2(b[k])
+        if not is_owner:
+            b.pop("expected", None)
+            b.pop("outstanding", None)
+        out.append(b)
+    return sorted(out, key=lambda x: (-x.get("outstanding", 0), x["agentName"]))
+
+
+@api.get("/insurance/receipts")
+async def list_insurance_receipts(agent_id: Optional[str] = None, entry_id: Optional[str] = None,
+                                  date_from: Optional[str] = None, date_to: Optional[str] = None):
+    """Flat agent-wise payout receipt ledger across every entry."""
+    q = {}
+    if agent_id:
+        q["insuranceAgentId"] = agent_id
+    if entry_id:
+        q["entryId"] = entry_id
+    out = []
+    for e in await db.insurance.find(q).to_list(5000):
+        for r in (e.get("receipts") or []):
+            day = str(r.get("date") or "")[:10]
+            if date_from and day < date_from:
+                continue
+            if date_to and day > date_to:
+                continue
+            out.append({
+                # Receipts live in an array with no id of their own; the entry plus
+                # the recording timestamp is unique and stable across reloads.
+                "receiptId": f"{e.get('entryId')}::{r.get('recordedAt') or day}",
+                "entryId": e.get("entryId"), "leadId": e.get("leadId"),
+                "customerName": e.get("customerName"),
+                "insuranceAgentId": e.get("insuranceAgentId", ""),
+                "insuranceAgentName": e.get("insuranceAgentName", ""),
+                "insuranceCompany": e.get("insuranceCompany", ""),
+                "policyNumber": e.get("policyNumber", ""),
+                "amount": ce.round2(ce.num(r.get("amount"))),
+                "date": day, "reference": r.get("reference", ""),
+                "recordedAt": r.get("recordedAt", ""),
+            })
+    return sorted(out, key=lambda x: (x["date"], x["recordedAt"]), reverse=True)
 
 
 class InsuranceIn(BaseModel):
@@ -3834,6 +4067,7 @@ class InsuranceIn(BaseModel):
     model: str = ""
     variant: str = ""
     insuranceCompany: str = ""
+    insuranceAgentId: str = ""
     policyNumber: str = ""
     insuranceAmount: float = 0
     payoutRate: float = 0          # fraction, e.g. 0.15 for 15%
@@ -3844,13 +4078,45 @@ class InsuranceIn(BaseModel):
     remarks: str = ""
 
 
-def _insurance_derive(body: dict):
+async def _insurance_payout_terms() -> dict:
+    """Settlement cycle, overridable from settings so a changed TAT is not a code change."""
+    doc = await db.settings.find_one({"_id": "insurance_payout_terms"}) or {}
+    return {
+        "dueDayOfMonth": int(doc.get("dueDayOfMonth") or ce.INSURANCE_PAYOUT_DUE_DAY),
+        "monthsAfter": int(doc.get("monthsAfter") if doc.get("monthsAfter") is not None
+                           else ce.INSURANCE_PAYOUT_MONTHS_AFTER),
+    }
+
+
+def _insurance_enrich(entry: dict, terms: Optional[dict] = None) -> dict:
+    """Derived view state — pending / dueBy / overdue. Never stored, so it cannot go stale."""
+    t = terms or {"dueDayOfMonth": ce.INSURANCE_PAYOUT_DUE_DAY,
+                  "monthsAfter": ce.INSURANCE_PAYOUT_MONTHS_AFTER}
+    e = dict(entry)
+    outstanding = ce.num(e.get("payoutOutstanding"))
+    status = str(e.get("status") or "")
+    pending = outstanding > 0.01 and status != "Received" and not status.startswith("N/A")
+    basis = e.get("policyDate") or e.get("deliveryDate") or ""
+    due_by = ce.insurance_payout_due_by(basis, t["dueDayOfMonth"], t["monthsAfter"])
+    e["pending"] = pending
+    e["payoutDueBy"] = due_by
+    e["overdue"] = bool(pending and due_by and due_by < today())
+    return e
+
+
+def _insurance_derive(body: dict, agent: Optional[dict] = None):
+    """Premium x rate -> expected / received / outstanding / status.
+
+    The rate is resolved through the agent's slab (manual override > agent slab >
+    catch-all > legacy 49/36.5) and SNAPSHOT onto the entry together with its
+    source, so a later slab edit never restates money already booked.
+    """
     premium = ce.num(body.get("insuranceAmount"))
-    rate = ce.num(body.get("payoutRate"))
-    if rate > 1:  # allow entering 15 meaning 15%
-        rate = rate / 100.0
-    if rate <= 0:  # no manual rate -> suggested default by model (49% Storm/Turbo, 36.5% others)
-        rate = ce.suggested_insurance_payout_rate(body.get("model"), body.get("variant"))
+    basis = body.get("policyDate") or body.get("deliveryDate") or ""
+    resolved = ce.resolve_insurance_payout_rate(
+        agent or {}, body.get("model"), body.get("variant"),
+        on_date=basis, manual_rate=body.get("payoutRate"))
+    rate = resolved["rate"]
     expected = ce.round2(premium * rate)
     received = ce.num(body.get("receivedPayout"))
     outstanding = ce.round2(max(0.0, expected - received))
@@ -3859,8 +4125,17 @@ def _insurance_derive(body: dict):
         status = "Received"
     elif received > 0:
         status = "Partial"
-    return {"payoutRate": rate, "expectedPayout": expected, "receivedPayout": received,
-            "payoutOutstanding": outstanding, "status": status}
+    out = {"payoutRate": rate, "expectedPayout": expected, "receivedPayout": received,
+           "payoutOutstanding": outstanding, "status": status,
+           "payoutRateSource": resolved["source"], "payoutSlabFamily": resolved["slabFamily"]}
+    if agent:
+        out["insuranceAgentId"] = agent.get("agentId", "")
+        out["insuranceAgentName"] = agent.get("agentName", "")
+    return out
+
+
+def _insurance_sheet_row(data: dict) -> dict:
+    return {**data, "payoutRatePct": round(ce.num(data.get("payoutRate")) * 100, 1)}
 
 
 @api.post("/insurance")
@@ -3868,33 +4143,44 @@ async def create_insurance(body: InsuranceIn, act=Depends(actor), _money=Depends
     is_owner = act.get("role") == "owner"
     data = body.model_dump()
     if not is_owner:
-        data["payoutRate"] = 0   # staff never set the rate; server auto-fills from model
-    data.update(_insurance_derive(data))
-    data["entryId"] = await next_id("insurance", "INS26")
+        data["payoutRate"] = 0   # staff never set the rate; server resolves it from the agent slab
+    agent = await _get_insurance_agent(data.get("insuranceAgentId")) or await _default_insurance_agent()
     if data.get("leadId"):
         lead = await db.leads.find_one({"leadId": data["leadId"]})
         if lead:
             data["deliveryDate"] = lead.get("deliveryDate")
+            if not data.get("insuranceAgentId") and lead.get("insuranceAgentId"):
+                agent = await _get_insurance_agent(lead["insuranceAgentId"]) or agent
+    data.update(_insurance_derive(data, agent))
+    data["entryId"] = await next_id("insurance", "INS26")
     await db.insurance.insert_one(dict(data))
-    await sheet_sync("insurance", {**data, "payoutRatePct": round(ce.num(data.get("payoutRate")) * 100, 1)})
+    await sheet_sync("insurance", _insurance_sheet_row(data))
     await write_audit(act, "create", "insurance", leadId=data.get("leadId", ""),
                       new={"entryId": data["entryId"], "premium": data.get("insuranceAmount"),
+                           "agent": data.get("insuranceAgentName", ""),
                            "payoutRate": data.get("payoutRate"), "expectedPayout": data.get("expectedPayout")})
-    return _strip_payout_for_staff(clean(data), is_owner)
+    return _strip_payout_for_staff(_insurance_enrich(clean(data)), is_owner)
 
 
 @api.put("/insurance/{entry_id}", dependencies=[Depends(owner_only)])
 async def update_insurance(entry_id: str, body: InsuranceIn, act=Depends(actor)):
     existing = await db.insurance.find_one({"entryId": entry_id}) or {}
     data = body.model_dump()
-    data.update(_insurance_derive(data))
+    data.setdefault("deliveryDate", existing.get("deliveryDate"))
+    agent = await _get_insurance_agent(data.get("insuranceAgentId") or existing.get("insuranceAgentId"))
+    data.update(_insurance_derive(data, agent))
     res = await db.insurance.update_one({"entryId": entry_id}, {"$set": data})
     if res.matched_count == 0:
         raise HTTPException(404, "Insurance entry not found")
+    await sheet_sync("insurance", _insurance_sheet_row({**clean(existing), **data, "entryId": entry_id}))
     await write_audit(act, "update", "insurance", leadId=data.get("leadId", ""),
-                      old={"payoutRate": existing.get("payoutRate"), "expectedPayout": existing.get("expectedPayout")},
-                      new={"payoutRate": data.get("payoutRate"), "expectedPayout": data.get("expectedPayout")})
-    return clean(await db.insurance.find_one({"entryId": entry_id}))
+                      old={"payoutRate": existing.get("payoutRate"), "expectedPayout": existing.get("expectedPayout"),
+                           "agent": existing.get("insuranceAgentName", "")},
+                      new={"payoutRate": data.get("payoutRate"), "expectedPayout": data.get("expectedPayout"),
+                           "agent": data.get("insuranceAgentName", "")})
+    if data.get("leadId"):
+        await recompute_lead(data["leadId"])
+    return _insurance_enrich(clean(await db.insurance.find_one({"entryId": entry_id})))
 
 
 @api.delete("/insurance/{entry_id}", dependencies=[Depends(owner_only)])
@@ -3915,20 +4201,43 @@ async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(acto
     if body.amount <= 0:
         raise HTTPException(422, "Enter a valid receipt amount")
     expected = ce.num(e.get("expectedPayout"))
-    received = ce.round2(ce.num(e.get("receivedPayout")) + body.amount)
+    amount = ce.round2(body.amount)
+    receipt_date = body.date or today()
+    # Same two guards the financer receipt has. Without them a double-click booked
+    # the insurer payout twice and the entry read as settled on half the money.
+    for prior in reversed(e.get("receipts") or []):
+        if ce.round2(ce.num(prior.get("amount"))) != amount or str(prior.get("date") or "") != receipt_date:
+            continue
+        try:
+            prev_at = datetime.fromisoformat(prior["recordedAt"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (datetime.now(timezone.utc) - prev_at).total_seconds() < FINANCE_RECEIPT_DEDUPE_SECONDS:
+            raise HTTPException(409, "Duplicate submission detected — this insurer payout was just "
+                                     "recorded. Open the entry to confirm before recording it again.")
+    already = ce.num(e.get("receivedPayout"))
+    received = ce.round2(already + amount)
+    if expected > 0 and received > expected + 0.01:
+        room = ce.round2(max(0.0, expected - already))
+        raise HTTPException(422, f"Receipt ₹{amount} is more than this entry still expects. "
+                                 f"Expected ₹{ce.round2(expected)}, already received ₹{ce.round2(already)} — "
+                                 f"only ₹{room} can be booked. Correct the premium or the payout rate first.")
     outstanding = ce.round2(max(0.0, expected - received))
     status = "Received" if expected > 0 and received >= expected - 0.01 else "Partial"
-    receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
+    receipt = {"amount": amount, "date": receipt_date,
                "reference": body.reference, "recordedAt": now_iso()}
     await db.insurance.update_one({"entryId": entry_id}, {
         "$set": {"receivedPayout": received, "payoutOutstanding": outstanding, "status": status,
-                 "lastPayoutDate": body.date or today()},
+                 "lastPayoutDate": receipt_date},
         "$push": {"receipts": receipt},
     })
+    updated = await db.insurance.find_one({"entryId": entry_id})
+    await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
     await write_audit(act, "receipt", "insurance", leadId=e.get("leadId", ""),
-                      old={"receivedPayout": ce.num(e.get("receivedPayout"))},
-                      new={"receivedPayout": received, "payoutOutstanding": outstanding, "amount": ce.round2(body.amount)})
-    return _strip_payout_for_staff(clean(await db.insurance.find_one({"entryId": entry_id})), act.get("role") == "owner")
+                      old={"receivedPayout": already},
+                      new={"receivedPayout": received, "payoutOutstanding": outstanding,
+                           "amount": amount, "agent": e.get("insuranceAgentName", "")})
+    return _strip_payout_for_staff(_insurance_enrich(clean(updated)), act.get("role") == "owner")
 
 
 # ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)
@@ -4194,6 +4503,8 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/leads/{lead_id}/billing-summary"),
     ("GET", "/api/payments"), ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),
+    ("GET", "/api/insurance/agents-rollup"), ("GET", "/api/insurance/receipts"),
+    ("GET", "/api/insurance-agents"), ("POST", "/api/insurance-agents"),
     ("GET", "/api/claims"), ("POST", "/api/claims/settle"), ("POST", "/api/claims/receipt"),
     ("GET", "/api/deliveries"), ("GET", "/api/bookings"), ("GET", "/api/activities"),
     ("GET", "/api/price-master"), ("GET", "/api/scheme-master"), ("GET", "/api/incentive-master"),
@@ -4208,10 +4519,12 @@ OWNER_ONLY_ENDPOINTS = [
     "/api/reports/claim-exceptions", "/api/reports/insurance-payout", "/api/reports/dealer-earnings",
     "/api/reports/production-audit", "/api/audit-log",
     "/api/payments/{receipt_number}",
+    "/api/insurance-agents/{agent_id}",
 ]
 EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "incentive_register",
                         "bookings", "payments", "deliveries", "finance", "insurance", "dealer_earnings",
-                        "activities", "claims", "quotations", "counters", "audit_log", "masters_list"]
+                        "activities", "claims", "quotations", "counters", "audit_log", "masters_list",
+                        "insurance_agents"]
 FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "variant",
                       "currentStatus", "accountStatus"]
 PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "derive_claim",
@@ -4219,7 +4532,8 @@ PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "
                          "compute_scheme_allocation",
                          "compute_scheme_income_breakdown", "compute_scheme_claim_shares",
                          "get_scheme_offer_rules_for_vehicle", "validate_scheme_offers",
-                         "scheme_month_from_date", "suggested_insurance_payout_rate"]
+                         "scheme_month_from_date", "suggested_insurance_payout_rate",
+                         "resolve_insurance_payout_rate", "insurance_payout_due_by"]
 
 
 @api.get("/reports/production-audit", dependencies=[Depends(owner_only)])
@@ -5170,6 +5484,7 @@ async def insurance_payout_report():
     entries = await db.insurance.find().to_list(5000)
     by_month = {}
     by_insurer = {}
+    by_agent = {}
     totals = {"premium": 0.0, "expected": 0.0, "received": 0.0, "outstanding": 0.0, "count": 0}
     for e in entries:
         month = str(e.get("policyDate") or e.get("deliveryDate") or "")[:7] or "Unknown"
@@ -5177,7 +5492,9 @@ async def insurance_payout_report():
         expected = ce.num(e.get("expectedPayout"))
         received = ce.num(e.get("receivedPayout"))
         outstanding = ce.num(e.get("payoutOutstanding"))
-        for bucket, key in ((by_month, month), (by_insurer, e.get("insuranceCompany") or "Unknown")):
+        agent = e.get("insuranceAgentName") or "— No agent —"
+        for bucket, key in ((by_month, month), (by_insurer, e.get("insuranceCompany") or "Unknown"),
+                            (by_agent, agent)):
             row = bucket.setdefault(key, {"key": key, "premium": 0.0, "expected": 0.0, "received": 0.0, "outstanding": 0.0, "count": 0})
             row["premium"] += premium; row["expected"] += expected
             row["received"] += received; row["outstanding"] += outstanding; row["count"] += 1
@@ -5190,6 +5507,7 @@ async def insurance_payout_report():
         return sorted(rows, key=lambda x: x["key"], reverse=True) if sort_key else sorted(rows, key=lambda x: -x["expected"])
 
     return {"byMonth": norm(by_month, True), "byInsurer": norm(by_insurer),
+            "byAgent": norm(by_agent),
             "totals": {k: (ce.round2(v) if isinstance(v, float) else v) for k, v in totals.items()}}
 
 
@@ -5678,6 +5996,61 @@ async def migrate_insurance_rates():
     return {"ok": True, "fixed": fixed}
 
 
+# Slabs of the arrangement that existed before agents were modelled. Seeded once
+# so every pre-agent entry has an agent to point at and NO amount changes.
+LEGACY_AGENT_SLABS = [
+    {"modelFamily": "storm", "payoutRatePct": 49.0, "effectiveFrom": "", "effectiveTo": ""},
+    {"modelFamily": "turbo", "payoutRatePct": 49.0, "effectiveFrom": "", "effectiveTo": ""},
+    {"modelFamily": "*", "payoutRatePct": 36.5, "effectiveFrom": "", "effectiveTo": ""},
+]
+SECOND_AGENT_SLABS = [
+    {"modelFamily": "storm", "payoutRatePct": 52.0, "effectiveFrom": "", "effectiveTo": ""},
+    {"modelFamily": "turbo", "payoutRatePct": 52.0, "effectiveFrom": "", "effectiveTo": ""},
+    {"modelFamily": "*", "payoutRatePct": 42.0, "effectiveFrom": "", "effectiveTo": ""},
+]
+SEED_INSURANCE_AGENTS = [
+    ("Agent 1", LEGACY_AGENT_SLABS, True,
+     "Existing arrangement (49% Storm/Turbo, 36.5% others). Rename to the real agent name."),
+    ("Agent 2", SECOND_AGENT_SLABS, False,
+     "52% Storm/Turbo, 42% others. Rename to the real agent name."),
+]
+
+
+async def _seed_insurance_agents() -> dict:
+    """Idempotent. Creates the two agents only when the collection is empty, then
+    stamps every unassigned insurance entry with the default agent. Rates are NOT
+    recomputed — existing expected/received/outstanding amounts stay exactly as they are."""
+    created = []
+    if await db.insurance_agents.count_documents({}) == 0:
+        for name, slabs, is_default, remarks in SEED_INSURANCE_AGENTS:
+            doc = {
+                "agentId": await next_id("insurance_agent", "IA26"),
+                "agentName": name, "agentCode": "", "contactPerson": "", "mobile": "", "email": "",
+                "status": "Active", "isDefault": is_default,
+                "slabs": [dict(s) for s in slabs], "remarks": remarks,
+                "createdAt": now_iso(), "lastUpdated": now_iso(),
+            }
+            await db.insurance_agents.insert_one(dict(doc))
+            created.append(doc["agentName"])
+    default = await _default_insurance_agent()
+    stamped = 0
+    if default:
+        res = await db.insurance.update_many(
+            {"$or": [{"insuranceAgentId": {"$exists": False}}, {"insuranceAgentId": ""}]},
+            {"$set": {"insuranceAgentId": default["agentId"],
+                      "insuranceAgentName": default.get("agentName", ""),
+                      "payoutRateSource": "legacy-default"}},
+        )
+        stamped = res.modified_count
+    return {"created": created, "stampedEntries": stamped,
+            "defaultAgent": (default or {}).get("agentName", "")}
+
+
+@api.post("/admin/seed-insurance-agents", dependencies=[Depends(owner_only)])
+async def seed_insurance_agents():
+    return {"ok": True, **await _seed_insurance_agents()}
+
+
 @api.post("/admin/reset-transactions", dependencies=[Depends(owner_only)])
 async def reset_transactions(act=Depends(actor)):
     """Owner-only go-live reset: permanently clears all transaction data (leads, bookings,
@@ -5876,6 +6249,8 @@ async def startup():
         await db.whatsapp_messages.create_index("leadId")
         await db.whatsapp_messages.create_index("providerId")
         await db.whatsapp_messages.create_index("phone")
+        await db.insurance_agents.create_index("agentId", unique=True)
+        await db.insurance.create_index("insuranceAgentId")
     except Exception:
         pass
     try:
@@ -5899,6 +6274,12 @@ async def startup():
         await _migrate_insurance_rates()
     except Exception:
         pass
+    # Insurance agents (brokers) + stamp pre-agent entries with the default agent.
+    # Idempotent and amount-preserving.
+    try:
+        await _seed_insurance_agents()
+    except Exception:
+        logging.exception("INSURANCE_AGENT_SEED_ERROR")
     # Self-heal: booked leads whose booking advance was never recorded as a payment
     # (so Customer Outstanding wasn't reduced). Idempotent.
     try:

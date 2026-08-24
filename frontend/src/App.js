@@ -24,6 +24,7 @@ import Quotations from "./pages/Quotations";
 import Bookings from "./pages/Bookings";
 import Settings from "./pages/Settings";
 import InsurancePayoutReport from "./pages/InsurancePayoutReport";
+import InsuranceAgents from "./pages/InsuranceAgents";
 import EarningsReport from "./pages/EarningsReport";
 import OwnerCommercialReport from "./pages/OwnerCommercialReport";
 import OemClaimDashboard from "./pages/OemClaimDashboard";
@@ -92,6 +93,7 @@ function AppRoutes() {
       <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
       <Route path="/finance" element={P(<Finance />, { financeView: true })} />
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
+      <Route path="/insurance-agents" element={P(<InsuranceAgents />, { ownerOnly: true })} />
       <Route path="/deliveries" element={P(<Deliveries />)} />
       <Route path="/claims" element={P(<Claims />, { moneyDesk: true })} />
       <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />

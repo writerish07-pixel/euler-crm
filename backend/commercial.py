@@ -296,7 +296,7 @@ def derive_claim(s, approvals=None):
 # ===========================================================================
 import re
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 # component key -> master label used for byComponent output
 SCHEME_COMPONENT_LABELS = {
@@ -983,11 +983,130 @@ def get_incentive_rate_for_lead(model, variant, delivery_date, incentive_rows):
 
 
 def suggested_insurance_payout_rate(model, variant=""):
-    """Storm/Turbo -> 49%, all other models -> 36.5% (decimal)."""
+    """Storm/Turbo -> 49%, all other models -> 36.5% (decimal).
+
+    This is the LEGACY single-agent rule and stays the last-resort fallback for
+    entries with no agent (every entry created before insurance agents existed).
+    Agent slabs are resolved by resolve_insurance_payout_rate() below.
+    """
     fam = normalize_scheme_model_key(model, variant)
     if fam in ("storm", "turbo"):
         return INSURANCE_RATE_STORM_TURBO
     return INSURANCE_RATE_OTHER
+
+
+# ---------------------------------------------------------------- agent slabs
+# An insurance agent is the broker sitting between the dealership and the
+# insurer. Each agent pays a different share of the premium, and the share
+# varies by model family exactly the way the legacy rule did (Storm/Turbo on one
+# rate, everything else on another). A slab list rather than a single rate keeps
+# both shapes expressible: per-family rows, plus a "*" catch-all.
+SLAB_CATCH_ALL = "*"
+INSURANCE_SLAB_FAMILIES = ["storm", "turbo", "hiload", "hicity", "hirange", SLAB_CATCH_ALL]
+
+# Insurer payout settlement cycle: money for a policy lands by the 10th of the
+# following month. Overridable from settings so a changed cycle is not a code change.
+INSURANCE_PAYOUT_DUE_DAY = 10
+INSURANCE_PAYOUT_MONTHS_AFTER = 1
+
+
+def normalize_slab_family(value):
+    """Slab keys use the same family vocabulary as the Scheme Master."""
+    raw = str(value or "").strip()
+    if raw in ("", SLAB_CATCH_ALL, "all", "All", "ALL", "any", "Any"):
+        return SLAB_CATCH_ALL
+    fam = normalize_scheme_model_key(raw)
+    return fam or SLAB_CATCH_ALL
+
+
+def _slab_rate_fraction(slab):
+    """Slabs store a PERCENT (52 means 52%); entries store a FRACTION (0.52)."""
+    pct = num(slab.get("payoutRatePct"))
+    if pct <= 0:
+        pct = num(slab.get("payoutRate")) * (100.0 if num(slab.get("payoutRate")) <= 1 else 1.0)
+    return round(pct / 100.0, 6) if pct > 0 else 0.0
+
+
+def _slab_effective_on(slab, on_date):
+    """A slab with no dates is always effective. Dates are inclusive."""
+    day = str(on_date or "")[:10]
+    if not day:
+        return True
+    start = str(slab.get("effectiveFrom") or "")[:10]
+    end = str(slab.get("effectiveTo") or "")[:10]
+    if start and day < start:
+        return False
+    if end and day > end:
+        return False
+    return True
+
+
+def resolve_insurance_payout_rate(agent, model, variant="", on_date=None, manual_rate=0):
+    """The ONE place an insurance payout rate is decided.
+
+    Precedence, highest first:
+      1. manual   — an owner typed a rate on the entry
+      2. agent slab for this model family, effective on `on_date`
+      3. agent "*" catch-all slab
+      4. legacy   — suggested_insurance_payout_rate() (49% / 36.5%)
+
+    Returns the rate as a FRACTION plus the source, so the entry can snapshot
+    both. Snapshotting matters: editing an agent's slab next month must not
+    silently rewrite last month's earnings.
+    """
+    rate = num(manual_rate)
+    if rate > 1:            # a percent was typed (52 meaning 52%)
+        rate = rate / 100.0
+    if rate > 0:
+        return {"rate": round(rate, 6), "source": "manual", "slabFamily": "",
+                "agentId": str((agent or {}).get("agentId") or ""),
+                "agentName": str((agent or {}).get("agentName") or "")}
+
+    fam = normalize_scheme_model_key(model, variant)
+    slabs = list((agent or {}).get("slabs") or [])
+    exact, catch_all = None, None
+    for slab in slabs:
+        if not _slab_effective_on(slab, on_date):
+            continue
+        key = normalize_slab_family(slab.get("modelFamily"))
+        if key == fam and exact is None:
+            exact = slab
+        elif key == SLAB_CATCH_ALL and catch_all is None:
+            catch_all = slab
+
+    for slab, source in ((exact, "agent-slab"), (catch_all, "agent-catch-all")):
+        if slab is None:
+            continue
+        r = _slab_rate_fraction(slab)
+        if r > 0:
+            return {"rate": r, "source": source,
+                    "slabFamily": normalize_slab_family(slab.get("modelFamily")),
+                    "agentId": str((agent or {}).get("agentId") or ""),
+                    "agentName": str((agent or {}).get("agentName") or "")}
+
+    return {"rate": suggested_insurance_payout_rate(model, variant),
+            "source": "legacy-default", "slabFamily": "",
+            "agentId": str((agent or {}).get("agentId") or ""),
+            "agentName": str((agent or {}).get("agentName") or "")}
+
+
+def insurance_payout_due_by(basis_date, due_day=INSURANCE_PAYOUT_DUE_DAY,
+                            months_after=INSURANCE_PAYOUT_MONTHS_AFTER):
+    """Payout for a policy is due by `due_day` of the month `months_after` later.
+
+    Default: a policy in Aug'26 must be settled by 2026-09-10. Returns "" when
+    the basis date is unusable, so callers never flag an undated entry overdue.
+    """
+    day = str(basis_date or "")[:10]
+    try:
+        base = date.fromisoformat(day)
+    except ValueError:
+        return ""
+    month_index = base.year * 12 + (base.month - 1) + max(0, int(months_after))
+    year, month = divmod(month_index, 12)
+    month += 1
+    dd = max(1, min(28, int(due_day or INSURANCE_PAYOUT_DUE_DAY)))
+    return date(year, month, dd).isoformat()
 
 
 def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows):
