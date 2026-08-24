@@ -631,3 +631,111 @@ async def test_button_reports_cleanly_when_sync_is_disabled(monkeypatch):
     monkeypatch.setattr(gsheets, "_init", lambda *a, **k: None)
     res = await gsheets.ensure_insurance_agent_columns()
     assert res["ok"] is False and res["tabs"] == []
+
+
+# ==================== Lead Register agent column + delivery requirement
+@pytest.mark.asyncio
+async def test_button_also_adds_the_lead_register_agent_column(monkeypatch):
+    """Insurer Name (the insurance COMPANY) stays; Insurance Agent is added beside it."""
+    import gsheets
+    lead_tab = gsheets.SYNC_MAP["leads"][0]
+    ins_tab = gsheets.SYNC_MAP["insurance"][0]
+    fakes = {lead_tab: FakeInsuranceTab(LIVE_HEADERS[lead_tab][1]),
+             ins_tab: FakeInsuranceTab(LIVE_INSURANCE_HEADERS)}
+
+    class MultiTab:
+        def spreadsheets(self):
+            return self
+
+        def values(self):
+            return self
+
+        def _pick(self, rng):
+            return fakes[rng.split("!")[0].strip("'")]
+
+        def get(self, spreadsheetId=None, range=None, **kw):
+            return self._pick(range).get(range=range)
+
+        def update(self, spreadsheetId=None, range=None, body=None, **kw):
+            return self._pick(range).update(range=range, body=body)
+
+    monkeypatch.setattr(gsheets, "_service", MultiTab())
+    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=True, canWrite=True))
+    monkeypatch.setattr(gsheets, "_sheet_titles", lambda: [lead_tab, ins_tab])
+    monkeypatch.setattr(gsheets, "_header_row_for", lambda *a, **k: 1)
+    monkeypatch.setattr(gsheets, "invalidate_header_cache", lambda *a, **k: None)
+    for k in ("ENVIRONMENT", "PRODUCTION_GSHEET_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GSHEET_ID", "FAKE_SHEET")
+    monkeypatch.setenv("GSHEET_ALLOW_TEST_WRITES", "1")
+
+    res = await gsheets.ensure_insurance_agent_columns()
+    assert res["ok"] is True and res["changed"] is True
+    assert "Insurance Agent" in fakes[lead_tab].headers
+    assert "Insurer Name" in fakes[lead_tab].headers, "the insurance company column must survive"
+    for h in gsheets.INSURANCE_AGENT_HEADERS:
+        assert h in fakes[ins_tab].headers
+
+
+def test_lead_register_maps_agent_and_insurer_to_different_columns():
+    """Two different things: the broker paying the payout vs the issuing company."""
+    import gsheets
+    fields = gsheets.SYNC_MAP["leads"][2]
+    assert "insurerName" in fields and "insuranceAgentName" in fields
+    assert fields.index("insuranceAgentName") == fields.index("insurerName") + 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_is_refused_without_an_insurance_agent(client):
+    r = await client.post("/api/leads", json={
+        "customerName": "ITER26 NOAGENT", "mobile": "9266260011",
+        "interestedModel": TURBO[0], "variant": TURBO[1], "executive": "Amit"})
+    lid = r.json()["leadId"]
+    ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    await client.put(f"/api/leads/{lid}/price-structure", json=ps)
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+    lead = await server.db.leads.find_one({"leadId": lid})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
+        "insurerName": "ICICI Lombard", "insuranceAgentId": "",
+        "invoiceNumber": "INV-I26NOAG", "chassisNumber": "CH-I26NOAG",
+        "numberPlate": "RJ26-I26NOAG", "delivered": "Yes"})
+    assert r.status_code == 422
+    assert "insurance agent" in r.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_self_arranged_delivery_needs_no_agent(client):
+    """Customer's own policy earns no payout, so the agent must not be demanded."""
+    r = await client.post("/api/leads", json={
+        "customerName": "ITER26 SELFNOAGENT", "mobile": "9266260012",
+        "interestedModel": TURBO[0], "variant": TURBO[1], "executive": "Amit"})
+    lid = r.json()["leadId"]
+    ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    ps["insuranceArrangedBy"] = "self"
+    await client.put(f"/api/leads/{lid}/price-structure", json=ps)
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+    lead = await server.db.leads.find_one({"leadId": lid})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
+        "insurerName": "Own policy", "insuranceAgentId": "",
+        "invoiceNumber": "INV-I26SELFNA", "chassisNumber": "CH-I26SELFNA",
+        "numberPlate": "RJ26-I26SELFNA", "delivered": "Yes"})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_agent_name_lands_on_the_lead_for_the_sheet(client):
+    """recompute_lead syncs the whole lead doc, so the column fills from this field."""
+    agents = await agents_by_name(client)
+    lid = await delivered_lead(client, "9266260013", TURBO,
+                               agents["Agent 2"]["agentId"], "RJ26-I26LEADCOL")
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead["insuranceAgentName"] == agents["Agent 2"]["agentName"]
+    assert lead["insurerName"] == "ICICI Lombard", "insurer must not be overwritten by the agent"

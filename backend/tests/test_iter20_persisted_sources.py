@@ -131,7 +131,7 @@ async def test_delivery_checklist_statuses_reach_the_lead(client):
     await client.post(f"/api/leads/{lid}/payments", json={"amount": 335000, "paymentMode": "Cash"})
     r = await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ABC", "invoiceNumber": "INV-20", "chassisNumber": "CH-20",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ABC", "invoiceNumber": "INV-20", "chassisNumber": "CH-20",
         "delivered": "Yes"})
     assert r.status_code == 200, r.text
     lead = await server.db.leads.find_one({"leadId": lid})
@@ -214,7 +214,7 @@ async def test_delivery_feedback_is_persisted(client):
     await client.post(f"/api/leads/{lid}/payments", json={"amount": 335000, "paymentMode": "Cash"})
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ABC", "invoiceNumber": "INV-21", "chassisNumber": "CH-21",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ABC", "invoiceNumber": "INV-21", "chassisNumber": "CH-21",
         "delivered": "Yes", "feedback": "Very happy with the handover"})
     d = await server.db.deliveries.find_one({"leadId": lid})
     assert d["feedback"] == "Very happy with the handover"

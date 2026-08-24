@@ -56,7 +56,10 @@ SYNC_MAP = {
                # Dealer Earnings + OEM Extra Support Register. Headers must exist on the tab.
                "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
                "totalDiscount", "oemSchemeAmount", "dealerSchemeAmount", "customerOutstanding",
-               "companyOutstanding", "insurerName", "invoiceNumber", "chassisNumber", "numberPlate",
+               # Insurer Name is the insurance COMPANY (ICICI etc.); Insurance Agent is
+               # the broker the payout is claimed from. Two different things, two columns.
+               "companyOutstanding", "insurerName", "insuranceAgentName",
+               "invoiceNumber", "chassisNumber", "numberPlate",
                # Dealer Earnings LAST among commercial totals — includes OEM Extra Retained.
                "dealerTotalEarnings",
                # Closure + delivery-checklist columns. All of these were already
@@ -893,20 +896,29 @@ def _ensure_oem_extra_support_columns_sync():
 # The labels must match HEADER_ALIASES for insuranceAgentName / payoutRateSource /
 # lastPayoutDate, or the sync will still not find them.
 INSURANCE_AGENT_HEADERS = ["Insurance Agent", "Rate Source", "Last Payout Date"]
+# Lead Register carries only the agent name, alongside the existing Insurer Name.
+LEAD_INSURANCE_AGENT_HEADERS = ["Insurance Agent"]
 
 
 def _ensure_insurance_agent_columns_sync():
-    tab = SYNC_MAP["insurance"][0]
-    if tab not in _sheet_titles():
-        return {"ok": False, "reason": f"tab '{tab}' not found", "tabs": []}
-    header_row = _header_row_for("insurance", tab)
-    res = _append_missing_headers(tab, INSURANCE_AGENT_HEADERS, header_row)
-    return {"ok": True, "changed": bool(res.get("added")), "tabs": [res]}
+    titles = _sheet_titles()
+    tabs = []
+    for entity, headers in (("insurance", INSURANCE_AGENT_HEADERS),
+                            ("leads", LEAD_INSURANCE_AGENT_HEADERS)):
+        tab = SYNC_MAP[entity][0]
+        if tab not in titles:
+            tabs.append({"tab": tab, "ok": False, "error": "tab not found", "added": []})
+            continue
+        tabs.append(_append_missing_headers(tab, headers, _header_row_for(entity, tab)))
+    return {"ok": True, "changed": any(t.get("added") for t in tabs), "tabs": tabs}
 
 
 async def ensure_insurance_agent_columns():
-    """Owner helper: append Insurance Agent / Rate Source / Last Payout Date to the
-    Insurance Register header so the agent-wise payout fields can start writing.
+    """Owner helper: append the insurance-agent headers to the live workbook.
+
+    Insurance Register: Insurance Agent / Rate Source / Last Payout Date.
+    Lead Register:      Insurance Agent (next to the existing Insurer Name, which
+                        keeps holding the insurance COMPANY).
 
     Append-only — never renames or reorders an existing column, and re-running it
     is a no-op once the headers are present.

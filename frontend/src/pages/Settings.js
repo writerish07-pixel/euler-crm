@@ -195,7 +195,7 @@ export default function Settings() {
                     <ListPlus size={14} /> {ensuringIns ? "Adding columns…" : "Add Insurance Agent columns"}
                   </Button>
                   <span className="text-xs text-ink-faint ml-2">
-                    Appends Insurance Agent / Rate Source / Last Payout Date to the Insurance Register header. Append-only — safe to run twice
+                    Adds "Insurance Agent" to the Lead Register (beside Insurer Name), and Insurance Agent / Rate Source / Last Payout Date to the Insurance Register. Append-only — safe to run twice
                   </span>
                 </div>
                 <div>
