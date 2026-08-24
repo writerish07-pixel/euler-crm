@@ -70,6 +70,8 @@ def resolve(tab, fields):
 # change. Anything listed here is a pending manual sheet edit, NOT a mapping bug.
 #
 #   Insurance Register: add "Insurance Agent", "Rate Source", "Last Payout Date"
+#   -> Settings -> "Add Insurance Agent columns" does this in one click
+#      (POST /api/integrations/gsheets/ensure-insurance-agent-columns).
 #
 # Remove an entry from this list the moment its column exists in live_headers.py.
 PENDING_SHEET_COLUMNS = {

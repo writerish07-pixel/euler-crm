@@ -889,6 +889,48 @@ def _ensure_oem_extra_support_columns_sync():
     return {"ok": True, "changed": added_any, "tabs": results}
 
 
+# Headers the Insurance Register needs before the insurance-agent fields can write.
+# The labels must match HEADER_ALIASES for insuranceAgentName / payoutRateSource /
+# lastPayoutDate, or the sync will still not find them.
+INSURANCE_AGENT_HEADERS = ["Insurance Agent", "Rate Source", "Last Payout Date"]
+
+
+def _ensure_insurance_agent_columns_sync():
+    tab = SYNC_MAP["insurance"][0]
+    if tab not in _sheet_titles():
+        return {"ok": False, "reason": f"tab '{tab}' not found", "tabs": []}
+    header_row = _header_row_for("insurance", tab)
+    res = _append_missing_headers(tab, INSURANCE_AGENT_HEADERS, header_row)
+    return {"ok": True, "changed": bool(res.get("added")), "tabs": [res]}
+
+
+async def ensure_insurance_agent_columns():
+    """Owner helper: append Insurance Agent / Rate Source / Last Payout Date to the
+    Insurance Register header so the agent-wise payout fields can start writing.
+
+    Append-only — never renames or reorders an existing column, and re-running it
+    is a no-op once the headers are present.
+    """
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled"), "tabs": []}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
+    try:
+        detail = await asyncio.to_thread(_ensure_insurance_agent_columns_sync)
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
+        return detail
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return {"ok": False, "reason": str(e)[:300], "tabs": []}
+
+
 async def ensure_oem_extra_support_columns():
     """Owner helper: make OEM Extra Support columns visible on the live workbook."""
     global _service

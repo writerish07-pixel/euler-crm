@@ -20,6 +20,7 @@ export default function Settings() {
   const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive" });
   const [backfilling, setBackfilling] = useState(false);
   const [ensuringOem, setEnsuringOem] = useState(false);
+  const [ensuringIns, setEnsuringIns] = useState(false);
   const [pwForm, setPwForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [pwBusy, setPwBusy] = useState(false);
 
@@ -82,6 +83,25 @@ export default function Settings() {
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to add OEM Extra Support columns");
     } finally { setEnsuringOem(false); }
+  };
+
+  const ensureInsuranceAgentColumns = async () => {
+    setEnsuringIns(true);
+    try {
+      const r = await post("/integrations/gsheets/ensure-insurance-agent-columns", {});
+      if (r.ok === false) {
+        toast.error(r.reason || "Could not update the Insurance Register header");
+        return;
+      }
+      const added = (r.tabs || []).flatMap((t) => t.added || []);
+      if (r.changed) {
+        toast.success(`Insurance Register updated — added ${added.join(", ")}`);
+      } else {
+        toast.success("Insurance Agent columns are already present");
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to add Insurance Agent columns");
+    } finally { setEnsuringIns(false); }
   };
 
   const addUser = async () => {
@@ -167,6 +187,15 @@ export default function Settings() {
                   </Button>
                   <span className="text-xs text-ink-faint ml-2">
                     Places Received / Passed / Retained before Dealer Earnings (total last) on Lead Register & Dealer Earnings; creates OEM Extra Support Register if missing
+                  </span>
+                </div>
+                <div>
+                  <Button variant="secondary" data-testid="ensure-insurance-agent-cols-btn"
+                    onClick={ensureInsuranceAgentColumns} disabled={ensuringIns || !gs?.enabled}>
+                    <ListPlus size={14} /> {ensuringIns ? "Adding columns…" : "Add Insurance Agent columns"}
+                  </Button>
+                  <span className="text-xs text-ink-faint ml-2">
+                    Appends Insurance Agent / Rate Source / Last Payout Date to the Insurance Register header. Append-only — safe to run twice
                   </span>
                 </div>
                 <div>

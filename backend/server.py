@@ -5296,6 +5296,21 @@ async def gsheets_ensure_oem_extra_columns(act=Depends(actor)):
     return result
 
 
+@api.post("/integrations/gsheets/ensure-insurance-agent-columns", dependencies=[Depends(owner_only)])
+async def gsheets_ensure_insurance_agent_columns(act=Depends(actor)):
+    """Owner-only: append Insurance Agent / Rate Source / Last Payout Date to the
+    Insurance Register header row.
+
+    The sync resolves columns by header name, so these three fields simply do not
+    write until the headers exist. Append-only and idempotent — running it twice
+    adds nothing the second time. After it succeeds, the next insurance save (or
+    Backfill) fills the new columns.
+    """
+    result = await gsheets.ensure_insurance_agent_columns()
+    await write_audit(act, "ensure", "gsheets-insurance-agent-columns", new=result)
+    return result
+
+
 @api.get("/integrations/gsheets/verify-lead/{lead_id}", dependencies=[Depends(owner_only)])
 async def gsheets_verify_lead(lead_id: str):
     """Read-only: how many rows the LIVE sheet actually holds for this lead in each

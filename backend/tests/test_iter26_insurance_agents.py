@@ -35,6 +35,10 @@ import httpx  # noqa: E402
 import commercial as ce  # noqa: E402
 import server  # noqa: E402
 
+from live_headers import LIVE_HEADERS  # noqa: E402
+
+LIVE_INSURANCE_HEADERS = LIVE_HEADERS["Insurance Register"][1]
+
 AGENT_1 = [
     {"modelFamily": "storm", "payoutRatePct": 49, "effectiveFrom": "", "effectiveTo": ""},
     {"modelFamily": "turbo", "payoutRatePct": 49, "effectiveFrom": "", "effectiveTo": ""},
@@ -509,3 +513,121 @@ async def test_self_arranged_insurance_still_earns_no_payout(client):
         "numberPlate": "RJ26-I26SELF", "delivered": "Yes"})
     after = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(after.get("dealerInsuranceIncome")) == 0
+
+
+# ================================ one-click sheet header repair (Settings button)
+class _HeaderExec:
+    def __init__(self, res):
+        self._res = res
+
+    def execute(self):
+        return self._res
+
+
+class FakeInsuranceTab:
+    """Insurance Register header row, and a record of every header write."""
+
+    def __init__(self, headers):
+        self.headers = list(headers)
+        self.updates = []
+
+    # values() surface
+    def get(self, spreadsheetId=None, range=None, **kw):
+        return _HeaderExec({"values": [list(self.headers)]})
+
+    def update(self, spreadsheetId=None, range=None, body=None, **kw):
+        self.updates.append((range, body["values"][0]))
+        self.headers.extend(body["values"][0])
+        return _HeaderExec({})
+
+    # service surface
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self
+
+
+@pytest.fixture
+def sheet(monkeypatch):
+    import gsheets
+    live = LIVE_INSURANCE_HEADERS
+    fake = FakeInsuranceTab(live)
+    monkeypatch.setattr(gsheets, "_service", fake)
+    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=True, canWrite=True))
+    monkeypatch.setattr(gsheets, "_sheet_titles", lambda: [gsheets.SYNC_MAP["insurance"][0]])
+    monkeypatch.setattr(gsheets, "_header_row_for", lambda *a, **k: 1)
+    monkeypatch.setattr(gsheets, "invalidate_header_cache", lambda *a, **k: None)
+    for k in ("ENVIRONMENT", "PRODUCTION_GSHEET_ID"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GSHEET_ID", "FAKE_SHEET")
+    # The env guard hard-blocks every sheet write under pytest — which is exactly
+    # what protects the live workbook. `_service` here is the in-memory fake above,
+    # so nothing can reach Google; opt in for this fixture only.
+    monkeypatch.setenv("GSHEET_ALLOW_TEST_WRITES", "1")
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_button_appends_the_three_missing_headers(sheet):
+    import gsheets
+    res = await gsheets.ensure_insurance_agent_columns()
+    assert res["ok"] is True and res["changed"] is True, res
+    assert res["tabs"][0]["added"] == gsheets.INSURANCE_AGENT_HEADERS
+    for h in gsheets.INSURANCE_AGENT_HEADERS:
+        assert h in sheet.headers
+
+
+@pytest.mark.asyncio
+async def test_button_is_idempotent(sheet):
+    import gsheets
+    await gsheets.ensure_insurance_agent_columns()
+    writes_after_first = len(sheet.updates)
+    again = await gsheets.ensure_insurance_agent_columns()
+    assert again["changed"] is False
+    assert len(sheet.updates) == writes_after_first, "a second run must write nothing"
+
+
+@pytest.mark.asyncio
+async def test_button_never_touches_an_existing_column(sheet):
+    import gsheets
+    before = list(sheet.headers)
+    await gsheets.ensure_insurance_agent_columns()
+    assert sheet.headers[:len(before)] == before, "existing headers were reordered or renamed"
+    rng, _vals = sheet.updates[0]
+    assert "Insurance Register" in rng
+
+
+@pytest.mark.asyncio
+async def test_appended_headers_actually_resolve_the_sync_fields(sheet):
+    """The point of the button: after it runs, the three fields map to real columns."""
+    import gsheets
+    await gsheets.ensure_insurance_agent_columns()
+    fields = gsheets.SYNC_MAP["insurance"][2]
+    by_norm = {gsheets._norm(h) for h in sheet.headers}
+    for f in ("insuranceAgentName", "payoutRateSource", "lastPayoutDate"):
+        assert f in fields
+        hit = gsheets._norm(f) in by_norm or any(
+            gsheets._norm(a) in by_norm for a in gsheets.HEADER_ALIASES.get(f, []))
+        assert hit, f"{f} still does not resolve after the repair"
+
+
+@pytest.mark.asyncio
+async def test_button_still_honours_the_write_guard(monkeypatch):
+    """The repair must not become a hole in the production write protection."""
+    import gsheets
+    monkeypatch.setattr(gsheets, "_service", FakeInsuranceTab(LIVE_INSURANCE_HEADERS))
+    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=True, canWrite=True))
+    monkeypatch.delenv("GSHEET_ALLOW_TEST_WRITES", raising=False)
+    res = await gsheets.ensure_insurance_agent_columns()
+    assert res["ok"] is False and res["writeBlocked"] is True
+
+
+@pytest.mark.asyncio
+async def test_button_reports_cleanly_when_sync_is_disabled(monkeypatch):
+    import gsheets
+    monkeypatch.setattr(gsheets, "_service", None)
+    monkeypatch.setattr(gsheets, "_status", dict(gsheets._status, enabled=False))
+    monkeypatch.setattr(gsheets, "_init", lambda *a, **k: None)
+    res = await gsheets.ensure_insurance_agent_columns()
+    assert res["ok"] is False and res["tabs"] == []
