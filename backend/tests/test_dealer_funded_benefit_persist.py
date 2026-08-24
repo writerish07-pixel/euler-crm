@@ -178,7 +178,7 @@ async def turbo_booked(c, mobile, allocation=None, deliver=False, insurance_payo
                      json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
         await c.put(f"/api/leads/{lid}/delivery", json={
             "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-            "insurerName": "ICICI Lombard", "invoiceNumber": f"INV-{mobile[-4:]}",
+            "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": f"INV-{mobile[-4:]}",
             "chassisNumber": f"CH-{mobile[-4:]}", "numberPlate": f"RJ14-{mobile[-4:]}",
             "delivered": "Yes"})
         if insurance_payout is not None:

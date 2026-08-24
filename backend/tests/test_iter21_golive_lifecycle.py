@@ -134,7 +134,7 @@ async def test_complete_golive_lifecycle(client):
     # ------------------------------------------------------------ 7. DELIVERY
     r = await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ABC Insurers", "invoiceNumber": "INV-GOLIVE-1",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ABC Insurers", "invoiceNumber": "INV-GOLIVE-1",
         "chassisNumber": "CH-GOLIVE-1", "numberPlate": "RJ14-GL-0001", "delivered": "Yes"})
     assert r.status_code == 200, r.text
     lead = await server.db.leads.find_one({"leadId": lid})

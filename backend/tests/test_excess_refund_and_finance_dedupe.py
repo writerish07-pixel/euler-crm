@@ -95,7 +95,7 @@ async def _deliver(client, lid):
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "rc": "Yes", "pdi": "Yes",
         "delivered": "Yes", "deliveryDate": "2026-08-11",
         "invoiceNumber": f"INV-{lid}", "chassisNumber": f"CH-{lid}",
-        "numberPlate": f"RJ14-{lid[-4:]}", "insurerName": "TestIns"})
+        "numberPlate": f"RJ14-{lid[-4:]}", "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns"})
     assert r.status_code == 200, r.text
 
 
@@ -126,7 +126,7 @@ async def test_excess_does_not_block_delivery_but_short_payment_does(client):
     r = await client.put(f"/api/leads/{short}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "rc": "Yes", "pdi": "Yes",
         "delivered": "Yes", "deliveryDate": "2026-08-11", "invoiceNumber": "INV-SHORT",
-        "chassisNumber": "CH-SHORT", "numberPlate": "RJ14-SHRT", "insurerName": "TestIns"})
+        "chassisNumber": "CH-SHORT", "numberPlate": "RJ14-SHRT", "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns"})
     assert r.status_code == 422
     assert "outstanding must be cleared" in r.text
 

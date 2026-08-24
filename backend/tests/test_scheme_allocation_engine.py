@@ -332,7 +332,7 @@ async def turbo_booked(c, mobile, *, breakup=None, used=None, deliver=False):
                      json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
         await c.put(f"/api/leads/{lid}/delivery", json={
             "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-            "insurerName": "ICICI Lombard", "invoiceNumber": "INV-ALLOC",
+            "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-ALLOC",
             "chassisNumber": "CH-ALLOC", "numberPlate": "RJ14-AL", "delivered": "Yes"})
     return lid
 
@@ -441,7 +441,7 @@ async def test_earnings_no_double_count_scheme_and_payout(client):
                       json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI Lombard", "invoiceNumber": "INV-ALLOC-E",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-ALLOC-E",
         "chassisNumber": "CH-ALLOC-E", "numberPlate": "RJ14-ALE", "delivered": "Yes"})
     lead = await server.db.leads.find_one({"leadId": lid})
     entry = await server.db.insurance.find_one({"leadId": lid})

@@ -115,7 +115,7 @@ def test_claim_register_survives_delivery(hdr):
         assert r.status_code == 200, r.text
     r = requests.put(f"{BASE}/api/leads/{lead_id}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes",
-        "insurerName": "QA Insurers", "invoiceNumber": "INV-ITER16-1", "chassisNumber": "CH-ITER16-1", "delivered": "Yes",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "QA Insurers", "invoiceNumber": "INV-ITER16-1", "chassisNumber": "CH-ITER16-1", "delivered": "Yes",
     }, headers=hdr, timeout=20)
     assert r.status_code == 200, r.text
     assert r.json()["currentStatus"] == "Delivered"

@@ -80,7 +80,7 @@ async def test_delivery_syncs_incentive_register_to_sheet(client):
     lid = await _booked_priced_lead(client, "9111100001")
     r = await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI", "invoiceNumber": "INV-INC-1", "chassisNumber": "CH-INC-1",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI", "invoiceNumber": "INV-INC-1", "chassisNumber": "CH-INC-1",
         "numberPlate": "RJ14-INC-1", "delivered": "Yes", "deliveryDate": "2026-08-11",
     })
     assert r.status_code == 200, r.text
@@ -100,7 +100,7 @@ async def test_mark_paid_opens_oem_claim_and_syncs_sheet(client):
     lid = await _booked_priced_lead(client, "9111100002")
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI", "invoiceNumber": "INV-INC-2", "chassisNumber": "CH-INC-2",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI", "invoiceNumber": "INV-INC-2", "chassisNumber": "CH-INC-2",
         "numberPlate": "RJ14-INC-2", "delivered": "Yes", "deliveryDate": "2026-08-11",
     })
     inc = await server.db.incentive_register.find_one({"leadId": lid})
@@ -145,7 +145,7 @@ async def test_delivered_lead_locked_for_staff_editable_for_owner(client):
     lid = await _booked_priced_lead(client, "9111100003")
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI", "invoiceNumber": "INV-LOCK-1", "chassisNumber": "CH-LOCK-1",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI", "invoiceNumber": "INV-LOCK-1", "chassisNumber": "CH-LOCK-1",
         "numberPlate": "RJ14-LOCK-1", "delivered": "Yes", "deliveryDate": "2026-08-11",
     })
     lead = await server.db.leads.find_one({"leadId": lid})
@@ -180,7 +180,7 @@ async def test_delivered_lead_locked_for_staff_editable_for_owner(client):
     assert r.status_code == 200, r.text
     r = await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI", "invoiceNumber": "INV-LOCK-1", "chassisNumber": "CH-LOCK-1",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI", "invoiceNumber": "INV-LOCK-1", "chassisNumber": "CH-LOCK-1",
         "numberPlate": "RJ14-LOCK-1", "delivered": "Yes", "deliveryDate": "2026-08-11",
     })
     assert r.status_code == 200, r.text

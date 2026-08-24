@@ -187,7 +187,7 @@ async def test_delivery_creates_billing_summary(client):
         "invoiceNumber": "INV-BILL-91",
         "chassisNumber": "CH-BILL-91",
         "numberPlate": "RJ14-BILL-91",
-        "insurerName": "TestIns",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
     })
     assert r.status_code == 200, r.text
 
@@ -220,7 +220,7 @@ async def test_scheme_additional_discount_refreshes_billing_summary(client):
         "invoiceNumber": "INV-BILL-92",
         "chassisNumber": "CH-BILL-92",
         "numberPlate": "RJ14-BILL-92",
-        "insurerName": "TestIns",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
     })
     assert r.status_code == 200, r.text
 
@@ -274,7 +274,7 @@ async def test_billing_summary_upsert_no_set_setoninsert_conflict(client):
         "invoiceNumber": "INV-BILL-93",
         "chassisNumber": "CH-BILL-93",
         "numberPlate": "RJ14-BILL-93",
-        "insurerName": "TestIns",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
     })
     assert r.status_code == 200, r.text
 

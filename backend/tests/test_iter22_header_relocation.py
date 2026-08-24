@@ -19,7 +19,7 @@ os.environ.setdefault("GSHEET_ID", "FAKE_SHEET")
 import gsheets  # noqa: E402
 from gsheets import SYNC_MAP, _col_letter  # noqa: E402
 
-from live_headers import LIVE_HEADERS  # noqa: E402
+from live_headers import LIVE_HEADERS, PENDING_SHEET_COLUMNS  # noqa: E402
 
 LEAD_HEADER = LIVE_HEADERS["Lead Register"][1]
 
@@ -121,7 +121,10 @@ def test_columns_resolve_correctly_against_the_relocated_header(monkeypatch):
     hr = gsheets._header_row_for("leads", "Lead Register")
     mapping, missing = gsheets._resolve_columns("Lead Register", SYNC_MAP["leads"][2],
                                                 use_cache=False, header_row=hr)
-    assert missing == [], f"unresolved fields against relocated header: {missing}"
+    # Columns still awaiting a manual sheet edit are expected to be unresolved;
+    # everything else must map. See live_headers.PENDING_SHEET_COLUMNS.
+    unexpected = [f for f in missing if f not in PENDING_SHEET_COLUMNS.get("leads", [])]
+    assert unexpected == [], f"unresolved fields against relocated header: {unexpected}"
     assert _col_letter(mapping["leadId"]) == "A"
     assert mapping["leadId"] == 0
 

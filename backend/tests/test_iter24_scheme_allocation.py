@@ -232,7 +232,7 @@ async def test_case11_insurance_payout_is_not_an_oem_scheme_claim(client):
                       json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI Lombard", "invoiceNumber": "INV-24",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-24",
         "chassisNumber": "CH-24", "numberPlate": "RJ14-24", "delivered": "Yes"})
 
     entry = await server.db.insurance.find_one({"leadId": lid})
@@ -256,7 +256,7 @@ async def test_case12_repeat_operations_create_no_duplicates(client):
     await client.post(f"/api/leads/{lid}/payments",
                       json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
     delivery = {"insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes",
-                "rc": "Yes", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-24-DUP",
+                "rc": "Yes", "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-24-DUP",
                 "chassisNumber": "CH-24-DUP", "numberPlate": "RJ14-24-DUP", "delivered": "Yes"}
     r = await client.put(f"/api/leads/{lid}/delivery", json=delivery)
     assert r.status_code == 200, r.text

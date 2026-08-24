@@ -64,7 +64,7 @@ async def turbo_lead(c, mobile, deliver=False):
                      json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
         await c.put(f"/api/leads/{lid}/delivery", json={
             "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-            "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22",
+            "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22",
             "chassisNumber": "CH-22", "numberPlate": "RJ14-22", "delivered": "Yes"})
     return lid
 
@@ -169,7 +169,7 @@ async def test_delivery_twice_does_not_duplicate_the_payout_entry(client):
     lid = await turbo_lead(client, "9777700006", deliver=True)
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22",
         "chassisNumber": "CH-22", "numberPlate": "RJ14-22", "delivered": "Yes"})
     assert await server.db.insurance.count_documents({"leadId": lid}) == 1
 
@@ -190,7 +190,7 @@ async def test_no_payout_entry_when_no_premium_was_charged(client):
                       json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insurerName": "ICICI Lombard", "invoiceNumber": "INV-0", "chassisNumber": "CH-0",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-0", "chassisNumber": "CH-0",
         "numberPlate": "RJ14-0", "delivered": "Yes"})
     assert await server.db.insurance.count_documents({"leadId": lid}) == 0
 

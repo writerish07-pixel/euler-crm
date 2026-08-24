@@ -54,3 +54,22 @@ LIVE_HEADERS = {
          'Remarks', 'Last Updated'],
     ),
 }
+
+# Fields mapped in SYNC_MAP whose column does not exist in the live workbook YET.
+# The sync tolerates these — only a missing ID header is fatal (gsheets.py:973) — so
+# they simply do not write until the header is added, then start writing with no code
+# change. Anything listed here is a pending sheet edit, NOT a mapping bug.
+#
+#   Insurance Register: "Insurance Agent", "Rate Source", "Last Payout Date"
+#   Lead Register:      "Insurance Agent" (beside the existing "Insurer Name",
+#                       which keeps holding the insurance COMPANY)
+#
+# Settings -> "Add Insurance Agent columns" appends all of them in one click
+# (POST /api/integrations/gsheets/ensure-insurance-agent-columns).
+#
+# Drop an entry the moment its header appears in LIVE_HEADERS above; the contract
+# test test_pending_columns_are_still_actually_pending fails until you do.
+PENDING_SHEET_COLUMNS = {
+    "insurance": ["insuranceAgentName", "payoutRateSource", "lastPayoutDate"],
+    "leads": ["insuranceAgentName"],
+}

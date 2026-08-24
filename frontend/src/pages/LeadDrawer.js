@@ -1006,6 +1006,8 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   // Insurance agent is chosen here; it decides the payout slab on the entry
   // that Mark Delivered opens.
   const [agents, setAgents] = useState([]);
+  // Customer-arranged insurance earns no payout, so no agent is required there.
+  const selfArranged = String(lead.insuranceArrangedBy || "dealer").toLowerCase() === "self";
 
   useEffect(() => { setSummary(billingSummary || null); }, [billingSummary]);
 
@@ -1027,6 +1029,10 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
     if (form.delivered === "Yes" && !form.deliveryDate) return toast.error("Delivery date is required");
+    // The agent decides the payout slab; the server rejects a blank one too.
+    if (form.delivered === "Yes" && !form.insuranceAgentId && !selfArranged) {
+      return toast.error("Select the insurance agent before marking delivered");
+    }
     try {
       await put(`/leads/${lead.leadId}/delivery`, form);
       toast.success(form.delivered === "Yes"
@@ -1057,10 +1063,10 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
         <Field label="Chassis Number"><Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked} /></Field>
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>
-        <Field label="Insurance Agent">
+        <Field label="Insurance Agent *">
           <Select data-testid="delivery-insurance-agent" value={form.insuranceAgentId}
             onChange={set("insuranceAgentId")} disabled={locked}>
-            <option value="">— Default agent —</option>
+            <option value="">— Select agent —</option>
             {agents.filter((a) => (a.status || "Active").toLowerCase() === "active" || a.agentId === form.insuranceAgentId)
               .map((a) => <option key={a.agentId} value={a.agentId}>{a.agentName}</option>)}
           </Select>

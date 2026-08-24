@@ -20,7 +20,7 @@ os.environ.setdefault("GSHEET_ID", "FAKE_SHEET")
 import gsheets  # noqa: E402
 from gsheets import HEADER_ALIASES, SYNC_MAP, _col_letter, _norm  # noqa: E402
 
-from live_headers import LIVE_HEADERS  # noqa: E402
+from live_headers import LIVE_HEADERS, PENDING_SHEET_COLUMNS  # noqa: E402
 
 # Columns that had a computed Mongo value but no Sheet mapping before this change.
 NEWLY_MAPPED = {
@@ -64,19 +64,6 @@ def resolve(tab, fields):
     return mapping, missing
 
 
-# Fields mapped in SYNC_MAP whose column does not exist in the live workbook YET.
-# The sync tolerates these — only a missing ID header is fatal (gsheets.py:973) — so
-# they simply do not write until the header is added, then start writing with no code
-# change. Anything listed here is a pending manual sheet edit, NOT a mapping bug.
-#
-#   Insurance Register: add "Insurance Agent", "Rate Source", "Last Payout Date"
-#   -> Settings -> "Add Insurance Agent columns" does this in one click
-#      (POST /api/integrations/gsheets/ensure-insurance-agent-columns).
-#
-# Remove an entry from this list the moment its column exists in live_headers.py.
-PENDING_SHEET_COLUMNS = {
-    "insurance": ["insuranceAgentName", "payoutRateSource", "lastPayoutDate"],
-}
 
 
 @pytest.mark.parametrize("entity", sorted(SYNC_MAP))

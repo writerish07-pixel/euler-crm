@@ -273,6 +273,13 @@ def _validate_delivery_ready(lead, body):
         errs.append("Set Insurance to Yes before marking delivered.")
     if not str(body.insurerName or "").strip():
         errs.append("Enter the insurer name before delivery.")
+    # The agent decides the payout slab. Without it the entry silently falls back
+    # to the default agent, which books the wrong rate on a real delivery.
+    # Self-arranged insurance earns no payout, so no agent is needed there.
+    if (ce.normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) != "self"
+            and not str(body.insuranceAgentId or "").strip()
+            and not str(lead.get("insuranceAgentId") or "").strip()):
+        errs.append("Select the insurance agent before delivery.")
     if not _yes_or_done(body.registration):
         errs.append("Set Registration to Yes before marking delivered.")
     if not _yes_or_done(body.invoice):
@@ -6023,10 +6030,15 @@ SECOND_AGENT_SLABS = [
     {"modelFamily": "turbo", "payoutRatePct": 52.0, "effectiveFrom": "", "effectiveTo": ""},
     {"modelFamily": "*", "payoutRatePct": 42.0, "effectiveFrom": "", "effectiveTo": ""},
 ]
+# Deterministic ids for the two seeded agents. A fixed id survives a rename, so a
+# lead or an insurance entry keeps pointing at the same agent after the owner
+# renames "Agent 1" to the real broker name.
+SEED_DEFAULT_AGENT_ID = "IA26AGENT1"
+SEED_SECOND_AGENT_ID = "IA26AGENT2"
 SEED_INSURANCE_AGENTS = [
-    ("Agent 1", LEGACY_AGENT_SLABS, True,
+    (SEED_DEFAULT_AGENT_ID, "Agent 1", LEGACY_AGENT_SLABS, True,
      "Existing arrangement (49% Storm/Turbo, 36.5% others). Rename to the real agent name."),
-    ("Agent 2", SECOND_AGENT_SLABS, False,
+    (SEED_SECOND_AGENT_ID, "Agent 2", SECOND_AGENT_SLABS, False,
      "52% Storm/Turbo, 42% others. Rename to the real agent name."),
 ]
 
@@ -6037,9 +6049,9 @@ async def _seed_insurance_agents() -> dict:
     recomputed — existing expected/received/outstanding amounts stay exactly as they are."""
     created = []
     if await db.insurance_agents.count_documents({}) == 0:
-        for name, slabs, is_default, remarks in SEED_INSURANCE_AGENTS:
+        for agent_id, name, slabs, is_default, remarks in SEED_INSURANCE_AGENTS:
             doc = {
-                "agentId": await next_id("insurance_agent", "IA26"),
+                "agentId": agent_id,
                 "agentName": name, "agentCode": "", "contactPerson": "", "mobile": "", "email": "",
                 "status": "Active", "isDefault": is_default,
                 "slabs": [dict(s) for s in slabs], "remarks": remarks,
