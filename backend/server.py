@@ -5163,12 +5163,164 @@ async def create_price_row(body: PriceRowIn):
     return clean(doc)
 
 
+# ------------------------------------------------- Price Master -> live leads
+# Fields a Price Master edit pushes onto matching leads. A change to any of them
+# reprices; a change to status/bodyType/notes alone does not.
+REPRICE_TRIGGER_FIELDS = ("exShowroom", "rto", "insurance", "accessories", "handlingCharges",
+                          "trc", "fastag", "extendedWarranty", "otherCharges", "tcsApplicable")
+
+
+def _price_row_changed(before: dict, after: dict) -> list:
+    changed = []
+    for f in REPRICE_TRIGGER_FIELDS:
+        if f == "tcsApplicable":
+            if str(before.get(f) or "No").strip() != str(after.get(f) or "No").strip():
+                changed.append(f)
+        elif abs(ce.num(before.get(f)) - ce.num(after.get(f))) > 0.005:
+            changed.append(f)
+    return changed
+
+
+def _lead_matches_price_row(lead: dict, row: dict) -> bool:
+    def norm(v):
+        return str(v or "").strip().lower()
+    return (norm(lead.get("interestedModel")) == norm(row.get("model"))
+            and norm(lead.get("variant")) == norm(row.get("variant")))
+
+
+async def reprice_leads_for_price_row(row: dict, changed_fields=None, act=None) -> dict:
+    """Push a Price Master change onto every Active, NOT-delivered lead on that vehicle.
+
+    Scope is deliberately wider than "booked": a priced-but-unbooked lead or an open
+    quotation must not keep quoting a withdrawn price. Delivered leads are never
+    touched — their invoice is already raised.
+
+    A lead that has PAID and settled (money received, outstanding cleared) keeps the
+    price it settled at. Repricing it would re-open an outstanding and block Mark
+    Delivered on a customer who owes nothing. Those are reported as skipped so the
+    owner can reprice one by hand if the business wants the increase passed on.
+
+    Scheme is NOT realigned: entitlements are governed by the Scheme Master and the
+    booking month, and must not move because the vehicle price moved.
+    """
+    repriced, skipped = [], []
+    for lead in await db.leads.find({"deliveryStatus": {"$ne": "Delivered"}}).to_list(5000):
+        if not _lead_matches_price_row(lead, row):
+            continue
+        lead_id = lead.get("leadId")
+        if _is_delivered(lead):
+            continue
+        if _acct(lead) != "Active":
+            skipped.append({"leadId": lead_id, "customerName": lead.get("customerName"),
+                            "reason": f"account {_acct(lead)}"})
+            continue
+        if not _is_priced(lead):
+            skipped.append({"leadId": lead_id, "customerName": lead.get("customerName"),
+                            "reason": "no price structure saved yet"})
+            continue
+        received = ce.num(lead.get("totalReceived"))
+        outstanding = ce.num(lead.get("customerOutstanding"))
+        if received > 0 and outstanding <= 0.01:
+            skipped.append({
+                "leadId": lead_id, "customerName": lead.get("customerName"),
+                "reason": "already paid in full — old price honoured",
+                "exShowroom": ce.num(lead.get("exShowroom")),
+                "customerPayable": ce.num(lead.get("customerPayable")),
+            })
+            continue
+        before = {"exShowroom": ce.num(lead.get("exShowroom")),
+                  "customerPayable": ce.num(lead.get("customerPayable")),
+                  "customerOutstanding": outstanding}
+        await _cascade_vehicle_or_price_change(lead_id, refresh_price=True, realign_scheme=False)
+        after_lead = await db.leads.find_one({"leadId": lead_id}) or {}
+        after = {"exShowroom": ce.num(after_lead.get("exShowroom")),
+                 "customerPayable": ce.num(after_lead.get("customerPayable")),
+                 "customerOutstanding": ce.num(after_lead.get("customerOutstanding"))}
+        if abs(before["customerPayable"] - after["customerPayable"]) < 0.005 and \
+                abs(before["exShowroom"] - after["exShowroom"]) < 0.005:
+            continue          # nothing actually moved for this lead
+        entry = {"leadId": lead_id, "customerName": lead.get("customerName"),
+                 "currentStatus": lead.get("currentStatus"),
+                 "exShowroomBefore": before["exShowroom"], "exShowroomAfter": after["exShowroom"],
+                 "customerPayableBefore": before["customerPayable"],
+                 "customerPayableAfter": after["customerPayable"],
+                 "outstandingBefore": before["customerOutstanding"],
+                 "outstandingAfter": after["customerOutstanding"],
+                 "delta": ce.round2(after["customerPayable"] - before["customerPayable"])}
+        repriced.append(entry)
+        # Per-lead audit so a wrong price edit can be traced and reversed.
+        if act:
+            await write_audit(act, "reprice", "lead", leadId=lead_id,
+                              old={k: before[k] for k in before},
+                              new={k: after[k] for k in after})
+        await sheet_sync("leads", clean(dict(after_lead)))
+    return {
+        "model": row.get("model"), "variant": row.get("variant"),
+        "changedFields": list(changed_fields or []),
+        "repricedCount": len(repriced), "skippedCount": len(skipped),
+        "totalPayableDelta": ce.round2(sum(r["delta"] for r in repriced)),
+        "repriced": repriced, "skipped": skipped,
+    }
+
+
 @api.put("/price-master/{price_id}", dependencies=[Depends(owner_only)])
-async def update_price_row(price_id: str, body: PriceRowIn):
-    res = await db.price_master.update_one({"priceId": price_id}, {"$set": body.model_dump()})
-    if res.matched_count == 0:
+async def update_price_row(price_id: str, body: PriceRowIn, act=Depends(actor)):
+    existing = await db.price_master.find_one({"priceId": price_id})
+    if not existing:
         raise HTTPException(404, "Price row not found")
-    return clean(await db.price_master.find_one({"priceId": price_id}))
+    payload = body.model_dump()
+    await db.price_master.update_one({"priceId": price_id}, {"$set": payload})
+    updated = await db.price_master.find_one({"priceId": price_id})
+    changed = _price_row_changed(existing, updated)
+    out = clean(updated)
+    # A price revision must reach every live lead on that vehicle, not just new ones.
+    out["reprice"] = (await reprice_leads_for_price_row(updated, changed, act) if changed
+                      else {"repricedCount": 0, "skippedCount": 0, "changedFields": [],
+                            "repriced": [], "skipped": [], "totalPayableDelta": 0})
+    if changed:
+        await write_audit(act, "update", "price-master",
+                          old={f: existing.get(f) for f in REPRICE_TRIGGER_FIELDS},
+                          new={f: updated.get(f) for f in REPRICE_TRIGGER_FIELDS})
+    return out
+
+
+@api.get("/price-master/{price_id}/reprice-preview", dependencies=[Depends(owner_only)])
+async def reprice_preview(price_id: str, exShowroom: Optional[float] = None):
+    """Read-only: which leads a price change WOULD move, and by how much.
+
+    Nothing is written. Pass exShowroom to model a price that is not saved yet.
+    """
+    row = await db.price_master.find_one({"priceId": price_id})
+    if not row:
+        raise HTTPException(404, "Price row not found")
+    proposed = dict(row)
+    if exShowroom is not None:
+        proposed["exShowroom"] = ce.num(exShowroom)
+    changed = _price_row_changed(row, proposed)
+    delta_ex = ce.round2(ce.num(proposed.get("exShowroom")) - ce.num(row.get("exShowroom")))
+    affected, skipped = [], []
+    for lead in await db.leads.find({"deliveryStatus": {"$ne": "Delivered"}}).to_list(5000):
+        if not _lead_matches_price_row(lead, row) or _is_delivered(lead):
+            continue
+        base = {"leadId": lead.get("leadId"), "customerName": lead.get("customerName"),
+                "currentStatus": lead.get("currentStatus"),
+                "exShowroom": ce.num(lead.get("exShowroom")),
+                "customerPayable": ce.num(lead.get("customerPayable")),
+                "customerOutstanding": ce.num(lead.get("customerOutstanding"))}
+        if _acct(lead) != "Active":
+            skipped.append({**base, "reason": f"account {_acct(lead)}"})
+        elif not _is_priced(lead):
+            skipped.append({**base, "reason": "no price structure saved yet"})
+        elif ce.num(lead.get("totalReceived")) > 0 and base["customerOutstanding"] <= 0.01:
+            skipped.append({**base, "reason": "already paid in full — old price honoured"})
+        else:
+            affected.append({**base, "exShowroomAfter": ce.num(proposed.get("exShowroom")),
+                             "estimatedDelta": delta_ex})
+    return {"priceId": price_id, "model": row.get("model"), "variant": row.get("variant"),
+            "currentExShowroom": ce.num(row.get("exShowroom")),
+            "proposedExShowroom": ce.num(proposed.get("exShowroom")),
+            "changedFields": changed, "wouldRepriceCount": len(affected),
+            "wouldSkipCount": len(skipped), "wouldReprice": affected, "wouldSkip": skipped}
 
 
 @api.delete("/price-master/{price_id}", dependencies=[Depends(owner_only)])
