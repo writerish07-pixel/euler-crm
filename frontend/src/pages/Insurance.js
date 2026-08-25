@@ -3,7 +3,7 @@ import { Plus, Pencil, Trash2, Banknote, HandCoins, ShieldCheck } from "lucide-r
 import { toast } from "sonner";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
+import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 
 const VIEWS = [["all", "All Entries"], ["pending", "Pending"], ["overdue", "Overdue"]];
@@ -216,9 +216,8 @@ function PayoutReceiptModal({ rows, isOwner, onClose, onDone }) {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-      <Card className="relative w-full max-w-lg p-6 animate-fade-up">
+    <Modal onClose={onClose} width="max-w-lg">
+      <div className="overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Record Insurer Payout</h3>
         <p className="text-xs text-ink-soft mb-4">Money actually received from the insurance agent.</p>
         <Field label="Entry (agent · customer · outstanding)">
@@ -244,8 +243,8 @@ function PayoutReceiptModal({ rows, isOwner, onClose, onDone }) {
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-payout-receipt-btn" onClick={submit}>Record {isOwner ? "Payout" : "Received"}</Button>
         </div>
-      </Card>
-    </div>
+      </div>
+    </Modal>
   );
 }
 

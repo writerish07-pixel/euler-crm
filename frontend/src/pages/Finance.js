@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { Landmark } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { PageHeader, Table, Badge, Button, Field, Input, Select, Card } from "../components/ui";
+import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 
 function financerRollup(rows) {
@@ -128,9 +128,8 @@ function FinanceReceiptModal({ files, onClose, onDone }) {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-      <Card className="relative w-full max-w-lg p-6 animate-fade-up">
+    <Modal onClose={onClose} width="max-w-lg">
+      <div className="overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Record Financer Receipt</h3>
         <p className="text-xs text-ink-soft mb-4">Money actually disbursed by the financer. This does not change the customer's outstanding.</p>
         <Field label="Finance file (financer · customer · outstanding)">
@@ -151,7 +150,7 @@ function FinanceReceiptModal({ files, onClose, onDone }) {
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-finance-receipt-btn" onClick={submit}>Record Receipt</Button>
         </div>
-      </Card>
-    </div>
+      </div>
+    </Modal>
   );
 }

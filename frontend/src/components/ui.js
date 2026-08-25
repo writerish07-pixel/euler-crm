@@ -1,7 +1,38 @@
-import React from "react";
+import React, { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
 export const cx = (...a) => a.filter(Boolean).join(" ");
+
+/**
+ * Render an overlay into <body> instead of leaving it inside the page tree.
+ *
+ * `position: fixed` is NOT relative to the viewport when any ancestor has a
+ * transform, filter, backdrop-filter, perspective or contain:paint — that
+ * ancestor becomes the containing block instead. Layout's <main> carries
+ * `animate-fade-up`, whose `both` fill-mode leaves a permanent
+ * `transform: translateY(0)`, so every drawer and modal was being sized against
+ * <main> — an element as tall as the whole lead list. The pinned footer really
+ * was pinned, just to the bottom of a page-tall box, so it moved further out of
+ * reach with every lead added.
+ *
+ * Portalling to <body> escapes that for good, and keeps working if someone adds
+ * a transform anywhere in the layout later.
+ */
+export function Portal({ children }) {
+  if (typeof document === "undefined") return null;
+  return createPortal(children, document.body);
+}
+
+/** Freeze the page behind an overlay so a scroll gesture cannot leak through. */
+export function useBodyScrollLock(active = true) {
+  useEffect(() => {
+    if (!active || typeof document === "undefined") return undefined;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [active]);
+}
 
 export function Card({ className, children, ...rest }) {
   return (
@@ -116,24 +147,49 @@ export function Table({ columns, rows, onRowClick, empty = "No records", rowKey 
 }
 
 export function Drawer({ open, onClose, title, subtitle, children, width = "max-w-2xl", footer }) {
+  useBodyScrollLock(!!open);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50">
-      <div className="absolute inset-0 bg-ink/40 backdrop-blur-[2px]" onClick={onClose} data-testid="drawer-overlay" />
-      <div className={cx("absolute inset-y-0 right-0 w-full bg-white shadow-drawer flex flex-col animate-drawer-in", width)}>
-        <div className="flex items-start justify-between gap-3 px-4 sm:px-6 py-4 border-b border-line shrink-0">
-          <div className="min-w-0">
-            <h2 className="font-heading text-base sm:text-lg font-bold text-ink truncate">{title}</h2>
-            {subtitle && <p className="text-xs text-ink-soft mt-0.5 break-words">{subtitle}</p>}
+    <Portal>
+      {/* h-[100dvh] not h-full: on mobile the browser chrome shrinks the visual
+          viewport, and 100vh would push the footer under it. */}
+      <div className="fixed inset-0 z-50 h-[100dvh]" data-testid="drawer-root">
+        <div className="absolute inset-0 bg-ink/40 backdrop-blur-[2px]" onClick={onClose} data-testid="drawer-overlay" />
+        <div className={cx("absolute inset-y-0 right-0 w-full bg-white shadow-drawer flex flex-col animate-drawer-in", width)}>
+          <div className="flex items-start justify-between gap-3 px-4 sm:px-6 py-4 border-b border-line shrink-0">
+            <div className="min-w-0">
+              <h2 className="font-heading text-base sm:text-lg font-bold text-ink truncate">{title}</h2>
+              {subtitle && <p className="text-xs text-ink-soft mt-0.5 break-words">{subtitle}</p>}
+            </div>
+            <button onClick={onClose} data-testid="drawer-close" className="rounded-lg p-1.5 text-ink-faint hover:bg-zinc-100 hover:text-ink transition-colors shrink-0">
+              <X size={18} />
+            </button>
           </div>
-          <button onClick={onClose} data-testid="drawer-close" className="rounded-lg p-1.5 text-ink-faint hover:bg-zinc-100 hover:text-ink transition-colors shrink-0">
-            <X size={18} />
-          </button>
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 sm:px-6 py-5">{children}</div>
+          {footer && <div className="border-t border-line px-4 sm:px-6 py-3 bg-zinc-50/60 shrink-0 overflow-x-auto">{footer}</div>}
         </div>
-        <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5">{children}</div>
-        {footer && <div className="border-t border-line px-4 sm:px-6 py-3 bg-zinc-50/60 shrink-0 overflow-x-auto">{footer}</div>}
       </div>
-    </div>
+    </Portal>
+  );
+}
+
+/**
+ * Centred modal shell. Same portal + scroll-lock treatment as Drawer, and the
+ * body scrolls inside the card so a long form never pushes its buttons off
+ * screen.
+ */
+export function Modal({ open = true, onClose, children, width = "max-w-lg", testid }) {
+  useBodyScrollLock(!!open);
+  if (!open) return null;
+  return (
+    <Portal>
+      <div className={cx("fixed inset-0 z-[60] h-[100dvh] flex items-center justify-center p-4")} data-testid={testid}>
+        <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
+        <Card className={cx("relative w-full max-h-[calc(100dvh-2rem)] flex flex-col animate-fade-up", width)}>
+          {children}
+        </Card>
+      </div>
+    </Portal>
   );
 }
 
