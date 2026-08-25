@@ -258,6 +258,13 @@ export default function Layout({ children }) {
 
       <div className="lg:ml-64 flex flex-col min-h-screen min-w-0">
         <Topbar onMenuOpen={() => setNavOpen(true)} />
+        {/* NOTE: `animate-fade-up` uses `animation-fill-mode: both`, so this element
+            keeps a `transform` after the animation ends. A transformed element is the
+            containing block for `position: fixed` DESCENDANTS — so any overlay rendered
+            inside a page would size itself against <main> (as tall as the whole list)
+            instead of the viewport, pushing its footer buttons off screen.
+            Every drawer and modal therefore portals to <body> via ui.js `Portal`.
+            If you add a new overlay, portal it too. */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 animate-fade-up min-w-0 overflow-x-hidden">{children}</main>
       </div>
     </div>

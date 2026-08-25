@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText } from "lucide-react";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { Drawer, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
+import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
 
@@ -1283,9 +1283,8 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
   };
   const m = masters || {};
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-      <Card className="relative w-full max-w-2xl p-6 animate-fade-up max-h-[90vh] overflow-y-auto">
+    <Modal onClose={onClose} width="max-w-2xl" testid="edit-lead-modal">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Edit Lead — {lead.leadId}</h3>
         <p className="text-xs text-ink-soft mb-4">
           Correct any details captured against this lead.
@@ -1319,12 +1318,12 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           )}
           <div className="col-span-3"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         </div>
-        <div className="flex justify-end gap-2 mt-5">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button data-testid="save-edit-lead-btn" onClick={save}>Save Changes</Button>
-        </div>
-      </Card>
-    </div>
+      </div>
+      <div className="flex justify-end gap-2 px-6 py-4 border-t border-line bg-zinc-50/60 shrink-0">
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button data-testid="save-edit-lead-btn" onClick={save}>Save Changes</Button>
+      </div>
+    </Modal>
   );
 }
 
@@ -1600,17 +1599,16 @@ function CloseModal({ lead, onClose, onDone }) {
 }
 
 function MiniModal({ title, children, onClose, onSubmit, submitLabel, danger, testid, submitDisabled }) {
+  // Title and the action row stay put; only the form body scrolls, so Confirm
+  // Booking is always one tap away however long the form gets.
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-      <Card className="relative w-full max-w-lg p-6 animate-fade-up">
-        <h3 className="font-heading text-lg font-bold text-ink mb-4">{title}</h3>
-        {children}
-        <div className="flex justify-end gap-2 mt-5">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button variant={danger ? "danger" : "primary"} data-testid={testid} onClick={onSubmit} disabled={submitDisabled}>{submitLabel}</Button>
-        </div>
-      </Card>
-    </div>
+    <Modal onClose={onClose} width="max-w-lg">
+      <h3 className="font-heading text-lg font-bold text-ink px-6 pt-6 pb-4 shrink-0">{title}</h3>
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-6">{children}</div>
+      <div className="flex justify-end gap-2 px-6 py-4 border-t border-line bg-zinc-50/60 shrink-0">
+        <Button variant="secondary" onClick={onClose}>Cancel</Button>
+        <Button variant={danger ? "danger" : "primary"} data-testid={testid} onClick={onSubmit} disabled={submitDisabled}>{submitLabel}</Button>
+      </div>
+    </Modal>
   );
 }

@@ -7,7 +7,7 @@ import {
 import { toast } from "sonner";
 import { get } from "../lib/api";
 import { inr, compactInr, fmtDate } from "../lib/format";
-import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import { Card, PageHeader, StatCard, Table, Badge, Button, Portal } from "../components/ui";
 
 export default function AccountsDashboard() {
   const [d, setD] = useState(null);
@@ -127,9 +127,10 @@ export default function AccountsDashboard() {
       </div>
 
       {summary && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" data-testid="billing-summary-modal"
+        <Portal>
+        <div className="fixed inset-0 z-50 h-[100dvh] bg-black/40 flex items-center justify-center p-4" data-testid="billing-summary-modal"
           onClick={() => setSummary(null)}>
-          <div className="bg-white rounded-xl border border-line shadow-drawer max-w-2xl w-full max-h-[90vh] overflow-y-auto p-5"
+          <div className="bg-white rounded-xl border border-line shadow-drawer max-w-2xl w-full max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain p-5"
             onClick={(e) => e.stopPropagation()}>
             <div className="flex items-start justify-between gap-3 mb-3">
               <div>
@@ -191,6 +192,7 @@ export default function AccountsDashboard() {
             </a>
           </div>
         </div>
+        </Portal>
       )}
     </div>
   );

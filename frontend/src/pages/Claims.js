@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { HandCoins, Plus } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard } from "../components/ui";
+import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 
 export default function Claims() {
   const [rows, setRows] = useState([]);
@@ -90,9 +90,8 @@ function ManualClaimModal({ leads, onClose, onDone }) {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-      <Card className="relative w-full max-w-xl p-6 animate-fade-up">
+    <Modal onClose={onClose} width="max-w-xl">
+      <div className="overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Add Manual Claim</h3>
         <p className="text-xs text-ink-soft mb-4">Record a claim manually (e.g. an OEM incentive). It joins the register; record money later via "Record Claim Received".</p>
         <div className="grid grid-cols-2 gap-3">
@@ -113,8 +112,8 @@ function ManualClaimModal({ leads, onClose, onDone }) {
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-manual-claim-btn" onClick={submit}>Add to Register</Button>
         </div>
-      </Card>
-    </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -134,9 +133,8 @@ function ClaimReceiptModal({ rows, onClose, onDone }) {
     } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
   };
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-      <Card className="relative w-full max-w-lg p-6 animate-fade-up">
+    <Modal onClose={onClose} width="max-w-lg">
+      <div className="overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Record Claim Received</h3>
         <p className="text-xs text-ink-soft mb-4">Pick a claim with a pending OEM company-share balance</p>
         <Field label="Claim (lead · component · outstanding)">
@@ -157,8 +155,8 @@ function ClaimReceiptModal({ rows, onClose, onDone }) {
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-claim-receipt-btn" onClick={submit}>Record Receipt</Button>
         </div>
-      </Card>
-    </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -171,9 +169,8 @@ function SettleModal({ claim, onClose, onDone }) {
     onDone();
   };
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-      <Card className="relative w-full max-w-lg p-6 animate-fade-up">
+    <Modal onClose={onClose} width="max-w-lg">
+      <div className="overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Settle Claim</h3>
         <p className="text-xs text-ink-soft mb-4">{claim.customer} · {claim.component} · {inr(claim.claimAmount)}</p>
         <div className="grid grid-cols-2 gap-3">
@@ -187,7 +184,7 @@ function SettleModal({ claim, onClose, onDone }) {
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-claim-btn" onClick={submit}>Save</Button>
         </div>
-      </Card>
-    </div>
+      </div>
+    </Modal>
   );
 }
