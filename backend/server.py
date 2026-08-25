@@ -935,9 +935,43 @@ async def reseed():
 
 
 # ---------------------------------------------------------------- dashboard helpers
+def _is_close_won(lead) -> bool:
+    return "close won" in (lead.get("currentStatus") or "").strip().lower()
+
+
 def _is_delivered_lead(lead) -> bool:
+    """Counted as a retail on the dashboards.
+
+    Close Won is a COMPLETED deal, so it counts. Closing a lead overwrites
+    currentStatus ("Delivered" -> "Close Won") and sets accountStatus=Closed,
+    which used to drop the retail out of the executive's numbers the moment the
+    paperwork was finished — penalising the executive for completing the file.
+
+    Reporting only. Workflow gating uses _is_delivered(), which stays strict:
+    only an actual Mark Delivered counts there.
+    """
     st = (lead.get("currentStatus") or "").lower()
-    return "deliver" in st or (lead.get("deliveryStatus") or "").lower() == "delivered"
+    return ("deliver" in st
+            or (lead.get("deliveryStatus") or "").lower() == "delivered"
+            or _is_close_won(lead))
+
+
+def _retail_date(lead) -> str:
+    """Date a retail is credited to. A lead closed without a Mark Delivered has no
+    deliveryDate, so fall back to the closing date rather than dropping it from MTD."""
+    return str(lead.get("deliveryDate") or lead.get("closedDate") or "")
+
+
+def _funnel_population(leads) -> list:
+    """Leads the funnel counts: everything Active, plus completed (Close Won) deals.
+
+    Closed-Lost / Cancelled / Archived stay out — only a finished SALE is added
+    back, and _status_bucket puts it in Delivered."""
+    out = []
+    for l in leads:
+        if (l.get("accountStatus") or "Active") == "Active" or _is_close_won(l):
+            out.append(l)
+    return out
 
 
 def _is_booked_lead(lead) -> bool:
@@ -1092,7 +1126,7 @@ async def dashboard():
             "monthlyLeads": len(monthly_leads),
             "monthlyBookings": len(monthly_bookings),
             "activeBookings": len(active_booked),
-            "monthlyDeliveries": len([l for l in delivered if in_month(l.get("deliveryDate"))]),
+            "monthlyDeliveries": len([l for l in delivered if in_month(_retail_date(l))]),
             "pendingDeliveries": len(active_booked),
             "totalLeads": len(leads),
             "conversion": round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0,
@@ -1229,11 +1263,11 @@ async def executive_dashboard(user=Depends(current_user)):
 
     monthly_leads = [l for l in mine if in_month(l.get("createdDate"))]
     monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
-    monthly_deliveries = [l for l in delivered if in_month(l.get("deliveryDate"))]
+    monthly_deliveries = [l for l in delivered if in_month(_retail_date(l))]
 
     funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
     funnel = {k: 0 for k in funnel_order}
-    for l in active:
+    for l in _funnel_population(mine):
         b = _status_bucket(l)
         funnel[b] = funnel.get(b, 0) + 1
 
@@ -1342,11 +1376,11 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
 
     monthly_leads = [l for l in leads if in_month(l.get("createdDate"))]
     monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
-    monthly_deliveries = [l for l in delivered if in_month(l.get("deliveryDate"))]
+    monthly_deliveries = [l for l in delivered if in_month(_retail_date(l))]
 
     funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
     funnel = {k: 0 for k in funnel_order}
-    for l in active:
+    for l in _funnel_population(leads):
         b = _status_bucket(l)
         funnel[b] = funnel.get(b, 0) + 1
 
@@ -1415,7 +1449,7 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
             row["leadsMtd"] += 1
         if _is_booked_lead(l) and in_month(l.get("bookingDate")):
             row["bookingsMtd"] += 1
-        if _is_delivered_lead(l) and in_month(l.get("deliveryDate")):
+        if _is_delivered_lead(l) and in_month(_retail_date(l)):
             row["deliveriesMtd"] += 1
         if (l.get("accountStatus") or "Active") == "Active":
             fd = followup_date(l)
