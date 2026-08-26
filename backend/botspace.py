@@ -23,7 +23,16 @@ DEFAULT_TEMPLATES = {
     "booking": "booking_confirm",
     "delivery": "delivery_review",
     "finance": "finance_overdue_exec",
+    # Internal daily reports (English, Utility category). Staff messages, so they
+    # bypass customer quiet hours.
+    "execMorning": "exec_day_ahead",
+    "execEod": "exec_eod_scorecard",
+    "managerEod": "manager_eod_volume",
+    "ownerEod": "owner_eod_summary",
 }
+
+# Slots the daily scheduler fires. Times are IST hours, overridable from settings.
+REPORT_SLOTS = {"morning": 8, "eod": 20}
 
 FOLLOWUP_STATUSES = {"new", "contacted", "follow-up", "follow up", "in progress"}
 STOP_WORDS = {"stop", "unsubscribe", "रोकें", "रोक दो", "बंद"}
@@ -649,6 +658,144 @@ async def flush_outbox() -> dict:
     return {"ok": True, "flushed": flushed}
 
 
+# ---------------------------------------------------------------- daily reports
+def _inr(n) -> str:
+    """Indian grouping, no decimals. Template variables must be single-line."""
+    try:
+        v = int(round(float(n or 0)))
+    except (TypeError, ValueError):
+        return "0"
+    sign, v = ("-" if v < 0 else ""), abs(v)
+    sv = str(v)
+    if len(sv) <= 3:
+        return sign + sv
+    head, tail = sv[:-3], sv[-3:]
+    parts = []
+    while len(head) > 2:
+        parts.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        parts.insert(0, head)
+    return sign + ",".join(parts) + "," + tail
+
+
+def _one_line(v) -> str:
+    """Meta rejects a template variable containing a newline, tab, or 4+ spaces."""
+    return re.sub(r"\s+", " ", str(v if v is not None else "")).strip() or "-"
+
+
+def _top_line(rows) -> str:
+    """Top executives as ONE single-line string, e.g. 'Amit (2), Sanjay (1)'."""
+    named = [f"{r['name']} ({r.get('bookingsToday', 0)})" for r in (rows or [])[:3]]
+    return _one_line(", ".join(named)) if named else "-"
+
+
+def _target_line(done, target, pct) -> str:
+    if not target:
+        return _one_line(f"{done}")
+    return _one_line(f"{done} of {int(target)} ({pct if pct is not None else 0}%)")
+
+
+async def _send_report(staff: dict, kind: str, variables: list, text: str) -> dict:
+    """Staff report send. customer_hours=False — an EOD report at 20:00 is not
+    a customer marketing message and must not be deferred to the outbox."""
+    who = {"leadId": "", "customerName": staff.get("name") or "Team",
+           "mobile": staff.get("mobile"), "executive": staff.get("name")}
+    cfg = await get_config()
+    return await _enqueue_or_send(
+        lead=who, kind=kind, phone=staff.get("mobile"),
+        template_id=cfg["templates"].get(kind_to_template(kind), kind),
+        variables=variables, text=text, customer_hours=False)
+
+
+def kind_to_template(kind: str) -> str:
+    return {"exec_morning": "execMorning", "exec_eod": "execEod",
+            "manager_eod": "managerEod", "owner_eod": "ownerEod"}.get(kind, kind)
+
+
+async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
+    """Send the reports for one slot. Idempotent per day+slot: a re-run (cron
+    retry, second worker) will not message anyone twice."""
+    cfg = await get_config()
+    if not cfg["enabled"]:
+        return {"ok": False, "skipped": True, "reason": "not-configured", "sent": 0}
+    import server
+    today_s = today_s or today_ist()
+    db = _db()
+    marker_id = f"report_{slot}_{today_s}"
+    if await db.settings.find_one({"_id": marker_id}):
+        return {"ok": True, "slot": slot, "sent": 0, "alreadySent": True}
+
+    data = await server._daily_report_data()
+    sent, failed, recipients = 0, 0, []
+
+    async def deliver(staff, kind, variables, text):
+        nonlocal sent, failed
+        res = await _send_report(staff, kind, variables, text)
+        recipients.append({"name": staff.get("name"), "kind": kind,
+                           "ok": bool(res.get("ok"))})
+        if res.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+
+    if slot == "morning":
+        for st in await server._staff_for_report("exec_morning"):
+            e = next((x for x in data["executives"]
+                      if x["name"].strip().lower() == str(st.get("name") or "").strip().lower()), None)
+            if not e:
+                continue
+            await deliver(st, "exec_morning", [
+                _one_line(e["name"]),
+                _one_line(e["pendingBookings"]),
+                _inr(e["pendingCollection"]),
+                _one_line(e["followupsDue"]),
+                _one_line(e["followupsOverdue"]),
+            ], f"Day ahead {today_s} for {e['name']}")
+    elif slot == "eod":
+        for st in await server._staff_for_report("exec_eod"):
+            e = next((x for x in data["executives"]
+                      if x["name"].strip().lower() == str(st.get("name") or "").strip().lower()), None)
+            if not e:
+                continue
+            await deliver(st, "exec_eod", [
+                _one_line(e["name"]),
+                _one_line(e["bookingsToday"]),
+                _one_line(e["bookingsMtd"]),
+                _target_line(e["deliveriesMtd"], e["monthlyTarget"], e.get("attainmentPct")),
+                _one_line(e["followupsOverdue"]),
+            ], f"EOD {today_s} for {e['name']}")
+
+        for st in await server._staff_for_report("manager_eod"):
+            await deliver(st, "manager_eod", [
+                _one_line(today_s),
+                _one_line(data["bookingsToday"]), _one_line(data["bookingsMtd"]),
+                _one_line(data["deliveriesToday"]), _one_line(data["deliveriesMtd"]),
+                _top_line(data["topExecutives"]),
+            ], f"Manager EOD {today_s}")
+
+        for st in await server._staff_for_report("owner_eod"):
+            await deliver(st, "owner_eod", [
+                _one_line(today_s),
+                _one_line(data["bookingsToday"]), _one_line(data["bookingsMtd"]),
+                _one_line(data["deliveriesToday"]),
+                _target_line(data["deliveriesMtd"], data["targetUnits"], data.get("attainmentPct")),
+                _inr(data["revenueMtd"]),
+                _inr(data["customerOutstanding"]),
+                _one_line(f'{_inr(data["financePendingAmount"])} ({data["financePendingFiles"]} files)'),
+                _top_line(data["topExecutives"]),
+            ], f"Owner EOD {today_s}")
+    else:
+        return {"ok": False, "reason": f"unknown slot '{slot}'", "sent": 0}
+
+    await db.settings.update_one({"_id": marker_id}, {"$set": {
+        "slot": slot, "day": today_s, "sentAt": datetime.now(timezone.utc).isoformat(),
+        "sent": sent, "failed": failed, "recipients": recipients,
+    }}, upsert=True)
+    return {"ok": True, "slot": slot, "day": today_s, "sent": sent,
+            "failed": failed, "recipients": recipients}
+
+
 async def run_daily_jobs(today_s: Optional[str] = None) -> dict:
     today_s = today_s or today_ist()
     db = _db()
@@ -785,7 +932,14 @@ async def summary_for_lead(lead_id: str) -> dict:
 
 
 async def scheduler_loop():
-    """Best-effort morning job. Railway cron hitting /cron is the reliable path."""
+    """Best-effort in-process ticker.
+
+    This only fires if the process happens to be awake in the right hour, so it
+    is a fallback, NOT the mechanism: an idle or restarting host silently skips a
+    day. External cron hitting /api/integrations/botspace/cron?slot=... is the
+    reliable path. Both are safe to run together — every job is idempotent per
+    day (and per day+slot for reports).
+    """
     await asyncio.sleep(15)
     while True:
         try:
@@ -794,6 +948,9 @@ async def scheduler_loop():
                 marker = await _db().settings.find_one({"_id": "botspace_job"}) or {}
                 if marker.get("lastRun") != today_ist():
                     await run_daily_jobs()
+            for slot, hour in REPORT_SLOTS.items():
+                if now.hour == hour:
+                    await run_daily_reports(slot)
         except Exception:
             logger.exception("whatsapp scheduler tick failed")
         await asyncio.sleep(15 * 60)

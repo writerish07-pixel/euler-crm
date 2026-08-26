@@ -25,6 +25,7 @@ import Bookings from "./pages/Bookings";
 import Settings from "./pages/Settings";
 import InsurancePayoutReport from "./pages/InsurancePayoutReport";
 import InsuranceAgents from "./pages/InsuranceAgents";
+import Staff from "./pages/Staff";
 import EarningsReport from "./pages/EarningsReport";
 import OwnerCommercialReport from "./pages/OwnerCommercialReport";
 import OemClaimDashboard from "./pages/OemClaimDashboard";
@@ -107,6 +108,7 @@ function AppRoutes() {
       <Route path="/erp-audit" element={P(<ERPProductionAudit />, { ownerOnly: true })} />
       <Route path="/audit-log" element={P(<AuditLog />, { ownerOnly: true })} />
       <Route path="/price-master" element={P(<PriceMaster />, { salesOnly: true })} />
+      <Route path="/staff" element={P(<Staff />, { ownerOnly: true })} />
       <Route path="/settings" element={P(<Settings />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

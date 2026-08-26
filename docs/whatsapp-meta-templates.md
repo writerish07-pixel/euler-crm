@@ -131,3 +131,194 @@ This goes to the **executive**, not the customer.
    `https://euler-crm-production.up.railway.app/api/integrations/botspace/webhook`
 4. Add each executive name (as typed on the lead) + their WhatsApp number.
 5. Paste the Google review URL.
+
+---
+
+# Internal daily reports (staff only)
+
+These four go to **your own team**, not customers. Category **Utility**,
+language **English (`en`)** — chosen so ₹ amounts, financer names and model
+names read unambiguously.
+
+### The one rule that governs every variable
+
+**A template variable may not contain a newline, a tab, or 4+ consecutive
+spaces.** Meta rejects the whole send with a parameter-format error. That is why
+none of these templates contains a list: totals and a single-line "top
+executives" string go in the message, and the **button links to the app** for the
+full breakdown. `botspace._one_line()` enforces this on every value, and
+`test_iter29_daily_reports.py` asserts it on real payloads.
+
+Recipients, roles and targets are managed in the app at **Settings → Staff &
+Reports** — nothing here is hard-coded.
+
+---
+
+## E. `exec_day_ahead`
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | English (`en`) |
+| Name | `exec_day_ahead` |
+| Sent | every executive, 08:30 IST |
+
+**Body**
+```
+Good morning {{1}}.
+
+Pending deliveries: {{2}}
+To collect: Rs {{3}}
+Follow-ups due today: {{4}}
+Overdue follow-ups: {{5}}
+
+Open the app for the customer list.
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Executive name | Amit |
+| {{2}} | Booked, not yet delivered | 6 |
+| {{3}} | Outstanding on those bookings | 4,20,000 |
+| {{4}} | Follow-ups dated today | 3 |
+| {{5}} | Follow-ups already past due | 2 |
+
+**Button (URL):** `Open my leads` → your app URL
+
+---
+
+## F. `exec_eod_scorecard`
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | English (`en`) |
+| Name | `exec_eod_scorecard` |
+| Sent | every executive, 20:00 IST |
+
+**Body**
+```
+{{1}} - today's numbers.
+
+Bookings today: {{2}}
+Bookings this month: {{3}}
+Deliveries this month: {{4}}
+Follow-ups still overdue: {{5}}
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Executive name | Amit |
+| {{2}} | Bookings dated today | 2 |
+| {{3}} | Bookings MTD | 11 |
+| {{4}} | Deliveries MTD vs target | 8 of 10 (80.0%) |
+| {{5}} | Overdue follow-ups | 1 |
+
+> {{4}} carries the target inline when one is set on the staff master, and just
+> the count when it is not — a single variable either way.
+
+---
+
+## G. `manager_eod_volume`
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | English (`en`) |
+| Name | `manager_eod_volume` |
+| Sent | every RM and ASM, 20:00 IST |
+
+**Body**
+```
+Euler CRM - EOD {{1}}
+
+Bookings today: {{2}} | Month: {{3}}
+Deliveries today: {{4}} | Month: {{5}}
+
+Top today: {{6}}
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Date | 2026-08-26 |
+| {{2}} | Bookings today | 4 |
+| {{3}} | Bookings MTD | 37 |
+| {{4}} | Deliveries today | 3 |
+| {{5}} | Deliveries MTD | 29 |
+| {{6}} | Top 3 executives, one line | Amit (2), Sanjay (1) |
+
+> **No money in this template, by design.** Revenue, customer outstanding and
+> finance amounts are owner-only; `/api/reports/daily/manager` strips them
+> server-side, so a manager cannot receive them even by accident.
+
+---
+
+## H. `owner_eod_summary`
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | English (`en`) |
+| Name | `owner_eod_summary` |
+| Sent | owner, 20:00 IST |
+
+**Body**
+```
+Euler CRM - EOD {{1}}
+
+Bookings today: {{2}} | Month: {{3}}
+Deliveries today: {{4}}
+Deliveries this month: {{5}}
+
+Revenue this month: Rs {{6}}
+Customer outstanding: Rs {{7}}
+Finance pending: Rs {{8}}
+
+Top today: {{9}}
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Date | 2026-08-26 |
+| {{2}} | Bookings today | 4 |
+| {{3}} | Bookings MTD | 37 |
+| {{4}} | Deliveries today | 3 |
+| {{5}} | Deliveries MTD vs target | 29 of 40 (72.5%) |
+| {{6}} | Retail value delivered MTD | 1,84,50,000 |
+| {{7}} | Open customer outstanding | 21,40,000 |
+| {{8}} | Financer money not yet received | 12,40,000 (6 files) |
+| {{9}} | Top 3 executives, one line | Amit (2), Sanjay (1) |
+
+**Button (URL):** `Open dashboard` → your app URL
+
+> **Revenue** = customer payable on vehicles retailed this month, i.e. what you
+> sold. Cash actually collected is a different number (`collectedMtd` on
+> `/api/reports/daily/owner`); say the word if you would rather the message
+> carried that instead.
+>
+> The per-financer split cannot be a variable (it is a list). {{8}} carries the
+> total and file count; the Finance Register's "By financer" card has the
+> breakdown.
+
+---
+
+## Scheduling — read this before going live
+
+The in-process ticker only fires if the API happens to be awake in the right
+hour. **An idle or restarting host silently skips a day**, which is not
+acceptable for reports people rely on. Point an external cron at:
+
+```
+POST https://<your-api>/api/integrations/botspace/cron?slot=morning&token=<cronToken>   # 08:30 IST
+POST https://<your-api>/api/integrations/botspace/cron?slot=eod&token=<cronToken>       # 20:00 IST
+```
+
+cron-job.org or Railway cron both work. Every job is idempotent per day and
+slot, so the ticker and cron can run together and nobody gets messaged twice.
+
+To resend a slot after fixing something:
+`DELETE /api/integrations/botspace/daily-report-marker?slot=eod`, then
+**Settings → Staff & Reports → Send EOD now**.
+
+**Cost:** roughly 6 staff x 2 messages x 30 days = ~360 Utility messages/month.
+In India that is around ₹40/month.

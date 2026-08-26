@@ -4,7 +4,7 @@ import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
-  BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake,
+  BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -47,6 +47,7 @@ const NAV = [
   ]},
   { section: "Catalogue & Admin", items: [
     { to: "/price-master", label: "Price Master", icon: Tag, salesOnly: true },
+    { to: "/staff", label: "Staff & Reports", icon: UserCog, ownerOnly: true },
     { to: "/settings", label: "Settings", icon: SettingsIcon },
   ]},
 ];
