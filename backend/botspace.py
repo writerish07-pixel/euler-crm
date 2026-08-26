@@ -320,11 +320,65 @@ async def _store_message(lead: dict, *, direction: str, kind: str, text: str,
     if extra:
         doc.update(extra)
     await db.whatsapp_messages.insert_one(doc)
+    await _touch_thread(doc)
     if direction == "inbound":
         await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
             "whatsappLastInboundAt": doc["createdAt"], "lastUpdated": doc["createdAt"],
         }})
     return doc
+
+
+async def _touch_thread(doc: dict):
+    """Keep one thread row per lead, updated on every stored message.
+
+    A stored thread rather than an aggregation over the message log: aggregation
+    gets slower as the log grows, is not reliably supported by the test harness,
+    and gives nowhere to keep read-state. Derived flags (unread / needsReply /
+    sessionOpen) are computed at READ time so they cannot go stale.
+
+    Staff messages (finance reminders, daily reports) are excluded — the inbox is
+    customer conversations only.
+    """
+    lead_id = str(doc.get("leadId") or "").strip()
+    if not lead_id or doc.get("audience") == "executive":
+        return None
+    db = _db()
+    inbound = doc.get("direction") == "inbound"
+    patch = {
+        "leadId": lead_id,
+        "customerName": doc.get("customerName") or "",
+        "phone": doc.get("phone") or "",
+        "lastMessageAt": doc["createdAt"],
+        "lastMessageText": (doc.get("text") or "")[:280],
+        "lastDirection": doc.get("direction"),
+        "lastKind": doc.get("kind"),
+    }
+    patch["lastInboundAt" if inbound else "lastOutboundAt"] = doc["createdAt"]
+    lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    patch["executive"] = lead.get("executive") or ""
+    patch["model"] = lead.get("interestedModel") or ""
+    patch["currentStatus"] = lead.get("currentStatus") or ""
+    patch["optOut"] = bool(lead.get("whatsappOptOut"))
+    await db.whatsapp_threads.update_one(
+        {"leadId": lead_id},
+        {"$set": patch,
+         "$inc": {"inboundCount" if inbound else "outboundCount": 1},
+         "$setOnInsert": {"lastReadAt": "", "createdAt": doc["createdAt"]}},
+        upsert=True)
+    return patch
+
+
+async def backfill_threads() -> dict:
+    """Rebuild every thread from the existing message log. Idempotent."""
+    db = _db()
+    await db.whatsapp_threads.delete_many({})
+    rows = await db.whatsapp_messages.find().sort("createdAt", 1).to_list(20000)
+    n = 0
+    for doc in rows:
+        if await _touch_thread(doc) is not None:
+            n += 1
+    return {"messages": len(rows), "threaded": n,
+            "threads": await db.whatsapp_threads.count_documents({})}
 
 
 async def _activity(lead: dict, discussion: str):

@@ -26,6 +26,7 @@ import Settings from "./pages/Settings";
 import InsurancePayoutReport from "./pages/InsurancePayoutReport";
 import InsuranceAgents from "./pages/InsuranceAgents";
 import Staff from "./pages/Staff";
+import WhatsAppInbox from "./pages/WhatsAppInbox";
 import EarningsReport from "./pages/EarningsReport";
 import OwnerCommercialReport from "./pages/OwnerCommercialReport";
 import OemClaimDashboard from "./pages/OemClaimDashboard";
@@ -91,6 +92,7 @@ function AppRoutes() {
       <Route path="/bookings" element={P(<Bookings />, { salesOnly: true, fieldOk: true })} />
       <Route path="/quotations" element={P(<Quotations />, { salesOnly: true })} />
       <Route path="/activities" element={P(<Activities />, { salesOnly: true })} />
+      <Route path="/whatsapp" element={P(<WhatsAppInbox />, { salesOnly: true })} />
       <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
       <Route path="/finance" element={P(<Finance />, { financeView: true })} />
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
