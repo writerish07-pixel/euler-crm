@@ -6363,6 +6363,112 @@ async def lead_whatsapp_reply(lead_id: str, body: WhatsAppReplyIn, user=Depends(
         raise HTTPException(502, str(e))
 
 
+# ------------------------------------------------------- WhatsApp inbox
+# One place to see every customer conversation, instead of opening each lead.
+def _thread_view(t: dict, now_iso_s: str) -> dict:
+    """Derived state, computed on read so it can never be stale."""
+    last_in = t.get("lastInboundAt") or ""
+    last_read = t.get("lastReadAt") or ""
+    out = dict(t)
+    out["sessionOpen"] = wa.session_open(last_in)
+    out["unread"] = bool(last_in and last_in > last_read)
+    out["needsReply"] = t.get("lastDirection") == "inbound"
+    return out
+
+
+async def _visible_threads(user) -> list:
+    """Executives see conversations on their own leads; everyone else sees all."""
+    rows = [clean(t) for t in
+            await db.whatsapp_threads.find().sort("lastMessageAt", -1).to_list(2000)]
+    if (user or {}).get("role") != "executive":
+        return rows
+    mine = {l["leadId"] for l in _leads_for_executive(
+        await db.leads.find().to_list(5000), user)}
+    return [t for t in rows if t.get("leadId") in mine]
+
+
+@api.get("/whatsapp/threads")
+async def whatsapp_threads(filter: str = "all", q: str = "",
+                           limit: int = 200, offset: int = 0,
+                           user=Depends(current_user)):
+    """Inbox. filter = all | active | needs-reply | unread."""
+    now = now_iso()
+    rows = [_thread_view(t, now) for t in await _visible_threads(user)]
+    if filter == "active":
+        rows = [r for r in rows if r["sessionOpen"]]
+    elif filter == "needs-reply":
+        rows = [r for r in rows if r["needsReply"]]
+    elif filter == "unread":
+        rows = [r for r in rows if r["unread"]]
+    needle = (q or "").strip().lower()
+    if needle:
+        rows = [r for r in rows if needle in " ".join(str(r.get(k) or "") for k in
+                ("customerName", "phone", "leadId", "executive", "model")).lower()]
+    return {"total": len(rows), "threads": rows[offset:offset + max(1, limit)]}
+
+
+@api.get("/whatsapp/summary")
+async def whatsapp_summary(user=Depends(current_user)):
+    """Counts for the nav badge."""
+    now = now_iso()
+    rows = [_thread_view(t, now) for t in await _visible_threads(user)]
+    failed = await db.whatsapp_messages.count_documents({"status": "failed"})
+    queued = await db.whatsapp_outbox.count_documents({"status": "queued"})
+    return {
+        "threads": len(rows),
+        "unread": len([r for r in rows if r["unread"]]),
+        "needsReply": len([r for r in rows if r["needsReply"]]),
+        "activeChats": len([r for r in rows if r["sessionOpen"]]),
+        "failed": failed, "queued": queued,
+    }
+
+
+@api.post("/whatsapp/threads/{lead_id}/read")
+async def whatsapp_mark_read(lead_id: str):
+    res = await db.whatsapp_threads.update_one(
+        {"leadId": lead_id}, {"$set": {"lastReadAt": now_iso()}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "No WhatsApp conversation for this lead")
+    return {"ok": True}
+
+
+@api.get("/whatsapp/messages")
+async def whatsapp_messages(direction: str = "outbound", kind: str = "", status: str = "",
+                            date_from: str = "", date_to: str = "", q: str = "",
+                            limit: int = 300, user=Depends(current_user)):
+    """Sent box — a flat list across every lead, so a failed or queued send is
+    visible without opening each conversation."""
+    visible = {t["leadId"] for t in await _visible_threads(user)}
+    out = []
+    for m in await db.whatsapp_messages.find().sort("createdAt", -1).to_list(20000):
+        if m.get("leadId") not in visible:
+            continue
+        if direction and m.get("direction") != direction:
+            continue
+        if kind and m.get("kind") != kind:
+            continue
+        if status and str(m.get("status") or "") != status:
+            continue
+        day = str(m.get("createdAt") or "")[:10]
+        if date_from and day < date_from:
+            continue
+        if date_to and day > date_to:
+            continue
+        if q and q.strip().lower() not in " ".join(str(m.get(k) or "") for k in
+                ("customerName", "phone", "leadId", "text")).lower():
+            continue
+        out.append(clean(m))
+        if len(out) >= max(1, limit):
+            break
+    return out
+
+
+@api.post("/admin/backfill-whatsapp-threads", dependencies=[Depends(owner_only)])
+async def backfill_whatsapp_threads():
+    """Build threads from the existing message log. Idempotent."""
+    return {"ok": True, **await wa.backfill_threads()}
+
+
 @public.head("/integrations/botspace/webhook")
 @public.get("/integrations/botspace/webhook")
 async def botspace_webhook_ping():
@@ -6810,6 +6916,8 @@ async def startup():
         await db.insurance.create_index("insuranceAgentId")
         await db.staff.create_index("staffId", unique=True)
         await db.staff.create_index("role")
+        await db.whatsapp_threads.create_index("leadId", unique=True)
+        await db.whatsapp_threads.create_index([("lastMessageAt", -1)])
     except Exception:
         pass
     try:

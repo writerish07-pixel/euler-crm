@@ -140,7 +140,14 @@ These four go to **your own team**, not customers. Category **Utility**,
 language **English (`en`)** — chosen so ₹ amounts, financer names and model
 names read unambiguously.
 
-### The one rule that governs every variable
+### Two rules govern every body
+
+**A body may not START or END with a variable.** Meta rejects it with
+"Leading or trailing params not allowed". Every body below therefore opens and
+closes with plain text — that is why each report ends with an "Open the app…"
+line rather than the top-executives variable.
+
+### The rule that governs every variable
 
 **A template variable may not contain a newline, a tab, or 4+ consecutive
 spaces.** Meta rejects the whole send with a parameter-format error. That is why
@@ -198,12 +205,14 @@ Open the app for the customer list.
 
 **Body**
 ```
-{{1}} - today's numbers.
+Today's numbers for {{1}}.
 
 Bookings today: {{2}}
 Bookings this month: {{3}}
 Deliveries this month: {{4}}
 Follow-ups still overdue: {{5}}
+
+Open the app for details.
 ```
 
 | Variable | Meaning | Sample |
@@ -234,8 +243,9 @@ Euler CRM - EOD {{1}}
 
 Bookings today: {{2}} | Month: {{3}}
 Deliveries today: {{4}} | Month: {{5}}
-
 Top today: {{6}}
+
+Open the app for the full list.
 ```
 
 | Variable | Meaning | Sample |
@@ -273,8 +283,9 @@ Deliveries this month: {{5}}
 Revenue this month: Rs {{6}}
 Customer outstanding: Rs {{7}}
 Finance pending: Rs {{8}}
-
 Top today: {{9}}
+
+Open the app for the full breakdown.
 ```
 
 | Variable | Meaning | Sample |
