@@ -3993,6 +3993,67 @@ async def list_price_master(model: Optional[str] = None):
     return [clean(p) for p in await db.price_master.find(q).to_list(2000)]
 
 
+@api.get("/price-list")
+async def price_list(model: Optional[str] = None, q: str = "", user=Depends(current_user)):
+    """Read-only showroom price list — what a salesperson quotes.
+
+    On-road is the same Gross Vehicle Cost the commercial engine computes, and
+    TCS follows the engine exactly: charged only when the Price Master row says
+    Yes AND the total reaches the threshold. A row over the threshold with the
+    flag off is NOT given a TCS line — that would quote a charge the app will
+    never bill — but it is counted in `tcsReview` so the owner can check it.
+
+    Scheme shows the TOTAL available for the current month. The company/dealer
+    split is deliberately withheld: that is commercial information.
+    """
+    scheme_rows = await get_scheme_rows()
+    on = today()
+    rows = await db.price_master.find({"model": model} if model else {}).to_list(2000)
+    needle = (q or "").strip().lower()
+    grouped, review = {}, []
+    for r in rows:
+        if str(r.get("status") or "active").lower() != "active":
+            continue
+        mdl, variant = str(r.get("model") or ""), str(r.get("variant") or "")
+        if needle and needle not in f"{mdl} {variant}".lower():
+            continue
+        ex = ce.num(r.get("exShowroom"))
+        rto = ce.num(r.get("rto"))
+        ins = ce.num(r.get("insurance"))
+        other = ce.round2(sum(ce.num(r.get(k)) for k in
+                ("accessories", "handlingCharges", "trc", "fastag",
+                 "extendedWarranty", "otherCharges")))
+        gvc = ce.round2(ex + rto + ins + other)
+        applies = str(r.get("tcsApplicable") or "No").strip().lower() == "yes"
+        tcs = ce.calculate_tcs(gvc) if applies else 0.0
+        over = gvc >= ce.TCS_THRESHOLD
+        if over and not applies:
+            review.append({"priceId": r.get("priceId"), "model": mdl,
+                           "variant": variant, "onRoad": ce.round2(gvc)})
+        shares = ce.get_scheme_shares_for_lead(mdl, variant, on, scheme_rows)
+        scheme = ce.round2(sum(
+            ce.num(v.get("totalBenefit")) or (ce.num(v.get("dealerShare")) + ce.num(v.get("companyShare")))
+            for v in shares.values()))
+        grouped.setdefault(mdl, []).append({
+            "priceId": r.get("priceId"), "model": mdl, "variant": variant,
+            "bodyType": r.get("bodyType") or "",
+            "exShowroom": ce.round2(ex), "rto": ce.round2(rto), "insurance": ce.round2(ins),
+            "otherCharges": other,
+            "tcs": tcs, "tcsApplies": applies and tcs > 0,
+            "onRoad": ce.round2(gvc + tcs),
+            "schemeAvailable": scheme,
+        })
+    out = [{"model": m, "count": len(v),
+            "rows": sorted(v, key=lambda x: x["onRoad"])}
+           for m, v in sorted(grouped.items())]
+    body = {"schemeMonth": ce.scheme_month_from_date(on), "asOf": on,
+            "totalRows": sum(g["count"] for g in out), "models": out}
+    # Only the owner is shown the data-quality flag.
+    if (user or {}).get("role") == "owner":
+        body["tcsReview"] = review
+    return body
+
+
 @api.get("/price-master/variants")
 async def price_variants(model: str):
     rows = await db.price_master.find({"model": model}).to_list(500)

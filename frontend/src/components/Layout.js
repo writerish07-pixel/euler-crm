@@ -5,7 +5,7 @@ import {
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
-  MessageCircle,
+  MessageCircle, SlidersHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -48,7 +48,8 @@ const NAV = [
     { to: "/erp-audit", label: "ERP Production Audit", icon: ShieldCheck, ownerOnly: true },
   ]},
   { section: "Catalogue & Admin", items: [
-    { to: "/price-master", label: "Price Master", icon: Tag, salesOnly: true },
+    { to: "/price-list", label: "Price List", icon: Tag, salesOnly: true },
+    { to: "/price-master", label: "Price Master", icon: SlidersHorizontal, ownerOnly: true },
     { to: "/staff", label: "Staff & Reports", icon: UserCog, ownerOnly: true },
     { to: "/settings", label: "Settings", icon: SettingsIcon },
   ]},
