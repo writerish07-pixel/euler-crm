@@ -872,8 +872,51 @@ EDITABLE_MASTER_CATEGORIES = seeder.EDITABLE_MASTER_CATEGORIES
 
 
 async def _masters_list_values(category):
+    # Executives live on the STAFF master once it is populated: a bare name in
+    # masters_list has nowhere to hold a mobile, which is why the WhatsApp
+    # settings grew a second, hand-typed executive list that silently drifted
+    # out of sync (a mismatched name = that executive never gets messaged).
+    if category == "executives":
+        names = await _executive_names()
+        if names:
+            return names
     rows = await db.masters_list.find({"category": category}).sort("value", 1).to_list(500)
     return [r["value"] for r in rows]
+
+
+STAFF_ROLES = ["executive", "ASM", "RM", "owner", "accounts"]
+# Which daily reports a staff member can receive.
+STAFF_REPORTS = ["exec_morning", "exec_eod", "manager_eod", "owner_eod"]
+DEFAULT_REPORTS_BY_ROLE = {
+    "executive": ["exec_morning", "exec_eod"],
+    "ASM": ["manager_eod"],
+    "RM": ["manager_eod"],
+    "owner": ["owner_eod"],
+    "accounts": [],
+}
+
+
+async def _executive_names() -> list:
+    rows = await db.staff.find({"role": "executive"}).to_list(500)
+    return sorted({str(r.get("name") or "").strip() for r in rows
+                   if str(r.get("name") or "").strip()
+                   and str(r.get("status") or "Active").lower() == "active"})
+
+
+async def _staff_for_report(report: str) -> list:
+    """Active, opted-in staff who should receive `report` and have a mobile."""
+    out = []
+    for r in await db.staff.find().to_list(500):
+        if str(r.get("status") or "Active").lower() != "active":
+            continue
+        if not r.get("whatsappOptIn", True):
+            continue
+        if report not in (r.get("reports") or []):
+            continue
+        if not wa.digits10(r.get("mobile")):
+            continue
+        out.append(r)
+    return sorted(out, key=lambda x: str(x.get("name") or ""))
 
 
 @api.get("/masters")
@@ -1353,6 +1396,150 @@ async def executive_dashboard(user=Depends(current_user)):
         "worklist": worklist[:25],
         "lastUpdated": now_iso(),
     }
+
+
+# ------------------------------------------------------------- daily reports
+# One computation feeds the in-app report pages AND the WhatsApp sends, so the
+# message can never disagree with the screen.
+def _booking_date(l):
+    return str(l.get("bookingDate") or "")[:10]
+
+
+async def _daily_report_data() -> dict:
+    leads = await db.leads.find().to_list(5000)
+    td, ym = today(), this_month()
+
+    def in_month(d):
+        return bool(d) and str(d).startswith(ym)
+
+    booked = [l for l in leads if _is_booked_lead(l)]
+    delivered = [l for l in leads if _is_delivered_lead(l)]
+
+    bookings_today = [l for l in booked if _booking_date(l) == td]
+    bookings_mtd = [l for l in booked if in_month(_booking_date(l))]
+    deliveries_today = [l for l in delivered if _retail_date(l)[:10] == td]
+    deliveries_mtd = [l for l in delivered if in_month(_retail_date(l))]
+
+    # Revenue = value of what was RETAILED this month (customer payable on MTD
+    # deliveries). Not cash collected — that is `collectedMtd` below.
+    revenue_mtd = ce.round2(sum(ce.num(l.get("customerPayable")) for l in deliveries_mtd))
+    collected_mtd = ce.round2(sum(
+        ce.num(p.get("amount")) for p in await db.payments.find().to_list(20000)
+        if in_month(str(p.get("date") or "")[:10]) and ce.num(p.get("amount")) > 0))
+    customer_outstanding = ce.round2(sum(
+        ce.num(l.get("customerOutstanding")) for l in leads
+        if (l.get("accountStatus") or "Active") == "Active"))
+
+    fin_pending, by_financer = [], {}
+    for f in await db.finance.find().to_list(5000):
+        amt = ce.num(f.get("fileOutstanding"))
+        if amt <= 0.01 or f.get("status") == "Received":
+            continue
+        fin_pending.append(f)
+        key = str(f.get("financer") or "Unknown").strip() or "Unknown"
+        b = by_financer.setdefault(key, {"financer": key, "files": 0, "amount": 0.0})
+        b["files"] += 1
+        b["amount"] += amt
+    overdue = [f for f in await _enrich_finance_with_delivery(fin_pending) if f.get("overdue")]
+    for b in by_financer.values():
+        b["amount"] = ce.round2(b["amount"])
+
+    # Per-executive, keyed on the staff master so a name with no leads still
+    # reports (an executive who booked nothing needs to see that).
+    staff = await db.staff.find({"role": "executive"}).to_list(500)
+    per_exec = {}
+    for st in staff:
+        name = str(st.get("name") or "").strip()
+        if not name or str(st.get("status") or "Active").lower() != "active":
+            continue
+        per_exec[_norm_name(name)] = {
+            "staffId": st.get("staffId"), "name": name,
+            "mobile": st.get("mobile", ""), "monthlyTarget": ce.num(st.get("monthlyTarget")),
+            "bookingsToday": 0, "bookingsMtd": 0, "deliveriesToday": 0, "deliveriesMtd": 0,
+            "pendingBookings": 0, "pendingCollection": 0.0,
+            "followupsDue": 0, "followupsOverdue": 0,
+        }
+
+    def slot(l):
+        return per_exec.get(_norm_name(l.get("executive")))
+
+    for rows, field in ((bookings_today, "bookingsToday"), (bookings_mtd, "bookingsMtd"),
+                        (deliveries_today, "deliveriesToday"), (deliveries_mtd, "deliveriesMtd")):
+        for l in rows:
+            e = slot(l)
+            if e:
+                e[field] += 1
+    for l in leads:
+        e = slot(l)
+        if not e:
+            continue
+        if (l.get("accountStatus") or "Active") != "Active":
+            continue
+        if _is_booked_lead(l) and not _is_delivered_lead(l):
+            e["pendingBookings"] += 1
+            e["pendingCollection"] += max(0.0, ce.num(l.get("customerOutstanding")))
+        fd = str(l.get("nextFollowupDate") or l.get("nextFollowup") or "")[:10]
+        if fd == td:
+            e["followupsDue"] += 1
+        elif fd and fd < td:
+            e["followupsOverdue"] += 1
+
+    for e in per_exec.values():
+        e["pendingCollection"] = ce.round2(e["pendingCollection"])
+        tgt = e["monthlyTarget"]
+        e["attainmentPct"] = round(100.0 * e["deliveriesMtd"] / tgt, 1) if tgt > 0 else None
+
+    ranked = sorted(per_exec.values(),
+                    key=lambda x: (-x["bookingsToday"], -x["bookingsMtd"], x["name"]))
+    target_total = ce.round2(sum(e["monthlyTarget"] for e in per_exec.values()))
+    return {
+        "date": td, "month": ym,
+        "bookingsToday": len(bookings_today), "bookingsMtd": len(bookings_mtd),
+        "deliveriesToday": len(deliveries_today), "deliveriesMtd": len(deliveries_mtd),
+        "revenueMtd": revenue_mtd, "collectedMtd": collected_mtd,
+        "customerOutstanding": customer_outstanding,
+        "financePendingAmount": ce.round2(sum(b["amount"] for b in by_financer.values())),
+        "financePendingFiles": len(fin_pending),
+        "financeOverdueFiles": len(overdue),
+        "financeByFinancer": sorted(by_financer.values(), key=lambda x: -x["amount"]),
+        "targetUnits": target_total,
+        "attainmentPct": (round(100.0 * len(deliveries_mtd) / target_total, 1)
+                          if target_total > 0 else None),
+        "executives": ranked,
+        "topExecutives": ranked[:3],
+        "generatedAt": now_iso(),
+    }
+
+
+@api.get("/reports/daily/owner", dependencies=[Depends(owner_only)])
+async def daily_owner_report():
+    """Owner EOD: volume + money. Same numbers the WhatsApp summary carries."""
+    return await _daily_report_data()
+
+
+@api.get("/reports/daily/manager")
+async def daily_manager_report(_viewer=Depends(current_user)):
+    """RM / ASM EOD: volume only — no revenue, outstanding or finance money."""
+    d = await _daily_report_data()
+    for k in ("revenueMtd", "collectedMtd", "customerOutstanding",
+              "financePendingAmount", "financeByFinancer"):
+        d.pop(k, None)
+    d["executives"] = [{k: v for k, v in e.items() if k != "pendingCollection"}
+                       for e in d["executives"]]
+    d["topExecutives"] = d["executives"][:3]
+    return d
+
+
+@api.get("/reports/daily/executive/{name}")
+async def daily_executive_report(name: str, _viewer=Depends(current_user)):
+    """One executive's day: what is pending on them, and where they stand MTD."""
+    d = await _daily_report_data()
+    row = next((e for e in d["executives"]
+                if _norm_name(e["name"]) == _norm_name(name)
+                or e.get("staffId") == name), None)
+    if not row:
+        raise HTTPException(404, f"No active executive '{name}' on the staff master")
+    return {"date": d["date"], "month": d["month"], **row}
 
 
 @api.get("/field/dashboard")
@@ -3944,6 +4131,139 @@ async def _default_insurance_agent() -> dict:
             or {})
 
 
+# ---------------------------------------------------------------- staff master
+class StaffIn(BaseModel):
+    name: str
+    mobile: str = ""
+    email: str = ""
+    role: str = "executive"
+    monthlyTarget: float = 0          # units per month; 0 = no target
+    reports: Optional[List[str]] = None
+    whatsappOptIn: bool = True
+    status: str = "Active"
+    remarks: str = ""
+
+
+def _staff_doc(body: dict) -> dict:
+    role = str(body.get("role") or "executive").strip()
+    if role not in STAFF_ROLES:
+        raise HTTPException(422, f"role must be one of {', '.join(STAFF_ROLES)}")
+    reports = body.get("reports")
+    if reports is None:
+        reports = DEFAULT_REPORTS_BY_ROLE.get(role, [])
+    bad = [r for r in reports if r not in STAFF_REPORTS]
+    if bad:
+        raise HTTPException(422, f"unknown report(s): {', '.join(bad)}")
+    return {
+        "name": str(body.get("name") or "").strip(),
+        "mobile": wa.digits10(body.get("mobile")),
+        "email": str(body.get("email") or "").strip(),
+        "role": role,
+        "monthlyTarget": max(0.0, ce.num(body.get("monthlyTarget"))),
+        "reports": list(reports),
+        "whatsappOptIn": bool(body.get("whatsappOptIn", True)),
+        "status": str(body.get("status") or "Active").strip() or "Active",
+        "remarks": str(body.get("remarks") or "").strip(),
+        "lastUpdated": now_iso(),
+    }
+
+
+@api.get("/staff")
+async def list_staff(role: Optional[str] = None):
+    """Readable by any signed-in user — every executive dropdown reads this."""
+    q = {"role": role} if role else {}
+    return [clean(r) for r in await db.staff.find(q).sort("name", 1).to_list(500)]
+
+
+@api.post("/staff", dependencies=[Depends(owner_only)])
+async def create_staff(body: StaffIn, act=Depends(actor)):
+    data = _staff_doc(body.model_dump())
+    if not data["name"]:
+        raise HTTPException(422, "Name is required")
+    dupe = await db.staff.find_one(
+        {"name": {"$regex": f"^{re.escape(data['name'])}$", "$options": "i"}})
+    if dupe:
+        raise HTTPException(409, f"'{data['name']}' already exists on the staff master")
+    data["staffId"] = await next_id("staff", "ST26")
+    data["createdAt"] = now_iso()
+    await db.staff.insert_one(dict(data))
+    await write_audit(act, "create", "staff", new={k: data[k] for k in ("staffId", "name", "role")})
+    return clean(await db.staff.find_one({"staffId": data["staffId"]}))
+
+
+@api.put("/staff/{staff_id}", dependencies=[Depends(owner_only)])
+async def update_staff(staff_id: str, body: StaffIn, act=Depends(actor)):
+    existing = await db.staff.find_one({"staffId": staff_id})
+    if not existing:
+        raise HTTPException(404, "Staff member not found")
+    data = _staff_doc(body.model_dump())
+    if not data["name"]:
+        raise HTTPException(422, "Name is required")
+    # lead.executive stores the NAME, so a rename would orphan every lead.
+    if (data["name"].strip().lower() != str(existing.get("name") or "").strip().lower()
+            and existing.get("role") == "executive"):
+        n = await db.leads.count_documents({"executive": existing.get("name")})
+        if n:
+            raise HTTPException(
+                409, f"{n} lead(s) are assigned to '{existing.get('name')}'. Renaming would "
+                     f"orphan them — set this person Inactive and add the new name instead.")
+    await db.staff.update_one({"staffId": staff_id}, {"$set": data})
+    await write_audit(act, "update", "staff",
+                      old={"mobile": existing.get("mobile"), "role": existing.get("role"),
+                           "monthlyTarget": existing.get("monthlyTarget")},
+                      new={"mobile": data["mobile"], "role": data["role"],
+                           "monthlyTarget": data["monthlyTarget"]})
+    return clean(await db.staff.find_one({"staffId": staff_id}))
+
+
+@api.delete("/staff/{staff_id}", dependencies=[Depends(owner_only)])
+async def delete_staff(staff_id: str, act=Depends(actor)):
+    existing = await db.staff.find_one({"staffId": staff_id})
+    if not existing:
+        raise HTTPException(404, "Staff member not found")
+    if existing.get("role") == "executive":
+        n = await db.leads.count_documents({"executive": existing.get("name")})
+        if n:
+            raise HTTPException(
+                409, f"{n} lead(s) are assigned to '{existing.get('name')}'. Set them Inactive "
+                     f"instead — deleting would leave those leads with an unknown executive.")
+    await db.staff.delete_one({"staffId": staff_id})
+    await write_audit(act, "delete", "staff", old={"staffId": staff_id, "name": existing.get("name")})
+    return {"ok": True}
+
+
+async def _seed_staff() -> dict:
+    """Idempotent. Builds the staff master from the executives already in
+    masters_list, carrying over any WhatsApp number already typed into the
+    BotSpace settings so nothing has to be re-entered."""
+    created = []
+    if await db.staff.count_documents({}) == 0:
+        cfg = await wa.get_config()
+        mobiles = {_norm_name(x.get("name")): wa.digits10(x.get("mobile"))
+                   for x in (cfg.get("executives") or [])}
+        rows = await db.masters_list.find({"category": "executives"}).sort("value", 1).to_list(500)
+        for r in rows:
+            name = str(r.get("value") or "").strip()
+            if not name:
+                continue
+            doc = {
+                "staffId": await next_id("staff", "ST26"),
+                "name": name, "mobile": mobiles.get(_norm_name(name), ""), "email": "",
+                "role": "executive", "monthlyTarget": 0.0,
+                "reports": list(DEFAULT_REPORTS_BY_ROLE["executive"]),
+                "whatsappOptIn": True, "status": "Active", "remarks": "",
+                "createdAt": now_iso(), "lastUpdated": now_iso(),
+            }
+            await db.staff.insert_one(dict(doc))
+            created.append(name)
+    return {"created": created, "count": await db.staff.count_documents({})}
+
+
+@api.post("/admin/seed-staff", dependencies=[Depends(owner_only)])
+async def seed_staff():
+    return {"ok": True, **await _seed_staff()}
+
+
 @api.get("/insurance-agents")
 async def list_insurance_agents(active_only: bool = False):
     """Readable by any signed-in user — the delivery screen needs the dropdown."""
@@ -6078,7 +6398,31 @@ async def botspace_cron(request: Request):
     got = request.headers.get("x-cron-token") or request.query_params.get("token") or ""
     if not token or got != token:
         raise HTTPException(401, "Invalid cron token")
+    # ?slot=morning|eod sends the daily reports; no slot keeps the legacy
+    # follow-up / finance / outbox job. Both are idempotent per day, so a cron
+    # retry cannot double-send.
+    slot = (request.query_params.get("slot") or "").strip().lower()
+    if slot:
+        return await wa.run_daily_reports(slot)
     return await wa.run_daily_jobs()
+
+
+@api.post("/integrations/botspace/send-daily-report", dependencies=[Depends(owner_only)])
+async def botspace_send_daily_report(slot: str = "eod", act=Depends(actor)):
+    """Owner: send a report slot now, without waiting for the schedule.
+
+    Idempotent per day+slot — use force=1 semantics by clearing the marker if you
+    really need a resend."""
+    res = await wa.run_daily_reports(slot)
+    await write_audit(act, "send", "daily-report", new={"slot": slot, "sent": res.get("sent")})
+    return res
+
+
+@api.delete("/integrations/botspace/daily-report-marker", dependencies=[Depends(owner_only)])
+async def botspace_clear_report_marker(slot: str = "eod"):
+    """Clear today's sent-marker so the slot can be re-sent (e.g. after a fix)."""
+    res = await db.settings.delete_one({"_id": f"report_{slot}_{wa.today_ist()}"})
+    return {"ok": True, "cleared": res.deleted_count}
 
 
 # ---------------------------------------------------------------- public share board (no auth)
@@ -6464,6 +6808,8 @@ async def startup():
         await db.whatsapp_messages.create_index("phone")
         await db.insurance_agents.create_index("agentId", unique=True)
         await db.insurance.create_index("insuranceAgentId")
+        await db.staff.create_index("staffId", unique=True)
+        await db.staff.create_index("role")
     except Exception:
         pass
     try:
@@ -6493,6 +6839,12 @@ async def startup():
         await _seed_insurance_agents()
     except Exception:
         logging.exception("INSURANCE_AGENT_SEED_ERROR")
+    # Staff master, built from the existing executive list + any WhatsApp number
+    # already saved in the BotSpace settings. Idempotent.
+    try:
+        await _seed_staff()
+    except Exception:
+        logging.exception("STAFF_SEED_ERROR")
     # Self-heal: booked leads whose booking advance was never recorded as a payment
     # (so Customer Outstanding wasn't reduced). Idempotent.
     try:

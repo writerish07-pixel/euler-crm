@@ -460,25 +460,11 @@ function BotspaceCard() {
       <p className="text-xs text-ink-faint mt-1">
         Paste this in BotSpace as the callback / webhook URL (POST). Use the Railway API host, not the Euler website address.
       </p>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3 items-end">
-        <Field label="Executive name (as on lead)">
-          <Input value={form.execName} onChange={(e) => setForm({ ...form, execName: e.target.value })} />
-        </Field>
-        <Field label="Executive WhatsApp">
-          <Input value={form.execMobile} onChange={(e) => setForm({ ...form, execMobile: e.target.value })} placeholder="10-digit mobile" />
-        </Field>
-        <Button variant="secondary" onClick={addExec}>Add executive number</Button>
+      <div className="mt-3 text-xs text-ink-soft bg-zinc-50 rounded-lg p-3 ring-1 ring-line">
+        Executive WhatsApp numbers now live on <b>Settings → Staff &amp; Reports</b>, together with
+        role, monthly target and which daily reports each person receives. Names come from the
+        staff master, so a typo can no longer stop someone being messaged.
       </div>
-      {execs.length > 0 && (
-        <ul className="mt-2 text-sm text-ink-soft space-y-1">
-          {execs.map((x) => (
-            <li key={x.name} className="flex justify-between">
-              <span>{x.name} · {x.mobile}</span>
-              <button className="text-red-500" onClick={() => setExecs((xs) => xs.filter((y) => y.name !== x.name))}>remove</button>
-            </li>
-          ))}
-        </ul>
-      )}
       <div className="flex flex-wrap gap-2 mt-4">
         <Button data-testid="botspace-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save WhatsApp settings"}</Button>
         <Button variant="secondary" onClick={runJobs}>Run follow-up jobs now</Button>
