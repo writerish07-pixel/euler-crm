@@ -198,9 +198,11 @@ async def test_cancel_stamps_history_and_count(client):
 
 @pytest.mark.asyncio
 async def test_cancelling_twice_counts_twice(client):
+    """Two separate walk-aways are two losses. (Two on the SAME day are refused —
+    that is a correction, covered further down.)"""
     lid = await make_lead(client, "ITER32 Twice")
-    await cancel(client, lid, "Not reachable")           # revives immediately
-    await cancel(client, lid, "Not reachable")
+    await cancel(client, lid, "Not reachable", cancelDate="2026-08-27")
+    await cancel(client, lid, "Not reachable", cancelDate="2026-10-02")
     doc = await lead_doc(lid)
     assert doc["cancelCount"] == 2
     assert len(doc["cancelHistory"]) == 2
@@ -326,7 +328,10 @@ async def test_owner_can_cancel_a_funded_lead_and_the_money_is_recorded(client):
     # Where in the funnel it died — a booked cancellation is not an enquiry that fizzled.
     assert h["stage"] == "Booked"
     # Cancelling reverses nothing: the receipt still stands and is refunded separately.
-    assert server.ce.num(doc.get("bookingAmount")) == 25000
+    # The LEAD's live booking is cleared (see the booking-undo test), but the money
+    # stays in the ledger and the amount that was booked is kept for the record.
+    assert server.ce.num(doc["totalReceived"]) == 25000
+    assert server.ce.num(doc["cancelledBookingAmount"]) == 25000
 
 
 @pytest.mark.asyncio
@@ -438,7 +443,8 @@ async def test_report_separates_revived_from_parked(client):
 
     d = (await client.get("/api/reports/cancellations")).json()
     assert d["revived"] >= 1 and d["parked"] >= 1
-    assert d["revived"] + d["parked"] == d["total"]
+    # Per LEAD, not per cancellation — a lead cancelled twice is still in one state.
+    assert d["revived"] + d["parked"] == d["uniqueLeads"]
 
 
 @pytest.mark.asyncio
@@ -507,3 +513,288 @@ def test_the_column_helper_is_append_only():
     import gsheets
     assert gsheets.LEAD_CANCEL_HEADERS == ["Cancel Count", "Last Cancel Date",
                                            "Last Cancel Reason", "Last Cancel Stage", "Revive On"]
+
+
+# ============================================ the deal is off (defects from live use)
+@pytest.mark.asyncio
+async def test_cancelling_clears_the_customer_outstanding(client):
+    """Reported live: a cancelled lead kept showing ₹4,66,134 outstanding.
+
+    It is not cosmetic. A revived lead goes back to Active, and dashboards sum
+    customerOutstanding across Active leads — so a stale figure re-enters the
+    company's receivables as a debt nobody is chasing.
+    """
+    lid = await make_lead(client, "ITER32 Outstanding", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": 10000, "paymentMode": "Cash"})
+
+    before = await lead_doc(lid)
+    assert server.ce.num(before["customerOutstanding"]) > 0     # a live deal owes money
+
+    r = await cancel(client, lid, "Finance rejected")
+    assert r.status_code == 200, r.text
+    after = await lead_doc(lid)
+    assert server.ce.num(after["customerOutstanding"]) == 0
+    assert server.ce.num(after["outstandingAmount"]) == 0
+    assert after["dealCancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_money_taken_on_a_cancelled_lead_becomes_refundable(client):
+    """Reported live: no refund option against a cancelled lead.
+
+    Refund was gated on excess-over-payable, and a cancelled customer has paid
+    LESS than payable, so nothing was ever refundable.
+    """
+    lid = await make_lead(client, "ITER32 Refundable", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": 10000, "paymentMode": "Cash"})
+
+    # Before cancelling, the customer owes money — there is no excess to refund.
+    pos = (await client.get(f"/api/leads/{lid}/refund-position")).json()
+    assert pos["excessReceived"] == 0
+
+    await cancel(client, lid, "Finance rejected")
+    pos = (await client.get(f"/api/leads/{lid}/refund-position")).json()
+    assert pos["dealCancelled"] is True
+    assert pos["excessReceived"] == 10000      # the whole balance is the customer's
+
+    r = await client.post(f"/api/leads/{lid}/refund",
+                          json={"amount": 10000, "paymentMode": "Cash"})
+    assert r.status_code == 200, r.text
+    doc = await lead_doc(lid)
+    assert server.ce.num(doc["totalReceived"]) == 0
+    assert server.ce.num(doc["refundedAmount"]) == 10000
+    assert server.ce.num(doc["excessReceived"]) == 0    # nothing left to refund twice
+
+
+@pytest.mark.asyncio
+async def test_a_refund_cannot_exceed_what_was_received(client):
+    lid = await make_lead(client, "ITER32 Over-refund", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": 10000, "paymentMode": "Cash"})
+    await cancel(client, lid, "Finance rejected")
+
+    r = await client.post(f"/api/leads/{lid}/refund",
+                          json={"amount": 25000, "paymentMode": "Cash"})
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_booking_again_makes_the_lead_owe_money_once_more(client):
+    lid = await make_lead(client, "ITER32 Rebooked", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    await cancel(client, lid, "Not reachable")          # revives immediately
+    assert (await lead_doc(lid))["dealCancelled"] is True
+
+    # A different advance, because re-posting the identical amount within seconds
+    # trips the app's duplicate-receipt guard.
+    r = await client.post(f"/api/leads/{lid}/convert-booking",
+                          json={"bookingAmount": 15000, "executive": "Amit"})
+    assert r.status_code == 200, r.text
+    doc = await lead_doc(lid)
+    assert doc["dealCancelled"] is False
+    assert server.ce.num(doc["customerOutstanding"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_clears_outstanding_on_leads_cancelled_before_the_flag(client):
+    """Existing production rows carry the phantom debt and must be repaired."""
+    lid = await make_lead(client, "ITER32 Legacy cancel", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    await cancel(client, lid, "Bought other brand")
+    # Rewind to how the row looked before dealCancelled existed.
+    await server.db.leads.update_one({"leadId": lid}, {"$unset": {"dealCancelled": ""}})
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"customerOutstanding": 466134}})
+
+    fixed = await server._backfill_deal_cancelled()
+    assert fixed >= 1
+    doc = await lead_doc(lid)
+    assert doc["dealCancelled"] is True
+    assert server.ce.num(doc["customerOutstanding"]) == 0
+
+    # Idempotent — a second run finds nothing left to do.
+    assert await server._backfill_deal_cancelled() == 0
+
+
+# ============================================ no accidental double-cancel
+@pytest.mark.asyncio
+async def test_a_second_cancellation_on_the_same_day_is_refused(client):
+    """Reported live: the same lead was cancelled twice in one afternoon, which
+    counted the loss twice and reported the same ₹10,000 twice."""
+    lid = await make_lead(client, "ITER32 Double cancel")
+    await cancel(client, lid, "Not reachable", cancelDate="2026-08-27")
+
+    again = await cancel(client, lid, "Finance rejected", cancelDate="2026-08-27")
+    assert again.status_code == 409
+    assert "already cancelled" in again.json()["detail"]
+    assert (await lead_doc(lid))["cancelCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_later_cancellation_is_still_allowed(client):
+    """A customer who comes back and walks away again IS two losses."""
+    lid = await make_lead(client, "ITER32 Later cancel")
+    await cancel(client, lid, "Not reachable", cancelDate="2026-08-27")
+    r = await cancel(client, lid, "Not reachable", cancelDate="2026-09-15")
+    assert r.status_code == 200, r.text
+    assert (await lead_doc(lid))["cancelCount"] == 2
+
+
+@pytest.mark.asyncio
+async def test_owner_can_amend_the_last_cancellation_without_counting_it_twice(client):
+    lid = await make_lead(client, "ITER32 Amend me", executive="Amit")
+    await cancel(client, lid, "Other", cancelRemarks="finance % issue", cancelDate="2026-08-27")
+    assert (await lead_doc(lid))["cancelCount"] == 1
+
+    r = await client.put(f"/api/leads/{lid}/cancel",
+                         json={"cancelReason": "Finance rejected", "cancelDate": "2026-08-27"})
+    assert r.status_code == 200, r.text
+    doc = await lead_doc(lid)
+    assert doc["cancelCount"] == 1                       # still one loss
+    assert len(doc["cancelHistory"]) == 1                # rewritten, not appended
+    assert doc["lastCancelReason"] == "Finance rejected"
+    assert doc["cancelHistory"][0]["reason"] == "Finance rejected"
+    assert doc["cancelHistory"][0]["amendedBy"] == "owner@euler.com"
+
+
+@pytest.mark.asyncio
+async def test_amending_re_applies_the_new_reasons_revival_policy(client):
+    """Relabelling must not leave a customer who bought elsewhere still being chased."""
+    lid = await make_lead(client, "ITER32 Amend policy")
+    await cancel(client, lid, "Not reachable")           # revive=now -> Active
+    assert (await lead_doc(lid))["accountStatus"] == "Active"
+
+    await client.put(f"/api/leads/{lid}/cancel", json={"cancelReason": "Bought other brand"})
+    doc = await lead_doc(lid)
+    assert doc["accountStatus"] == "Cancelled"           # revive=never now applies
+    assert doc["reviveOn"] == ""
+
+
+@pytest.mark.asyncio
+async def test_amend_is_owner_only(client, exec_client):
+    lid = await make_lead(client, "ITER32 Amend gate", executive="Executive")
+    await cancel(exec_client, lid, "Not reachable")
+    r = await exec_client.put(f"/api/leads/{lid}/cancel", json={"cancelReason": "Price too high"})
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_amending_a_never_cancelled_lead_is_a_404(client):
+    lid = await make_lead(client, "ITER32 Nothing to amend")
+    r = await client.put(f"/api/leads/{lid}/cancel", json={"cancelReason": "Not reachable"})
+    assert r.status_code == 404
+
+
+# ============================================ money is per lead, not per cancellation
+@pytest.mark.asyncio
+async def test_repeat_cancellations_do_not_double_count_the_money(client):
+    """Reported live: one lead with a ₹10,000 advance, cancelled twice, reported
+    ₹20,000 taken. Two losses, yes — but still only ₹10,000."""
+    lid = await make_lead(client, "ITER32 Money once", model=TURBO[0], executive="Ashok26")
+    await client.post("/api/staff", json={"name": "Ashok26", "role": "executive"})
+    await client.put(f"/api/leads/{lid}", json={"executive": "Ashok26"})
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Ashok26"})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": 10000, "paymentMode": "Cash"})
+
+    await cancel(client, lid, "Not reachable", cancelDate="2026-08-27")
+    await cancel(client, lid, "Finance rejected", cancelDate="2026-08-28")
+    assert (await lead_doc(lid))["cancelCount"] == 2
+
+    d = (await client.get("/api/reports/cancellations",
+                          params={"period": "all", "executive": "Ashok26"})).json()
+    assert d["total"] == 2                # two losses
+    assert d["uniqueLeads"] == 1
+    assert d["withMoney"] == 1            # one lead holding money, not two
+    assert d["moneyAtRisk"] == 10000      # the defect in the screenshot: not 20000
+
+    # Stage counts are per cancellation. The first died Booked; cancelling cleared
+    # the booking, so by the second the lead was an enquiry again.
+    stages = {s["stage"]: s for s in d["byStage"]}
+    assert stages["Booked"]["count"] == 1
+    assert stages["Enquiry"]["count"] == 1
+    # ...and the ₹10,000 appears under exactly one of them, never both.
+    assert sum(s["money"] for s in d["byStage"]) == 10000
+
+    ashok = next(x for x in d["byExecutive"] if x["executive"] == "Ashok26")
+    assert ashok["count"] == 2 and ashok["money"] == 10000
+
+
+@pytest.mark.asyncio
+async def test_only_the_latest_cancellation_reports_current_state(client):
+    lid = await make_lead(client, "ITER32 Latest only")
+    await cancel(client, lid, "Not reachable", cancelDate="2026-08-27")
+    await cancel(client, lid, "Bought other brand", cancelDate="2026-08-28")
+
+    d = (await client.get("/api/reports/cancellations", params={"period": "all"})).json()
+    mine = [e for e in d["events"] if e["leadId"] == lid]
+    assert len(mine) == 2
+    assert sum(1 for e in mine if e["isLatest"]) == 1
+    latest = next(e for e in mine if e["isLatest"])
+    assert latest["reason"] == "Bought other brand"
+    assert latest["sequence"] == 2 and latest["cancelCount"] == 2
+
+
+@pytest.mark.asyncio
+async def test_revived_and_parked_are_counted_per_lead_not_per_cancellation(client):
+    """Two cancellations on one lead is still one lead in one state."""
+    lid = await make_lead(client, "ITER32 One state")
+    await cancel(client, lid, "Not reachable", cancelDate="2026-08-27")
+    await cancel(client, lid, "Bought other brand", cancelDate="2026-08-28")
+
+    d = (await client.get("/api/reports/cancellations", params={"period": "all"})).json()
+    assert d["revived"] + d["parked"] == d["uniqueLeads"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_booked_lead_undoes_the_booking_on_the_lead(client):
+    """A cancelled booking must stop counting as a booking.
+
+    bookingDate alone keeps _is_booked true, so the lead would still appear in
+    bookings MTD and could never be converted again (canBook needs "not booked").
+    The bookings row and the receipt stay — the booking really happened and the
+    money really came in.
+    """
+    lid = await make_lead(client, "ITER32 Undo booking", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": 10000, "paymentMode": "Cash"})
+
+    await cancel(client, lid, "Not reachable")
+    doc = await lead_doc(lid)
+    assert doc["bookingDate"] == ""
+    assert server.ce.num(doc["bookingAmount"]) == 0
+    # …but the history of what was cancelled is kept.
+    assert server.ce.num(doc["cancelledBookingAmount"]) == 10000
+    assert doc["cancelHistory"][-1]["stage"] == "Booked"
+
+    # The receipt survives — that money is the customer's and must be refundable.
+    pays = await server.db.payments.find({"leadId": lid}).to_list(10)
+    assert sum(server.ce.num(p.get("amount")) for p in pays) == 10000
+    assert server.ce.num(doc["totalReceived"]) == 10000
+
+    # Booking Register shows it as cancelled rather than live.
+    bk = await server.db.bookings.find_one({"leadId": lid})
+    assert bk["bookingStatus"] == "Cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_booking_leaves_the_bookings_count(client):
+    lid = await make_lead(client, "ITER32 Not booked now", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    assert server._is_booked_lead(await lead_doc(lid)) is True
+
+    await cancel(client, lid, "Not reachable")
+    assert server._is_booked_lead(await lead_doc(lid)) is False

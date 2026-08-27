@@ -508,10 +508,20 @@ async def recompute_lead(lead_id):
     # Do NOT subtract entitlement benefits again — that double-counted after the
     # allocation engines were merged onto one path.
     customer_payable = totals["customerPayable"]
-    customer_outstanding = ce.round2(max(0.0, customer_payable - total_received)) if customer_payable > 0 else 0.0
-    # Surplus still held for the customer. Refundable at any time, including after
-    # delivery/closure, so it must be visible on the lead rather than inferred.
-    excess_received = ce.round2(max(0.0, total_received - customer_payable)) if customer_payable > 0 else 0.0
+    if lead.get("dealCancelled"):
+        # The deal is off. The customer owes nothing — showing an outstanding here
+        # is not just cosmetic: once a cancelled lead is revived it goes back to
+        # Active, and a stale outstanding would re-enter the company's live
+        # receivables as a phantom debt on a lead nobody is chasing.
+        customer_outstanding = 0.0
+        # Everything still held belongs to the customer, because there is no longer
+        # a vehicle to set it against. That is what makes it refundable.
+        excess_received = ce.round2(max(0.0, total_received))
+    else:
+        customer_outstanding = ce.round2(max(0.0, customer_payable - total_received)) if customer_payable > 0 else 0.0
+        # Surplus still held for the customer. Refundable at any time, including after
+        # delivery/closure, so it must be visible on the lead rather than inferred.
+        excess_received = ce.round2(max(0.0, total_received - customer_payable)) if customer_payable > 0 else 0.0
     oem_extra = ce.compute_oem_extra_support(lead)
     oem_extra_recv = oem_extra["oemExtraSupportReceived"]
     oem_extra_pass = oem_extra["oemExtraSupportPassed"]
@@ -1516,10 +1526,25 @@ def _cancel_events(leads) -> list:
         history = l.get("cancelHistory") or []
         if not isinstance(history, list):
             continue
-        for h in history:
+        last_index = len(history) - 1
+        # Money STILL held for this customer, present tense, once per lead. The
+        # per-event customerMoney below is a historical note of what was at stake
+        # at that moment; summing it across a lead's cancellations reported the
+        # same ₹10,000 advance twice. Only the newest event carries the live
+        # figure, so every total and grouping counts it exactly once.
+        held = ce.num(l.get("excessReceived")) if l.get("dealCancelled") else 0.0
+        for i, h in enumerate(history):
             if not isinstance(h, dict):
                 continue
             out.append({
+                # Only the newest cancellation on a lead reflects where that lead
+                # stands now, and only it carries the money — see the report.
+                "isLatest": i == last_index,
+                "sequence": i + 1,
+                "cancelCount": len(history),
+                # Lead-level, repeated on each of the lead's events. The report
+                # picks exactly ONE event per lead to carry it into the totals.
+                "leadMoneyHeld": ce.round2(held),
                 "leadId": l.get("leadId"), "customerName": l.get("customerName"),
                 "mobile": l.get("mobile"), "model": l.get("interestedModel"),
                 "date": str(h.get("date") or "")[:10],
@@ -1720,30 +1745,52 @@ async def cancellations_report(period: str = "month", executive: str = "",
     if stage:
         events = [e for e in events if e["stage"].lower() == stage.strip().lower()]
 
+    # Attach each lead's outstanding refund to exactly one event — its most recent
+    # one INSIDE this window. Using the globally latest event would drop the money
+    # from a period view whenever a lead was cancelled again after that period.
+    newest_in_window = {}
+    for e in events:
+        cur = newest_in_window.get(e["leadId"])
+        if cur is None or (e["date"], e["sequence"]) >= (cur["date"], cur["sequence"]):
+            newest_in_window[e["leadId"]] = e
+    for e in events:
+        e["moneyToRefund"] = (e["leadMoneyHeld"]
+                              if newest_in_window.get(e["leadId"]) is e else 0.0)
+
     def group(key):
+        """Count every cancellation; count each lead's money once.
+
+        A lead cancelled twice is two losses — the executive lost it twice. It is
+        not twice the money: the same ₹10,000 booking advance is still one
+        ₹10,000, and moneyToRefund is carried by one event per lead.
+        """
         out = {}
         for e in events:
             k = e[key] or "Unknown"
             row = out.setdefault(k, {key: k, "count": 0, "money": 0.0, "leads": set()})
             row["count"] += 1
-            row["money"] += e["customerMoney"]
             row["leads"].add(e["leadId"])
-        rows = []
-        for r in out.values():
-            rows.append({**{k: v for k, v in r.items() if k != "leads"},
-                         "money": ce.round2(r["money"]), "uniqueLeads": len(r["leads"])})
-        return sorted(rows, key=lambda x: -x["count"])
+            row["money"] += e["moneyToRefund"]
+        return sorted(
+            [{**{k: v for k, v in r.items() if k != "leads"},
+              "money": ce.round2(r["money"]), "uniqueLeads": len(r["leads"])}
+             for r in out.values()],
+            key=lambda x: -x["count"])
 
-    parked = [e for e in events if str(e["currentAccountStatus"]).lower() == "cancelled"]
+    # Where the LEADS stand now — one state per lead, whatever its account status
+    # is today, so revived + parked always adds up to the leads in this window.
+    state_by_lead = {e["leadId"]: e["currentAccountStatus"] for e in events}
+    unique_leads = len(state_by_lead)
+    parked = [k for k, v in state_by_lead.items() if str(v).lower() == "cancelled"]
     return {
         "period": period, "date": td, "month": ym,
         "total": len(events),
-        "uniqueLeads": len({e["leadId"] for e in events}),
-        # Cancellations that happened after the customer had paid something.
-        "withMoney": len([e for e in events if e["customerMoney"] > 0.01]),
-        "moneyAtRisk": ce.round2(sum(e["customerMoney"] for e in events)),
-        # Back in the funnel vs still parked waiting for a cool-off to end.
-        "revived": len(events) - len(parked),
+        "uniqueLeads": unique_leads,
+        # Customer money still sitting with the dealer on a cancelled lead — i.e.
+        # refunds that have not been recorded yet. Actionable, not historical.
+        "withMoney": len([e for e in events if e["moneyToRefund"] > 0.01]),
+        "moneyAtRisk": ce.round2(sum(e["moneyToRefund"] for e in events)),
+        "revived": unique_leads - len(parked),
         "parked": len(parked),
         "byExecutive": group("executive"),
         "byReason": group("reason"),
@@ -2049,6 +2096,9 @@ LEAD_SYSTEM_FIELDS = {
     "cancelCount", "cancelHistory", "lastCancelDate", "lastCancelReason",
     "lastCancelRemarks", "lastCancelStage", "lastCancelBy", "cancelMoneyAtRisk",
     "reviveOn", "revivedAt", "revivedFromCancel", "followupAnchorDate",
+    # Drives whether Customer Outstanding is real money owed or a dead figure on a
+    # cancelled deal. Set by /cancel and cleared by /convert-booking only.
+    "dealCancelled", "cancelledBookingDate", "cancelledBookingAmount",
 }
 
 # The literal placeholder Swagger/OpenAPI "Try it out" fills into required-string
@@ -2384,6 +2434,10 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
         "currentStatus": "Booked", "bookingDate": bdate, "bookingAmount": body.bookingAmount,
         "executive": body.executive or lead.get("executive"), "financeRequired": body.financeRequired,
         "exchangeRequired": body.exchangeRequired, "lastPaymentMode": body.paymentMode, "lastUpdated": now_iso(),
+        # A lead that cancelled and has now booked again is a live deal: the
+        # customer owes the payable once more, and the money held stops being a
+        # refund and becomes part of this booking.
+        "dealCancelled": False,
     }})
     await db.bookings.insert_one({
         "bookingId": booking_id, "leadId": lead_id, "customerName": lead.get("customerName"),
@@ -2838,6 +2892,17 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=D
     if reason.get("reason", "").lower() == "other" and not str(body.cancelRemarks or "").strip():
         raise HTTPException(422, "Remarks are required when the reason is 'Other'.")
 
+    when_in = str(body.cancelDate or "").strip() or today()
+    # A second cancellation on the same day is a correction, not a new loss. Left
+    # unguarded it inflates the executive's count and double-reports the same
+    # money. Correcting the reason is a deliberate, owner-gated amend instead.
+    if str(lead.get("lastCancelDate") or "")[:10] == when_in[:10] and lead.get("cancelCount"):
+        raise HTTPException(
+            409, f"This lead was already cancelled on {when_in} "
+                 f"(reason: {lead.get('lastCancelReason') or 'unknown'}). "
+                 f"To correct that cancellation the owner can amend it; cancelling again "
+                 f"would count it twice against {lead.get('executive') or 'the executive'}.")
+
     money = _cancel_money(lead)
     if money["hasMoney"] and (act or {}).get("role") != "owner":
         raise HTTPException(
@@ -2845,7 +2910,7 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=D
                  f"so only the owner can cancel it. The refund is recorded separately — "
                  f"cancelling does not reverse any receipt.")
 
-    when = str(body.cancelDate or "").strip() or today()
+    when = when_in
     stage = _cancel_stage(lead)
     record = {
         "date": when,
@@ -2865,9 +2930,24 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=D
         "lastCancelStage": stage,
         "lastCancelBy": act.get("email", ""),
         "cancelMoneyAtRisk": money["customerMoney"],
+        # The deal is off. recompute_lead reads this to zero the outstanding and
+        # make everything still held refundable.
+        "dealCancelled": True,
         "lastUpdatedBy": act.get("email", ""),
         "lastUpdated": now_iso(),
     }
+
+    # A cancelled booking is not a booking. Left in place, bookingDate alone keeps
+    # the lead reading as Booked: it would still count in bookings MTD, and it
+    # could never be converted again because canBook requires "not already booked".
+    # The bookings row and the payment ledger are NOT touched — the booking really
+    # happened and the money really came in; only the LEAD's live state is cleared.
+    if _is_booked(lead):
+        updates.update({
+            "cancelledBookingDate": lead.get("bookingDate") or "",
+            "cancelledBookingAmount": ce.num(lead.get("bookingAmount")),
+            "bookingDate": "", "bookingAmount": 0.0, "bookingId": "",
+        })
 
     # Revival policy comes from the reason, and STOP always wins over it: a
     # customer who opted out must not be walked back into the messaging cycle.
@@ -2890,6 +2970,17 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=D
         {"leadId": lead_id},
         {"$set": updates, "$inc": {"cancelCount": 1}, "$push": {"cancelHistory": record}},
     )
+    # Booking Register should not carry a live booking for a dead deal.
+    if _is_booked(lead):
+        booking = await db.bookings.find_one({"leadId": lead_id})
+        if booking:
+            await db.bookings.update_one({"leadId": lead_id},
+                                         {"$set": {"bookingStatus": "Cancelled"}})
+            await sheet_sync("bookings", clean(
+                await db.bookings.find_one({"leadId": lead_id})))
+    # Clears Customer Outstanding and turns whatever was received into a refundable
+    # balance, so the drawer stops showing a debt nobody is going to collect.
+    await recompute_lead(lead_id)
     await write_audit(act, "cancel", "lead", leadId=lead_id,
                       old={"accountStatus": lead.get("accountStatus"),
                            "currentStatus": lead.get("currentStatus")},
@@ -2907,6 +2998,74 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=D
         "optOutBlockedRevival": opted_out and mode != "never",
         "moneyAtRisk": money,
     }
+
+
+@api.put("/leads/{lead_id}/cancel", dependencies=[Depends(owner_only)])
+async def amend_cancellation(lead_id: str, body: CancelIn, act=Depends(actor)):
+    """Correct the most recent cancellation in place, instead of stacking another.
+
+    Cancelling a second time to "fix" the reason would count the loss twice against
+    the executive and report the same money twice. This rewrites the last history
+    entry, leaves cancelCount alone, and re-applies the revival policy of the new
+    reason — so changing "Other" to "Bought other brand" actually stops the
+    follow-ups rather than just relabelling the record.
+    """
+    lead = await get_lead_or_404(lead_id)
+    history = lead.get("cancelHistory") or []
+    if not history:
+        raise HTTPException(404, "This lead has never been cancelled, so there is nothing to amend.")
+
+    reason_text = str(body.cancelReason or "").strip()
+    if not reason_text:
+        raise HTTPException(422, "Cancel Reason is required.")
+    reason = await _get_cancel_reason(reason_text)
+    if not reason:
+        raise HTTPException(422, f"'{reason_text}' is not a cancel reason. "
+                                 f"Owner: add it in Settings → Cancel Reasons.")
+    if reason["reason"].lower() == "other" and not str(body.cancelRemarks or "").strip():
+        raise HTTPException(422, "Remarks are required when the reason is 'Other'.")
+
+    last = dict(history[-1])
+    before = {k: last.get(k) for k in ("reason", "remarks", "date")}
+    when = str(body.cancelDate or "").strip() or last.get("date") or today()
+    last.update({
+        "reason": reason["reason"],
+        "remarks": str(body.cancelRemarks or "").strip(),
+        "date": when,
+        "amendedBy": act.get("email", ""),
+        "amendedAt": now_iso(),
+    })
+    history[-1] = last
+
+    updates = {
+        "cancelHistory": history,
+        "lastCancelReason": reason["reason"],
+        "lastCancelRemarks": last["remarks"],
+        "lastCancelDate": when,
+        "lastUpdatedBy": act.get("email", ""),
+        "lastUpdated": now_iso(),
+    }
+    mode = str(reason.get("revive") or "now").lower()
+    opted_out = bool(lead.get("whatsappOptOut"))
+    revived_now, revive_on = False, ""
+    if mode == "now" and not opted_out:
+        updates.update(_revive_updates(lead, anchor=when, note=reason["reason"]))
+        revived_now = True
+    elif mode == "days" and not opted_out:
+        revive_on = _add_days(when, int(reason.get("reviveAfterDays") or 30))
+        updates.update({"accountStatus": "Cancelled", "currentStatus": "Lost",
+                        "reviveOn": revive_on, "nextFollowupDate": revive_on})
+    else:
+        updates.update({"accountStatus": "Cancelled", "currentStatus": "Lost", "reviveOn": ""})
+
+    await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
+    await write_audit(act, "amend", "lead-cancellation", leadId=lead_id,
+                      old=before, new={"reason": reason["reason"], "remarks": last["remarks"],
+                                       "date": when, "revivePolicy": mode})
+    await _log_activity_safe(lead, "Note", f"Cancellation amended — {reason['reason']}")
+    updated = clean(await db.leads.find_one({"leadId": lead_id}))
+    await sheet_sync("leads", updated)
+    return {**updated, "amended": True, "revivedNow": revived_now, "reviveOn": revive_on}
 
 
 @api.post("/leads/{lead_id}/revive")
@@ -2930,6 +3089,36 @@ async def revive_lead(lead_id: str, act=Depends(actor), _sales=Depends(sales_sta
     updated = clean(await db.leads.find_one({"leadId": lead_id}))
     await sheet_sync("leads", updated)
     return updated
+
+
+async def _backfill_deal_cancelled() -> int:
+    """Leads cancelled before dealCancelled existed still carry a live outstanding.
+
+    Idempotent. A lead that booked again AFTER its last cancellation is a live deal
+    and is left alone; everything else cancelled has the flag applied and is
+    recomputed, which clears the phantom debt and makes the money refundable.
+    """
+    fixed = 0
+    cursor = db.leads.find({"cancelCount": {"$gt": 0}, "dealCancelled": {"$exists": False}})
+    for lead in await cursor.to_list(5000):
+        lid = lead.get("leadId")
+        if not lid:
+            continue
+        last_cancel = str(lead.get("lastCancelDate") or "")[:10]
+        booking = str(lead.get("bookingDate") or "")[:10]
+        rebooked = bool(booking and last_cancel and booking > last_cancel)
+        await db.leads.update_one({"leadId": lid}, {"$set": {"dealCancelled": not rebooked}})
+        if not rebooked:
+            await recompute_lead(lid)
+            fixed += 1
+    if fixed:
+        logging.info("DEAL_CANCELLED_BACKFILL: cleared outstanding on %s cancelled lead(s)", fixed)
+    return fixed
+
+
+@api.post("/admin/backfill-deal-cancelled", dependencies=[Depends(owner_only)])
+async def admin_backfill_deal_cancelled():
+    return {"ok": True, "fixed": await _backfill_deal_cancelled()}
 
 
 async def run_scheduled_revivals(today_s: Optional[str] = None) -> dict:
@@ -3674,9 +3863,16 @@ async def _refund_position(lead_id, lead=None):
     rows = await db.payments.find({"leadId": lead_id}).to_list(2000)
     received = ce.round2(sum(ce.num(p.get("amount")) for p in rows))
     refunded = ce.round2(sum(-ce.num(p.get("amount")) for p in rows if p.get("entryType") == "Refund"))
-    excess = ce.round2(max(0.0, received - payable)) if payable > 0 else 0.0
+    if lead.get("dealCancelled"):
+        # No vehicle to set the money against any more, so the whole balance is the
+        # customer's. `received` is already net of refunds, so this also stops being
+        # refundable once it has been returned.
+        excess = ce.round2(max(0.0, received))
+    else:
+        excess = ce.round2(max(0.0, received - payable)) if payable > 0 else 0.0
     return {"customerPayable": ce.round2(payable), "totalReceived": received,
-            "refundedAmount": refunded, "excessReceived": excess}
+            "refundedAmount": refunded, "excessReceived": excess,
+            "dealCancelled": bool(lead.get("dealCancelled"))}
 
 
 @api.get("/leads/{lead_id}/refund-position")
@@ -3700,6 +3896,9 @@ async def refund_excess_payment(lead_id: str, body: RefundIn, act=Depends(actor)
         raise HTTPException(422, "Enter a valid refund amount")
     pos = await _refund_position(lead_id, lead)
     if pos["excessReceived"] <= 0:
+        if lead.get("dealCancelled"):
+            raise HTTPException(422, "Nothing is left to refund on this cancelled lead — "
+                                     "everything received has already been returned.")
         raise HTTPException(422, "There is no excess payment on this lead to refund. Only money "
                                  "collected above Customer Payable can be returned here.")
     if amount > pos["excessReceived"] + 0.01:
@@ -7576,6 +7775,10 @@ async def startup():
         await run_scheduled_revivals()
     except Exception:
         logging.exception("LEAD_REVIVAL_STARTUP_ERROR")
+    try:
+        await _backfill_deal_cancelled()
+    except Exception:
+        logging.exception("DEAL_CANCELLED_BACKFILL_ERROR")
     # Self-heal: booked leads whose booking advance was never recorded as a payment
     # (so Customer Outstanding wasn't reduced). Idempotent.
     try:
