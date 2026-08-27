@@ -69,7 +69,12 @@ SYNC_MAP = {
                "insuranceStatus", "registrationStatus", "invoiceStatus", "rcStatus", "pdiStatus",
                # Newly sourced: attribution and activity summary (see SOURCE_REQUIRED
                # below for the Lead Register columns that still have no source).
-               "lastActivity", "lastUpdatedBy", "closedBy", "closeTimestamp"], 1),
+               "lastActivity", "lastUpdatedBy", "closedBy", "closeTimestamp",
+               # Cancellation stamp. Kept separate from the Close columns above
+               # because Close = won and Cancel = lost, and a lead can be
+               # cancelled several times before it is ever closed.
+               "cancelCount", "lastCancelDate", "lastCancelReason", "lastCancelStage",
+               "reviveOn"], 1),
     "activities": (_tab("GSHEET_TAB_ACTIVITIES", "Activity Log"), "activityId",
                    ["activityId", "leadId", "date", "time", "activityType", "discussion",
                     "executive", "customerName", "mobile", "model",
@@ -210,6 +215,11 @@ HEADER_ALIASES = {
     "rtoInsuranceBenefit": ["rto insurance benefit"],
     "dealerTotalEarnings": ["dealer earnings", "total dealer earnings"],
     "nextFollowupDate": ["next follow-up date", "next followup date"],
+    "cancelCount": ["cancel count", "cancelled count", "times cancelled"],
+    "lastCancelDate": ["last cancel date", "cancel date", "cancelled on"],
+    "lastCancelReason": ["last cancel reason", "cancel reason", "cancellation reason"],
+    "lastCancelStage": ["last cancel stage", "cancel stage", "cancelled at stage"],
+    "reviveOn": ["revive on", "follow-up restarts", "revive date"],
     # Booking Register
     "model": ["vehicle model", "model", "interested model"],
     "interestedModel": ["interested model", "vehicle model", "model"],
@@ -898,6 +908,49 @@ def _ensure_oem_extra_support_columns_sync():
 INSURANCE_AGENT_HEADERS = ["Insurance Agent", "Rate Source", "Last Payout Date"]
 # Lead Register carries only the agent name, alongside the existing Insurer Name.
 LEAD_INSURANCE_AGENT_HEADERS = ["Insurance Agent"]
+
+
+# Lead Register columns the cancellation stamp needs. Labels must match the
+# HEADER_ALIASES above or the sync resolves nothing and the columns stay blank.
+LEAD_CANCEL_HEADERS = ["Cancel Count", "Last Cancel Date", "Last Cancel Reason",
+                       "Last Cancel Stage", "Revive On"]
+
+
+def _ensure_cancel_columns_sync():
+    titles = _sheet_titles()
+    tab = SYNC_MAP["leads"][0]
+    if tab not in titles:
+        return {"ok": False, "changed": False,
+                "tabs": [{"tab": tab, "ok": False, "error": "tab not found", "added": []}]}
+    detail = _append_missing_headers(tab, LEAD_CANCEL_HEADERS, _header_row_for("leads", tab))
+    return {"ok": True, "changed": bool(detail.get("added")), "tabs": [detail]}
+
+
+async def ensure_cancel_columns():
+    """Owner helper: append the cancellation headers to Lead Register.
+
+    Append-only and idempotent — never renames or reorders an existing column,
+    and re-running it adds nothing the second time. Until these headers exist the
+    cancel fields simply do not write, because the sync resolves columns by name.
+    """
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled"), "tabs": []}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
+    try:
+        detail = await asyncio.to_thread(_ensure_cancel_columns_sync)
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
+        return detail
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
 def _ensure_insurance_agent_columns_sync():

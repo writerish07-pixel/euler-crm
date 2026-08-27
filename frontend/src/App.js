@@ -12,6 +12,7 @@ import AccountsDashboard from "./pages/AccountsDashboard";
 import Leads from "./pages/Leads";
 import PriceMaster from "./pages/PriceMaster";
 import PriceList from "./pages/PriceList";
+import Cancellations from "./pages/Cancellations";
 import SchemeMaster from "./pages/SchemeMaster";
 import IncentiveMaster from "./pages/IncentiveMaster";
 import Payments from "./pages/Payments";
@@ -94,6 +95,9 @@ function AppRoutes() {
       <Route path="/quotations" element={P(<Quotations />, { salesOnly: true })} />
       <Route path="/activities" element={P(<Activities />, { salesOnly: true })} />
       <Route path="/whatsapp" element={P(<WhatsAppInbox />, { salesOnly: true })} />
+      {/* Every role that sees the funnel sees who is dropping out of it. The API
+          scopes an executive to their own leads. */}
+      <Route path="/cancellations" element={P(<Cancellations />, { fieldOk: true })} />
       <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
       <Route path="/finance" element={P(<Finance />, { financeView: true })} />
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />

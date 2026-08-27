@@ -71,5 +71,9 @@ LIVE_HEADERS = {
 # test test_pending_columns_are_still_actually_pending fails until you do.
 PENDING_SHEET_COLUMNS = {
     "insurance": ["insuranceAgentName", "payoutRateSource", "lastPayoutDate"],
-    "leads": ["insuranceAgentName"],
+    # Added by Settings -> "Add Cancellation columns". Pending for the same reason
+    # as insuranceAgentName above: the header does not exist on Euler Master until
+    # the owner runs that append-only step, and the sync resolves by header name.
+    "leads": ["insuranceAgentName", "cancelCount", "lastCancelDate",
+              "lastCancelReason", "lastCancelStage", "reviveOn"],
 }

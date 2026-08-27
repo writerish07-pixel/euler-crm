@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del, put } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -21,6 +21,7 @@ export default function Settings() {
   const [backfilling, setBackfilling] = useState(false);
   const [ensuringOem, setEnsuringOem] = useState(false);
   const [ensuringIns, setEnsuringIns] = useState(false);
+  const [ensuringCancel, setEnsuringCancel] = useState(false);
   const [pwForm, setPwForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [pwBusy, setPwBusy] = useState(false);
 
@@ -102,6 +103,25 @@ export default function Settings() {
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to add Insurance Agent columns");
     } finally { setEnsuringIns(false); }
+  };
+
+  const ensureCancelColumns = async () => {
+    setEnsuringCancel(true);
+    try {
+      const r = await post("/integrations/gsheets/ensure-cancel-columns", {});
+      if (r.ok === false) {
+        toast.error(r.reason || "Could not update the Lead Register header");
+        return;
+      }
+      const added = (r.tabs || []).flatMap((t) => t.added || []);
+      if (r.changed) {
+        toast.success(`Lead Register updated — added ${added.join(", ")}`);
+      } else {
+        toast.success("Cancellation columns are already present");
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to add Cancellation columns");
+    } finally { setEnsuringCancel(false); }
   };
 
   const addUser = async () => {
@@ -199,6 +219,15 @@ export default function Settings() {
                   </span>
                 </div>
                 <div>
+                  <Button variant="secondary" data-testid="ensure-cancel-cols-btn"
+                    onClick={ensureCancelColumns} disabled={ensuringCancel || !gs?.enabled}>
+                    <ListPlus size={14} /> {ensuringCancel ? "Adding columns…" : "Add Cancellation columns"}
+                  </Button>
+                  <span className="text-xs text-ink-faint ml-2">
+                    Adds Cancel Count / Last Cancel Date / Last Cancel Reason / Last Cancel Stage / Revive On to the Lead Register. Append-only — safe to run twice
+                  </span>
+                </div>
+                <div>
                   <Button variant="secondary" data-testid="backfill-btn" onClick={runBackfill} disabled={backfilling}>
                     <RefreshCcw size={14} /> {backfilling ? "Backfilling…" : "Backfill existing data to sheet"}
                   </Button>
@@ -219,6 +248,8 @@ export default function Settings() {
           <a href={shareUrl} target="_blank" rel="noreferrer"><Button variant="secondary"><ExternalLink size={14} /> Open</Button></a>
         </div>
       </Card>
+
+      {isOwner && <CancelReasonsCard />}
 
       {isOwner && <MastersListCard gsEnabled={gs?.enabled} />}
 
@@ -260,6 +291,125 @@ export default function Settings() {
         </Card>
       )}
     </div>
+  );
+}
+
+const REVIVE_MODES = [
+  ["now", "Straight back to New"],
+  ["days", "After a cool-off"],
+  ["never", "Stays cancelled"],
+];
+
+/**
+ * Cancel reasons, and what each one does to the lead afterwards.
+ *
+ * The revival policy sits on the reason rather than being one global switch
+ * because "postponed purchase" and "bought another brand" deserve opposite
+ * treatment. Chasing the second one every third day forever is how a WhatsApp
+ * number earns a poor quality rating and loses template access.
+ */
+function CancelReasonsCard() {
+  const [rows, setRows] = useState([]);
+  const [form, setForm] = useState({ reason: "", revive: "now", reviveAfterDays: 30 });
+
+  const load = useCallback(() => {
+    get("/cancel-reasons").then(setRows).catch(() => toast.error("Could not load cancel reasons"));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const add = async () => {
+    if (!form.reason.trim()) return toast.error("Reason is required");
+    try {
+      await post("/cancel-reasons", form);
+      toast.success("Cancel reason added");
+      setForm({ reason: "", revive: "now", reviveAfterDays: 30 });
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not add reason"); }
+  };
+
+  const patch = async (row, changes) => {
+    try {
+      await put(`/cancel-reasons/${row.reasonId}`, { ...row, ...changes });
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not update"); }
+  };
+
+  const remove = async (row) => {
+    try {
+      await del(`/cancel-reasons/${row.reasonId}`);
+      toast.success("Reason removed");
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not remove"); }
+  };
+
+  return (
+    <Card className="p-5 mb-6" data-testid="cancel-reasons-card">
+      <div className="flex items-center gap-2 mb-1">
+        <Ban size={16} className="text-rose-600" />
+        <h3 className="font-heading font-bold text-ink">Cancel Reasons <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
+      </div>
+      <p className="text-sm text-ink-soft mb-4">
+        Why a customer walked away, and whether the lead comes back. A cancelled lead
+        always keeps counting against its executive on the Cancellations report — even
+        after it returns to the funnel.
+      </p>
+
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end mb-4">
+        <Field label="Reason">
+          <Input data-testid="new-cancel-reason" value={form.reason}
+            onChange={(e) => setForm({ ...form, reason: e.target.value })}
+            placeholder="e.g. Waiting for subsidy" />
+        </Field>
+        <Field label="Then what?">
+          <Select value={form.revive} onChange={(e) => setForm({ ...form, revive: e.target.value })}>
+            {REVIVE_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </Select>
+        </Field>
+        <Field label="Cool-off (days)">
+          <Input type="number" min="1" value={form.reviveAfterDays}
+            disabled={form.revive !== "days"}
+            onChange={(e) => setForm({ ...form, reviveAfterDays: Number(e.target.value) })} />
+        </Field>
+        <Button data-testid="add-cancel-reason-btn" onClick={add}><Plus size={15} /> Add Reason</Button>
+      </div>
+
+      <Table
+        rowKey="reasonId"
+        rows={rows}
+        empty="No cancel reasons yet"
+        columns={[
+          { key: "reason", label: "Reason", render: (r) => <span className="font-semibold">{r.reason}</span> },
+          { key: "revive", label: "Then what?", render: (r) => (
+            <Select value={r.revive} className="!py-1 text-xs max-w-[12rem]"
+              onChange={(e) => patch(r, { revive: e.target.value })}>
+              {REVIVE_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </Select>
+          ) },
+          { key: "reviveAfterDays", label: "Cool-off", align: "right", render: (r) => (
+            r.revive === "days"
+              ? <Input type="number" min="1" value={r.reviveAfterDays}
+                  className="!py-1 text-xs w-20 text-right"
+                  onChange={(e) => patch(r, { reviveAfterDays: Number(e.target.value) })} />
+              : <span className="text-ink-faint">—</span>
+          ) },
+          { key: "status", label: "Status", render: (r) => (
+            <button onClick={() => patch(r, { status: r.status === "Active" ? "Inactive" : "Active" })}>
+              <Badge tone={r.status === "Active"
+                ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
+                : "bg-zinc-100 text-zinc-600 ring-zinc-500/20"}>{r.status}</Badge>
+            </button>
+          ) },
+          { key: "reasonId", label: "", align: "right", render: (r) => (
+            <Button variant="ghost" className="!py-1 !px-2" onClick={() => remove(r)}>
+              <Trash2 size={14} className="text-red-500" />
+            </Button>
+          ) },
+        ]} />
+      <p className="text-xs text-ink-faint mt-3">
+        A reason already used on a cancelled lead cannot be deleted — set it Inactive
+        instead, so the record of why those leads were lost survives.
+      </p>
+    </Card>
   );
 }
 
@@ -479,6 +629,83 @@ function BotspaceCard() {
       <p className="text-xs text-ink-faint mt-2">
         Bulk send covers already-booked / already-delivered Euler leads that never got the WhatsApp. Future Convert to Booking and Mark Delivered still send automatically.
       </p>
+      <ModelAskCampaign />
     </Card>
+  );
+}
+
+/**
+ * The app's only Marketing-category send. Everything else is Utility, which is
+ * why this one gets a preview instead of a plain button: a marketing blast
+ * cannot be recalled, and enough spam reports cost you template access for the
+ * booking and delivery messages too.
+ */
+function ModelAskCampaign() {
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
+
+  const load = async () => {
+    setBusy(true);
+    try {
+      setPreview(await get("/integrations/botspace/model-ask/preview"));
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not build the preview");
+    } finally { setBusy(false); }
+  };
+
+  const send = async () => {
+    if (!window.confirm(
+      `Send the model-interest WhatsApp to ${preview.eligible} lead(s)?\n\n`
+      + "This is a Marketing template. It cannot be recalled once sent.")) return;
+    setSending(true);
+    try {
+      const r = await post("/integrations/botspace/model-ask?confirm=true", {});
+      toast.success(`Sent ${r.sent || 0}, queued for morning ${r.queued || 0}, failed ${r.failed || 0}`);
+      setPreview(null);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Campaign failed");
+    } finally { setSending(false); }
+  };
+
+  return (
+    <div className="mt-5 pt-4 border-t border-line" data-testid="model-ask-campaign">
+      <h4 className="font-heading font-bold text-ink text-sm mb-1">Model interest campaign</h4>
+      <p className="text-xs text-ink-soft mb-3">
+        Asks Active leads with no vehicle recorded which model they want, and writes a
+        confident reply straight onto the lead. Opted-out, booked and delivered customers are
+        never included, and nobody is asked twice within 45 days.{" "}
+        <b>This is a Marketing template</b> — send it deliberately, not on a schedule.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant="secondary" data-testid="model-ask-preview-btn" onClick={load} disabled={busy}>
+          <Users size={14} /> {busy ? "Checking…" : "Preview recipients"}
+        </Button>
+        {preview && (
+          <Button data-testid="model-ask-send-btn" onClick={send}
+            disabled={sending || !preview.eligible}>
+            {sending ? "Sending…" : `Send to ${preview.eligible} lead(s)`}
+          </Button>
+        )}
+      </div>
+      {preview && (
+        <div className="mt-3 text-xs bg-zinc-50 rounded-lg p-3 ring-1 ring-line">
+          {preview.eligible === 0 ? (
+            <span className="text-ink-soft">Every active lead already has a model recorded — nothing to send.</span>
+          ) : (
+            <>
+              <div className="text-ink-soft mb-1">
+                <b>{preview.eligible} lead(s)</b> would receive it. Menu they will see:{" "}
+                <span className="font-mono">{preview.menu}</span>
+              </div>
+              <div className="text-ink-faint">
+                {preview.targets.slice(0, 12).map((t) => t.customerName || t.leadId).join(" · ")}
+                {preview.targets.length > 12 && ` … +${preview.targets.length - 12} more`}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

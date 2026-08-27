@@ -37,7 +37,19 @@ export default function Leads() {
     )},
     { key: "vehicle", label: "Vehicle", render: (r) => <div className="text-sm"><div>{r.interestedModel || "—"}</div><div className="text-xs text-ink-faint">{r.variant}</div></div> },
     { key: "executive", label: "Executive" },
-    { key: "currentStatus", label: "Status", render: (r) => <Badge>{r.currentStatus}</Badge> },
+    { key: "currentStatus", label: "Status", render: (r) => (
+      <div className="flex flex-wrap items-center gap-1">
+        <Badge>{r.currentStatus}</Badge>
+        {/* A lead that has walked away before is worth seeing before the next call —
+            including one that has since come back and reads as "New" again. */}
+        {Number(r.cancelCount || 0) > 0 && (
+          <Badge tone="bg-rose-50 text-rose-700 ring-rose-600/20"
+            title={`${r.lastCancelReason || "Cancelled"}${r.lastCancelDate ? ` · ${r.lastCancelDate}` : ""}`}>
+            ✕{r.cancelCount}
+          </Badge>
+        )}
+      </div>
+    ) },
     ...(!isField ? [
       { key: "customerPayable", label: "Payable", align: "right", mono: true, render: (r) => inr(r.customerPayable) },
       { key: "customerOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.customerOutstanding > 0 ? "text-red-600 font-semibold" : "text-emerald-600"}>{inr(r.customerOutstanding)}</span> },

@@ -5,7 +5,7 @@ import {
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
-  MessageCircle, SlidersHorizontal,
+  MessageCircle, SlidersHorizontal, Ban,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -25,6 +25,7 @@ const NAV = [
     { to: "/quotations", label: "Quotations", icon: FileText, salesOnly: true },
     { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
     { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle, salesOnly: true },
+    { to: "/cancellations", label: "Cancellations", icon: Ban },
   ]},
   { section: "Money", items: [
     { to: "/payments", label: "Payment Ledger", icon: Wallet, moneyDesk: true },
