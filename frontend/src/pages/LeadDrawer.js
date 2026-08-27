@@ -223,6 +223,7 @@ function StepLock({ text }) {
 }
 
 function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
+  const { isOwner } = useAuth();
   const [modal, setModal] = useState(null);
   const acct = String(lead.accountStatus || "").toLowerCase();
   const closed = !actions.isActive || acct === "closed";
@@ -251,6 +252,13 @@ function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
       {actions.canCancel && (
         <Button variant="secondary" data-testid="cancel-lead-btn" onClick={() => setModal("cancel")}><Ban size={15} /> Cancel Lead</Button>
       )}
+      {/* Correcting a reason must never be done by cancelling again — that counts
+          the loss twice against the executive and re-reports the same money. */}
+      {isOwner && cancels > 0 && (
+        <Button variant="secondary" data-testid="amend-cancel-btn" onClick={() => setModal("amend")}>
+          <Pencil size={15} /> Amend Cancellation
+        </Button>
+      )}
       {cancelled && (
         <Button variant="secondary" data-testid="revive-lead-btn" onClick={async () => {
           try {
@@ -264,6 +272,7 @@ function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
       {modal === "book" && <BookingModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); (onBooked || refresh)(); }} />}
       {modal === "close" && <CloseModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); onClose(); }} />}
       {modal === "cancel" && <CancelModal lead={lead} actions={actions} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); }} />}
+      {modal === "amend" && <CancelModal lead={lead} actions={actions} amend onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); }} />}
     </div>
   );
 }
@@ -808,6 +817,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
   const excess = +(lead.excessReceived || 0);
   const refunded = +(lead.refundedAmount || 0);
+  const dealCancelled = !!lead.dealCancelled;
   const add = async (allowExcess = false) => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     if (!form.date) return toast.error("Payment date is required");
@@ -852,15 +862,18 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-ink">
-                Excess held: <span className="font-mono text-amber-700">{inr(excess)}</span>
+                {dealCancelled ? "Refundable to customer: " : "Excess held: "}
+                <span className="font-mono text-amber-700">{inr(excess)}</span>
               </div>
               <div className="text-xs text-ink-soft mt-0.5">
                 {refunded > 0 ? `${inr(refunded)} already refunded · ` : ""}
-                Money collected above Customer Payable. Refundable even after delivery or closure.
+                {dealCancelled
+                  ? "This lead was cancelled, so there is no vehicle to set this against — the whole balance belongs to the customer."
+                  : "Money collected above Customer Payable. Refundable even after delivery or closure."}
               </div>
             </div>
           </div>
-          {excess > 0 && <RefundForm lead={lead} excess={excess} onSaved={onSaved} />}
+          {excess > 0 && <RefundForm lead={lead} excess={excess} dealCancelled={dealCancelled} onSaved={onSaved} />}
         </Card>
       )}
       <Card className="p-4 mb-4">
@@ -916,7 +929,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
 
 /** Refund of surplus money. Not gated on delivery/closure — the excess is the
  *  customer's money, so it must be returnable at any point. */
-function RefundForm({ lead, excess, onSaved }) {
+function RefundForm({ lead, excess, dealCancelled = false, onSaved }) {
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", date: todayISO(), reference: "", narration: "" });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -947,7 +960,8 @@ function RefundForm({ lead, excess, onSaved }) {
       </Field>
       <Field label="Reference / UTR"><Input value={form.reference} onChange={set("reference")} /></Field>
       <Button data-testid="refund-btn" onClick={submit} disabled={busy}>
-        <ArrowRightLeft size={15} /> {busy ? "Refunding…" : "Refund Excess"}
+        <ArrowRightLeft size={15} />
+        {busy ? "Refunding…" : dealCancelled ? "Refund Customer" : "Refund Excess"}
       </Button>
     </div>
   );
@@ -1625,12 +1639,13 @@ function CloseModal({ lead, onClose, onDone }) {
   );
 }
 
-function CancelModal({ lead, actions, onClose, onDone }) {
+function CancelModal({ lead, actions, amend = false, onClose, onDone }) {
   const { isOwner } = useAuth();
   const [reasons, setReasons] = useState([]);
-  const [reason, setReason] = useState("");
-  const [remarks, setRemarks] = useState("");
-  const [cancelDate, setCancelDate] = useState(todayISO());
+  const [reason, setReason] = useState(amend ? (lead.lastCancelReason || "") : "");
+  const [remarks, setRemarks] = useState(amend ? (lead.lastCancelRemarks || "") : "");
+  const [cancelDate, setCancelDate] = useState(
+    amend ? (lead.lastCancelDate || todayISO()) : todayISO());
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -1654,24 +1669,34 @@ function CancelModal({ lead, actions, onClose, onDone }) {
     if (!reason) return toast.error("Pick a cancel reason");
     if (reason === "Other" && !remarks.trim()) return toast.error("Remarks are required for 'Other'");
     setBusy(true);
+    const body = { cancelReason: reason, cancelRemarks: remarks, cancelDate };
     try {
-      const res = await post(`/leads/${lead.leadId}/cancel`, {
-        cancelReason: reason, cancelRemarks: remarks, cancelDate,
-      });
-      toast.success(res.revivedNow ? "Cancelled — lead is back in the funnel"
-        : res.reviveOn ? `Cancelled — returns on ${fmtDate(res.reviveOn)}`
-          : "Lead cancelled");
+      const res = amend
+        ? await put(`/leads/${lead.leadId}/cancel`, body)
+        : await post(`/leads/${lead.leadId}/cancel`, body);
+      const verb = amend ? "Cancellation updated" : "Cancelled";
+      toast.success(res.revivedNow ? `${verb} — lead is back in the funnel`
+        : res.reviveOn ? `${verb} — returns on ${fmtDate(res.reviveOn)}`
+          : amend ? "Cancellation updated" : "Lead cancelled");
       onDone();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Cancel failed");
+      toast.error(e?.response?.data?.detail || (amend ? "Amend failed" : "Cancel failed"));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <MiniModal title="Cancel Lead" onClose={onClose} onSubmit={submit} submitLabel="Cancel Lead"
-      danger testid="confirm-cancel-btn" submitDisabled={busy || ownerNeeded}>
+    <MiniModal title={amend ? "Amend Cancellation" : "Cancel Lead"} onClose={onClose}
+      onSubmit={submit} submitLabel={amend ? "Save Correction" : "Cancel Lead"}
+      danger={!amend} testid={amend ? "confirm-amend-btn" : "confirm-cancel-btn"}
+      submitDisabled={busy || (!amend && ownerNeeded)}>
+      {amend && (
+        <div className="mb-3 rounded-lg border border-cobalt/20 bg-cobalt-tint/40 px-3 py-2 text-xs text-ink-soft">
+          Corrects the last cancellation in place. The executive's cancellation count is
+          unchanged — cancelling again to fix a reason would count the same loss twice.
+        </div>
+      )}
       {money > 0 && (
         <div data-testid="cancel-money-warning"
           className="mb-3 flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">

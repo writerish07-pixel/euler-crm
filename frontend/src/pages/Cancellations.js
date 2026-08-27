@@ -66,16 +66,16 @@ export default function Cancellations() {
         <StatCard label="Cancellations" value={d.total} icon={Ban} tone="text-rose-600" />
         <StatCard label="Back in the funnel" value={d.revived} icon={RotateCcw} tone="text-emerald-600" />
         <StatCard label="Still parked" value={d.parked} icon={Users} />
-        <StatCard label="Money already taken" value={compactInr(d.moneyAtRisk)} icon={IndianRupee}
+        <StatCard label="Still to refund" value={compactInr(d.moneyAtRisk)} icon={IndianRupee}
           tone={d.moneyAtRisk > 0 ? "text-amber-600" : undefined} />
       </div>
 
       {d.withMoney > 0 && (
         <Card className="p-3 mb-6 bg-amber-50 border-amber-200" data-testid="cancel-money-note">
           <p className="text-sm text-amber-900">
-            <b>{d.withMoney} of these had already taken money</b> — {inr(d.moneyAtRisk)} in total.
-            Cancelling never reverses a receipt, so each of those still needs a refund
-            recorded against the lead.
+            <b>{d.withMoney} cancelled lead{d.withMoney === 1 ? "" : "s"} still hold customer money</b> — {inr(d.moneyAtRisk)} in total.
+            Cancelling never reverses a receipt. Open each lead's Payments tab and use
+            Refund Customer to return it.
           </p>
         </Card>
       )}
@@ -109,7 +109,7 @@ export default function Cancellations() {
             columns={[
               { key: "reason", label: "Reason", render: (r) => <span className="font-medium">{r.reason}</span> },
               { key: "count", label: "Leads", align: "right" },
-              { key: "money", label: "Money taken", align: "right", mono: true,
+              { key: "money", label: "To refund", align: "right", mono: true,
                 render: (r) => (r.money > 0 ? inr(r.money) : <span className="text-ink-faint">—</span>) },
             ]} />
           {reason && (
@@ -129,7 +129,7 @@ export default function Cancellations() {
               { key: "stage", label: "Stage",
                 render: (r) => <Badge tone={STAGE_TONE[r.stage]}>{r.stage}</Badge> },
               { key: "count", label: "Leads", align: "right" },
-              { key: "money", label: "Money taken", align: "right", mono: true,
+              { key: "money", label: "To refund", align: "right", mono: true,
                 render: (r) => (r.money > 0 ? inr(r.money) : <span className="text-ink-faint">—</span>) },
             ]} />
         </section>
@@ -160,14 +160,25 @@ export default function Cancellations() {
               ) },
             { key: "stage", label: "Stage",
               render: (r) => <Badge tone={STAGE_TONE[r.stage]}>{r.stage}</Badge> },
-            { key: "customerMoney", label: "Money", align: "right", mono: true,
+            // Two columns because they answer different questions: what was at
+            // stake when the deal died, and what is still owed back today.
+            { key: "customerMoney", label: "At stake", align: "right", mono: true,
               render: (r) => (r.customerMoney > 0 ? inr(r.customerMoney) : <span className="text-ink-faint">—</span>) },
+            { key: "moneyToRefund", label: "To refund", align: "right", mono: true,
+              render: (r) => (r.moneyToRefund > 0
+                ? <span className="text-amber-700 font-semibold">{inr(r.moneyToRefund)}</span>
+                : <span className="text-ink-faint">—</span>) },
             { key: "currentAccountStatus", label: "Now", align: "right",
-              render: (r) => (String(r.currentAccountStatus).toLowerCase() === "cancelled"
-                ? <Badge tone="bg-zinc-100 text-zinc-700 ring-zinc-500/20">
-                    {r.reviveOn ? `Returns ${fmtDate(r.reviveOn)}` : "Parked"}
+              render: (r) => (!r.isLatest
+                ? <Badge tone="bg-zinc-100 text-zinc-500 ring-zinc-400/20"
+                    title={`Cancellation ${r.sequence} of ${r.cancelCount} on this lead`}>
+                    Superseded
                   </Badge>
-                : <Badge tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">In funnel</Badge>) },
+                : String(r.currentAccountStatus).toLowerCase() === "cancelled"
+                  ? <Badge tone="bg-zinc-100 text-zinc-700 ring-zinc-500/20">
+                      {r.reviveOn ? `Returns ${fmtDate(r.reviveOn)}` : "Parked"}
+                    </Badge>
+                  : <Badge tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">In funnel</Badge>) },
           ]} />
       </section>
     </div>

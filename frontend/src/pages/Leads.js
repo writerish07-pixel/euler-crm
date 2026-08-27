@@ -45,7 +45,7 @@ export default function Leads() {
         {Number(r.cancelCount || 0) > 0 && (
           <Badge tone="bg-rose-50 text-rose-700 ring-rose-600/20"
             title={`${r.lastCancelReason || "Cancelled"}${r.lastCancelDate ? ` · ${r.lastCancelDate}` : ""}`}>
-            ✕{r.cancelCount}
+            {Number(r.cancelCount) === 1 ? "Cancelled once" : `Cancelled ${r.cancelCount}×`}
           </Badge>
         )}
       </div>
