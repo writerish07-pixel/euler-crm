@@ -333,3 +333,77 @@ To resend a slot after fixing something:
 
 **Cost:** roughly 6 staff x 2 messages x 30 days = ~360 Utility messages/month.
 In India that is around ₹40/month.
+
+---
+
+## Template I — `lead_model_interest` (MARKETING)
+
+**This is the only Marketing-category template in the app.** Everything above is
+Utility. That difference matters more than it looks:
+
+* Marketing templates need the customer to have opted in, count against a
+  per-number marketing send limit, and are the ones people report as spam.
+* Enough reports and Meta cuts your WABA quality rating; at the bottom of that
+  scale you lose template sending altogether — including the Utility templates
+  that run your booking confirmations and delivery reviews.
+
+So this one is sent deliberately from **Settings → WhatsApp → Model interest
+campaign**, never on a schedule, and the app shows you exactly who would receive
+it before anything leaves.
+
+**Category:** Marketing
+**Language:** English
+**Name:** `lead_model_interest`
+
+```
+Namaste {{1}}, thank you for your interest in Euler Motors electric vehicles.
+
+Could you tell us which vehicle you are looking for? Just reply with the number:
+
+{{2}}
+
+Reply STOP to stop receiving messages.
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Customer name | Ramesh |
+| {{2}} | Numbered model menu, built from Price Master | 1 Hi-Load / 2 Neo HiRange / 3 Storm / 4 Turbo Max |
+
+**Both Meta rules this template already respects:**
+
+1. The body does **not** start or end with a variable — it opens with "Namaste"
+   and closes with the STOP line. This is what got three of the earlier
+   templates rejected.
+2. `{{2}}` contains no newline, tab, or run of 4+ spaces — the menu is joined
+   with " / " for exactly this reason. **Do not** reformat it into a vertical
+   list inside the variable; Meta rejects the send.
+
+**Optional quick-reply buttons.** WhatsApp allows up to 3. Adding your three
+highest-volume models as buttons is worth doing — a tap returns an exact value,
+where typed text has to be parsed. The numbered menu stays in the body for
+everything else, and both paths are handled.
+
+### What happens to the reply
+
+The reply is matched against Price Master. It understands a tapped button, a
+menu number, the model name in any spacing or case ("hi load", "HILOAD",
+"Hi-Load"), and a name inside a sentence ("mujhe storm chahiye").
+
+It writes a model onto the lead **only** when all three of these hold:
+
+* the lead's Interested Model is currently **empty** — a model an executive
+  entered is never overwritten;
+* exactly one model matches — "storm or turbo max?" updates nothing;
+* the value is stamped `modelSource = whatsapp-reply`, so a customer-stated
+  model is always distinguishable from a staff-entered one.
+
+Anything else is left alone and shows up in the WhatsApp Inbox for a human. A
+wrong model written onto a lead is worse than an empty one: the executive stops
+asking, and nobody notices until someone quotes the wrong vehicle.
+
+When a model IS captured, the customer gets an immediate confirmation. That
+needs no template — they just messaged you, so the 24-hour session is open and
+free-form text is allowed.
+
+**Cool-off:** the same lead is not asked again for 45 days.

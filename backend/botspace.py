@@ -29,7 +29,14 @@ DEFAULT_TEMPLATES = {
     "execEod": "exec_eod_scorecard",
     "managerEod": "manager_eod_volume",
     "ownerEod": "owner_eod_summary",
+    # MARKETING category, unlike everything above it. Asks a lead with no model
+    # recorded which vehicle they are interested in.
+    "modelAsk": "lead_model_interest",
 }
+
+# How long before the same lead may be asked again. A marketing template resent
+# every few days is what gets a number reported and a WABA quality rating cut.
+MODEL_ASK_COOLOFF_DAYS = 45
 
 # Slots the daily scheduler fires. Times are IST hours, overridable from settings.
 REPORT_SLOTS = {"morning": 8, "eod": 20}
@@ -96,14 +103,25 @@ def is_unbooked_active(lead: dict) -> bool:
     return st in FOLLOWUP_STATUSES or st == ""
 
 
+def followup_anchor(lead: dict) -> str:
+    """The date the 3/6/9 cycle counts from.
+
+    Normally the lead's creation date. After a cancellation and revival it is the
+    cancel date instead — otherwise a lead created ninety days ago would compute
+    day 90 the moment it came back, fire once because 90 divides by 3, and then go
+    silent for three days. The customer is starting over, so the clock does too.
+    """
+    return str(lead.get("followupAnchorDate") or lead.get("createdDate") or "")
+
+
 def followup_due(lead: dict, today_s: Optional[str] = None) -> bool:
-    """Day 3, 6, 9… from createdDate. Not nextFollowupDate."""
+    """Day 3, 6, 9… from the follow-up anchor. Not nextFollowupDate."""
     if not is_unbooked_active(lead):
         return False
     today_s = today_s or today_ist()
     if str(lead.get("whatsappFollowupLastDate") or "")[:10] == today_s:
         return False
-    n = days_since(lead.get("createdDate"), today_s)
+    n = days_since(followup_anchor(lead), today_s)
     return n >= 3 and n % 3 == 0
 
 
@@ -631,6 +649,166 @@ async def run_unbooked_followups(today_s: Optional[str] = None) -> dict:
     return {"ok": True, "sent": sent, "considered": sent + skipped}
 
 
+# ------------------------------------------------------- model-ask campaign
+async def _crm_models() -> list:
+    """Sellable models, from Price Master — the same list the lead form offers."""
+    db = _db()
+    return sorted([m for m in await db.price_master.distinct("model") if str(m or "").strip()])
+
+
+def _norm_model_text(s: str) -> str:
+    """Squash to bare letters+digits so 'Hi-Load', 'hi load' and 'HILOAD' all agree."""
+    return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def match_model_reply(text: str, models: list) -> Optional[str]:
+    """Resolve a customer's WhatsApp reply to exactly one model, or to nothing.
+
+    Deliberately returns None on ambiguity rather than picking a winner. A wrong
+    model written into a lead is worse than an empty one: the executive stops
+    asking, and the mistake is invisible until someone quotes the wrong vehicle.
+
+    Handles a tapped quick-reply button, a menu number, the model name in any
+    spacing or case, and a name embedded in a sentence.
+    """
+    raw = str(text or "").strip()
+    if not raw or not models:
+        return None
+    flat = _norm_model_text(raw)
+    if not flat:
+        return None
+
+    # 1. Exact name (button payloads and one-word replies land here).
+    exact = [m for m in models if _norm_model_text(m) == flat]
+    if len(exact) == 1:
+        return exact[0]
+
+    # 2. A bare menu number: "2", "2." or "option 2".
+    num = re.fullmatch(r"(?:option\s*)?(\d{1,2})[.)]?", raw.strip().lower())
+    if num:
+        idx = int(num.group(1))
+        if 1 <= idx <= len(models):
+            return models[idx - 1]
+        return None
+
+    # 3. Name inside a sentence ("I want hi load", "hiload ka price?").
+    hits = [m for m in models if _norm_model_text(m) and _norm_model_text(m) in flat]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        # "hiload or hicity?" names two vehicles and decides nothing.
+        return None
+
+    # 4. Last resort: the reply is a prefix of exactly one model ("hi ra" -> HiRange).
+    if len(flat) >= 4:
+        starts = [m for m in models if _norm_model_text(m).startswith(flat)]
+        if len(starts) == 1:
+            return starts[0]
+    return None
+
+
+def model_ask_due(lead: dict, today_s: Optional[str] = None) -> bool:
+    """Active lead, no model recorded, opted in, and not asked recently."""
+    if not is_unbooked_active(lead):
+        return False
+    if str(lead.get("interestedModel") or "").strip():
+        return False
+    if not digits10(lead.get("mobile")):
+        return False
+    last = str(lead.get("modelAskSentAt") or "")[:10]
+    if last:
+        n = days_since(last, today_s or today_ist())
+        if n < MODEL_ASK_COOLOFF_DAYS:
+            return False
+    return True
+
+
+async def run_model_ask_campaign(*, dry_run: bool = True, limit: int = 500,
+                                 today_s: Optional[str] = None) -> dict:
+    """Ask leads with no recorded model which vehicle they want.
+
+    Dry run by default. This is the one MARKETING-category send in the app, so
+    the owner sees exactly who would receive it before anything leaves.
+    """
+    cfg = await get_config()
+    if not cfg["enabled"] and not dry_run:
+        return {"ok": False, "skipped": True, "reason": "whatsapp-not-configured", "sent": 0}
+    today_s = today_s or today_ist()
+    db = _db()
+    models = await _crm_models()
+    if not models:
+        return {"ok": False, "reason": "no models in Price Master", "sent": 0, "targets": []}
+    menu = " / ".join(f"{i + 1} {m}" for i, m in enumerate(models))
+
+    targets, sent, queued, failed = [], 0, 0, 0
+    for lead in await db.leads.find(
+            {"accountStatus": {"$regex": "^active$", "$options": "i"}}).to_list(5000):
+        if not model_ask_due(lead, today_s):
+            continue
+        targets.append({"leadId": lead.get("leadId"), "customerName": lead.get("customerName"),
+                        "mobile": digits10(lead.get("mobile")),
+                        "executive": lead.get("executive") or "",
+                        "createdDate": lead.get("createdDate") or ""})
+        if dry_run or len(targets) > limit:
+            continue
+        res = await _enqueue_or_send(
+            lead=lead, kind="model_ask", phone=lead.get("mobile"),
+            template_id=cfg["templates"].get("modelAsk", DEFAULT_TEMPLATES["modelAsk"]),
+            variables=[lead.get("customerName") or "ग्राहक", menu],
+            text=f"Model interest ask {lead.get('leadId')}",
+            customer_hours=True,
+        )
+        if res.get("queued"):
+            queued += 1
+        elif res.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+        if res.get("ok"):
+            await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
+                "modelAskSentAt": datetime.now(timezone.utc).isoformat(),
+            }})
+            await _activity(lead, "WhatsApp model-interest ask sent")
+
+    return {"ok": True, "dryRun": dry_run, "day": today_s, "models": models, "menu": menu,
+            "eligible": len(targets), "sent": sent, "queued": queued, "failed": failed,
+            "targets": targets[:limit]}
+
+
+async def apply_model_reply(lead: dict, text: str) -> dict:
+    """Write a model onto a lead from what the customer said — or refuse to.
+
+    Three rules, and all three exist to stop this from corrupting the register:
+      - only fills a model that is currently EMPTY, never overwrites one an
+        executive entered;
+      - only on an unambiguous match;
+      - stamps modelSource so a customer-stated model is always distinguishable
+        from a staff-entered one.
+    Anything else is left for a human, which is what the inbox is for.
+    """
+    if str(lead.get("interestedModel") or "").strip():
+        return {"updated": False, "reason": "model-already-set"}
+    models = await _crm_models()
+    picked = match_model_reply(text, models)
+    if not picked:
+        return {"updated": False, "reason": "no-confident-match", "models": models}
+    db = _db()
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
+        "interestedModel": picked,
+        "modelSource": "whatsapp-reply",
+        "modelCapturedAt": datetime.now(timezone.utc).isoformat(),
+        "lastUpdated": datetime.now(timezone.utc).isoformat(),
+    }})
+    await _activity(lead, f"Model captured from WhatsApp reply: {picked}")
+    try:
+        import server
+        updated = await db.leads.find_one({"leadId": lead["leadId"]})
+        await server.sheet_sync("leads", server.clean(updated))
+    except Exception:
+        logger.exception("MODEL_REPLY_SHEET_SYNC_FAILED %s", lead.get("leadId"))
+    return {"updated": True, "model": picked}
+
+
 async def run_finance_reminders(today_s: Optional[str] = None) -> dict:
     cfg = await get_config()
     if not cfg["enabled"]:
@@ -916,7 +1094,25 @@ async def handle_webhook(body: dict) -> dict:
         provider_id=str(body.get("id") or ""),
     )
     await _activity(lead, f"WhatsApp reply: {(text or '')[:120]}")
-    return {"ok": True, "leadId": lead.get("leadId")}
+
+    # If this lead has no model yet, the reply may be answering the model-ask.
+    # Never blocks or fails the webhook — BotSpace only needs the 200.
+    model_res = {"updated": False, "reason": "skipped"}
+    try:
+        model_res = await apply_model_reply(lead, text)
+        if model_res.get("updated"):
+            # The customer just messaged us, so the 24-hour session is open and a
+            # plain confirmation needs no template.
+            await send_session_text(
+                phone,
+                f"Thank you! We have noted your interest in {model_res['model']}. "
+                f"Our team will call you shortly with the price and offers.",
+                name=lead.get("customerName") or "",
+            )
+    except Exception:
+        logger.exception("MODEL_REPLY_FAILED %s", lead.get("leadId"))
+
+    return {"ok": True, "leadId": lead.get("leadId"), "model": model_res}
 
 
 async def list_thread(lead_id: str) -> dict:

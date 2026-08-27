@@ -105,6 +105,44 @@ def this_month():
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
+def _add_days(day: str, days: int) -> str:
+    """Calendar arithmetic on a YYYY-MM-DD string. Unparseable in, empty out —
+    a bad date must not become a revival that fires on the wrong day."""
+    try:
+        base = datetime.strptime(str(day or "")[:10], "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return (base + timedelta(days=int(days or 0))).strftime("%Y-%m-%d")
+
+
+async def _log_activity_safe(lead: dict, activity_type: str, discussion: str):
+    """Timeline entry that must never fail the operation that caused it.
+
+    A cancellation that succeeded but could not write its activity row is still a
+    cancellation; raising here would roll the user back to an error page while the
+    lead was already cancelled in the database.
+    """
+    lead_id = str((lead or {}).get("leadId") or "")
+    if not lead_id:
+        return None
+    try:
+        doc = {
+            "activityId": await next_id("activity", "AC26"), "leadId": lead_id,
+            "date": today(), "time": datetime.now(timezone.utc).strftime("%H:%M"),
+            "activityType": activity_type, "discussion": discussion,
+            "customerName": lead.get("customerName"), "mobile": lead.get("mobile"),
+            "model": lead.get("interestedModel"),
+        }
+        await db.activities.insert_one(doc)
+        await db.leads.update_one({"leadId": lead_id}, {"$set": {
+            "lastActivity": f"{activity_type} · {discussion}"[:200]}})
+        await sheet_sync("activities", doc)
+        return doc
+    except Exception:
+        logging.exception("ACTIVITY_LOG_FAILED lead=%s", lead_id)
+        return None
+
+
 async def next_id(kind, prefix, width=6):
     doc = await db.counters.find_one_and_update(
         {"_id": kind}, {"$inc": {"seq": 1}}, upsert=True, return_document=True
@@ -193,6 +231,39 @@ def _is_priced(lead):
     return ce.num((lead or {}).get("exShowroom")) > 0
 
 
+def _cancel_money(lead) -> dict:
+    """Money already committed against a lead, and therefore at stake in a cancel.
+
+    Cancelling does NOT reverse any of it — there is no auto-refund path, and
+    inventing one would post entries nobody authorised. It is surfaced and
+    recorded so a cancellation with money behind it is visible instead of silent.
+    """
+    booking = ce.num(lead.get("bookingAmount"))
+    received = ce.num(lead.get("totalReceived"))
+    # totalReceived already includes the booking amount once it is receipted, so
+    # the exposure is the larger of the two, not their sum.
+    customer = max(booking, received)
+    return {
+        "bookingAmount": ce.round2(booking),
+        "totalReceived": ce.round2(received),
+        "customerMoney": ce.round2(customer),
+        "hasMoney": customer > 0.01,
+    }
+
+
+def _cancel_stage(lead) -> str:
+    """Where in the funnel the lead died. An enquiry that fizzles costs a phone
+    call; a booked deal that cancels costs a refund and a blocked chassis. They
+    must never be added together."""
+    if _is_delivered(lead):
+        return "Delivered"
+    if (lead.get("currentStatus") or "").lower().startswith("finance") or lead.get("financeFileNumber"):
+        return "Finance"
+    if _is_booked(lead):
+        return "Booked"
+    return "Enquiry"
+
+
 def lead_actions(lead, act=None):
     """Which workflow steps a lead is eligible for (faithful to PICKER_STAGE + requireActiveLead_).
 
@@ -219,6 +290,12 @@ def lead_actions(lead, act=None):
         "canFinanceReceipt": not_archived,               # finance receipt allowed after close
         "canDeliver": active and booked and not delivered,
         "canClose": active,                               # close exit path (incl. delivered)
+        # Cancel is the LOST exit. A delivered vehicle is not a cancellation — that
+        # is a buyback, which this app has no ledger for — so it stops at delivery.
+        "canCancel": active and not delivered,
+        # Owner-only once the customer has paid: cancelling a funded booking is a
+        # refund decision, not a sales-desk one.
+        "cancelNeedsOwner": _cancel_money(lead)["hasMoney"],
         "canEditLead": mutable,                           # Edit Lead modal / PUT /leads
         "isBooked": booked, "isDelivered": delivered, "isActive": active,
         "isLocked": not mutable,
@@ -827,6 +904,27 @@ class CloseIn(BaseModel):
     closedDate: Optional[str] = None
 
 
+class CancelIn(BaseModel):
+    """Customer walked away. The LOST exit, as opposed to CloseIn's WON exit."""
+    cancelReason: str = ""
+    cancelRemarks: str = ""
+    cancelDate: Optional[str] = None
+
+
+class CancelReasonIn(BaseModel):
+    """A cancel reason and what should happen to the lead afterwards.
+
+    revive="now"   -> back in the funnel immediately, follow-ups restart
+    revive="days"  -> parked, comes back automatically after reviveAfterDays
+    revive="never" -> stays cancelled until someone revives it by hand
+    """
+    reason: str = ""
+    revive: str = "now"
+    reviveAfterDays: int = 0
+    status: str = "Active"
+    remarks: str = ""
+
+
 class ActivityIn(BaseModel):
     activityType: str = "Note"
     discussion: str = ""
@@ -1405,6 +1503,39 @@ def _booking_date(l):
     return str(l.get("bookingDate") or "")[:10]
 
 
+def _cancel_events(leads) -> list:
+    """Flatten every lead's cancelHistory into one list of cancellations.
+
+    One cancellation = one event, so a lead that cancelled three times counts
+    three times. Attribution uses the executive recorded ON the event, not the
+    lead's current executive — reassigning a lead afterwards must not move a
+    cancellation onto someone who never worked it.
+    """
+    out = []
+    for l in leads:
+        history = l.get("cancelHistory") or []
+        if not isinstance(history, list):
+            continue
+        for h in history:
+            if not isinstance(h, dict):
+                continue
+            out.append({
+                "leadId": l.get("leadId"), "customerName": l.get("customerName"),
+                "mobile": l.get("mobile"), "model": l.get("interestedModel"),
+                "date": str(h.get("date") or "")[:10],
+                "reason": str(h.get("reason") or "Unknown") or "Unknown",
+                "remarks": h.get("remarks") or "",
+                "stage": str(h.get("stage") or "Enquiry") or "Enquiry",
+                "executive": str(h.get("executive") or "").strip(),
+                "cancelledBy": h.get("cancelledBy") or "",
+                "customerMoney": ce.num(h.get("customerMoney")),
+                "currentAccountStatus": l.get("accountStatus") or "Active",
+                "reviveOn": l.get("reviveOn") or "",
+            })
+    out.sort(key=lambda x: x["date"], reverse=True)
+    return out
+
+
 async def _daily_report_data() -> dict:
     leads = await db.leads.find().to_list(5000)
     td, ym = today(), this_month()
@@ -1458,6 +1589,7 @@ async def _daily_report_data() -> dict:
             "bookingsToday": 0, "bookingsMtd": 0, "deliveriesToday": 0, "deliveriesMtd": 0,
             "pendingBookings": 0, "pendingCollection": 0.0,
             "followupsDue": 0, "followupsOverdue": 0,
+            "cancelledToday": 0, "cancelledMtd": 0, "cancelledTotal": 0,
         }
 
     def slot(l):
@@ -1484,10 +1616,25 @@ async def _daily_report_data() -> dict:
         elif fd and fd < td:
             e["followupsOverdue"] += 1
 
+    # Cancellations are a permanent stamp on the lead, not a status, so they still
+    # count after the lead has been revived and is sitting back in the funnel as New.
+    cancels = _cancel_events(leads)
+    cancels_today = [c for c in cancels if c["date"] == td]
+    cancels_mtd = [c for c in cancels if in_month(c["date"])]
+    for rows, field in ((cancels_today, "cancelledToday"), (cancels_mtd, "cancelledMtd"),
+                        (cancels, "cancelledTotal")):
+        for c in rows:
+            e = per_exec.get(_norm_name(c["executive"]))
+            if e:
+                e[field] += 1
+
     for e in per_exec.values():
         e["pendingCollection"] = ce.round2(e["pendingCollection"])
         tgt = e["monthlyTarget"]
         e["attainmentPct"] = round(100.0 * e["deliveriesMtd"] / tgt, 1) if tgt > 0 else None
+        # Of everything that reached a decision this month, what share walked away.
+        decided = e["bookingsMtd"] + e["cancelledMtd"]
+        e["cancelRatePct"] = round(100.0 * e["cancelledMtd"] / decided, 1) if decided else None
 
     ranked = sorted(per_exec.values(),
                     key=lambda x: (-x["bookingsToday"], -x["bookingsMtd"], x["name"]))
@@ -1496,6 +1643,7 @@ async def _daily_report_data() -> dict:
         "date": td, "month": ym,
         "bookingsToday": len(bookings_today), "bookingsMtd": len(bookings_mtd),
         "deliveriesToday": len(deliveries_today), "deliveriesMtd": len(deliveries_mtd),
+        "cancelledToday": len(cancels_today), "cancelledMtd": len(cancels_mtd),
         "revenueMtd": revenue_mtd, "collectedMtd": collected_mtd,
         "customerOutstanding": customer_outstanding,
         "financePendingAmount": ce.round2(sum(b["amount"] for b in by_financer.values())),
@@ -1540,6 +1688,69 @@ async def daily_executive_report(name: str, _viewer=Depends(current_user)):
     if not row:
         raise HTTPException(404, f"No active executive '{name}' on the staff master")
     return {"date": d["date"], "month": d["month"], **row}
+
+
+@api.get("/reports/cancellations")
+async def cancellations_report(period: str = "month", executive: str = "",
+                               reason: str = "", stage: str = "",
+                               user=Depends(current_user)):
+    """Who is losing leads, why, and how far down the funnel they got.
+
+    period: month (default) | today | all
+    Stage matters more than the raw count. A lead lost at Enquiry cost a phone
+    call; one lost after Booked cost a refund and a blocked chassis, and the two
+    are never summed into a single "cancellations" number here.
+    """
+    leads = await db.leads.find().to_list(5000)
+    events = _cancel_events(leads)
+    td, ym = today(), this_month()
+    if period == "today":
+        events = [e for e in events if e["date"] == td]
+    elif period != "all":
+        events = [e for e in events if e["date"].startswith(ym)]
+
+    # An executive only ever sees their own — same scoping the WhatsApp inbox uses.
+    if (user or {}).get("role") == "executive":
+        mine = {l["leadId"] for l in _leads_for_executive(leads, user)}
+        events = [e for e in events if e["leadId"] in mine]
+    if executive:
+        events = [e for e in events if _norm_name(e["executive"]) == _norm_name(executive)]
+    if reason:
+        events = [e for e in events if e["reason"].lower() == reason.strip().lower()]
+    if stage:
+        events = [e for e in events if e["stage"].lower() == stage.strip().lower()]
+
+    def group(key):
+        out = {}
+        for e in events:
+            k = e[key] or "Unknown"
+            row = out.setdefault(k, {key: k, "count": 0, "money": 0.0, "leads": set()})
+            row["count"] += 1
+            row["money"] += e["customerMoney"]
+            row["leads"].add(e["leadId"])
+        rows = []
+        for r in out.values():
+            rows.append({**{k: v for k, v in r.items() if k != "leads"},
+                         "money": ce.round2(r["money"]), "uniqueLeads": len(r["leads"])})
+        return sorted(rows, key=lambda x: -x["count"])
+
+    parked = [e for e in events if str(e["currentAccountStatus"]).lower() == "cancelled"]
+    return {
+        "period": period, "date": td, "month": ym,
+        "total": len(events),
+        "uniqueLeads": len({e["leadId"] for e in events}),
+        # Cancellations that happened after the customer had paid something.
+        "withMoney": len([e for e in events if e["customerMoney"] > 0.01]),
+        "moneyAtRisk": ce.round2(sum(e["customerMoney"] for e in events)),
+        # Back in the funnel vs still parked waiting for a cool-off to end.
+        "revived": len(events) - len(parked),
+        "parked": len(parked),
+        "byExecutive": group("executive"),
+        "byReason": group("reason"),
+        "byStage": group("stage"),
+        "events": events[:500],
+        "generatedAt": now_iso(),
+    }
 
 
 @api.get("/field/dashboard")
@@ -1832,6 +2043,12 @@ LEAD_SYSTEM_FIELDS = {
     "extraDealerIncomeTotal", "dealerTotalEarnings",
     # Derived from the payment ledger by recompute_lead / POST /leads/{id}/refund.
     "excessReceived", "refundedAmount",
+    # Owned by POST /leads/{id}/cancel and /revive. The cancellation stamp is the
+    # basis of every executive's cancel count — it must not be editable through
+    # the ordinary lead form, or the count could be typed away.
+    "cancelCount", "cancelHistory", "lastCancelDate", "lastCancelReason",
+    "lastCancelRemarks", "lastCancelStage", "lastCancelBy", "cancelMoneyAtRisk",
+    "reviveOn", "revivedAt", "revivedFromCancel", "followupAnchorDate",
 }
 
 # The literal placeholder Swagger/OpenAPI "Try it out" fills into required-string
@@ -2572,6 +2789,174 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Dep
     updated = clean(await db.leads.find_one({"leadId": lead_id}))
     await sheet_sync("leads", updated)
     return updated
+
+
+def _revive_updates(lead, *, anchor: str, note: str) -> dict:
+    """Put a lead back at the top of the funnel.
+
+    The anchor matters: followup_due() counts days from a date, and a lead created
+    ninety days ago would otherwise compute day 90, fire once, then fall silent for
+    three days. Anchoring on the cancel date genuinely restarts the 3/6/9 cycle.
+    """
+    return {
+        "accountStatus": "Active",
+        "currentStatus": "New",
+        "followupAnchorDate": anchor,
+        "revivedAt": now_iso(),
+        "reviveOn": "",
+        "revivedFromCancel": note,
+        # Let the follow-up engine treat this as a lead it has never messaged.
+        "whatsappFollowupLastDate": "",
+        "whatsappFollowupCount": 0,
+        "lastUpdated": now_iso(),
+    }
+
+
+@api.post("/leads/{lead_id}/cancel")
+async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+    """The LOST exit. Close (Close Won) is the won one; this is the other half.
+
+    Cancellation is recorded as a permanent STAMP (cancelCount + cancelHistory),
+    not as a status. That is what lets a cancelled lead go straight back into the
+    funnel — as asked — while the executive's cancellation count still holds,
+    which a status-based count could not do once the lead flipped back to New.
+    """
+    lead = await get_lead_or_404(lead_id)
+    if _is_delivered(lead):
+        raise HTTPException(
+            409, "This vehicle is already delivered, so it cannot be cancelled. "
+                 "A delivered vehicle coming back is a buyback, which is handled outside the lead.")
+    _require_action(lead, "canCancel", "cancelling (only Active, undelivered leads)", act)
+
+    reason_text = str(body.cancelReason or "").strip()
+    if not reason_text:
+        raise HTTPException(422, "Cancel Reason is required.")
+    reason = await _get_cancel_reason(reason_text)
+    if not reason:
+        raise HTTPException(422, f"'{reason_text}' is not a cancel reason. "
+                                 f"Owner: add it in Settings → Cancel Reasons.")
+    if reason.get("reason", "").lower() == "other" and not str(body.cancelRemarks or "").strip():
+        raise HTTPException(422, "Remarks are required when the reason is 'Other'.")
+
+    money = _cancel_money(lead)
+    if money["hasMoney"] and (act or {}).get("role") != "owner":
+        raise HTTPException(
+            403, f"₹{money['customerMoney']:,.0f} has already been received against this lead, "
+                 f"so only the owner can cancel it. The refund is recorded separately — "
+                 f"cancelling does not reverse any receipt.")
+
+    when = str(body.cancelDate or "").strip() or today()
+    stage = _cancel_stage(lead)
+    record = {
+        "date": when,
+        "reason": reason["reason"],
+        "remarks": str(body.cancelRemarks or "").strip(),
+        "stage": stage,
+        "executive": lead.get("executive") or "",
+        "cancelledBy": act.get("email", ""),
+        "cancelledAt": now_iso(),
+        "customerMoney": money["customerMoney"],
+        "statusAtCancel": lead.get("currentStatus") or "New",
+    }
+    updates = {
+        "lastCancelDate": when,
+        "lastCancelReason": reason["reason"],
+        "lastCancelRemarks": record["remarks"],
+        "lastCancelStage": stage,
+        "lastCancelBy": act.get("email", ""),
+        "cancelMoneyAtRisk": money["customerMoney"],
+        "lastUpdatedBy": act.get("email", ""),
+        "lastUpdated": now_iso(),
+    }
+
+    # Revival policy comes from the reason, and STOP always wins over it: a
+    # customer who opted out must not be walked back into the messaging cycle.
+    mode = str(reason.get("revive") or "now").lower()
+    opted_out = bool(lead.get("whatsappOptOut"))
+    revived_now = False
+    if mode == "now" and not opted_out:
+        updates.update(_revive_updates(lead, anchor=when, note=reason["reason"]))
+        revived_now = True
+        revive_on = ""
+    elif mode == "days" and not opted_out:
+        revive_on = _add_days(when, int(reason.get("reviveAfterDays") or 30))
+        updates.update({"accountStatus": "Cancelled", "currentStatus": "Lost",
+                        "reviveOn": revive_on, "nextFollowupDate": revive_on})
+    else:
+        revive_on = ""
+        updates.update({"accountStatus": "Cancelled", "currentStatus": "Lost", "reviveOn": ""})
+
+    await db.leads.update_one(
+        {"leadId": lead_id},
+        {"$set": updates, "$inc": {"cancelCount": 1}, "$push": {"cancelHistory": record}},
+    )
+    await write_audit(act, "cancel", "lead", leadId=lead_id,
+                      old={"accountStatus": lead.get("accountStatus"),
+                           "currentStatus": lead.get("currentStatus")},
+                      new={**updates, "cancelRecord": record})
+    await _log_activity_safe(lead, "Note", f"Lead cancelled — {reason['reason']}"
+                             + (f" ({record['remarks']})" if record["remarks"] else ""))
+    updated = clean(await db.leads.find_one({"leadId": lead_id}))
+    await sheet_sync("leads", updated)
+    return {
+        **updated,
+        "cancelled": True,
+        "revivedNow": revived_now,
+        "reviveOn": revive_on,
+        "revivePolicy": mode,
+        "optOutBlockedRevival": opted_out and mode != "never",
+        "moneyAtRisk": money,
+    }
+
+
+@api.post("/leads/{lead_id}/revive")
+async def revive_lead(lead_id: str, act=Depends(actor), _sales=Depends(sales_staff_only)):
+    """Put a parked cancelled lead back in the funnel by hand, before its date."""
+    lead = await get_lead_or_404(lead_id)
+    if _acct(lead) == "Active":
+        raise HTTPException(409, "This lead is already active.")
+    if _acct(lead) != "Cancelled":
+        raise HTTPException(409, f"Only cancelled leads can be revived (this one is {_acct(lead)}).")
+    if lead.get("whatsappOptOut"):
+        # Reviving is allowed — the executive can still call. Messaging is not.
+        pass
+    updates = _revive_updates(lead, anchor=today(), note="manual revive")
+    updates["lastUpdatedBy"] = act.get("email", "")
+    await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
+    await write_audit(act, "revive", "lead", leadId=lead_id,
+                      old={"accountStatus": lead.get("accountStatus"),
+                           "currentStatus": lead.get("currentStatus")}, new=updates)
+    await _log_activity_safe(lead, "Note", "Cancelled lead revived")
+    updated = clean(await db.leads.find_one({"leadId": lead_id}))
+    await sheet_sync("leads", updated)
+    return updated
+
+
+async def run_scheduled_revivals(today_s: Optional[str] = None) -> dict:
+    """Parked leads whose cool-off has expired come back on their own."""
+    day = str(today_s or today())[:10]
+    revived = []
+    q = {"accountStatus": {"$regex": "^cancelled$", "$options": "i"},
+         "reviveOn": {"$gt": "", "$lte": day}}
+    for lead in await db.leads.find(q).to_list(2000):
+        lid = lead.get("leadId")
+        if not lid:
+            continue
+        await db.leads.update_one(
+            {"leadId": lid},
+            {"$set": _revive_updates(lead, anchor=day, note=lead.get("lastCancelReason") or "cool-off")})
+        await _log_activity_safe(lead, "Note", "Cool-off over — lead back in the funnel")
+        updated = clean(await db.leads.find_one({"leadId": lid}))
+        await sheet_sync("leads", updated)
+        revived.append(lid)
+    if revived:
+        logging.info("LEAD_REVIVAL: %s lead(s) revived on %s", len(revived), day)
+    return {"ok": True, "day": day, "revived": revived, "count": len(revived)}
+
+
+@api.post("/admin/run-revivals", dependencies=[Depends(owner_only)])
+async def admin_run_revivals(day: Optional[str] = None):
+    return await run_scheduled_revivals(day)
 
 
 # ---------------------------------------------------------------- lead bulk import
@@ -4325,6 +4710,124 @@ async def seed_staff():
     return {"ok": True, **await _seed_staff()}
 
 
+# ---------------------------------------------------------------- cancel reasons
+# Seeded once, then owner-editable. The revival policy lives on the REASON rather
+# than being one global setting, because "postponed purchase" and "bought a Tata"
+# deserve opposite treatment: chasing the second one every third day forever is
+# how a WhatsApp number earns a poor quality rating and loses template access.
+REVIVE_MODES = ("now", "days", "never")
+DEFAULT_CANCEL_REASONS = [
+    {"reason": "Price too high", "revive": "days", "reviveAfterDays": 30},
+    {"reason": "Postponed purchase", "revive": "days", "reviveAfterDays": 30},
+    {"reason": "Finance rejected", "revive": "days", "reviveAfterDays": 60},
+    {"reason": "Not reachable", "revive": "now", "reviveAfterDays": 0},
+    {"reason": "Vehicle not available", "revive": "now", "reviveAfterDays": 0},
+    {"reason": "Bought other brand", "revive": "never", "reviveAfterDays": 0},
+    {"reason": "Duplicate lead", "revive": "never", "reviveAfterDays": 0},
+    {"reason": "Other", "revive": "now", "reviveAfterDays": 0},
+]
+
+
+def _cancel_reason_doc(data: dict) -> dict:
+    revive = str(data.get("revive") or "now").strip().lower()
+    if revive not in REVIVE_MODES:
+        revive = "now"
+    days = int(ce.num(data.get("reviveAfterDays")))
+    if revive != "days":
+        days = 0
+    elif days <= 0:
+        days = 30
+    return {
+        "reason": str(data.get("reason") or "").strip(),
+        "revive": revive,
+        "reviveAfterDays": days,
+        "status": str(data.get("status") or "Active").strip() or "Active",
+        "remarks": str(data.get("remarks") or "").strip(),
+        "lastUpdated": now_iso(),
+    }
+
+
+async def _get_cancel_reason(reason: str) -> Optional[dict]:
+    if not str(reason or "").strip():
+        return None
+    return await db.cancel_reasons.find_one(
+        {"reason": {"$regex": f"^{re.escape(str(reason).strip())}$", "$options": "i"}})
+
+
+async def _seed_cancel_reasons() -> dict:
+    created = []
+    if await db.cancel_reasons.count_documents({}) == 0:
+        for row in DEFAULT_CANCEL_REASONS:
+            doc = _cancel_reason_doc(row)
+            doc["reasonId"] = await next_id("cancel_reason", "CR26")
+            doc["createdAt"] = now_iso()
+            await db.cancel_reasons.insert_one(dict(doc))
+            created.append(doc["reason"])
+    return {"created": created, "count": await db.cancel_reasons.count_documents({})}
+
+
+@api.get("/cancel-reasons")
+async def list_cancel_reasons(active_only: bool = False):
+    """Readable by any signed-in user — the cancel dialog needs the dropdown."""
+    q = {"status": {"$regex": "^active$", "$options": "i"}} if active_only else {}
+    return [clean(r) for r in await db.cancel_reasons.find(q).sort("reason", 1).to_list(200)]
+
+
+@api.post("/cancel-reasons", dependencies=[Depends(owner_only)])
+async def create_cancel_reason(body: CancelReasonIn, act=Depends(actor)):
+    data = _cancel_reason_doc(body.model_dump())
+    if not data["reason"]:
+        raise HTTPException(422, "Reason is required")
+    if await _get_cancel_reason(data["reason"]):
+        raise HTTPException(409, f"A cancel reason '{data['reason']}' already exists")
+    data["reasonId"] = await next_id("cancel_reason", "CR26")
+    data["createdAt"] = now_iso()
+    await db.cancel_reasons.insert_one(dict(data))
+    await write_audit(act, "create", "cancel_reasons", new=data)
+    return clean(await db.cancel_reasons.find_one({"reasonId": data["reasonId"]}))
+
+
+@api.put("/cancel-reasons/{reason_id}", dependencies=[Depends(owner_only)])
+async def update_cancel_reason(reason_id: str, body: CancelReasonIn, act=Depends(actor)):
+    existing = await db.cancel_reasons.find_one({"reasonId": reason_id})
+    if not existing:
+        raise HTTPException(404, "Cancel reason not found")
+    data = _cancel_reason_doc(body.model_dump())
+    if not data["reason"]:
+        raise HTTPException(422, "Reason is required")
+    clash = await _get_cancel_reason(data["reason"])
+    if clash and clash.get("reasonId") != reason_id:
+        raise HTTPException(409, f"A cancel reason '{data['reason']}' already exists")
+    await db.cancel_reasons.update_one({"reasonId": reason_id}, {"$set": data})
+    # Already-cancelled leads keep the policy that applied when they were
+    # cancelled — their reviveOn date is stamped on the lead, not read back from
+    # here, so editing a reason never silently re-dates parked leads.
+    await write_audit(act, "update", "cancel_reasons",
+                      old={k: existing.get(k) for k in ("reason", "revive", "reviveAfterDays", "status")},
+                      new=data)
+    return clean(await db.cancel_reasons.find_one({"reasonId": reason_id}))
+
+
+@api.delete("/cancel-reasons/{reason_id}", dependencies=[Depends(owner_only)])
+async def delete_cancel_reason(reason_id: str, act=Depends(actor)):
+    existing = await db.cancel_reasons.find_one({"reasonId": reason_id})
+    if not existing:
+        raise HTTPException(404, "Cancel reason not found")
+    used = await db.leads.count_documents({"lastCancelReason": existing.get("reason")})
+    if used:
+        raise HTTPException(
+            409, f"{used} lead{'' if used == 1 else 's'} were cancelled for this reason. "
+                 f"Set it to Inactive instead — deleting it would erase why they were lost.")
+    await db.cancel_reasons.delete_one({"reasonId": reason_id})
+    await write_audit(act, "delete", "cancel_reasons", old=clean(existing))
+    return {"ok": True}
+
+
+@api.post("/admin/seed-cancel-reasons", dependencies=[Depends(owner_only)])
+async def seed_cancel_reasons():
+    return {"ok": True, **await _seed_cancel_reasons()}
+
+
 @api.get("/insurance-agents")
 async def list_insurance_agents(active_only: bool = False):
     """Readable by any signed-in user — the delivery screen needs the dropdown."""
@@ -4920,6 +5423,9 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
     ("PUT", "/api/leads/{lead_id}/scheme"), ("POST", "/api/leads/{lead_id}/close"),
+    # The lost exit, next to the won one. Both must stay reachable.
+    ("POST", "/api/leads/{lead_id}/cancel"), ("POST", "/api/leads/{lead_id}/revive"),
+    ("GET", "/api/reports/cancellations"), ("GET", "/api/cancel-reasons"),
     ("POST", "/api/leads/{lead_id}/payments"), ("DELETE", "/api/payments/{receipt_number}"),
     ("PUT", "/api/leads/{lead_id}/delivery"),
     ("GET", "/api/leads/{lead_id}/billing-summary"),
@@ -4942,11 +5448,12 @@ OWNER_ONLY_ENDPOINTS = [
     "/api/reports/production-audit", "/api/audit-log",
     "/api/payments/{receipt_number}",
     "/api/insurance-agents/{agent_id}",
+    "/api/cancel-reasons/{reason_id}",
 ]
 EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "incentive_register",
                         "bookings", "payments", "deliveries", "finance", "insurance", "dealer_earnings",
                         "activities", "claims", "quotations", "counters", "audit_log", "masters_list",
-                        "insurance_agents"]
+                        "insurance_agents", "cancel_reasons"]
 FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "variant",
                       "currentStatus", "accountStatus"]
 PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "derive_claim",
@@ -5885,6 +6392,20 @@ async def gsheets_ensure_insurance_agent_columns(act=Depends(actor)):
     return result
 
 
+@api.post("/integrations/gsheets/ensure-cancel-columns", dependencies=[Depends(owner_only)])
+async def gsheets_ensure_cancel_columns(act=Depends(actor)):
+    """Owner-only: append Cancel Count / Last Cancel Date / Last Cancel Reason /
+    Last Cancel Stage / Revive On to the Lead Register header row.
+
+    Append-only and idempotent. Until the headers exist the cancellation fields
+    do not write to the sheet — the app still holds them, the sheet just shows
+    blanks. After it succeeds, the next lead save (or Backfill) fills them in.
+    """
+    result = await gsheets.ensure_cancel_columns()
+    await write_audit(act, "ensure", "gsheets-cancel-columns", new=result)
+    return result
+
+
 @api.get("/integrations/gsheets/verify-lead/{lead_id}", dependencies=[Depends(owner_only)])
 async def gsheets_verify_lead(lead_id: str):
     """Read-only: how many rows the LIVE sheet actually holds for this lead in each
@@ -6371,6 +6892,34 @@ async def botspace_send_delivery_reviews(body: Optional[GoogleReviewIn] = None):
     """Owner: send Google-review WhatsApp to all delivered Euler leads not yet messaged."""
     force = bool(body and body.force)
     return await wa.send_delivery_reviews(force=force, immediate=True)
+
+
+@api.get("/integrations/botspace/model-ask/preview", dependencies=[Depends(owner_only)])
+async def botspace_model_ask_preview():
+    """Who WOULD receive the model-interest ask, without sending anything.
+
+    This is the only Marketing-category template in the app, so it gets a preview:
+    a marketing blast that goes out wider than intended cannot be recalled, and
+    enough spam reports will cost you template access altogether.
+    """
+    return await wa.run_model_ask_campaign(dry_run=True)
+
+
+@api.post("/integrations/botspace/model-ask", dependencies=[Depends(owner_only)])
+async def botspace_run_model_ask(confirm: bool = False, limit: int = 500, act=Depends(actor)):
+    """Owner: send the model-interest ask to Active leads with no model recorded.
+
+    Requires ?confirm=true — without it this behaves exactly like the preview, so
+    a mis-click cannot start a marketing send.
+    """
+    if not confirm:
+        return {**await wa.run_model_ask_campaign(dry_run=True),
+                "hint": "Call again with confirm=true to actually send."}
+    res = await wa.run_model_ask_campaign(dry_run=False, limit=limit)
+    await write_audit(act, "send", "whatsapp-model-ask", new={
+        "eligible": res.get("eligible"), "sent": res.get("sent"),
+        "queued": res.get("queued"), "failed": res.get("failed")})
+    return res
 
 
 @api.get("/leads/{lead_id}/whatsapp")
@@ -6979,6 +7528,9 @@ async def startup():
         await db.staff.create_index("role")
         await db.whatsapp_threads.create_index("leadId", unique=True)
         await db.whatsapp_threads.create_index([("lastMessageAt", -1)])
+        await db.cancel_reasons.create_index("reasonId", unique=True)
+        # The daily revival sweep queries on these two together.
+        await db.leads.create_index([("accountStatus", 1), ("reviveOn", 1)])
     except Exception:
         pass
     try:
@@ -7014,6 +7566,16 @@ async def startup():
         await _seed_staff()
     except Exception:
         logging.exception("STAFF_SEED_ERROR")
+    try:
+        await _seed_cancel_reasons()
+    except Exception:
+        logging.exception("CANCEL_REASON_SEED_ERROR")
+    # Parked leads whose cool-off expired while the service was down. Cheap, and it
+    # means a revival is never lost just because nobody hit the app that morning.
+    try:
+        await run_scheduled_revivals()
+    except Exception:
+        logging.exception("LEAD_REVIVAL_STARTUP_ERROR")
     # Self-heal: booked leads whose booking advance was never recorded as a payment
     # (so Customer Outstanding wasn't reduced). Idempotent.
     try:

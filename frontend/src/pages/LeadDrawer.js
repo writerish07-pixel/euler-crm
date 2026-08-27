@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText } from "lucide-react";
+import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle } from "lucide-react";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
@@ -224,19 +224,46 @@ function StepLock({ text }) {
 
 function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
   const [modal, setModal] = useState(null);
-  const closed = !actions.isActive || String(lead.accountStatus || "").toLowerCase() === "closed";
+  const acct = String(lead.accountStatus || "").toLowerCase();
+  const closed = !actions.isActive || acct === "closed";
+  const cancelled = acct === "cancelled";
+  const cancels = Number(lead.cancelCount || 0);
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {closed && <Badge data-testid="close-won-badge" tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Close Won</Badge>}
+      {closed && !cancelled && <Badge data-testid="close-won-badge" tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Close Won</Badge>}
+      {cancelled && (
+        <Badge data-testid="cancelled-badge" tone="bg-rose-50 text-rose-700 ring-rose-600/20">
+          Cancelled — {lead.lastCancelReason || "no reason"}
+        </Badge>
+      )}
+      {/* A lead that has walked away before is worth knowing about before the next call. */}
+      {!cancelled && cancels > 0 && (
+        <Badge data-testid="cancel-count-badge" tone="bg-amber-50 text-amber-800 ring-amber-600/20">
+          Cancelled {cancels}×
+        </Badge>
+      )}
       {!closed && actions.canBook && <Button data-testid="convert-booking-btn" onClick={() => setModal("book")}><ArrowRightLeft size={15} /> Convert to Booking</Button>}
       {!closed && actions.isBooked && !actions.canBook && <Badge data-testid="already-booked-badge">Booked ✓</Badge>}
       {!closed && actions.isDelivered && <Badge data-testid="already-delivered-badge">Delivered ✓</Badge>}
       {actions.canClose && (
         <Button variant="secondary" data-testid="close-lead-btn" onClick={() => setModal("close")}><XCircle size={15} /> Close Lead</Button>
       )}
+      {actions.canCancel && (
+        <Button variant="secondary" data-testid="cancel-lead-btn" onClick={() => setModal("cancel")}><Ban size={15} /> Cancel Lead</Button>
+      )}
+      {cancelled && (
+        <Button variant="secondary" data-testid="revive-lead-btn" onClick={async () => {
+          try {
+            await post(`/leads/${lead.leadId}/revive`);
+            toast.success("Lead is back in the funnel");
+            refresh();
+          } catch (e) { toast.error(e?.response?.data?.detail || "Could not revive"); }
+        }}><RotateCcw size={15} /> Revive Lead</Button>
+      )}
       <div className="w-full sm:w-auto sm:ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
       {modal === "book" && <BookingModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); (onBooked || refresh)(); }} />}
       {modal === "close" && <CloseModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); onClose(); }} />}
+      {modal === "cancel" && <CancelModal lead={lead} actions={actions} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); }} />}
     </div>
   );
 }
@@ -1594,6 +1621,91 @@ function CloseModal({ lead, onClose, onDone }) {
         <Field label="Close Date"><Input data-testid="close-date" type="date" value={closedDate} onChange={(e) => setClosedDate(e.target.value)} /></Field>
         <Field label="Close Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Delivered & settled" /></Field>
       </div>
+    </MiniModal>
+  );
+}
+
+function CancelModal({ lead, actions, onClose, onDone }) {
+  const { isOwner } = useAuth();
+  const [reasons, setReasons] = useState([]);
+  const [reason, setReason] = useState("");
+  const [remarks, setRemarks] = useState("");
+  const [cancelDate, setCancelDate] = useState(todayISO());
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    get("/cancel-reasons", { active_only: true })
+      .then(setReasons)
+      .catch(() => toast.error("Could not load cancel reasons"));
+  }, []);
+
+  const picked = reasons.find((r) => r.reason === reason);
+  const money = Number(lead.totalReceived || 0) || Number(lead.bookingAmount || 0);
+  const ownerNeeded = actions.cancelNeedsOwner && !isOwner;
+
+  // Say up front what will happen to the lead, so nobody has to learn the
+  // revival rules by watching leads reappear.
+  const outcome = !picked ? "" :
+    picked.revive === "now" ? "This lead goes straight back to New and the 3-day WhatsApp follow-up restarts."
+      : picked.revive === "days" ? `This lead is parked and comes back automatically after ${picked.reviveAfterDays} days.`
+        : "This lead stays cancelled. Nothing will be sent to the customer.";
+
+  const submit = async () => {
+    if (!reason) return toast.error("Pick a cancel reason");
+    if (reason === "Other" && !remarks.trim()) return toast.error("Remarks are required for 'Other'");
+    setBusy(true);
+    try {
+      const res = await post(`/leads/${lead.leadId}/cancel`, {
+        cancelReason: reason, cancelRemarks: remarks, cancelDate,
+      });
+      toast.success(res.revivedNow ? "Cancelled — lead is back in the funnel"
+        : res.reviveOn ? `Cancelled — returns on ${fmtDate(res.reviveOn)}`
+          : "Lead cancelled");
+      onDone();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Cancel failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <MiniModal title="Cancel Lead" onClose={onClose} onSubmit={submit} submitLabel="Cancel Lead"
+      danger testid="confirm-cancel-btn" submitDisabled={busy || ownerNeeded}>
+      {money > 0 && (
+        <div data-testid="cancel-money-warning"
+          className="mb-3 flex gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+          <div>
+            <b>{inr(money)} has already been received against this lead.</b> Cancelling does not
+            reverse it — the refund is recorded separately on the Payments tab.
+            {ownerNeeded && <> Only the owner can cancel a lead that has taken money.</>}
+          </div>
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <Field label="Cancel Date">
+          <Input data-testid="cancel-date" type="date" value={cancelDate}
+            onChange={(e) => setCancelDate(e.target.value)} />
+        </Field>
+        <Field label="Reason">
+          <Select data-testid="cancel-reason" value={reason} onChange={(e) => setReason(e.target.value)}>
+            <option value="">Select…</option>
+            {reasons.map((r) => <option key={r.reasonId}>{r.reason}</option>)}
+          </Select>
+        </Field>
+      </div>
+      <Field label={reason === "Other" ? "Remarks (required)" : "Remarks"}>
+        <Input data-testid="cancel-remarks" value={remarks} onChange={(e) => setRemarks(e.target.value)}
+          placeholder="What did the customer say?" />
+      </Field>
+      {outcome && (
+        <p data-testid="cancel-outcome" className="mt-3 text-xs text-ink-soft">{outcome}</p>
+      )}
+      <p className="mt-2 text-xs text-ink-faint">
+        This counts against {lead.executive || "the executive"} on the Cancellations report,
+        and keeps counting even after the lead comes back.
+      </p>
     </MiniModal>
   );
 }
