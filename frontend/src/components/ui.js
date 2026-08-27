@@ -166,7 +166,7 @@ export function Drawer({ open, onClose, title, subtitle, children, width = "max-
             </button>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 sm:px-6 py-5">{children}</div>
-          {footer && <div className="border-t border-line px-4 sm:px-6 py-3 bg-zinc-50/60 shrink-0 overflow-x-auto">{footer}</div>}
+          {footer && <div className="border-t border-line px-4 sm:px-6 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-zinc-50/60 shrink-0 overflow-x-auto">{footer}</div>}
         </div>
       </div>
     </Portal>
