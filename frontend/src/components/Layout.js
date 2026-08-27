@@ -5,11 +5,12 @@ import {
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
-  MessageCircle,
+  MessageCircle, SlidersHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
+import ConnectionBar from "./ConnectionBar";
 import { downloadFile, get } from "../lib/api";
 
 const NAV = [
@@ -48,7 +49,8 @@ const NAV = [
     { to: "/erp-audit", label: "ERP Production Audit", icon: ShieldCheck, ownerOnly: true },
   ]},
   { section: "Catalogue & Admin", items: [
-    { to: "/price-master", label: "Price Master", icon: Tag, salesOnly: true },
+    { to: "/price-list", label: "Price List", icon: Tag, salesOnly: true },
+    { to: "/price-master", label: "Price Master", icon: SlidersHorizontal, ownerOnly: true },
     { to: "/staff", label: "Staff & Reports", icon: UserCog, ownerOnly: true },
     { to: "/settings", label: "Settings", icon: SettingsIcon },
   ]},
@@ -260,6 +262,7 @@ export default function Layout({ children }) {
       />
 
       <div className="lg:ml-64 flex flex-col min-h-screen min-w-0">
+        <ConnectionBar />
         <Topbar onMenuOpen={() => setNavOpen(true)} />
         {/* NOTE: `animate-fade-up` uses `animation-fill-mode: both`, so this element
             keeps a `transform` after the animation ends. A transformed element is the
@@ -268,7 +271,7 @@ export default function Layout({ children }) {
             instead of the viewport, pushing its footer buttons off screen.
             Every drawer and modal therefore portals to <body> via ui.js `Portal`.
             If you add a new overlay, portal it too. */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-8 animate-fade-up min-w-0 overflow-x-hidden">{children}</main>
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-fade-up min-w-0 overflow-x-hidden">{children}</main>
       </div>
     </div>
   );

@@ -11,6 +11,7 @@ import FieldDashboard from "./pages/FieldDashboard";
 import AccountsDashboard from "./pages/AccountsDashboard";
 import Leads from "./pages/Leads";
 import PriceMaster from "./pages/PriceMaster";
+import PriceList from "./pages/PriceList";
 import SchemeMaster from "./pages/SchemeMaster";
 import IncentiveMaster from "./pages/IncentiveMaster";
 import Payments from "./pages/Payments";
@@ -109,7 +110,8 @@ function AppRoutes() {
       <Route path="/claim-exceptions" element={P(<ClaimExceptions />, { ownerOnly: true })} />
       <Route path="/erp-audit" element={P(<ERPProductionAudit />, { ownerOnly: true })} />
       <Route path="/audit-log" element={P(<AuditLog />, { ownerOnly: true })} />
-      <Route path="/price-master" element={P(<PriceMaster />, { salesOnly: true })} />
+      <Route path="/price-list" element={P(<PriceList />, { salesOnly: true, fieldOk: true })} />
+      <Route path="/price-master" element={P(<PriceMaster />, { ownerOnly: true })} />
       <Route path="/staff" element={P(<Staff />, { ownerOnly: true })} />
       <Route path="/settings" element={P(<Settings />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
