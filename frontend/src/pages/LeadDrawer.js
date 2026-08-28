@@ -1595,7 +1595,12 @@ function BookingModal({ lead, onClose, onDone }) {
         <Field label="Booking advance (₹)">
           <Input data-testid="booking-amount" type="number" min="0" value={form.bookingAmount} onChange={set("bookingAmount")} />
         </Field>
-        <p className="col-span-2 text-xs text-ink-soft -mt-1">Use 0 when the customer pays the full amount with no separate booking advance (default is 0, not ₹5,000).</p>
+        <p className="col-span-2 text-xs text-ink-soft -mt-1">
+          Use 0 when the customer pays the full amount with no separate booking advance (default is 0, not ₹5,000).
+          {Number(lead.totalReceived || 0) > 0
+            ? ` ₹${Number(lead.totalReceived).toLocaleString("en-IN")} is already on this lead — leave 0 unless they are paying extra now, or you will not create a second receipt.`
+            : ""}
+        </p>
         <Field label="Payment Mode"><Select value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
         <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
         <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>

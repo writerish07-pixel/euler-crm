@@ -630,7 +630,9 @@ async def recompute_lead(lead_id):
     # GS-5: Dealer Earnings and Exchange previously had no Sheet destination at all.
     # Both are keyed on leadId, so these are upserts — one row per lead, kept current
     # on every commercial recompute rather than appended each time.
-    if _is_booked(merged) or ce.num(merged.get("customerPayable")) > 0:
+    if (not merged.get("dealCancelled")
+            and (_is_booked(merged) or _is_commercial_deal(merged)
+                 or ce.num(merged.get("customerPayable")) > 0)):
         de_row = {
             "insurancePayout": _ins_payout,
             "dealerInsuranceIncome": _dealer_ins_income,
@@ -705,13 +707,28 @@ async def recompute_lead(lead_id):
         for _key, _amt in shares["displayByComponent"].items():
             if _amt <= 0:
                 continue
-            _ex = await db.claims.find_one({"leadId": lead_id, "componentKey": _key})
+            _ex = await db.claims.find_one({
+                "leadId": lead_id, "componentKey": _key, "manual": {"$ne": True},
+                "claimStatus": {"$nin": ["Cancelled"]},
+            })
             _amt = ce.round2(_amt)
             _comp_cols = {f: 0.0 for f in _claim_amount_fields}
             if _key in _comp_cols:
                 _comp_cols[_key] = _amt
-            await sheet_sync("claims", {
-                "claimId": (_ex or {}).get("claimId", f"CLM-{lead_id}-{_key}"),
+            if _ex:
+                _claim_id = _ex.get("claimId") or f"CLM-{lead_id}-{_key}"
+            else:
+                _bk_now = await _live_booking(lead_id) or {}
+                _had_cancelled = await db.claims.find_one({
+                    "leadId": lead_id, "componentKey": _key, "manual": {"$ne": True},
+                    "claimStatus": "Cancelled",
+                })
+                if _had_cancelled and _bk_now.get("bookingId"):
+                    _claim_id = f"CLM-{lead_id}-{_key}-{_bk_now['bookingId']}"
+                else:
+                    _claim_id = f"CLM-{lead_id}-{_key}"
+            _claim_row = {
+                "claimId": _claim_id,
                 "leadId": lead_id, "customer": merged.get("customerName"),
                 "model": merged.get("interestedModel"), "variant": merged.get("variant"),
                 "bookingDate": merged.get("bookingDate", ""),
@@ -721,12 +738,10 @@ async def recompute_lead(lead_id):
                 "receivedAmount": (_ex or {}).get("receivedAmount", 0),
                 "claimStatus": (_ex or {}).get("claimStatus", "Pending"),
                 "claimReference": (_ex or {}).get("claimReference", ""),
-                # Claim Register columns that already had a source but no mapping.
-                "bookingId": (await db.bookings.find_one({"leadId": lead_id}) or {}).get("bookingId", ""),
+                "bookingId": ((await _live_booking(lead_id)) or {}).get("bookingId", ""),
                 "schemeMonth": ce.scheme_month_from_date(merged.get("bookingDate", "")),
                 "executive": merged.get("executive", ""),
                 **_comp_cols,
-                # Row-level totals = this component's claim (not the whole-lead aggregate).
                 "totalDiscount": _amt,
                 "dealerDiscount": 0.0,
                 "oemDiscount": _amt,
@@ -734,20 +749,26 @@ async def recompute_lead(lead_id):
                 "ageingDays": _claim_ageing_days(
                     (_ex or {}).get("submittedDate") or merged.get("deliveryDate", ""),
                     (_ex or {}).get("claimStatus", "Pending")),
-                # How this claim row came to exist.
                 "source": (
                     "Manual" if (_ex or {}).get("manual")
                     else ("OEM Extra Support" if _key == ce.OEM_EXTRA_SUPPORT_KEY
                           else "Derived (Scheme Master)")
                 ),
-                # DSA is the one component whose claim needs explicit approval.
                 "dsaApproval": (_ex or {}).get("approvalStatus", "") if _key == "dsaDiscount" else "",
                 "claimReceivedDate": (_ex or {}).get("claimReceivedDate", ""),
                 "claimRemarks": (_ex or {}).get("claimRemarks", ""),
-            })
+                "manual": False,
+            }
+            # Persist so GET /claims still lists the row after Close Won overwrites
+            # currentStatus (the sheet already kept it; the app used to drop it).
+            if _ex:
+                await db.claims.update_one({"_id": _ex["_id"]}, {"$set": _claim_row})
+            else:
+                await db.claims.insert_one(dict(_claim_row))
+            await sheet_sync("claims", _claim_row)
         # OEM Extra Support Register — Received is the claim; Passed/Retained track usage.
         if oem_extra_recv > 0:
-            _bk = await db.bookings.find_one({"leadId": lead_id}) or {}
+            _bk = await _live_booking(lead_id) or {}
             await sheet_sync("oem_extra_support", {
                 "leadId": lead_id,
                 "bookingId": _bk.get("bookingId", "") or merged.get("bookingId", ""),
@@ -1088,6 +1109,78 @@ async def reseed():
 # ---------------------------------------------------------------- dashboard helpers
 def _is_close_won(lead) -> bool:
     return "close won" in (lead.get("currentStatus") or "").strip().lower()
+
+
+def _is_commercial_deal(lead) -> bool:
+    """Booked / finance / delivered / Close Won deals that are still ON.
+
+    Close Won overwrites currentStatus, so a book|deliver|finance regex misses
+    finished retails — OEM Claims, Owner Commercial and Dealer Earnings then
+    showed fewer rows than the Google Sheet (which keeps every claim forever).
+    dealCancelled deals are off even when revival puts them back to Active/New.
+    """
+    if not lead or lead.get("dealCancelled"):
+        return False
+    if _is_close_won(lead) or _is_delivered_lead(lead):
+        return True
+    st = (lead.get("currentStatus") or "").lower()
+    if "book" in st or "finance" in st:
+        return True
+    if lead.get("bookingDate") or lead.get("bookingId"):
+        return True
+    return False
+
+
+async def _commercial_leads(limit: int = 5000) -> list:
+    return [l for l in await db.leads.find().to_list(limit) if _is_commercial_deal(l)]
+
+
+async def _live_booking(lead_id):
+    """The current booking for a lead — never a Cancelled historical row."""
+    rows = await db.bookings.find({"leadId": lead_id}).sort("bookingId", -1).to_list(50)
+    live = [b for b in rows if str(b.get("bookingStatus") or "").lower() != "cancelled"]
+    return live[0] if live else None
+
+
+async def _net_received(lead_id) -> float:
+    agg = await db.payments.aggregate([
+        {"$match": {"leadId": lead_id}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]).to_list(1)
+    return ce.round2(agg[0]["total"]) if agg else 0.0
+
+
+async def _void_derived_claims_on_cancel(lead_id: str):
+    """Stop chasing OEM on a dead booking. Rows stay forever as Cancelled."""
+    rows = await db.claims.find({
+        "leadId": lead_id,
+        "manual": {"$ne": True},
+        "claimStatus": {"$nin": ["Cancelled"]},
+    }).to_list(200)
+    now = now_iso()
+    for c in rows:
+        await db.claims.update_one({"_id": c["_id"]}, {"$set": {
+            "claimStatus": "Cancelled",
+            "cancelledAt": now,
+            "claimRequired": "No",
+        }})
+        updated = await db.claims.find_one({"_id": c["_id"]}) or {**c, "claimStatus": "Cancelled"}
+        await sheet_sync("claims", {
+            "claimId": updated.get("claimId"),
+            "leadId": lead_id,
+            "customer": updated.get("customer"),
+            "model": updated.get("model"),
+            "variant": updated.get("variant"),
+            "bookingDate": updated.get("bookingDate"),
+            "component": updated.get("component"),
+            "componentKey": updated.get("componentKey"),
+            "eligibleClaim": updated.get("eligibleClaim"),
+            "claimAmount": updated.get("claimAmount"),
+            "receivedAmount": updated.get("receivedAmount", 0),
+            "claimStatus": "Cancelled",
+            "claimReference": updated.get("claimReference", ""),
+            "claimRequired": "No",
+        })
 
 
 def _is_delivered_lead(lead) -> bool:
@@ -2013,7 +2106,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
     # ASM / RM — pipeline snapshot only (no commercials, payments, claims)
     if user.get("role") in authmod.FIELD_ROLES:
         delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
-        booking = clean(await db.bookings.find_one({"leadId": lead_id}) or {})
+        booking = clean(await _live_booking(lead_id) or {})
         activities = [clean(a) for a in await db.activities.find({"leadId": lead_id}).sort("activityId", -1).to_list(500)]
         safe_delivery = {}
         if delivery:
@@ -2050,7 +2143,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
     payments = [clean(p) for p in await db.payments.find({"leadId": lead_id}).sort("date", 1).to_list(500)]
     activities = [clean(a) for a in await db.activities.find({"leadId": lead_id}).sort("activityId", -1).to_list(500)]
     delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
-    booking = clean(await db.bookings.find_one({"leadId": lead_id}) or {})
+    booking = clean(await _live_booking(lead_id) or {})
     claims = [clean(c) for c in await db.claims.find({"leadId": lead_id}).to_list(100)]
     # Always rebuild from current commercials when delivered so scheme/Additional
     # (Dealer) edits are not stuck on the Mark-Delivered snapshot.
@@ -2216,10 +2309,10 @@ async def _sync_booking_amount_edit(lead_id, lead, old_amount, new_amount, act=N
     old_amount = max(0.0, ce.num(old_amount))
     if abs(old_amount - new_amount) < 0.005:
         return
-    booking = await db.bookings.find_one({"leadId": lead_id})
+    booking = await _live_booking(lead_id)
     if booking:
         await db.bookings.update_one(
-            {"leadId": lead_id},
+            {"bookingId": booking.get("bookingId")},
             {"$set": {"bookingAmount": new_amount, "amountReceived": new_amount}},
         )
         await sheet_sync("bookings", {
@@ -2430,30 +2523,36 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
     booking_id = await next_id("booking", "BK26")
     snapshot_id = await next_id("snapshot", "SN26")
     bdate = body.bookingDate or today()
+    requested = ce.round2(max(0.0, ce.num(body.bookingAmount)))
+    held = await _net_received(lead_id)
+    extra = ce.round2(max(0.0, requested - held))
     await db.leads.update_one({"leadId": lead_id}, {"$set": {
-        "currentStatus": "Booked", "bookingDate": bdate, "bookingAmount": body.bookingAmount,
+        "currentStatus": "Booked", "bookingDate": bdate, "bookingAmount": requested,
         "executive": body.executive or lead.get("executive"), "financeRequired": body.financeRequired,
         "exchangeRequired": body.exchangeRequired, "lastPaymentMode": body.paymentMode, "lastUpdated": now_iso(),
         # A lead that cancelled and has now booked again is a live deal: the
         # customer owes the payable once more, and the money held stops being a
         # refund and becomes part of this booking.
         "dealCancelled": False,
+        # Allow booking-confirm WhatsApp for this new booking (cancel cleared it too).
+        "whatsappBookingSentAt": "",
     }})
     await db.bookings.insert_one({
         "bookingId": booking_id, "leadId": lead_id, "customerName": lead.get("customerName"),
         "bookingDate": bdate, "model": lead.get("interestedModel"), "variant": lead.get("variant"),
-        "bookingAmount": body.bookingAmount, "amountReceived": body.bookingAmount, "paymentMode": body.paymentMode,
+        "bookingAmount": requested, "amountReceived": requested, "paymentMode": body.paymentMode,
         "financeRequired": body.financeRequired, "exchangeRequired": body.exchangeRequired,
         "snapshotId": snapshot_id, "bookingStatus": "Booked", "createdBy": "crm", "createdDate": today(),
     })
     await sheet_sync("bookings", {
         "bookingId": booking_id, "leadId": lead_id, "customerName": lead.get("customerName"),
         "bookingDate": bdate, "model": lead.get("interestedModel"), "variant": lead.get("variant"),
-        "bookingAmount": body.bookingAmount, "paymentMode": body.paymentMode, "bookingStatus": "Booked",
+        "bookingAmount": requested, "paymentMode": body.paymentMode, "bookingStatus": "Booked",
     })
-    if body.bookingAmount > 0:
+    # Re-book must not post a second advance for money already on the ledger.
+    if extra > 0.01:
         await _add_payment_internal(lead_id, PaymentIn(
-            amount=body.bookingAmount, paymentMode=body.paymentMode, date=bdate,
+            amount=extra, paymentMode=body.paymentMode, date=bdate,
             narration="Booking advance"))
     _bk_act = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": bdate,
@@ -2933,6 +3032,8 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=D
         # The deal is off. recompute_lead reads this to zero the outstanding and
         # make everything still held refundable.
         "dealCancelled": True,
+        # A later Convert to Booking must be allowed to send booking WhatsApp again.
+        "whatsappBookingSentAt": "",
         "lastUpdatedBy": act.get("email", ""),
         "lastUpdated": now_iso(),
     }
@@ -2972,12 +3073,13 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=D
     )
     # Booking Register should not carry a live booking for a dead deal.
     if _is_booked(lead):
-        booking = await db.bookings.find_one({"leadId": lead_id})
+        booking = await _live_booking(lead_id)
         if booking:
-            await db.bookings.update_one({"leadId": lead_id},
+            await db.bookings.update_one({"bookingId": booking.get("bookingId")},
                                          {"$set": {"bookingStatus": "Cancelled"}})
             await sheet_sync("bookings", clean(
-                await db.bookings.find_one({"leadId": lead_id})))
+                await db.bookings.find_one({"bookingId": booking.get("bookingId")})))
+    await _void_derived_claims_on_cancel(lead_id)
     # Clears Customer Outstanding and turns whatever was received into a refundable
     # balance, so the drawer stops showing a debt nobody is going to collect.
     await recompute_lead(lead_id)
@@ -3097,9 +3199,16 @@ async def _backfill_deal_cancelled() -> int:
     Idempotent. A lead that booked again AFTER its last cancellation is a live deal
     and is left alone; everything else cancelled has the flag applied and is
     recomputed, which clears the phantom debt and makes the money refundable.
+
+    Also clears leftover bookingDate/bookingAmount from the first cancel ship
+    (#72), which left those fields in place so the lead stayed "booked" and
+    Convert to Booking stayed hidden.
     """
     fixed = 0
-    cursor = db.leads.find({"cancelCount": {"$gt": 0}, "dealCancelled": {"$exists": False}})
+    cursor = db.leads.find({"cancelCount": {"$gt": 0}, "$or": [
+        {"dealCancelled": {"$exists": False}},
+        {"dealCancelled": True, "bookingDate": {"$gt": ""}},
+    ]})
     for lead in await cursor.to_list(5000):
         lid = lead.get("leadId")
         if not lid:
@@ -3107,10 +3216,29 @@ async def _backfill_deal_cancelled() -> int:
         last_cancel = str(lead.get("lastCancelDate") or "")[:10]
         booking = str(lead.get("bookingDate") or "")[:10]
         rebooked = bool(booking and last_cancel and booking > last_cancel)
-        await db.leads.update_one({"leadId": lid}, {"$set": {"dealCancelled": not rebooked}})
-        if not rebooked:
-            await recompute_lead(lid)
-            fixed += 1
+        if rebooked:
+            await db.leads.update_one({"leadId": lid}, {"$set": {"dealCancelled": False}})
+            continue
+        patch = {
+            "dealCancelled": True,
+            "whatsappBookingSentAt": "",
+        }
+        if lead.get("bookingDate") or ce.num(lead.get("bookingAmount")) or lead.get("bookingId"):
+            patch.update({
+                "cancelledBookingDate": lead.get("cancelledBookingDate") or lead.get("bookingDate") or "",
+                "cancelledBookingAmount": lead.get("cancelledBookingAmount")
+                if lead.get("cancelledBookingAmount") is not None
+                else ce.num(lead.get("bookingAmount")),
+                "bookingDate": "", "bookingAmount": 0.0, "bookingId": "",
+            })
+        await db.leads.update_one({"leadId": lid}, {"$set": patch})
+        live = await _live_booking(lid)
+        if live:
+            await db.bookings.update_one({"bookingId": live.get("bookingId")},
+                                         {"$set": {"bookingStatus": "Cancelled"}})
+        await _void_derived_claims_on_cancel(lid)
+        await recompute_lead(lid)
+        fixed += 1
     if fixed:
         logging.info("DEAL_CANCELLED_BACKFILL: cleared outstanding on %s cancelled lead(s)", fixed)
     return fixed
@@ -5367,7 +5495,7 @@ async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(acto
 # ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)
 async def _owner_booking_metrics():
     """Per booked-lead economics + claim register — shared by owner reports (ownerAggregates_/dashboard)."""
-    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    leads = await _commercial_leads()
     scheme_rows = await get_scheme_rows()
     reg_by_lead = {}
     ref_counts = {}
@@ -5475,7 +5603,7 @@ async def scheme_allocation_impact():
     explicit dealer allocation, so leads without one show a zero payable delta —
     but their dealer-retained figure does change, because the old formula reported
     the dealer's own funded share as negative income."""
-    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    leads = await _commercial_leads()
     scheme_rows = await get_scheme_rows()
     affected, payable_delta, retained_delta = [], 0.0, 0.0
     for l in leads:
@@ -6007,7 +6135,7 @@ async def list_claims():
     Scheme Claim Register is a permanent ledger: Received / settled claims stay listed
     forever (same rule as the Google Sheet). Persisted claim docs are merged in even when
     live scheme display drops to zero or the lead leaves the book/deliver/finance filter."""
-    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(2000)
+    leads = await _commercial_leads()
     scheme_rows = await get_scheme_rows()
     result = []
     seen_ids = set()
@@ -6076,9 +6204,11 @@ async def list_claims():
             continue
         received = ce.round2(ce.num(c.get("receivedAmount")))
         status = (c.get("claimStatus") or "").strip()
-        if received <= 0 and status not in ("Received", "Partial", "Submitted", "Approved", "Rejected"):
+        if received <= 0 and status not in (
+            "Received", "Partial", "Submitted", "Approved", "Rejected", "Cancelled", "Pending"):
             # Skip pure empty shells with no lifecycle — only keep real register history.
-            if not (c.get("submittedDate") or c.get("approvedDate") or c.get("claimReceivedDate")):
+            if not (c.get("submittedDate") or c.get("approvedDate") or c.get("claimReceivedDate")
+                    or ce.num(c.get("claimAmount")) > 0 or ce.num(c.get("eligibleClaim")) > 0):
                 continue
         elig = ce.round2(ce.num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount")))
         key = c.get("componentKey") or ""
@@ -6500,13 +6630,7 @@ async def list_dealer_earnings():
     total = margin + scheme retained + OEM Extra Retained + insurance income + extras
             − dealer-funded benefit.
     """
-    leads = await db.leads.find({
-        "$or": [
-            {"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}},
-            {"customerPayable": {"$gt": 0}},
-            {"dealerTotalEarnings": {"$gt": 0}},
-        ]
-    }).to_list(5000)
+    leads = await _commercial_leads()
     # Fallback extras from dealer_earnings docs when lead mirror is thin.
     de_by = {r.get("leadId"): r for r in await db.dealer_earnings.find().to_list(5000)}
     rows = []
@@ -6827,7 +6951,7 @@ async def scheme_allocation_impact_report():
     Compares each booked lead's currently persisted commercial fields against what
     compute_scheme_allocation would produce. Does NOT modify any records.
     """
-    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    leads = await _commercial_leads()
     scheme_rows = await get_scheme_rows()
     rows = []
     summary = {
@@ -6902,7 +7026,7 @@ async def scheme_allocation_impact_report():
 @api.get("/reports/dealer-earnings", dependencies=[Depends(owner_only)])
 async def dealer_earnings_report():
     """Live dealer earnings from booked leads: margin + scheme retained + insurance income + other."""
-    leads = await db.leads.find({"currentStatus": {"$regex": "book|deliver|finance", "$options": "i"}}).to_list(5000)
+    leads = await _commercial_leads()
     scheme_rows = await get_scheme_rows()
     # insurance income (dealer payout) per lead
     ins_by_lead = {}

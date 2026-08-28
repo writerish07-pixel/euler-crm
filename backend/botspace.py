@@ -809,6 +809,25 @@ async def apply_model_reply(lead: dict, text: str) -> dict:
     return {"updated": True, "model": picked}
 
 
+async def _executive_whatsapp(name: str, cfg: dict) -> str:
+    """Staff master is the source of executive mobiles; BotSpace list is fallback."""
+    key = (name or "").strip().lower()
+    if not key:
+        return ""
+    import server
+    for r in await server.db.staff.find().to_list(500):
+        if str(r.get("status") or "Active").lower() != "active":
+            continue
+        if str(r.get("name") or "").strip().lower() != key:
+            continue
+        m = digits10(r.get("mobile"))
+        if m:
+            return m
+    exec_map = {str(x.get("name") or "").strip().lower(): x.get("mobile")
+                for x in (cfg.get("executives") or [])}
+    return digits10(exec_map.get(key) or "")
+
+
 async def run_finance_reminders(today_s: Optional[str] = None) -> dict:
     cfg = await get_config()
     if not cfg["enabled"]:
@@ -819,13 +838,15 @@ async def run_finance_reminders(today_s: Optional[str] = None) -> dict:
     pending = [f for f in await db.finance.find().to_list(2000)
                if float(f.get("fileOutstanding") or 0) > 0.01 and (f.get("status") or "") != "Received"]
     overdue = await server._enrich_finance_with_delivery(pending)
-    exec_map = {str(x.get("name") or "").strip().lower(): x.get("mobile") for x in cfg["executives"]}
-    sent = 0
+    sent, skipped_cancelled, skipped_no_mobile = 0, 0, []
     for f in overdue:
         if not f.get("overdue"):
             continue
         lead = await db.leads.find_one({"leadId": f.get("leadId")}) or {}
         if not lead:
+            continue
+        if lead.get("dealCancelled") or str(lead.get("accountStatus") or "").lower() == "cancelled":
+            skipped_cancelled += 1
             continue
         count = int(lead.get("whatsappFinancePingCount") or 0)
         if count >= MAX_FINANCE_PINGS:
@@ -833,8 +854,10 @@ async def run_finance_reminders(today_s: Optional[str] = None) -> dict:
         if str(lead.get("whatsappFinanceLastDate") or "")[:10] == today_s:
             continue
         exec_name = (lead.get("executive") or "").strip()
-        mobile = exec_map.get(exec_name.lower())
+        mobile = await _executive_whatsapp(exec_name, cfg)
         if not mobile:
+            if exec_name and exec_name not in skipped_no_mobile:
+                skipped_no_mobile.append(exec_name)
             continue
         vars_ = [
             lead.get("customerName") or "",
@@ -857,7 +880,8 @@ async def run_finance_reminders(today_s: Optional[str] = None) -> dict:
                 "whatsappFinancePingCount": count + 1,
                 "whatsappFinanceLastDate": today_s,
             }})
-    return {"ok": True, "sent": sent}
+    return {"ok": True, "sent": sent, "skippedCancelled": skipped_cancelled,
+            "skippedNoMobile": skipped_no_mobile}
 
 
 async def flush_outbox() -> dict:
