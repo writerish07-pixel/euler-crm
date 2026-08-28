@@ -61,7 +61,8 @@ def test_phone_and_followup_rules():
 async def client(monkeypatch):
     isolated = server.client["whatsapp_botspace_isolated"]
     for name in ("leads", "settings", "whatsapp_messages", "whatsapp_outbox",
-                 "activities", "bookings", "payments", "price_master"):
+                 "activities", "bookings", "payments", "price_master",
+                 "staff", "finance"):
         await isolated[name].delete_many({})
     monkeypatch.setattr(server, "db", isolated)
     monkeypatch.delenv("BOTSPACE_API_KEY", raising=False)
@@ -495,3 +496,47 @@ async def test_env_kill_switch_blocks_send(client, monkeypatch):
     r = await client.post("/api/leads/LDBKKILL/whatsapp/booking-confirm", json={})
     assert r.status_code == 422
     assert "not configured" in r.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_finance_overdue_uses_staff_mobile_and_skips_cancelled(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append({"phone": phone, "template_id": template_id})
+        return {"ok": True, "data": {"id": "wamid.fin"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _enable_whatsapp(client)
+    await server.db.staff.insert_one({
+        "staffId": "ST-FIN", "name": "Amit", "role": "executive",
+        "mobile": "9111100999", "status": "Active", "whatsappOptIn": True,
+        "reports": [],
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LDFINCANCEL", "customerName": "Dead Deal", "mobile": "9000066666",
+        "accountStatus": "Cancelled", "currentStatus": "Lost", "executive": "Amit",
+        "dealCancelled": True, "deliveryDate": "2026-08-01",
+        "financeFileNumber": "FN26000001",
+    })
+    await server.db.finance.insert_one({
+        "fileNumber": "FN26000001", "leadId": "LDFINCANCEL",
+        "fileOutstanding": 50000, "status": "Pending", "financer": "HDFC",
+    })
+    out = await wa.run_finance_reminders("2026-08-28")
+    assert out.get("skippedCancelled") >= 1
+    assert calls == []
+
+    await server.db.leads.insert_one({
+        "leadId": "LDFINLIVE", "customerName": "Live Deal", "mobile": "9000077777",
+        "accountStatus": "Active", "currentStatus": "Delivered", "executive": "Amit",
+        "dealCancelled": False, "deliveryDate": "2026-08-01",
+        "financeFileNumber": "FN26000002",
+    })
+    await server.db.finance.insert_one({
+        "fileNumber": "FN26000002", "leadId": "LDFINLIVE",
+        "fileOutstanding": 40000, "status": "Pending", "financer": "HDFC",
+    })
+    out2 = await wa.run_finance_reminders("2026-08-28")
+    assert out2.get("sent") >= 1
+    assert any(c["phone"] == "9111100999" or "9111100999" in str(c["phone"]) for c in calls)

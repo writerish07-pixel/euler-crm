@@ -594,14 +594,22 @@ async def test_booking_again_makes_the_lead_owe_money_once_more(client):
     await cancel(client, lid, "Not reachable")          # revives immediately
     assert (await lead_doc(lid))["dealCancelled"] is True
 
-    # A different advance, because re-posting the identical amount within seconds
-    # trips the app's duplicate-receipt guard.
     r = await client.post(f"/api/leads/{lid}/convert-booking",
-                          json={"bookingAmount": 15000, "executive": "Amit"})
+                          json={"bookingAmount": 10000, "executive": "Amit"})
     assert r.status_code == 200, r.text
     doc = await lead_doc(lid)
     assert doc["dealCancelled"] is False
     assert server.ce.num(doc["customerOutstanding"]) > 0
+    pays = await server.db.payments.find({"leadId": lid}).to_list(20)
+    # The original ₹10,000 advance is reused — a second receipt must not appear.
+    assert sum(server.ce.num(p.get("amount")) for p in pays) == 10000
+    live = [b for b in await server.db.bookings.find({"leadId": lid}).to_list(10)
+            if (b.get("bookingStatus") or "") != "Cancelled"]
+    cancelled = [b for b in await server.db.bookings.find({"leadId": lid}).to_list(10)
+                 if (b.get("bookingStatus") or "") == "Cancelled"]
+    assert len(live) == 1
+    assert len(cancelled) == 1
+    assert live[0]["bookingId"] != cancelled[0]["bookingId"]
 
 
 @pytest.mark.asyncio
@@ -798,3 +806,90 @@ async def test_a_cancelled_booking_leaves_the_bookings_count(client):
 
     await cancel(client, lid, "Not reachable")
     assert server._is_booked_lead(await lead_doc(lid)) is False
+
+
+@pytest.mark.asyncio
+async def test_backfill_unsticks_leftover_booking_date_from_first_cancel_ship(client):
+    """#72 cancelled without clearing bookingDate. After #73's flag, Convert stayed hidden."""
+    lid = await make_lead(client, "ITER32 Leftover booking", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 10000, "executive": "Amit"})
+    await cancel(client, lid, "Not reachable")
+    # Simulate the leftover live booking fields from the first cancel ship,
+    # on a revived (Active) lead — Convert to Booking stayed hidden because
+    # bookingDate still made _is_booked true.
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "dealCancelled": True,
+        "accountStatus": "Active",
+        "currentStatus": "New",
+        "bookingDate": "2026-08-10",
+        "bookingAmount": 10000,
+        "bookingId": "BK-STUCK",
+    }})
+    assert server._is_booked(await lead_doc(lid)) is True
+    assert server.lead_actions(await lead_doc(lid), {"role": "owner"})["canBook"] is False
+
+    fixed = await server._backfill_deal_cancelled()
+    assert fixed >= 1
+    doc = await lead_doc(lid)
+    assert doc["dealCancelled"] is True
+    assert doc["bookingDate"] == ""
+    assert server.ce.num(doc["bookingAmount"]) == 0
+    assert server.lead_actions(doc, {"role": "owner"})["canBook"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_marks_derived_claims_cancelled(client):
+    lid = await make_lead(client, "ITER32 Claim void", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 0, "executive": "Amit"})
+    await server.db.claims.insert_one({
+        "claimId": f"CLM-{lid}-loyaltyBonus", "leadId": lid,
+        "componentKey": "loyaltyBonus", "component": "Loyalty Bonus",
+        "claimAmount": 8000, "eligibleClaim": 8000, "claimStatus": "Pending",
+        "customer": "ITER32 Claim void", "manual": False,
+    })
+    await cancel(client, lid, "Finance rejected")
+    c = await server.db.claims.find_one({"leadId": lid, "componentKey": "loyaltyBonus"})
+    assert c["claimStatus"] == "Cancelled"
+    listed = (await client.get("/api/claims")).json()
+    hit = next((x for x in listed if x.get("leadId") == lid), None)
+    assert hit is not None
+    assert hit["claimStatus"] == "Cancelled"
+
+
+@pytest.mark.asyncio
+async def test_close_won_still_shows_on_oem_and_commercial_tabs(client):
+    lid = await make_lead(client, "ITER32 Close Won commercial", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 0, "executive": "Amit"})
+    await server.db.claims.insert_one({
+        "claimId": f"CLM-{lid}-loyaltyBonus", "leadId": lid,
+        "componentKey": "loyaltyBonus", "component": "Loyalty Bonus",
+        "claimAmount": 12000, "eligibleClaim": 12000, "claimStatus": "Pending",
+        "customer": "ITER32 Close Won commercial", "manual": False,
+    })
+    r = await client.post(f"/api/leads/{lid}/close", json={"closeReason": "Delivered and settled"})
+    assert r.status_code == 200, r.text
+    assert (await lead_doc(lid))["currentStatus"] == "Close Won"
+
+    claims = (await client.get("/api/claims")).json()
+    assert any(x.get("leadId") == lid for x in claims)
+
+    commercial = (await client.get("/api/reports/owner-commercial")).json()
+    assert commercial["bookings"] >= 1
+
+    earnings = (await client.get("/api/dealer-earnings")).json()
+    assert any(x.get("leadId") == lid for x in earnings.get("rows") or [])
+
+
+@pytest.mark.asyncio
+async def test_cancelled_deal_drops_out_of_dealer_earnings(client):
+    lid = await make_lead(client, "ITER32 Earnings drop", model=TURBO[0])
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingAmount": 0, "executive": "Amit"})
+    before = (await client.get("/api/dealer-earnings")).json()
+    assert any(x.get("leadId") == lid for x in before.get("rows") or [])
+    await cancel(client, lid, "Bought other brand")
+    after = (await client.get("/api/dealer-earnings")).json()
+    assert not any(x.get("leadId") == lid for x in after.get("rows") or [])

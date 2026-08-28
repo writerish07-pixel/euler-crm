@@ -57,7 +57,11 @@ export default function Claims() {
           { key: "eligibleClaim", label: "Eligible", align: "right", mono: true, render: (r) => <span className="text-emerald-600 font-semibold">{inr(r.eligibleClaim)}</span> },
           { key: "receivedAmount", label: "Received", align: "right", mono: true, render: (r) => inr(r.receivedAmount) },
           { key: "outstanding", label: "Outstanding", align: "right", mono: true, render: (r) => { const o = Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0); return <span className={o > 0.01 ? "text-red-600 font-semibold" : ""}>{inr(Math.max(0, o))}</span>; } },
-          { key: "claimStatus", label: "Status", render: (r) => <Badge>{r.claimStatus}</Badge> },
+          { key: "claimStatus", label: "Status", render: (r) => <Badge tone={
+            r.claimStatus === "Cancelled" ? "bg-zinc-100 text-zinc-600 ring-zinc-400/30"
+              : r.claimStatus === "Received" ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
+                : undefined
+          }>{r.claimStatus}</Badge> },
           { key: "submittedDate", label: "Submitted", render: (r) => r.submittedDate ? fmtDate(r.submittedDate) : "—" },
           { key: "approvedDate", label: "Approved", render: (r) => r.approvedDate ? fmtDate(r.approvedDate) : "—" },
           { key: "ageingDays", label: "Ageing", align: "right", render: (r) => r.ageingDays ? <Badge tone={r.ageingDays > 30 ? "bg-red-50 text-red-700 ring-red-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>{r.ageingDays}d</Badge> : "—" },
