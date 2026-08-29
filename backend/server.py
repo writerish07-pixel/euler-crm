@@ -7457,6 +7457,19 @@ async def botspace_send_daily_report(slot: str = "eod", act=Depends(actor)):
     return res
 
 
+@api.get("/integrations/botspace/report-status", dependencies=[Depends(owner_only)])
+async def botspace_report_status(days: int = 7):
+    """Why a report slot failed.
+
+    Daily reports go to staff, so they carry no leadId — which means they are
+    excluded from both the WhatsApp inbox and the Sent box, and a failure had
+    nowhere to surface. This returns the last runs per slot with the provider's
+    own error against each recipient, the template name actually used, and the
+    most likely fix.
+    """
+    return await wa.report_status(days)
+
+
 @api.delete("/integrations/botspace/daily-report-marker", dependencies=[Depends(owner_only)])
 async def botspace_clear_report_marker(slot: str = "eod"):
     """Clear today's sent-marker so the slot can be re-sent (e.g. after a fix)."""

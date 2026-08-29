@@ -363,3 +363,92 @@ async def test_staff_without_a_mobile_is_skipped_not_crashed(wired):
 async def test_unknown_slot_is_rejected(wired):
     res = await wa.run_daily_reports("teatime")
     assert res["ok"] is False and res["sent"] == 0
+
+
+# ============================================ why a slot failed (reported live)
+# The morning slot worked while every EOD send failed. Nothing in the app could
+# explain it: report messages carry no leadId, so they are excluded from the
+# WhatsApp inbox AND the Sent box, and the run marker recorded only ok/not-ok.
+def test_a_template_error_is_translated_into_an_action():
+    for err in ("BotSpace 400: template not found",
+                "Template exec_eod_scorecard is not approved",
+                "error 132001 template does not exist"):
+        hint = wa.diagnose_report_failure(err)
+        assert "approved and active on Meta" in hint, err
+
+
+def test_a_variable_count_error_is_told_apart_from_an_approval_error():
+    hint = wa.diagnose_report_failure("132000: number of parameters does not match")
+    assert "different number of variables" in hint
+    assert "approved and active" not in hint
+
+
+def test_a_credential_error_points_at_the_settings_page():
+    assert "API key" in wa.diagnose_report_failure("BotSpace 401: unauthorized")
+
+
+def test_an_empty_error_produces_no_guess():
+    assert wa.diagnose_report_failure("") == ""
+    assert wa.diagnose_report_failure(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_report_status_names_the_template_behind_every_report(client):
+    d = (await client.get("/api/integrations/botspace/report-status")).json()
+    # The template a send actually uses, so a mismatch with Meta is visible.
+    assert d["templates"]["exec_morning"]["templateId"] == "exec_day_ahead"
+    assert d["templates"]["exec_eod"]["templateId"] == "exec_eod_scorecard"
+    assert d["templates"]["manager_eod"]["templateId"] == "manager_eod_volume"
+    assert d["templates"]["owner_eod"]["templateId"] == "owner_eod_summary"
+    assert "morning" in d["slots"] and "eod" in d["slots"]
+
+
+@pytest.mark.asyncio
+async def test_report_status_surfaces_the_recipients_and_the_provider_error(client):
+    """A failed run must say who, which template, and the provider's own words."""
+    day = wa.today_ist()
+    await server.db.settings.update_one({"_id": f"report_eod_{day}"}, {"$set": {
+        "slot": "eod", "day": day, "sent": 0, "failed": 2,
+        "sentAt": "2026-08-27T14:30:00+00:00",
+        "recipients": [
+            {"name": "ITER29 Owner", "kind": "owner_eod", "ok": False,
+             "templateId": "owner_eod_summary", "mobile": "9812340009",
+             "error": "BotSpace 400: {'error': 'template not found'}"},
+            {"name": "ITER29 Exec", "kind": "exec_eod", "ok": False,
+             "templateId": "exec_eod_scorecard", "mobile": "9812340008",
+             "error": "BotSpace 400: {'error': 'template not approved'}"},
+        ],
+    }}, upsert=True)
+
+    d = (await client.get("/api/integrations/botspace/report-status")).json()
+    eod = d["slots"]["eod"]
+    assert eod["lastRun"]["failed"] == 2
+    assert len(eod["failures"]) == 2
+    f = eod["failures"][0]
+    assert f["templateId"] == "owner_eod_summary"
+    assert "template not found" in f["error"]
+    assert "approved and active on Meta" in f["hint"]
+    await server.db.settings.delete_one({"_id": f"report_eod_{day}"})
+
+
+@pytest.mark.asyncio
+async def test_report_status_is_owner_only(client):
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post("/api/auth/login",
+                         json={"email": "executive@euler.com", "password": "euler@123"})
+        c.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
+        assert (await c.get("/api/integrations/botspace/report-status")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_run_records_the_template_and_error_against_each_recipient(client):
+    """The marker itself must carry enough to diagnose without the provider console."""
+    day = "2026-07-15"
+    await server.db.settings.delete_one({"_id": f"report_eod_{day}"})
+    await wa.run_daily_reports("eod", day)
+    marker = await server.db.settings.find_one({"_id": f"report_eod_{day}"})
+    if marker and marker.get("recipients"):
+        for r in marker["recipients"]:
+            assert "templateId" in r and "variableCount" in r and "error" in r
+    await server.db.settings.delete_one({"_id": f"report_eod_{day}"})

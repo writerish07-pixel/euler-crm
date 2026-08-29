@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Plus, Pencil, Trash2, Save, Send, BarChart3 } from "lucide-react";
+import { Plus, Pencil, Trash2, Save, Send, BarChart3, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put, del } from "../lib/api";
 import { inr } from "../lib/format";
@@ -75,6 +75,8 @@ export default function Staff() {
           no WhatsApp number — they will be skipped silently until one is added.
         </Card>
       )}
+
+      <ReportHealth refreshKey={busy} />
 
       <Table
         rowKey="staffId"
@@ -209,5 +211,87 @@ function StaffDrawer({ row, onClose, onSaved }) {
         <Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field>
       </div>
     </Drawer>
+  );
+}
+
+/**
+ * Why a report slot failed.
+ *
+ * Daily reports go to staff, so they carry no leadId — which excludes them from
+ * the WhatsApp inbox AND the Sent box. Before this panel a failed EOD report was
+ * completely invisible in the app: the only symptom was that nobody's phone
+ * buzzed.
+ */
+function ReportHealth({ refreshKey }) {
+  const [d, setD] = useState(null);
+  const load = useCallback(() => {
+    get("/integrations/botspace/report-status").then(setD).catch(() => setD(null));
+  }, []);
+  useEffect(() => { load(); }, [load, refreshKey]);
+
+  if (!d) return null;
+  const slots = [["morning", "Morning"], ["eod", "EOD"]];
+
+  return (
+    <Card className="p-5 mb-6" data-testid="report-health">
+      <div className="flex items-center gap-2 mb-1">
+        <BarChart3 size={16} className="text-cobalt" />
+        <h3 className="font-heading font-bold text-ink">Daily report health</h3>
+      </div>
+      <p className="text-xs text-ink-soft mb-4">
+        Reports are staff messages, so they never appear in the WhatsApp inbox. This is
+        where a failed send shows up.
+      </p>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        {slots.map(([key, label]) => {
+          const s = d.slots?.[key];
+          const last = s?.lastRun;
+          const fails = s?.failures || [];
+          const ok = last && !fails.length && last.sent > 0;
+          return (
+            <div key={key} className="rounded-xl ring-1 ring-line p-4" data-testid={`report-slot-${key}`}>
+              <div className="flex items-center gap-2 mb-1">
+                {ok ? <CheckCircle2 size={15} className="text-emerald-600" />
+                  : <AlertTriangle size={15} className="text-amber-600" />}
+                <span className="font-semibold text-ink">{label}</span>
+              </div>
+              {!s?.everRan ? (
+                <p className="text-xs text-ink-faint">Has never run.</p>
+              ) : (
+                <p className="text-xs text-ink-soft">
+                  Last run {last.day} · <b>{last.sent} sent</b>
+                  {last.failed ? <span className="text-red-600"> · {last.failed} failed</span> : null}
+                </p>
+              )}
+
+              {fails.map((f, i) => (
+                <div key={i} className="mt-3 rounded-lg bg-red-50 ring-1 ring-red-200 p-2.5">
+                  <div className="text-xs font-semibold text-red-900">
+                    {f.name} · template <span className="font-mono">{f.templateId}</span>
+                  </div>
+                  {f.hint && <div className="text-xs text-red-800 mt-1">{f.hint}</div>}
+                  {f.error && (
+                    <div className="text-[11px] font-mono text-red-700/80 mt-1 break-all">{f.error}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 pt-3 border-t border-line">
+        <div className="text-xs text-ink-soft mb-2">Templates in use — each must be approved on Meta under this exact name:</div>
+        <div className="grid sm:grid-cols-2 gap-x-6 gap-y-1">
+          {Object.entries(d.templates || {}).map(([kind, t]) => (
+            <div key={kind} className="flex items-baseline justify-between text-xs">
+              <span className="font-mono text-ink">{t.templateId}</span>
+              <span className="text-ink-faint">{t.recipients} recipient{t.recipients === 1 ? "" : "s"}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Card>
   );
 }
