@@ -313,6 +313,51 @@ Open the app for the full breakdown.
 
 ---
 
+## If a report says "not delivered to maintain healthy ecosystem engagement"
+
+This is Meta error **131049**, and it is not a rejection — Meta **accepted** the
+send, returned success, and then refused to deliver it. That is why the app
+originally reported these as sent.
+
+**It is the per-user marketing frequency cap, and it applies only to
+MARKETING-category templates.** Utility templates are not subject to it. So
+seeing this error means Meta has categorised that template as **Marketing**,
+regardless of the category requested when it was submitted — Meta
+auto-categorises from the body text and its decision overrides yours.
+
+It also explains why the morning report kept working while every EOD report
+failed: `exec_day_ahead` reads as an operational task list and was categorised
+Utility, while the EOD bodies read as business/performance summaries and were
+categorised Marketing.
+
+### The fix, in order of preference
+
+1. **Get the category changed.** WhatsApp Manager → Message Templates → open the
+   template → check **Category**. If it says Marketing, request Utility. Meta
+   allows a category appeal; if it is refused, delete the template and re-create
+   it with wording that reads as an account/status update rather than a
+   performance summary — avoid superlatives, rankings and anything that sounds
+   promotional. "Top today: …" is the kind of line that pushes a body into
+   Marketing.
+
+2. **Have each recipient reply once.** The app now sends a report as a plain
+   **session message** whenever the recipient's 24-hour window is open. A session
+   message is not a template at all, so it has no category and the cap cannot
+   touch it. Anyone who replies to their morning report keeps the window open
+   through the evening one. This works today with no Meta changes.
+
+3. **Read it in the app.** Every report is also a page:
+   `/reports/daily/owner`, `/reports/daily/manager`,
+   `/reports/daily/executive/{name}`. The WhatsApp copy is a convenience, not
+   the only route to the numbers.
+
+**Diagnosing it:** Staff & Reports → *Daily report health* shows the last run per
+slot, the template each report used, and Meta's verbatim reason against each
+recipient. Reports carry no leadId, so they never appear in the WhatsApp Inbox
+or the Sent box — that panel is where they surface.
+
+---
+
 ## Scheduling — read this before going live
 
 The in-process ticker only fires if the API happens to be awake in the right

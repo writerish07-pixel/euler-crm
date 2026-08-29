@@ -41,6 +41,11 @@ MODEL_ASK_COOLOFF_DAYS = 45
 # Slots the daily scheduler fires. Times are IST hours, overridable from settings.
 REPORT_SLOTS = {"morning": 8, "eod": 20}
 
+# Messages sent to our own people, not to customers. They carry no leadId, so
+# they are kept out of the customer inbox — and they are the sends whose
+# failures had nowhere to surface.
+STAFF_KINDS = {"finance_exec", "exec_morning", "exec_eod", "manager_eod", "owner_eod"}
+
 FOLLOWUP_STATUSES = {"new", "contacted", "follow-up", "follow up", "in progress"}
 STOP_WORDS = {"stop", "unsubscribe", "रोकें", "रोक दो", "बंद"}
 MAX_FINANCE_PINGS = 3
@@ -333,7 +338,7 @@ async def _store_message(lead: dict, *, direction: str, kind: str, text: str,
         "templateId": template_id,
         "providerId": provider_id,
         "createdAt": datetime.now(timezone.utc).isoformat(),
-        "audience": "executive" if kind == "finance_exec" else "customer",
+        "audience": "executive" if kind in STAFF_KINDS else "customer",
     }
     if extra:
         doc.update(extra)
@@ -952,16 +957,79 @@ def _target_line(done, target, pct) -> str:
     return _one_line(f"{done} of {int(target)} ({pct if pct is not None else 0}%)")
 
 
-async def _send_report(staff: dict, kind: str, variables: list, text: str) -> dict:
+async def _staff_by_phone(phone) -> Optional[dict]:
+    d = digits10(phone)
+    if len(d) != 10:
+        return None
+    return await _db().staff.find_one({"mobile": {"$regex": f"{d}$"}})
+
+
+async def _record_report_delivery_failure(provider_id: str, reason: str):
+    """Stamp a post-accept delivery failure onto today's report run.
+
+    Meta accepts a report send, returns 200, and only later refuses to deliver it
+    (the marketing frequency cap does exactly this). Without writing that back,
+    the run marker keeps claiming the report was sent.
+    """
+    db = _db()
+    msg = await db.whatsapp_messages.find_one({"providerId": provider_id})
+    if not msg or msg.get("audience") != "executive":
+        return
+    kind = msg.get("kind") or ""
+    slot = "morning" if kind.endswith("_morning") else "eod"
+    marker_id = f"report_{slot}_{str(msg.get('createdAt') or '')[:10]}"
+    marker = await db.settings.find_one({"_id": marker_id})
+    if not marker:
+        return
+    recipients, changed = marker.get("recipients") or [], False
+    for r in recipients:
+        if r.get("kind") == kind and digits10(r.get("mobile")) == digits10(msg.get("phone")):
+            r["ok"] = False
+            r["error"] = reason[:400]
+            r["deliveryFailed"] = True
+            changed = True
+    if changed:
+        await db.settings.update_one({"_id": marker_id}, {"$set": {
+            "recipients": recipients,
+            "sent": sum(1 for r in recipients if r.get("ok")),
+            "failed": sum(1 for r in recipients if not r.get("ok")),
+        }})
+
+
+async def _send_report(staff: dict, kind: str, variables: list, text: str,
+                       body_text: str = "") -> dict:
     """Staff report send. customer_hours=False — an EOD report at 20:00 is not
-    a customer marketing message and must not be deferred to the outbox."""
+    a customer marketing message and must not be deferred to the outbox.
+
+    Prefers a free-form session message when the recipient's 24-hour window is
+    open. That is not merely cheaper: a session message is not a template, so it
+    carries no Meta category and is not subject to the marketing frequency cap
+    that silently drops report templates ("not delivered to maintain healthy
+    ecosystem engagement"). Staff who reply to any message keep the window open.
+    """
     who = {"leadId": "", "customerName": staff.get("name") or "Team",
            "mobile": staff.get("mobile"), "executive": staff.get("name")}
     cfg = await get_config()
+    phone = staff.get("mobile")
+
+    if body_text and session_open(staff.get("whatsappLastInboundAt")):
+        try:
+            res = await send_session_text(phone, body_text, name=staff.get("name") or "")
+            if res.get("ok"):
+                await _store_message(
+                    who, direction="outbound", kind=kind, text=body_text, phone=phone,
+                    status="accepted", extra={"audience": "executive", "viaSession": True,
+                                              "providerId": ""})
+                return {**res, "session": True}
+            # Session send refused (window actually closed) — fall through to the
+            # template rather than dropping the report.
+        except Exception:
+            logger.exception("session report send failed %s %s", kind, staff.get("name"))
+
     return await _enqueue_or_send(
-        lead=who, kind=kind, phone=staff.get("mobile"),
+        lead=who, kind=kind, phone=phone,
         template_id=cfg["templates"].get(kind_to_template(kind), kind),
-        variables=variables, text=text, customer_hours=False)
+        variables=variables, text=body_text or text, customer_hours=False)
 
 
 def kind_to_template(kind: str) -> str:
@@ -985,9 +1053,9 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
     data = await server._daily_report_data()
     sent, failed, recipients = 0, 0, []
 
-    async def deliver(staff, kind, variables, text):
+    async def deliver(staff, kind, variables, text, body_text=""):
         nonlocal sent, failed
-        res = await _send_report(staff, kind, variables, text)
+        res = await _send_report(staff, kind, variables, text, body_text)
         # The provider's own words. Without this a failed report is a bare "not
         # sent" — and the report messages carry no leadId, so they never appear
         # in the Sent box either. There was nowhere at all to read the reason.
@@ -996,6 +1064,7 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
             "mobile": digits10(staff.get("mobile")),
             "templateId": cfg["templates"].get(kind_to_template(kind), kind),
             "variableCount": len(variables),
+            "viaSession": bool(res.get("ok") and res.get("session")),
             "error": "" if res.get("ok") else str(res.get("error") or res.get("reason") or "")[:400],
         })
         if res.get("ok"):
@@ -1015,7 +1084,14 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
                 _inr(e["pendingCollection"]),
                 _one_line(e["followupsDue"]),
                 _one_line(e["followupsOverdue"]),
-            ], f"Day ahead {today_s} for {e['name']}")
+            ], f"Day ahead {today_s} for {e['name']}", "\n".join([
+                f"Good morning {e['name']}.", "",
+                f"Pending deliveries: {e['pendingBookings']}",
+                f"To collect: Rs {_inr(e['pendingCollection'])}",
+                f"Follow-ups due today: {e['followupsDue']}",
+                f"Overdue follow-ups: {e['followupsOverdue']}", "",
+                "Open the app for the customer list.",
+            ]))
     elif slot == "eod":
         for st in await server._staff_for_report("exec_eod"):
             e = next((x for x in data["executives"]
@@ -1028,7 +1104,15 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
                 _one_line(e["bookingsMtd"]),
                 _target_line(e["deliveriesMtd"], e["monthlyTarget"], e.get("attainmentPct")),
                 _one_line(e["followupsOverdue"]),
-            ], f"EOD {today_s} for {e['name']}")
+            ], f"EOD {today_s} for {e['name']}", "\n".join([
+                f"Day close for {e['name']}.", "",
+                f"Bookings today: {e['bookingsToday']}",
+                f"Bookings this month: {e['bookingsMtd']}",
+                f"Deliveries this month: "
+                f"{_target_line(e['deliveriesMtd'], e['monthlyTarget'], e.get('attainmentPct'))}",
+                f"Overdue follow-ups: {e['followupsOverdue']}", "",
+                "Open the app for the full list.",
+            ]))
 
         for st in await server._staff_for_report("manager_eod"):
             await deliver(st, "manager_eod", [
@@ -1036,7 +1120,14 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
                 _one_line(data["bookingsToday"]), _one_line(data["bookingsMtd"]),
                 _one_line(data["deliveriesToday"]), _one_line(data["deliveriesMtd"]),
                 _top_line(data["topExecutives"]),
-            ], f"Manager EOD {today_s}")
+            ], f"Manager EOD {today_s}", "\n".join([
+                f"Euler team EOD - {today_s}", "",
+                f"Bookings today: {data['bookingsToday']} | Month: {data['bookingsMtd']}",
+                f"Deliveries today: {data['deliveriesToday']}",
+                f"Deliveries this month: {data['deliveriesMtd']}",
+                f"Top today: {_top_line(data['topExecutives'])}", "",
+                "Open the app for the executive-wise list.",
+            ]))
 
         for st in await server._staff_for_report("owner_eod"):
             await deliver(st, "owner_eod", [
@@ -1048,7 +1139,20 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
                 _inr(data["customerOutstanding"]),
                 _one_line(f'{_inr(data["financePendingAmount"])} ({data["financePendingFiles"]} files)'),
                 _top_line(data["topExecutives"]),
-            ], f"Owner EOD {today_s}")
+            ], f"Owner EOD {today_s}", "\n".join([
+                f"Euler CRM - EOD {today_s}", "",
+                f"Bookings today: {data['bookingsToday']} | Month: {data['bookingsMtd']}",
+                f"Deliveries today: {data['deliveriesToday']}",
+                f"Deliveries this month: "
+                f"{_target_line(data['deliveriesMtd'], data['targetUnits'], data.get('attainmentPct'))}",
+                "",
+                f"Revenue this month: Rs {_inr(data['revenueMtd'])}",
+                f"Customer outstanding: Rs {_inr(data['customerOutstanding'])}",
+                f"Finance pending: Rs {_inr(data['financePendingAmount'])} "
+                f"({data['financePendingFiles']} files)",
+                f"Top today: {_top_line(data['topExecutives'])}", "",
+                "Open the app for the full breakdown.",
+            ]))
     else:
         return {"ok": False, "reason": f"unknown slot '{slot}'", "sent": 0}
 
@@ -1074,6 +1178,18 @@ def diagnose_report_failure(error: str) -> str:
     e = str(error or "").lower()
     if not e:
         return ""
+    # Meta ACCEPTS the send, then refuses to deliver it. This is the per-user
+    # marketing frequency cap, and it only applies to MARKETING-category
+    # templates — so seeing it means Meta has categorised this report as
+    # Marketing, whatever category was requested when it was submitted.
+    if "healthy ecosystem" in e or "131049" in e or "not delivered to maintain" in e:
+        return ("Meta accepted this then blocked delivery under its marketing frequency "
+                "cap, which applies ONLY to Marketing-category templates — so this report "
+                "is categorised Marketing on Meta, not Utility. Fix it in WhatsApp Manager: "
+                "open the template, check Category, and request Utility (or delete and "
+                "re-create it as Utility). Until then, have the recipient reply once to any "
+                "message — the app then sends their report as a plain session message, which "
+                "carries no category and is not capped.")
     if "132000" in e or "number of parameters" in e or "mismatch" in e:
         return ("The template on Meta expects a different number of variables than the app "
                 "sends. Compare it against docs/whatsapp-meta-templates.md.")
@@ -1165,21 +1281,44 @@ async def handle_webhook(body: dict) -> dict:
             phone = f"{cc}{phone}"
     else:
         phone = str(phone_obj or body.get("mobile") or "")
-    lead = await find_euler_lead_by_phone(phone)
-    if not lead:
-        return {"ok": True, "ignored": True, "reason": "not-euler-lead"}
-
-    if event in {"delivery-update", "delivery-event"} or body.get("status") in {"SENT", "READ", "DELIVERED", "FAILED"}:
+    # Delivery status FIRST, before the lead lookup. A daily report goes to a
+    # staff number, which is not a lead — so its delivery failure used to be
+    # dropped here as "not-euler-lead" and the reason never reached the app.
+    # Meta reports a post-accept block (e.g. the marketing frequency cap) only
+    # on this callback, so dropping it hid the single most useful signal.
+    is_status = (event in {"delivery-update", "delivery-event"}
+                 or body.get("status") in {"SENT", "READ", "DELIVERED", "FAILED"})
+    if is_status:
         pid = str(body.get("id") or "")
         status = str(body.get("status") or "").lower() or "updated"
+        reason = str(body.get("failedReason") or body.get("reason") or "")
         db = _db()
+        matched = 0
         if pid:
-            await db.whatsapp_messages.update_one(
+            res = await db.whatsapp_messages.update_one(
                 {"providerId": pid},
                 {"$set": {"status": status, "deliveryAt": datetime.now(timezone.utc).isoformat(),
-                          "failedReason": body.get("failedReason") or ""}},
+                          "failedReason": reason}},
             )
-        return {"ok": True, "leadId": lead.get("leadId"), "event": "delivery"}
+            matched = res.matched_count
+            if status == "failed" and reason:
+                await _record_report_delivery_failure(pid, reason)
+        lead = await find_euler_lead_by_phone(phone)
+        return {"ok": True, "event": "delivery", "status": status,
+                "leadId": (lead or {}).get("leadId", ""), "matched": matched}
+
+    lead = await find_euler_lead_by_phone(phone)
+    if not lead:
+        # Not a customer — but it may be one of our own staff replying, which
+        # opens their 24-hour session and lets the next report go as plain text
+        # instead of a template.
+        staff = await _staff_by_phone(phone)
+        if staff:
+            await _db().staff.update_one(
+                {"staffId": staff["staffId"]},
+                {"$set": {"whatsappLastInboundAt": datetime.now(timezone.utc).isoformat()}})
+            return {"ok": True, "staff": staff.get("name"), "sessionOpened": True}
+        return {"ok": True, "ignored": True, "reason": "not-euler-lead"}
 
     payload = body.get("payload") or {}
     text = _payload_text(payload) or _payload_text(body)
