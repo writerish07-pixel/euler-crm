@@ -194,68 +194,69 @@ Open the app for the customer list.
 
 ---
 
-## F. `exec_eod_scorecard`
+## F. `exec_eod_statement` (replaces `exec_eod_scorecard`)
 
 | Field | Value |
 |---|---|
-| Category | **Utility** |
+| Category | **Utility** — see the note below |
 | Language | English (`en`) |
-| Name | `exec_eod_scorecard` |
+| Name | `exec_eod_statement` |
 | Sent | every executive, 20:00 IST |
 
 **Body**
 ```
-Today's numbers for {{1}}.
+Daily activity summary for {{1}}, dated {{2}}.
 
-Bookings today: {{2}}
-Bookings this month: {{3}}
-Deliveries this month: {{4}}
-Follow-ups still overdue: {{5}}
+Bookings recorded today: {{3}}
+Bookings recorded this month: {{4}}
+Deliveries completed this month: {{5}}
+Follow-ups past their due date: {{6}}
 
-Open the app for details.
+Open the Euler CRM app to view these records.
 ```
 
 | Variable | Meaning | Sample |
 |---|---|---|
 | {{1}} | Executive name | Amit |
-| {{2}} | Bookings dated today | 2 |
-| {{3}} | Bookings MTD | 11 |
-| {{4}} | Deliveries MTD vs target | 8 of 10 (80.0%) |
-| {{5}} | Overdue follow-ups | 1 |
+| {{2}} | Statement date | 2026-08-27 |
+| {{3}} | Bookings dated today | 2 |
+| {{4}} | Bookings MTD | 11 |
+| {{5}} | Deliveries MTD vs target | 8 of 10 (80.0%) |
+| {{6}} | Overdue follow-ups | 1 |
 
-> {{4}} carries the target inline when one is set on the staff master, and just
+> {{5}} carries the target inline when one is set on the staff master, and just
 > the count when it is not — a single variable either way.
 
 ---
 
-## G. `manager_eod_volume`
+## G. `manager_eod_statement` (replaces `manager_eod_volume`)
 
 | Field | Value |
 |---|---|
 | Category | **Utility** |
 | Language | English (`en`) |
-| Name | `manager_eod_volume` |
+| Name | `manager_eod_statement` |
 | Sent | every RM and ASM, 20:00 IST |
 
 **Body**
 ```
-Euler CRM - EOD {{1}}
+Daily activity summary for the dealership, dated {{1}}.
 
-Bookings today: {{2}} | Month: {{3}}
-Deliveries today: {{4}} | Month: {{5}}
-Top today: {{6}}
+Bookings recorded today: {{2}}
+Bookings recorded this month: {{3}}
+Deliveries completed today: {{4}}
+Deliveries completed this month: {{5}}
 
-Open the app for the full list.
+Open the Euler CRM app for the executive-wise records.
 ```
 
 | Variable | Meaning | Sample |
 |---|---|---|
-| {{1}} | Date | 2026-08-26 |
+| {{1}} | Statement date | 2026-08-27 |
 | {{2}} | Bookings today | 4 |
 | {{3}} | Bookings MTD | 37 |
 | {{4}} | Deliveries today | 3 |
 | {{5}} | Deliveries MTD | 29 |
-| {{6}} | Top 3 executives, one line | Amit (2), Sanjay (1) |
 
 > **No money in this template, by design.** Revenue, customer outstanding and
 > finance amounts are owner-only; `/api/reports/daily/manager` strips them
@@ -263,53 +264,84 @@ Open the app for the full list.
 
 ---
 
-## H. `owner_eod_summary`
+## H. `owner_eod_statement` (replaces `owner_eod_summary`)
 
 | Field | Value |
 |---|---|
 | Category | **Utility** |
 | Language | English (`en`) |
-| Name | `owner_eod_summary` |
+| Name | `owner_eod_statement` |
 | Sent | owner, 20:00 IST |
 
 **Body**
 ```
-Euler CRM - EOD {{1}}
+Daily account statement for the dealership, dated {{1}}.
 
-Bookings today: {{2}} | Month: {{3}}
-Deliveries today: {{4}}
-Deliveries this month: {{5}}
+Bookings recorded today: {{2}}
+Bookings recorded this month: {{3}}
+Deliveries completed today: {{4}}
+Deliveries completed this month: {{5}}
 
-Revenue this month: Rs {{6}}
-Customer outstanding: Rs {{7}}
-Finance pending: Rs {{8}}
-Top today: {{9}}
+Billed value this month: Rs {{6}}
+Amount receivable from customers: Rs {{7}}
+Amount receivable from financers: Rs {{8}}
 
-Open the app for the full breakdown.
+Open the Euler CRM app for the record-wise statement.
 ```
 
 | Variable | Meaning | Sample |
 |---|---|---|
-| {{1}} | Date | 2026-08-26 |
+| {{1}} | Statement date | 2026-08-27 |
 | {{2}} | Bookings today | 4 |
 | {{3}} | Bookings MTD | 37 |
 | {{4}} | Deliveries today | 3 |
 | {{5}} | Deliveries MTD vs target | 29 of 40 (72.5%) |
-| {{6}} | Retail value delivered MTD | 1,84,50,000 |
-| {{7}} | Open customer outstanding | 21,40,000 |
+| {{6}} | Value billed MTD | 1,84,50,000 |
+| {{7}} | Open customer receivable | 21,40,000 |
 | {{8}} | Financer money not yet received | 12,40,000 (6 files) |
-| {{9}} | Top 3 executives, one line | Amit (2), Sanjay (1) |
 
-**Button (URL):** `Open dashboard` → your app URL
-
-> **Revenue** = customer payable on vehicles retailed this month, i.e. what you
-> sold. Cash actually collected is a different number (`collectedMtd` on
-> `/api/reports/daily/owner`); say the word if you would rather the message
-> carried that instead.
+> **Billed value** = customer payable on vehicles retailed this month. Cash
+> actually collected is a different number (`collectedMtd` on
+> `/api/reports/daily/owner`).
 >
 > The per-financer split cannot be a variable (it is a list). {{8}} carries the
 > total and file count; the Finance Register's "By financer" card has the
 > breakdown.
+
+---
+
+## Why these three were rewritten, and what changed
+
+The originals were categorised **Marketing** by Meta and hit the per-user
+marketing frequency cap — accepted, then not delivered. Meta categorises from
+the body text and its decision overrides the category you pick at submission, so
+the body had to change.
+
+**Submit these under the NEW names.** A template already classified Marketing
+keeps that classification; editing it re-opens review but starts from a body Meta
+has already judged. New names get a clean assessment. Leave the old three in
+place until the new ones are approved — the app will simply use whichever names
+are configured.
+
+`exec_day_ahead` is **not** changed. It was categorised Utility and delivers, and
+the reason is instructive: it reads as a task list ("pending deliveries",
+"follow-ups due"), not as a performance report.
+
+What changed, and why each thing matters:
+
+| Change | Reason |
+|---|---|
+| **The "Top today" leaderboard is gone** | A ranking of people is the strongest Marketing signal in these bodies. It is still on the report pages, which have no category to lose. |
+| Opens "Daily activity summary / account statement … dated {{n}}" | Meta names *recurring billing statements* as Utility. A dated statement for a named account reads that way; "Euler CRM - EOD" reads as a branded broadcast. |
+| "Revenue" → "Billed value" | Account-ledger language rather than business-performance language. |
+| "Customer outstanding" → "Amount receivable from customers" | Same reason, and it is plainer English. |
+| "Finance pending" → "Amount receivable from financers" | Same. |
+| Neutral closing line, no exclamation, no promotional verb | "Open the app for the full breakdown" is fine; anything urging action is not. |
+
+**No guarantee.** Meta's categoriser is not published and not deterministic. This
+removes the signals that are known to push a body into Marketing, but if a
+template still comes back Marketing, appeal the category in WhatsApp Manager, and
+use the session-message route below in the meantime.
 
 ---
 
