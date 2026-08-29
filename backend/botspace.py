@@ -964,8 +964,16 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
     async def deliver(staff, kind, variables, text):
         nonlocal sent, failed
         res = await _send_report(staff, kind, variables, text)
-        recipients.append({"name": staff.get("name"), "kind": kind,
-                           "ok": bool(res.get("ok"))})
+        # The provider's own words. Without this a failed report is a bare "not
+        # sent" — and the report messages carry no leadId, so they never appear
+        # in the Sent box either. There was nowhere at all to read the reason.
+        recipients.append({
+            "name": staff.get("name"), "kind": kind, "ok": bool(res.get("ok")),
+            "mobile": digits10(staff.get("mobile")),
+            "templateId": cfg["templates"].get(kind_to_template(kind), kind),
+            "variableCount": len(variables),
+            "error": "" if res.get("ok") else str(res.get("error") or res.get("reason") or "")[:400],
+        })
         if res.get("ok"):
             sent += 1
         else:
@@ -1026,6 +1034,81 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
     }}, upsert=True)
     return {"ok": True, "slot": slot, "day": today_s, "sent": sent,
             "failed": failed, "recipients": recipients}
+
+
+# Provider wording that means "this template is not usable", which is by far the
+# most common reason a report slot fails while another slot on the same numbers
+# and the same code path succeeds.
+_TEMPLATE_ERROR_HINTS = (
+    "template", "not found", "not approved", "does not exist", "rejected",
+    "pending", "disabled", "paused", "132001", "132000", "132012",
+)
+
+
+def diagnose_report_failure(error: str) -> str:
+    """Turn a provider error into the thing the owner has to go and do."""
+    e = str(error or "").lower()
+    if not e:
+        return ""
+    if "132000" in e or "number of parameters" in e or "mismatch" in e:
+        return ("The template on Meta expects a different number of variables than the app "
+                "sends. Compare it against docs/whatsapp-meta-templates.md.")
+    if any(h in e for h in _TEMPLATE_ERROR_HINTS):
+        return ("This template is not approved and active on Meta under this exact name. "
+                "Check its status in the WhatsApp Manager — a rejected or still-pending "
+                "template cannot be sent, and the name must match character for character.")
+    if "24" in e and "window" in e:
+        return "Outside the 24-hour session window — this send needs an approved template."
+    if "phone" in e or "recipient" in e:
+        return "The recipient's WhatsApp number was not accepted. Check it on Staff & Reports."
+    if "auth" in e or "401" in e or "403" in e:
+        return "BotSpace rejected the credentials. Re-check the API key and Channel ID."
+    return ""
+
+
+async def report_status(days: int = 7) -> dict:
+    """What actually happened on the last report runs, and why anything failed.
+
+    Reports are staff messages with no leadId, so they are excluded from the
+    WhatsApp inbox and the Sent box by design — which left no way to see a
+    failure. This is that way.
+    """
+    db = _db()
+    cfg = await get_config()
+    import server
+    out = {"configured": cfg["enabled"], "slots": {}, "templates": {}, "generatedAt":
+           datetime.now(timezone.utc).isoformat()}
+    for kind, key in (("exec_morning", "execMorning"), ("exec_eod", "execEod"),
+                      ("manager_eod", "managerEod"), ("owner_eod", "ownerEod")):
+        out["templates"][kind] = {
+            "templateId": cfg["templates"].get(key, DEFAULT_TEMPLATES[key]),
+            "recipients": len(await server._staff_for_report(kind)),
+        }
+
+    for slot in ("morning", "eod"):
+        runs = []
+        for row in await db.settings.find(
+                {"_id": {"$regex": f"^report_{slot}_"}}).to_list(400):
+            runs.append({
+                "day": row.get("day") or str(row.get("_id", ""))[-10:],
+                "sentAt": row.get("sentAt"), "sent": row.get("sent", 0),
+                "failed": row.get("failed", 0),
+                "recipients": row.get("recipients") or [],
+            })
+        runs.sort(key=lambda r: str(r.get("day") or ""), reverse=True)
+        runs = runs[:days]
+        last = runs[0] if runs else None
+        failures = []
+        if last:
+            for r in last["recipients"]:
+                if r.get("ok"):
+                    continue
+                failures.append({**r, "hint": diagnose_report_failure(r.get("error"))})
+        out["slots"][slot] = {
+            "lastRun": last, "failures": failures, "history": runs,
+            "everRan": bool(runs),
+        }
+    return out
 
 
 async def run_daily_jobs(today_s: Optional[str] = None) -> dict:
