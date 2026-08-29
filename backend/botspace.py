@@ -25,10 +25,16 @@ DEFAULT_TEMPLATES = {
     "finance": "finance_overdue_exec",
     # Internal daily reports (English, Utility category). Staff messages, so they
     # bypass customer quiet hours.
+    # exec_day_ahead is categorised Utility by Meta and delivers, so it is left
+    # alone. The three EOD bodies were categorised MARKETING — Meta decides from
+    # the text, and its decision overrides the category requested at submission —
+    # which put them under the marketing frequency cap and stopped delivery.
+    # Rewritten as dated account statements under NEW names, because a template
+    # already classified Marketing keeps that classification.
     "execMorning": "exec_day_ahead",
-    "execEod": "exec_eod_scorecard",
-    "managerEod": "manager_eod_volume",
-    "ownerEod": "owner_eod_summary",
+    "execEod": "exec_eod_statement",
+    "managerEod": "manager_eod_statement",
+    "ownerEod": "owner_eod_statement",
     # MARKETING category, unlike everything above it. Asks a lead with no model
     # recorded which vehicle they are interested in.
     "modelAsk": "lead_model_interest",
@@ -1100,33 +1106,36 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
                 continue
             await deliver(st, "exec_eod", [
                 _one_line(e["name"]),
+                _one_line(today_s),
                 _one_line(e["bookingsToday"]),
                 _one_line(e["bookingsMtd"]),
                 _target_line(e["deliveriesMtd"], e["monthlyTarget"], e.get("attainmentPct")),
                 _one_line(e["followupsOverdue"]),
             ], f"EOD {today_s} for {e['name']}", "\n".join([
-                f"Day close for {e['name']}.", "",
-                f"Bookings today: {e['bookingsToday']}",
-                f"Bookings this month: {e['bookingsMtd']}",
-                f"Deliveries this month: "
+                f"Daily activity summary for {e['name']}, dated {today_s}.", "",
+                f"Bookings recorded today: {e['bookingsToday']}",
+                f"Bookings recorded this month: {e['bookingsMtd']}",
+                f"Deliveries completed this month: "
                 f"{_target_line(e['deliveriesMtd'], e['monthlyTarget'], e.get('attainmentPct'))}",
-                f"Overdue follow-ups: {e['followupsOverdue']}", "",
-                "Open the app for the full list.",
+                f"Follow-ups past their due date: {e['followupsOverdue']}", "",
+                "Open the Euler CRM app to view these records.",
             ]))
 
         for st in await server._staff_for_report("manager_eod"):
+            # The executive leaderboard is gone from the template on purpose: a
+            # ranking is the single strongest Marketing signal in these bodies.
+            # It stays on the report page, which has no category to lose.
             await deliver(st, "manager_eod", [
                 _one_line(today_s),
                 _one_line(data["bookingsToday"]), _one_line(data["bookingsMtd"]),
                 _one_line(data["deliveriesToday"]), _one_line(data["deliveriesMtd"]),
-                _top_line(data["topExecutives"]),
             ], f"Manager EOD {today_s}", "\n".join([
-                f"Euler team EOD - {today_s}", "",
-                f"Bookings today: {data['bookingsToday']} | Month: {data['bookingsMtd']}",
-                f"Deliveries today: {data['deliveriesToday']}",
-                f"Deliveries this month: {data['deliveriesMtd']}",
-                f"Top today: {_top_line(data['topExecutives'])}", "",
-                "Open the app for the executive-wise list.",
+                f"Daily activity summary for the dealership, dated {today_s}.", "",
+                f"Bookings recorded today: {data['bookingsToday']}",
+                f"Bookings recorded this month: {data['bookingsMtd']}",
+                f"Deliveries completed today: {data['deliveriesToday']}",
+                f"Deliveries completed this month: {data['deliveriesMtd']}", "",
+                "Open the Euler CRM app for the executive-wise records.",
             ]))
 
         for st in await server._staff_for_report("owner_eod"):
@@ -1138,20 +1147,19 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
                 _inr(data["revenueMtd"]),
                 _inr(data["customerOutstanding"]),
                 _one_line(f'{_inr(data["financePendingAmount"])} ({data["financePendingFiles"]} files)'),
-                _top_line(data["topExecutives"]),
             ], f"Owner EOD {today_s}", "\n".join([
-                f"Euler CRM - EOD {today_s}", "",
-                f"Bookings today: {data['bookingsToday']} | Month: {data['bookingsMtd']}",
-                f"Deliveries today: {data['deliveriesToday']}",
-                f"Deliveries this month: "
+                f"Daily account statement for the dealership, dated {today_s}.", "",
+                f"Bookings recorded today: {data['bookingsToday']}",
+                f"Bookings recorded this month: {data['bookingsMtd']}",
+                f"Deliveries completed today: {data['deliveriesToday']}",
+                f"Deliveries completed this month: "
                 f"{_target_line(data['deliveriesMtd'], data['targetUnits'], data.get('attainmentPct'))}",
                 "",
-                f"Revenue this month: Rs {_inr(data['revenueMtd'])}",
-                f"Customer outstanding: Rs {_inr(data['customerOutstanding'])}",
-                f"Finance pending: Rs {_inr(data['financePendingAmount'])} "
-                f"({data['financePendingFiles']} files)",
-                f"Top today: {_top_line(data['topExecutives'])}", "",
-                "Open the app for the full breakdown.",
+                f"Billed value this month: Rs {_inr(data['revenueMtd'])}",
+                f"Amount receivable from customers: Rs {_inr(data['customerOutstanding'])}",
+                f"Amount receivable from financers: Rs {_inr(data['financePendingAmount'])} "
+                f"({data['financePendingFiles']} files)", "",
+                "Open the Euler CRM app for the record-wise statement.",
             ]))
     else:
         return {"ok": False, "reason": f"unknown slot '{slot}'", "sent": 0}

@@ -7,9 +7,9 @@ master holds name, mobile, role, target and report subscriptions in one place.
 
 Reports (English, Utility templates):
   morning -> exec_day_ahead        each executive
-  eod     -> exec_eod_scorecard    each executive
-             manager_eod_volume    RM + ASM, volume only, NO money
-             owner_eod_summary     owner, volume + money
+  eod     -> exec_eod_statement     each executive
+             manager_eod_statement  RM + ASM, volume only, NO money
+             owner_eod_statement    owner, volume + money
 
 The hard constraint throughout: a WhatsApp template variable may not contain a
 newline, tab, or 4+ consecutive spaces — Meta rejects the send. Every variable
@@ -301,8 +301,8 @@ async def test_eod_slot_messages_execs_manager_and_owner(wired):
     for s in sends:
         by_kind.setdefault(s["kind"], []).append(s)
     assert set(by_kind) == {"exec_eod", "manager_eod", "owner_eod"}
-    assert by_kind["manager_eod"][0]["template"] == "manager_eod_volume"
-    assert by_kind["owner_eod"][0]["template"] == "owner_eod_summary"
+    assert by_kind["manager_eod"][0]["template"] == "manager_eod_statement"
+    assert by_kind["owner_eod"][0]["template"] == "owner_eod_statement"
 
 
 @pytest.mark.asyncio
@@ -372,7 +372,7 @@ async def test_unknown_slot_is_rejected(wired):
 # WhatsApp inbox AND the Sent box, and the run marker recorded only ok/not-ok.
 def test_a_template_error_is_translated_into_an_action():
     for err in ("BotSpace 400: template not found",
-                "Template exec_eod_scorecard is not approved",
+                "Template exec_eod_statement is not approved",
                 "error 132001 template does not exist"):
         hint = wa.diagnose_report_failure(err)
         assert "approved and active on Meta" in hint, err
@@ -398,9 +398,9 @@ async def test_report_status_names_the_template_behind_every_report(client):
     d = (await client.get("/api/integrations/botspace/report-status")).json()
     # The template a send actually uses, so a mismatch with Meta is visible.
     assert d["templates"]["exec_morning"]["templateId"] == "exec_day_ahead"
-    assert d["templates"]["exec_eod"]["templateId"] == "exec_eod_scorecard"
-    assert d["templates"]["manager_eod"]["templateId"] == "manager_eod_volume"
-    assert d["templates"]["owner_eod"]["templateId"] == "owner_eod_summary"
+    assert d["templates"]["exec_eod"]["templateId"] == "exec_eod_statement"
+    assert d["templates"]["manager_eod"]["templateId"] == "manager_eod_statement"
+    assert d["templates"]["owner_eod"]["templateId"] == "owner_eod_statement"
     assert "morning" in d["slots"] and "eod" in d["slots"]
 
 
@@ -413,10 +413,10 @@ async def test_report_status_surfaces_the_recipients_and_the_provider_error(clie
         "sentAt": "2026-08-27T14:30:00+00:00",
         "recipients": [
             {"name": "ITER29 Owner", "kind": "owner_eod", "ok": False,
-             "templateId": "owner_eod_summary", "mobile": "9812340009",
+             "templateId": "owner_eod_statement", "mobile": "9812340009",
              "error": "BotSpace 400: {'error': 'template not found'}"},
             {"name": "ITER29 Exec", "kind": "exec_eod", "ok": False,
-             "templateId": "exec_eod_scorecard", "mobile": "9812340008",
+             "templateId": "exec_eod_statement", "mobile": "9812340008",
              "error": "BotSpace 400: {'error': 'template not approved'}"},
         ],
     }}, upsert=True)
@@ -426,7 +426,7 @@ async def test_report_status_surfaces_the_recipients_and_the_provider_error(clie
     assert eod["lastRun"]["failed"] == 2
     assert len(eod["failures"]) == 2
     f = eod["failures"][0]
-    assert f["templateId"] == "owner_eod_summary"
+    assert f["templateId"] == "owner_eod_statement"
     assert "template not found" in f["error"]
     assert "approved and active on Meta" in f["hint"]
     await server.db.settings.delete_one({"_id": f"report_eod_{day}"})
@@ -553,7 +553,7 @@ async def test_a_closed_session_still_uses_the_template(client):
         await wa._send_report(staff, "owner_eod", ["a"], "label", "body")
     finally:
         wa._enqueue_or_send = orig
-    assert used["template_id"] == "owner_eod_summary"
+    assert used["template_id"] == "owner_eod_statement"
     # Staff reports must never be deferred to the customer-hours outbox.
     assert used["customer_hours"] is False
 
@@ -572,7 +572,7 @@ async def test_a_delivery_failure_on_a_staff_number_reaches_the_run_marker(clien
     await server.db.settings.update_one({"_id": f"report_eod_{day}"}, {"$set": {
         "slot": "eod", "day": day, "sent": 1, "failed": 0,
         "recipients": [{"name": "ITER29 Blocked", "kind": "owner_eod", "ok": True,
-                        "mobile": "9812340080", "templateId": "owner_eod_summary",
+                        "mobile": "9812340080", "templateId": "owner_eod_statement",
                         "error": ""}],
     }}, upsert=True)
 
@@ -605,3 +605,68 @@ async def test_report_messages_stay_out_of_the_customer_inbox(client):
                             direction="outbound", kind="manager_eod", text="EOD",
                             phone="9812340081", status="accepted")
     assert await server.db.whatsapp_threads.count_documents({}) == before
+
+
+# ============================ the sender and the submitted template must agree
+def _doc_templates():
+    """Parse docs/whatsapp-meta-templates.md — the file the owner submits from."""
+    import re
+    from pathlib import Path
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "whatsapp-meta-templates.md").read_text()
+    out = {}
+    for sec in re.split(r"\n## ", doc):
+        m = re.match(r"[A-Z]\.?\s*`([a-z_0-9]+)`", sec)
+        blocks = re.findall(r"```\n(.*?)```", sec, re.S)
+        if not m or not blocks:
+            continue
+        body = blocks[0].strip()
+        out[m.group(1)] = {
+            "body": body,
+            "vars": sorted({int(n) for n in re.findall(r"\{\{(\d+)\}\}", body)}),
+        }
+    return out
+
+
+def test_every_documented_body_obeys_both_meta_rules():
+    """A body may not start or end with a variable, and no variable may contain
+    a newline, tab, or a run of four spaces. Three templates were rejected for
+    the first rule alone."""
+    for name, t in _doc_templates().items():
+        assert not t["body"].startswith("{{"), f"{name} starts with a variable"
+        assert not t["body"].endswith("}}"), f"{name} ends with a variable"
+        assert t["vars"] == list(range(1, len(t["vars"]) + 1)), f"{name} has a gap in {{{{n}}}}"
+
+
+def test_the_rewritten_eod_bodies_carry_no_marketing_signals():
+    """What got them categorised Marketing: a people ranking and performance
+    framing. If either comes back, so does the delivery cap."""
+    docs = _doc_templates()
+    for name in ("exec_eod_statement", "manager_eod_statement", "owner_eod_statement"):
+        body = docs[name]["body"].lower()
+        assert "top today" not in body, f"{name} still ranks people"
+        assert "revenue" not in body, f"{name} still uses performance framing"
+        assert "!" not in body, f"{name} has promotional punctuation"
+        # Reads as a dated statement, which is the Utility shape.
+        assert "dated {{" in body
+
+
+@pytest.mark.asyncio
+async def test_the_sender_passes_exactly_the_documented_variable_count(wired):
+    """A count mismatch is Meta error 132000 and looks nothing like a rejection —
+    it is the failure mode this pairing exists to prevent."""
+    docs = _doc_templates()
+    _c, sends = wired
+    await wa.run_daily_reports("morning")
+    await wa.run_daily_reports("eod")
+
+    seen = {}
+    for s in sends:
+        seen.setdefault(s["kind"], (s["template"], len(s["variables"])))
+    # Guard against a vacuous pass: every report must actually have been built.
+    assert set(seen) == {"exec_morning", "exec_eod", "manager_eod", "owner_eod"}, seen
+
+    for kind, (template_id, count) in seen.items():
+        assert template_id in docs, f"{kind} sends '{template_id}', which is not documented"
+        assert count == len(docs[template_id]["vars"]), (
+            f"{kind}: app sends {count} variables, {template_id} declares "
+            f"{len(docs[template_id]['vars'])}")
