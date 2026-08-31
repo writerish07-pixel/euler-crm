@@ -8211,6 +8211,31 @@ async def _coulson_sync_loop():
         await asyncio.sleep(15 * 60)
 
 
+async def _oem_catalog_boot():
+    """Rename/drop/add Price Master from the OEM catalog, then reprice live leads.
+
+    First production boot can change dozens of ex-showroom values and reprice every
+    matching lead (including Google Sheet writes). That must not run inside FastAPI
+    startup — the process does not bind PORT until startup returns, so Railway
+    healthchecks 502 and restart the deploy.
+    """
+    try:
+        cat_res = await oem_sync.apply_catalog(db)
+        try:
+            await _reprice_after_oem(cat_res.get("changedPriceIds"))
+        except Exception:
+            logging.exception("OEM_CATALOG_REPRICE_ERROR")
+    except Exception:
+        logging.exception("OEM_CATALOG_APPLY_ERROR")
+    try:
+        if os.environ.get("ENVIRONMENT", "").lower() != "test":
+            user, pw, _src = await oem_sync.resolve_credentials(db)
+            if oem_sync.credentials_configured(user, pw):
+                asyncio.create_task(_coulson_sync_loop())
+    except Exception:
+        logging.exception("COULSON_SYNC_LOOP_START_ERROR")
+
+
 @app.on_event("startup")
 async def startup():
     global _finance_index_status
@@ -8312,23 +8337,15 @@ async def startup():
         await _repair_duplicate_finance_receipts()
     except Exception:
         logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
-    # OEM catalog: rename/drop/add Price Master rows. Live Coulson pull is
-    # separate and fail-soft (credentials may be missing).
+    # OEM catalog: tests await it so Price Master is ready on the first request.
+    # Production runs it after the server is listening (Railway healthcheck).
     try:
-        cat_res = await oem_sync.apply_catalog(db)
-        try:
-            await _reprice_after_oem(cat_res.get("changedPriceIds"))
-        except Exception:
-            logging.exception("OEM_CATALOG_REPRICE_ERROR")
+        if os.environ.get("ENVIRONMENT", "").lower() == "test":
+            await _oem_catalog_boot()
+        else:
+            asyncio.create_task(_oem_catalog_boot())
     except Exception:
-        logging.exception("OEM_CATALOG_APPLY_ERROR")
-    try:
-        if os.environ.get("ENVIRONMENT", "").lower() != "test":
-            user, pw, _src = await oem_sync.resolve_credentials(db)
-            if oem_sync.credentials_configured(user, pw):
-                asyncio.create_task(_coulson_sync_loop())
-    except Exception:
-        logging.exception("COULSON_SYNC_LOOP_START_ERROR")
+        logging.exception("OEM_CATALOG_BOOT_ERROR")
     try:
         if os.environ.get("ENVIRONMENT", "").lower() != "test":
             asyncio.create_task(wa.scheduler_loop())
