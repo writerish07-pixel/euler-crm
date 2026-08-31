@@ -89,8 +89,20 @@ export function PriceRowDrawer({ row, onClose, onSaved }) {
           <Button data-testid="save-price-row-btn" onClick={save} disabled={busy}>Save</Button>
         </div>
       </div>}>
+      {!isNew && row.priceSource === "oem" && (
+        <p className="text-xs text-ink-soft mb-3">
+          Ex-showroom is locked to the Euler OEM price. RTO, insurance and other charges stay yours to edit.
+        </p>
+      )}
       <div className="grid grid-cols-2 gap-3">
-        {PRICE_FIELDS.map(([k, label, t]) => <Field key={k} label={label}><Input data-testid={`pm-${k}`} type={t} value={form[k]} onChange={set(k, t)} /></Field>)}
+        {PRICE_FIELDS.map(([k, label, t]) => {
+          const oemLocked = !isNew && row.priceSource === "oem" && k === "exShowroom";
+          return (
+            <Field key={k} label={oemLocked ? "Ex-Showroom (OEM)" : label}>
+              <Input data-testid={`pm-${k}`} type={t} value={form[k]} onChange={set(k, t)} disabled={oemLocked} />
+            </Field>
+          );
+        })}
         <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={(e) => setForm({ ...form, tcsApplicable: e.target.value })}><option>No</option><option>Yes</option></Select></Field>
         <Field label="Status"><Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option>active</option><option>inactive</option></Select></Field>
       </div>

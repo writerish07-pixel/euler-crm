@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del, put } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -181,6 +181,7 @@ export default function Settings() {
       {!isOemFinance && (
       <>
       {isOwner && <BotspaceCard />}
+      {isOwner && <CoulsonCard />}
 
       <Card className="p-5 mb-6">
         <div className="flex items-center gap-2 mb-3">
@@ -771,5 +772,85 @@ function LoginIdCell({ row, onSaved }) {
         </Button>
       )}
     </div>
+  );
+}
+
+function CoulsonCard() {
+  const [cfg, setCfg] = useState(null);
+  const [form, setForm] = useState({ username: "", password: "" });
+  const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
+  const load = useCallback(() => {
+    get("/integrations/coulson").then((d) => {
+      setCfg(d);
+      setForm((f) => ({ ...f, username: d.username && !d.username.includes("*") ? d.username : f.username }));
+    }).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    if (!form.username && !cfg?.configured) return toast.error("Coulson username is required");
+    setBusy(true);
+    try {
+      await put("/integrations/coulson", { username: form.username, password: form.password });
+      toast.success("Euler OEM login saved");
+      setForm((f) => ({ ...f, password: "" }));
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not save Coulson login");
+    } finally { setBusy(false); }
+  };
+
+  const sync = async () => {
+    setSyncing(true);
+    try {
+      const r = await post("/integrations/coulson/sync", {});
+      if (r.ok) toast.success(`Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices`);
+      else toast.error(r.reason === "not_configured" ? "Save the Coulson login first" : "Sync did not run");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Coulson sync failed");
+    } finally { setSyncing(false); }
+  };
+
+  return (
+    <Card className="p-5 mb-6" data-testid="coulson-settings">
+      <div className="flex items-center gap-2 mb-1">
+        <Warehouse size={16} className="text-cobalt" />
+        <h3 className="font-heading font-bold text-ink">Euler OEM (Coulson)</h3>
+        {cfg && <Badge tone={cfg.configured ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>
+          {cfg.configured ? "Configured" : "Not configured"}
+        </Badge>}
+      </div>
+      <p className="text-sm text-ink-soft mb-3">
+        Live yard inventory and ex-showroom come from the Euler dealer portal.
+        RTO, insurance and other charges stay on Price Master — they are never taken from OEM.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+        <Field label="Coulson username">
+          <Input data-testid="coulson-username" value={form.username} autoComplete="off"
+            placeholder={cfg?.username || "dealer username"}
+            onChange={(e) => setForm({ ...form, username: e.target.value })} />
+        </Field>
+        <Field label="Password">
+          <Input data-testid="coulson-password" type="password" autoComplete="new-password"
+            placeholder={cfg?.configured ? "unchanged" : "Coulson password"}
+            value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+        </Field>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button data-testid="coulson-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save login"}</Button>
+        <Button variant="secondary" data-testid="coulson-settings-sync-btn" onClick={sync} disabled={syncing}>
+          <RefreshCcw size={14} /> {syncing ? "Syncing…" : "Sync now"}
+        </Button>
+      </div>
+      {cfg?.lastSyncAt && (
+        <div className="text-xs text-ink-faint mt-3">
+          Last sync {cfg.lastSyncOk === false ? "failed" : "ok"} · {cfg.inventoryCount || 0} in yard
+          {cfg.lastError ? ` · ${cfg.lastError}` : ""}
+        </div>
+      )}
+    </Card>
   );
 }

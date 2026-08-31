@@ -79,7 +79,7 @@ function QuoteDrawer({ masters, onClose, onSaved }) {
         <Field label="Mobile"><Input value={form.mobile} onChange={set("mobile")} /></Field>
         <div />
         <Field label="Model"><Select value={form.model} onChange={set("model")}><option value="">—</option>{masters.models.map((m) => <option key={m}>{m}</option>)}</Select></Field>
-        <div className="col-span-2"><Field label="Variant (auto-fills price)"><Select value={form.variant} onChange={(e) => applyVariant(e.target.value)}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}</option>)}</Select></Field></div>
+        <div className="col-span-2"><Field label="Variant (auto-fills price)"><Select value={form.variant} onChange={(e) => applyVariant(e.target.value)}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field></div>
       </div>
       <h4 className="font-heading font-bold text-ink text-sm mb-2">Charges</h4>
       <div className="grid grid-cols-3 gap-3">

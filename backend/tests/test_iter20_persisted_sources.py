@@ -64,6 +64,13 @@ async def booked(c, mobile, name="ITER20"):
                 json={"exShowroom": 300000, "rto": 20000, "insuranceAmount": 15000})
     await c.post(f"/api/leads/{lid}/convert-booking",
                  json={"bookingDate": "2026-08-08", "bookingAmount": 0})
+    # Convert re-applies Price Master (Hi-Load/XR → HiCity XR @ ₹4,35,000).
+    lead = (await c.get(f"/api/leads/{lid}")).json()
+    remaining = float(lead.get("customerOutstanding") or 0)
+    if remaining > 0:
+        pay = await c.post(f"/api/leads/{lid}/payments", json={
+            "amount": remaining, "paymentMode": "Cash", "date": "2026-08-08"})
+        assert pay.status_code == 200, pay.text
     return lid
 
 

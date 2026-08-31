@@ -12,6 +12,7 @@ import AccountsDashboard from "./pages/AccountsDashboard";
 import Leads from "./pages/Leads";
 import PriceMaster from "./pages/PriceMaster";
 import PriceList from "./pages/PriceList";
+import Inventory from "./pages/Inventory";
 import Cancellations from "./pages/Cancellations";
 import SchemeMaster from "./pages/SchemeMaster";
 import IncentiveMaster from "./pages/IncentiveMaster";
@@ -130,6 +131,7 @@ function AppRoutes() {
       <Route path="/erp-audit" element={P(<ERPProductionAudit />, { ownerOnly: true })} />
       <Route path="/audit-log" element={P(<AuditLog />, { ownerOnly: true })} />
       <Route path="/price-list" element={P(<PriceList />, { salesOnly: true, fieldOk: true })} />
+      <Route path="/inventory" element={P(<Inventory />, { salesOnly: true, fieldOk: true })} />
       <Route path="/price-master" element={P(<PriceMaster />, { ownerOnly: true })} />
       <Route path="/staff" element={P(<Staff />, { ownerOnly: true })} />
       <Route path="/settings" element={P(<Settings />)} />

@@ -118,8 +118,8 @@ export default function PriceList() {
                           {inr(r.schemeAvailable)} scheme
                         </Badge>
                       )}
-                      {r.tcsApplies && (
-                        <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">+TCS</Badge>
+                      {r.inYard > 0 && (
+                        <Badge tone="bg-sky-50 text-sky-700 ring-sky-600/20">{r.inYard} in yard</Badge>
                       )}
                       <span className="ml-auto flex items-baseline gap-2">
                         <span className="font-mono font-bold text-ink tabular text-base">{inr(r.onRoad)}</span>
