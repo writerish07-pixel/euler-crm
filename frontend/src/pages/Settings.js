@@ -793,10 +793,11 @@ function CoulsonCard() {
     if (!form.username && !cfg?.configured) return toast.error("Coulson username is required");
     setBusy(true);
     try {
-      await put("/integrations/coulson", { username: form.username, password: form.password });
-      toast.success("Euler OEM login saved");
+      const st = await put("/integrations/coulson", { username: form.username, password: form.password });
       setForm((f) => ({ ...f, password: "" }));
-      load();
+      setCfg(st);
+      if (st.loginOk) toast.success("Euler OEM login works — you can Sync now");
+      else toast.error(st.lastError || "Coulson rejected this username/password");
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Could not save Coulson login");
     } finally { setBusy(false); }
@@ -805,6 +806,17 @@ function CoulsonCard() {
   const sync = async () => {
     setSyncing(true);
     try {
+      // Sync must pick up whatever is in the form. Clicking Sync without Save
+      // used to keep a previously rejected password.
+      if (form.username || form.password) {
+        const st = await put("/integrations/coulson", { username: form.username, password: form.password });
+        setCfg(st);
+        setForm((f) => ({ ...f, password: "" }));
+        if (st.loginOk === false) {
+          toast.error(st.lastError || "Coulson rejected this username/password");
+          return;
+        }
+      }
       const r = await post("/integrations/coulson/sync", {});
       if (r.ok) toast.success(`Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices`);
       else toast.error(r.reason === "not_configured" ? "Save the Coulson login first" : "Sync did not run");
@@ -819,13 +831,19 @@ function CoulsonCard() {
       <div className="flex items-center gap-2 mb-1">
         <Warehouse size={16} className="text-cobalt" />
         <h3 className="font-heading font-bold text-ink">Euler OEM (Coulson)</h3>
-        {cfg && <Badge tone={cfg.configured ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>
-          {cfg.configured ? "Configured" : "Not configured"}
+        {cfg && <Badge tone={cfg.configured
+          ? (cfg.loginOk === false || cfg.lastSyncOk === false
+            ? "bg-red-50 text-red-700 ring-red-600/20"
+            : "bg-emerald-50 text-emerald-700 ring-emerald-600/20")
+          : "bg-amber-50 text-amber-700 ring-amber-600/20"}>
+          {!cfg.configured ? "Not configured"
+            : (cfg.loginOk === false || cfg.lastSyncOk === false) ? "Login failed" : "Configured"}
         </Badge>}
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        Live yard inventory and ex-showroom come from the Euler dealer portal.
-        RTO, insurance and other charges stay on Price Master — they are never taken from OEM.
+        Same username and password as <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>.
+        Type the password, then Save — we check it with Euler before syncing.
+        RTO, insurance and other charges stay on Price Master.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <Field label="Coulson username">

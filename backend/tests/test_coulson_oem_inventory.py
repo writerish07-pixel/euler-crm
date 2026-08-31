@@ -203,3 +203,30 @@ async def test_coulson_status_hides_password(client):
     r = await client.get("/api/integrations/coulson")
     assert r.status_code == 200
     assert "password" not in r.json()
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_invalid_coulson_login(client, monkeypatch):
+    def _boom(u, p):
+        raise coulson_client.CoulsonError("Username/password is not valid, Please try again", status=203)
+
+    monkeypatch.setattr(coulson_client, "login", _boom)
+    r = await client.put("/api/integrations/coulson",
+                         json={"username": "vaibhav.akar", "password": "nope"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["loginOk"] is False
+    assert "not valid" in (body.get("lastError") or "").lower()
+    assert "nope" not in str(body)
+
+
+@pytest.mark.asyncio
+async def test_save_verifies_valid_coulson_login(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
+    r = await client.put("/api/integrations/coulson",
+                         json={"username": "dealer.user", "password": "secret"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["loginOk"] is True
+    assert body["configured"] is True
+    assert "secret" not in str(body)
