@@ -1,4 +1,4 @@
-"""JWT email+password auth — Owner / Executive / Accounts / ASM / RM (Bearer token)."""
+"""JWT email+password auth — Owner / TL / Executive / Accounts / ASM / RM / OEM (Bearer)."""
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -13,13 +13,17 @@ JWT_ALGORITHM = "HS256"
 bearer = HTTPBearer(auto_error=False)
 
 # Dealership staff + company field managers + money desk + the OEM's finance desk
-ALLOWED_ROLES = ("owner", "executive", "accounts", "asm", "rm", "oem_finance")
+ALLOWED_ROLES = ("owner", "tl", "executive", "accounts", "asm", "rm", "oem_finance")
 # Executives feed the funnel: leads, booking + booking amount, activities,
-# quotations. Pricing, scheme, delivery, close/cancel and every money movement
-# are owner (or money-desk) decisions and are deliberately NOT here.
-SALES_ROLES = ("owner", "executive")
-LEAD_INTAKE_ROLES = ("owner", "executive")
-MONEY_ROLES = ("owner", "accounts")
+# quotations. A TEAM LEADER then finishes the deal — pricing, scheme, collection
+# and delivery — so a handover never waits for the owner to log in. A TL can do
+# everything an executive can, and so covers for one.
+SALES_ROLES = ("owner", "tl", "executive")
+LEAD_INTAKE_ROLES = ("owner", "tl", "executive")
+MONEY_ROLES = ("owner", "tl", "accounts")
+# Closing the deal: price, scheme, extra income, delivery, close, cancel, revive.
+# The commercial decisions an executive does not make.
+DEAL_DESK_ROLES = ("owner", "tl")
 FIELD_ROLES = ("asm", "rm")
 # Money desk can write; ASM/RM may view Finance Register (disbursed vs remaining).
 FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", *FIELD_ROLES)
@@ -135,12 +139,26 @@ def build_router(db):
             )
         return user
 
+    async def deal_desk_only(user=Depends(current_user)):
+        """Owner + Team Leader — the commercial steps that close a deal.
+
+        Executives hand over here: pricing, scheme, extra income, delivery,
+        close and cancel. A TL exists so those never queue behind the owner.
+        """
+        if user.get("role") not in DEAL_DESK_ROLES:
+            raise HTTPException(
+                403,
+                "Only the Owner or a Team Leader can price, scheme, deliver, "
+                "close or cancel a lead.",
+            )
+        return user
+
     async def money_desk_only(user=Depends(current_user)):
-        """Owner / Accounts — record payments, finance, claims, insurance."""
+        """Owner / TL / Accounts — record payments, finance, claims, insurance."""
         if user.get("role") not in MONEY_ROLES:
             raise HTTPException(
                 403,
-                "Only the Owner or Accounts can record money movements.",
+                "Only the Owner, a Team Leader or Accounts can record money movements.",
             )
         return user
 
@@ -220,6 +238,7 @@ def build_router(db):
     router.current_user = current_user
     router.owner_only = owner_only
     router.sales_staff_only = sales_staff_only
+    router.deal_desk_only = deal_desk_only
     router.money_desk_only = money_desk_only
     router.finance_viewer_only = finance_viewer_only
     router.field_viewer_only = field_viewer_only

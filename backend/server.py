@@ -45,6 +45,7 @@ auth_router = authmod.build_router(db)
 current_user = auth_router.current_user
 owner_only = auth_router.owner_only
 sales_staff_only = auth_router.sales_staff_only
+deal_desk_only = auth_router.deal_desk_only
 money_desk_only = auth_router.money_desk_only
 field_viewer_only = auth_router.field_viewer_only
 finance_viewer_only = auth_router.finance_viewer_only
@@ -1013,11 +1014,12 @@ async def _masters_list_values(category):
     return [r["value"] for r in rows]
 
 
-STAFF_ROLES = ["executive", "ASM", "RM", "owner", "accounts"]
+STAFF_ROLES = ["executive", "TL", "ASM", "RM", "owner", "accounts"]
 # Which daily reports a staff member can receive.
 STAFF_REPORTS = ["exec_morning", "exec_eod", "manager_eod", "owner_eod"]
 DEFAULT_REPORTS_BY_ROLE = {
     "executive": ["exec_morning", "exec_eod"],
+    "TL": ["manager_eod"],
     "ASM": ["manager_eod"],
     "RM": ["manager_eod"],
     "owner": ["owner_eod"],
@@ -2748,7 +2750,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 
 
 @api.put("/leads/{lead_id}/price-structure")
-async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _owner=Depends(owner_only)):
+async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)", act)
     _require_owner_reedit(act, _is_priced(lead), "Price structure")
@@ -2799,7 +2801,7 @@ async def scheme_rules(lead_id: str):
 
 
 @api.put("/leads/{lead_id}/scheme")
-async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _owner=Depends(owner_only)):
+async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
@@ -2935,7 +2937,7 @@ class ExtraIncomeIn(BaseModel):
 
 
 @api.put("/leads/{lead_id}/scheme-allocation")
-async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depends(actor), _owner=Depends(owner_only)):
+async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     """Record how much of EACH scheme component the dealer passes to the customer.
 
     Validation is per component against Scheme Master: a benefit is never negative and
@@ -2995,7 +2997,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
 
 
 @api.put("/leads/{lead_id}/extra-income")
-async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor), _owner=Depends(owner_only)):
+async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     """Dealer extra-income lines:
     Documentation / Warranty / RSA / Referral / Other / Finance Incentive /
     Accessories Margin / Exchange Margin / Campaign Incentive.
@@ -3023,7 +3025,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
 
 
 @api.post("/leads/{lead_id}/close")
-async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _owner=Depends(owner_only)):
+async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canClose", "closing (only Active leads)", act)
     if not str(body.closeReason or "").strip():
@@ -3087,7 +3089,7 @@ def _revive_updates(lead, *, anchor: str, note: str) -> dict:
 
 
 @api.post("/leads/{lead_id}/cancel")
-async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _owner=Depends(owner_only)):
+async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     """The LOST exit. Close (Close Won) is the won one; this is the other half.
 
     Cancellation is recorded as a permanent STAMP (cancelCount + cancelHistory),
@@ -3292,7 +3294,7 @@ async def amend_cancellation(lead_id: str, body: CancelIn, act=Depends(actor)):
 
 
 @api.post("/leads/{lead_id}/revive")
-async def revive_lead(lead_id: str, act=Depends(actor), _owner=Depends(owner_only)):
+async def revive_lead(lead_id: str, act=Depends(actor), _desk=Depends(deal_desk_only)):
     """Put a parked cancelled lead back in the funnel by hand, before its date."""
     lead = await get_lead_or_404(lead_id)
     if _acct(lead) == "Active":
@@ -4482,7 +4484,7 @@ async def list_deliveries():
 
 
 @api.put("/leads/{lead_id}/delivery")
-async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _owner=Depends(owner_only)):
+async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
     role = ((act or {}).get("role") or "").strip().lower()
