@@ -118,13 +118,14 @@ async def _lead(c, mobile):
 
 
 @pytest.mark.asyncio
-async def test_staff_cannot_reedit_price_or_scheme(client):
+async def test_an_executive_cannot_price_or_scheme_at_all(client):
+    """Executives were narrowed to feeding leads and booking amounts. Pricing and
+    scheme are commercial decisions and moved to the owner outright — this used to
+    assert an executive could save each of them ONCE."""
     await _login(client, "executive@euler.com")
     lid = await _lead(client, "9777700001")
     ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
-    r = await client.put(f"/api/leads/{lid}/price-structure", json=ps)
-    assert r.status_code == 200, r.text
-    # Second price save by staff → 403
+
     r = await client.put(f"/api/leads/{lid}/price-structure", json=ps)
     assert r.status_code == 403
     assert "owner" in r.text.lower()
@@ -134,22 +135,30 @@ async def test_staff_cannot_reedit_price_or_scheme(client):
         "benefitPassedBreakup": json.dumps({"loyaltyBonus": 10000, "insuranceBenefit": 0}),
         "schemeComponentsUsed": json.dumps({"loyaltyBonus": True, "insuranceBenefit": True}),
     })
-    assert r.status_code == 200, r.text
-    r = await client.put(f"/api/leads/{lid}/scheme", json={
-        "loyaltyBonus": 10000, "benefitMode": "Partial Benefit",
-        "benefitPassedBreakup": json.dumps({"loyaltyBonus": 0, "insuranceBenefit": 0}),
-        "schemeComponentsUsed": json.dumps({"loyaltyBonus": False, "insuranceBenefit": False}),
-    })
     assert r.status_code == 403
+    # Nothing was written by the refused calls.
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert not lead.get("priceStructureSaved")
 
-    # Owner can still re-edit
+
+@pytest.mark.asyncio
+async def test_the_owner_prices_schemes_and_re_edits_freely(client):
+    """The step-lock coverage the executive test used to carry, kept — the owner
+    was always allowed to re-edit a completed step, and still is."""
     await _login(client, "owner@euler.com")
-    r = await client.put(f"/api/leads/{lid}/scheme", json={
+    lid = await _lead(client, "9777700011")
+    ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    assert (await client.put(f"/api/leads/{lid}/price-structure", json=ps)).status_code == 200
+    # Re-saving a completed step is an owner privilege, not a first-write allowance.
+    assert (await client.put(f"/api/leads/{lid}/price-structure", json=ps)).status_code == 200
+
+    scheme = {
         "loyaltyBonus": 10000, "benefitMode": "Partial Benefit",
         "benefitPassedBreakup": json.dumps({"loyaltyBonus": 10000, "insuranceBenefit": 0}),
         "schemeComponentsUsed": json.dumps({"loyaltyBonus": True, "insuranceBenefit": True}),
-    })
-    assert r.status_code == 200, r.text
+    }
+    assert (await client.put(f"/api/leads/{lid}/scheme", json=scheme)).status_code == 200
+    assert (await client.put(f"/api/leads/{lid}/scheme", json=scheme)).status_code == 200
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["dealerSchemeRetained"] == 10000
 
@@ -197,6 +206,9 @@ async def test_booking_autofill_does_not_lock_price_for_staff(client):
     assert ce.num(lead.get("exShowroom")) > 0
     assert lead.get("priceStructureSaved") is False
     assert server.lead_actions(lead)["priceCompleted"] is False
+    # The executive booked it; pricing is the owner's step now, and the point of
+    # this test is that autofill left that step OPEN rather than pre-completed.
     ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    await _login(client, "owner@euler.com")
     r = await client.put(f"/api/leads/{lid}/price-structure", json=ps)
     assert r.status_code == 200, r.text

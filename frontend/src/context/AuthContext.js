@@ -38,8 +38,15 @@ export function AuthProvider({ children }) {
       isAsm: role === "asm",
       isRm: role === "rm",
       isField: role === "asm" || role === "rm",
+      // The OEM's finance desk — an OUTSIDE party. One read-only report and
+      // nothing else; the API denies every other route to this role.
+      isOemFinance: role === "oem_finance",
       isSalesStaff: role === "owner" || role === "executive",
-      isMoneyDesk: role === "owner" || role === "executive" || role === "accounts",
+      // Executives feed leads and booking amounts. Money movements are the
+      // owner's or Accounts' — matching MONEY_ROLES on the API.
+      isMoneyDesk: role === "owner" || role === "accounts",
+      // Commercial steps: price, scheme, delivery, close and cancel are owner-only.
+      canEditCommercials: role === "owner",
       // ASM/RM may view Finance Register (disbursed vs remaining); writes stay money-desk.
       canViewFinance: role === "owner" || role === "executive" || role === "accounts"
         || role === "asm" || role === "rm",

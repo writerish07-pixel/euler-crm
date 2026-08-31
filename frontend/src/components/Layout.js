@@ -5,7 +5,7 @@ import {
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
-  MessageCircle, SlidersHorizontal, Ban,
+  MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -30,6 +30,7 @@ const NAV = [
   { section: "Money", items: [
     { to: "/payments", label: "Payment Ledger", icon: Wallet, moneyDesk: true },
     { to: "/finance", label: "Finance Register", icon: Landmark, financeView: true },
+    { to: "/oem-finance", label: "OEM Finance View", icon: LandmarkIcon, ownerOnly: true },
     { to: "/insurance", label: "Insurance Payouts", icon: ShieldCheck, moneyDesk: true },
     { to: "/insurance-agents", label: "Insurance Agents", icon: Handshake, ownerOnly: true },
     { to: "/insurance-report", label: "Payout Report", icon: TrendingUp, ownerOnly: true },
@@ -57,8 +58,20 @@ const NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, open, onNavigate, onClose }) {
-  const deskLabel = isAccounts ? "Accounts desk" : isField ? "Field desk" : "EV Dealership";
+// The OEM's finance desk is an OUTSIDE party. Rather than filtering the normal
+// nav — which shows anything not explicitly flagged, so a new unflagged page
+// would appear for them — they get their own short list.
+const OEM_NAV = [
+  { section: "OEM", items: [
+    { to: "/oem-finance", label: "Retail Finance", icon: Landmark, end: true },
+    { to: "/settings", label: "My Password", icon: SettingsIcon },
+  ]},
+];
+
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, open, onNavigate, onClose }) {
+  const deskLabel = isOemFinance ? "OEM finance desk"
+    : isAccounts ? "Accounts desk" : isField ? "Field desk" : "EV Dealership";
+  const nav = isOemFinance ? OEM_NAV : NAV;
   return (
     <aside
       data-testid="app-sidebar"
@@ -85,7 +98,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
         </button>
       </div>
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5 overscroll-contain">
-        {NAV.map((group) => {
+        {nav.map((group) => {
           if (group.ownerOnly && !isOwner) return null;
           if (group.pipeline && !isSalesStaff && !isField) return null;
           const items = group.items.filter((i) => {
@@ -222,7 +235,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const location = useLocation();
 
@@ -257,6 +270,7 @@ export default function Layout({ children }) {
         isField={isField}
         isMoneyDesk={isMoneyDesk}
         canViewFinance={canViewFinance}
+        isOemFinance={isOemFinance}
         open={navOpen}
         onClose={() => setNavOpen(false)}
         onNavigate={() => setNavOpen(false)}

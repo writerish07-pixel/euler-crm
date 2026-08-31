@@ -35,19 +35,26 @@ import OemClaimDashboard from "./pages/OemClaimDashboard";
 import ClaimExceptions from "./pages/ClaimExceptions";
 import ERPProductionAudit from "./pages/ERPProductionAudit";
 import AuditLog from "./pages/AuditLog";
+import OemFinance from "./pages/OemFinance";
 
 function homePath(auth) {
+  // The OEM finance desk has exactly one page. Sending it anywhere else would
+  // bounce off the API's 403 and look like a broken app.
+  if (auth.isOemFinance) return "/oem-finance";
   if (auth.isAccounts) return "/accounts";
   if (auth.isField) return "/field";
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance } = auth;
   const loc = useLocation();
   if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
+  // An outside role reaches only the pages that name it. Everything else is a
+  // redirect here and a 403 on the API — the browser is not the enforcement.
+  if (isOemFinance && !oemOk) return <Navigate to="/oem-finance" replace />;
   if (ownerOnly && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (fieldOnly && !isField && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (accountsHome && !isAccounts && !isOwner && !isSalesStaff) {
@@ -62,7 +69,8 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
 }
 
 function HomeRedirect() {
-  const { isAccounts, isField, isExecutive } = useAuth();
+  const { isAccounts, isField, isExecutive, isOemFinance } = useAuth();
+  if (isOemFinance) return <Navigate to="/oem-finance" replace />;
   if (isAccounts) return <Navigate to="/accounts" replace />;
   if (isField) return <Navigate to="/field" replace />;
   if (isExecutive) return <ExecutiveDashboard />;
@@ -79,6 +87,7 @@ function AppRoutes() {
       fieldOk={opts.fieldOk}
       fieldOnly={opts.fieldOnly}
       accountsHome={opts.accountsHome}
+      oemOk={opts.oemOk}
     >
       {el}
     </Protected>
@@ -98,6 +107,8 @@ function AppRoutes() {
       {/* Every role that sees the funnel sees who is dropping out of it. The API
           scopes an executive to their own leads. */}
       <Route path="/cancellations" element={P(<Cancellations />, { fieldOk: true })} />
+      {/* Owner too, so you can see exactly what the OEM sees before issuing a login. */}
+      <Route path="/oem-finance" element={P(<OemFinance />, { oemOk: true })} />
       <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
       <Route path="/finance" element={P(<Finance />, { financeView: true })} />
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
