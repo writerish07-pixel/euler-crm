@@ -12,13 +12,32 @@ from pydantic import BaseModel, EmailStr
 JWT_ALGORITHM = "HS256"
 bearer = HTTPBearer(auto_error=False)
 
-# Dealership staff + company field managers + money desk
-ALLOWED_ROLES = ("owner", "executive", "accounts", "asm", "rm")
+# Dealership staff + company field managers + money desk + the OEM's finance desk
+ALLOWED_ROLES = ("owner", "executive", "accounts", "asm", "rm", "oem_finance")
+# Executives feed the funnel: leads, booking + booking amount, activities,
+# quotations. Pricing, scheme, delivery, close/cancel and every money movement
+# are owner (or money-desk) decisions and are deliberately NOT here.
 SALES_ROLES = ("owner", "executive")
-MONEY_ROLES = ("owner", "executive", "accounts")
+LEAD_INTAKE_ROLES = ("owner", "executive")
+MONEY_ROLES = ("owner", "accounts")
 FIELD_ROLES = ("asm", "rm")
 # Money desk can write; ASM/RM may view Finance Register (disbursed vs remaining).
-FINANCE_VIEW_ROLES = (*MONEY_ROLES, *FIELD_ROLES)
+FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", *FIELD_ROLES)
+
+# Roles belonging to people OUTSIDE the dealership. 37 of 43 GET endpoints carry
+# no role check of their own — the /api router only requires a valid token — so an
+# outside role would otherwise read the entire Lead Register, mobile numbers
+# included. These roles are therefore denied EVERY authenticated route except the
+# handful named below, which means a route added later is closed to them by
+# default instead of silently exposed.
+EXTERNAL_ROLES = ("oem_finance",)
+EXTERNAL_ROLE_PATHS = {
+    "oem_finance": (
+        "/api/auth/me",
+        "/api/auth/change-password",
+        "/api/reports/oem-finance",
+    ),
+}
 
 
 def _secret():
@@ -74,7 +93,8 @@ class ChangePasswordIn(BaseModel):
 def build_router(db):
     router = APIRouter(prefix="/api/auth")
 
-    async def current_user(creds: HTTPAuthorizationCredentials = Depends(bearer)):
+    async def current_user(request: Request,
+                           creds: HTTPAuthorizationCredentials = Depends(bearer)):
         if not creds:
             raise HTTPException(401, "Not authenticated")
         payload = decode_token(creds.credentials)
@@ -83,6 +103,17 @@ def build_router(db):
             raise HTTPException(401, "User not found")
         user.pop("_id", None)
         user.pop("passwordHash", None)
+        # One chokepoint for outside roles. The /api router depends on
+        # current_user for every route, so denying here denies everywhere —
+        # including the 37 GET endpoints that have no role check of their own.
+        # Allowlisted, so it fails closed: a new route is denied until someone
+        # deliberately opens it.
+        role = str(user.get("role") or "").strip().lower()
+        if role in EXTERNAL_ROLES:
+            path = (request.url.path or "").rstrip("/") or "/"
+            if path not in EXTERNAL_ROLE_PATHS.get(role, ()):
+                raise HTTPException(
+                    403, "This account can only open the OEM finance report.")
         return user
 
     async def owner_only(user=Depends(current_user)):
@@ -91,20 +122,25 @@ def build_router(db):
         return user
 
     async def sales_staff_only(user=Depends(current_user)):
-        """Owner + Executive — commercial / pipeline edits."""
+        """Owner + Executive — feeding the funnel.
+
+        Leads, booking (with the booking amount), activities, bulk import and
+        quotations. Pricing, scheme, delivery, close/cancel and money movements
+        are NOT here — they are owner or money-desk decisions.
+        """
         if user.get("role") not in SALES_ROLES:
             raise HTTPException(
                 403,
-                "Only Owner / Executive can edit sales pipeline or commercial steps.",
+                "Only Owner / Executive can add or update leads and bookings.",
             )
         return user
 
     async def money_desk_only(user=Depends(current_user)):
-        """Owner / Executive / Accounts — record payments, finance, claims, insurance."""
+        """Owner / Accounts — record payments, finance, claims, insurance."""
         if user.get("role") not in MONEY_ROLES:
             raise HTTPException(
                 403,
-                "ASM / RM cannot record money movements. Use the Field Dashboard.",
+                "Only the Owner or Accounts can record money movements.",
             )
         return user
 

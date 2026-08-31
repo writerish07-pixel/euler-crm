@@ -302,6 +302,8 @@ async def test_reviving_an_active_lead_is_rejected(client):
 # ==================================================== the money guard
 @pytest.mark.asyncio
 async def test_executive_cannot_cancel_a_lead_that_has_taken_money(client, exec_client):
+    """Cancelling is owner-only outright now. The money rule below it survives as
+    defence in depth, so loosening the role guard cannot quietly re-expose it."""
     lid = await make_lead(client, "ITER32 Funded", executive="Executive")
     r = await client.post(f"/api/leads/{lid}/convert-booking",
                           json={"bookingAmount": 25000, "executive": "Executive"})
@@ -309,7 +311,6 @@ async def test_executive_cannot_cancel_a_lead_that_has_taken_money(client, exec_
 
     blocked = await cancel(exec_client, lid, "Finance rejected")
     assert blocked.status_code == 403
-    assert "only the owner" in blocked.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -335,10 +336,12 @@ async def test_owner_can_cancel_a_funded_lead_and_the_money_is_recorded(client):
 
 
 @pytest.mark.asyncio
-async def test_an_unfunded_lead_can_be_cancelled_by_an_executive(client, exec_client):
+async def test_an_executive_cannot_cancel_even_an_unfunded_lead(client, exec_client):
+    """Cancel moved to owner-only when executives were narrowed to lead intake."""
     lid = await make_lead(client, "ITER32 Exec cancels", executive="Executive")
-    r = await cancel(exec_client, lid, "Not reachable")
-    assert r.status_code == 200, r.text
+    assert (await cancel(exec_client, lid, "Not reachable")).status_code == 403
+    # ...and the owner can still cancel it.
+    assert (await cancel(client, lid, "Not reachable")).status_code == 200
 
 
 @pytest.mark.asyncio

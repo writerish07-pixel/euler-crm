@@ -1893,6 +1893,127 @@ async def cancellations_report(period: str = "month", executive: str = "",
     }
 
 
+# Who may open the OEM board. The owner is included so you can see exactly what
+# the OEM's finance manager sees before handing out the login.
+OEM_FINANCE_ROLES = ("owner", "oem_finance")
+# Ageing buckets, in days since delivery. The finance receipt SLA is 2 days, so
+# the first bucket is "inside SLA" and everything after it is late.
+OEM_AGEING_BUCKETS = [(0, 2, "0-2 days"), (3, 7, "3-7 days"),
+                      (8, 15, "8-15 days"), (16, 10**6, "15+ days")]
+
+
+@api.get("/reports/oem-finance")
+async def oem_finance_report(view: str = "all", financer: str = "", month: str = "",
+                             user=Depends(current_user)):
+    """Read-only finance position for the OEM's finance manager.
+
+    Every retail finance file — pending AND received — with how long it has been
+    waiting, so a delay is visible without asking the dealer.
+
+    Each row is BUILT from a whitelist rather than copied from the finance and
+    lead documents with contact fields deleted. A blacklist leaks every field
+    added later; this cannot. There is no mobile, alternate mobile, village or
+    city here, and no dealer commercials — no margin, scheme, insurance payout or
+    customer outstanding.
+
+    view: all (default) | pending | overdue | received
+    """
+    if (user or {}).get("role") not in OEM_FINANCE_ROLES:
+        raise HTTPException(403, "This report is for the Owner and the OEM finance desk.")
+
+    files = await db.finance.find().to_list(5000)
+    enriched = await _enrich_finance_with_delivery(files)
+    leads = {l["leadId"]: l for l in await db.leads.find().to_list(5000) if l.get("leadId")}
+
+    rows = []
+    for f in enriched:
+        lead = leads.get(str(f.get("leadId") or "")) or {}
+        sanctioned = ce.num(f.get("sanctionedAmount"))
+        received = ce.num(f.get("receivedAgainstFile"))
+        pending = ce.round2(max(0.0, ce.num(f.get("fileOutstanding"))))
+        status = str(f.get("status") or ("Received" if pending <= 0.01 else "Pending"))
+        days = f.get("daysSinceDelivery")
+        rows.append({
+            # Identity the OEM can quote back to the dealer — and nothing more.
+            "leadId": f.get("leadId") or "",
+            "customerName": f.get("customerName") or lead.get("customerName") or "",
+            "model": lead.get("interestedModel") or "",
+            "variant": lead.get("variant") or "",
+            "fileNumber": f.get("fileNumber") or "",
+            "financer": str(f.get("financer") or "Unknown").strip() or "Unknown",
+            "sanctioned": ce.round2(sanctioned),
+            "received": ce.round2(received),
+            "pending": pending,
+            "deliveryDate": f.get("deliveryDate") or "",
+            "daysSinceDelivery": days if isinstance(days, int) else None,
+            "status": status,
+            "overdue": bool(f.get("overdue")) and pending > 0.01,
+            "lastPaymentDate": str(f.get("lastPaymentDate") or "")[:10],
+        })
+
+    if financer:
+        rows = [r for r in rows if r["financer"].lower() == financer.strip().lower()]
+    if month:
+        rows = [r for r in rows if str(r["deliveryDate"]).startswith(month.strip())]
+    if view == "pending":
+        rows = [r for r in rows if r["pending"] > 0.01]
+    elif view == "overdue":
+        rows = [r for r in rows if r["overdue"]]
+    elif view == "received":
+        rows = [r for r in rows if r["pending"] <= 0.01]
+
+    pending_rows = [r for r in rows if r["pending"] > 0.01]
+    overdue_rows = [r for r in rows if r["overdue"]]
+
+    by_financer = {}
+    for r in rows:
+        b = by_financer.setdefault(r["financer"], {
+            "financer": r["financer"], "files": 0, "sanctioned": 0.0,
+            "received": 0.0, "pending": 0.0, "overdue": 0})
+        b["files"] += 1
+        b["sanctioned"] += r["sanctioned"]
+        b["received"] += r["received"]
+        b["pending"] += r["pending"]
+        b["overdue"] += 1 if r["overdue"] else 0
+    for b in by_financer.values():
+        for k in ("sanctioned", "received", "pending"):
+            b[k] = ce.round2(b[k])
+
+    ageing = []
+    for lo, hi, label in OEM_AGEING_BUCKETS:
+        hit = [r for r in pending_rows
+               if isinstance(r["daysSinceDelivery"], int) and lo <= r["daysSinceDelivery"] <= hi]
+        ageing.append({"bucket": label, "files": len(hit),
+                       "pending": ce.round2(sum(r["pending"] for r in hit))})
+    # Files with no delivery date yet: the SLA clock has not started, so they are
+    # neither on-time nor late. Shown separately instead of being forced into a bucket.
+    not_started = [r for r in pending_rows if not isinstance(r["daysSinceDelivery"], int)]
+    if not_started:
+        ageing.append({"bucket": "Not delivered yet", "files": len(not_started),
+                       "pending": ce.round2(sum(r["pending"] for r in not_started))})
+
+    oldest = max((r["daysSinceDelivery"] for r in pending_rows
+                  if isinstance(r["daysSinceDelivery"], int)), default=0)
+    rows.sort(key=lambda r: (not r["overdue"], -(r["daysSinceDelivery"] or 0), -r["pending"]))
+    return {
+        "view": view, "generatedAt": now_iso(), "slaDays": FINANCE_RECEIPT_SLA_DAYS,
+        "totals": {
+            "files": len(rows),
+            "sanctioned": ce.round2(sum(r["sanctioned"] for r in rows)),
+            "received": ce.round2(sum(r["received"] for r in rows)),
+            "pending": ce.round2(sum(r["pending"] for r in rows)),
+            "pendingFiles": len(pending_rows),
+            "overdueFiles": len(overdue_rows),
+            "overdueAmount": ce.round2(sum(r["pending"] for r in overdue_rows)),
+            "oldestPendingDays": oldest,
+        },
+        "byFinancer": sorted(by_financer.values(), key=lambda x: -x["pending"]),
+        "ageing": ageing,
+        "financers": sorted({r["financer"] for r in rows}),
+        "files": rows,
+    }
+
+
 @api.get("/field/dashboard")
 async def field_dashboard(_field=Depends(field_viewer_only)):
     """Shared ASM / RM company field board — retail + pipeline hygiene (read-only)."""
@@ -2627,7 +2748,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 
 
 @api.put("/leads/{lead_id}/price-structure")
-async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _owner=Depends(owner_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)", act)
     _require_owner_reedit(act, _is_priced(lead), "Price structure")
@@ -2678,7 +2799,7 @@ async def scheme_rules(lead_id: str):
 
 
 @api.put("/leads/{lead_id}/scheme")
-async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _owner=Depends(owner_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
@@ -2814,7 +2935,7 @@ class ExtraIncomeIn(BaseModel):
 
 
 @api.put("/leads/{lead_id}/scheme-allocation")
-async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depends(actor), _owner=Depends(owner_only)):
     """Record how much of EACH scheme component the dealer passes to the customer.
 
     Validation is per component against Scheme Master: a benefit is never negative and
@@ -2874,7 +2995,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
 
 
 @api.put("/leads/{lead_id}/extra-income")
-async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor), _owner=Depends(owner_only)):
     """Dealer extra-income lines:
     Documentation / Warranty / RSA / Referral / Other / Finance Incentive /
     Accessories Margin / Exchange Margin / Campaign Incentive.
@@ -2902,7 +3023,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
 
 
 @api.post("/leads/{lead_id}/close")
-async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _owner=Depends(owner_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canClose", "closing (only Active leads)", act)
     if not str(body.closeReason or "").strip():
@@ -2966,7 +3087,7 @@ def _revive_updates(lead, *, anchor: str, note: str) -> dict:
 
 
 @api.post("/leads/{lead_id}/cancel")
-async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _owner=Depends(owner_only)):
     """The LOST exit. Close (Close Won) is the won one; this is the other half.
 
     Cancellation is recorded as a permanent STAMP (cancelCount + cancelHistory),
@@ -3171,7 +3292,7 @@ async def amend_cancellation(lead_id: str, body: CancelIn, act=Depends(actor)):
 
 
 @api.post("/leads/{lead_id}/revive")
-async def revive_lead(lead_id: str, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def revive_lead(lead_id: str, act=Depends(actor), _owner=Depends(owner_only)):
     """Put a parked cancelled lead back in the funnel by hand, before its date."""
     lead = await get_lead_or_404(lead_id)
     if _acct(lead) == "Active":
@@ -4361,7 +4482,7 @@ async def list_deliveries():
 
 
 @api.put("/leads/{lead_id}/delivery")
-async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _owner=Depends(owner_only)):
     lead = await get_lead_or_404(lead_id)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
     role = ((act or {}).get("role") or "").strip().lower()

@@ -14,7 +14,7 @@ const MASTER_LIST_CATEGORIES = [
 ];
 
 export default function Settings() {
-  const { isOwner, user } = useAuth();
+  const { isOwner, user, isOemFinance } = useAuth();
   const [users, setUsers] = useState([]);
   const [gs, setGs] = useState(null);
   const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive" });
@@ -26,7 +26,11 @@ export default function Settings() {
   const [pwBusy, setPwBusy] = useState(false);
 
   const loadUsers = useCallback(() => { if (isOwner) get("/auth/users").then(setUsers).catch(() => {}); }, [isOwner]);
-  useEffect(() => { loadUsers(); get("/integrations/gsheets").then(setGs).catch(() => {}); }, [loadUsers]);
+  useEffect(() => {
+    loadUsers();
+    // The OEM role is denied every route but its own report, so do not even ask.
+    if (!isOemFinance) get("/integrations/gsheets").then(setGs).catch(() => {});
+  }, [loadUsers, isOemFinance]);
 
   const changePassword = async () => {
     if (!pwForm.currentPassword || !pwForm.newPassword) {
@@ -168,6 +172,14 @@ export default function Settings() {
         </div>
       </Card>
 
+      {/* Outside party: password only. Everything below is dealership business. */}
+      {isOemFinance && (
+        <p className="text-sm text-ink-faint">
+          This account can open the Retail Finance report and change its own password.
+        </p>
+      )}
+      {!isOemFinance && (
+      <>
       {isOwner && <BotspaceCard />}
 
       <Card className="p-5 mb-6">
@@ -254,7 +266,7 @@ export default function Settings() {
       {isOwner && <MastersListCard gsEnabled={gs?.enabled} />}
 
       {isOwner && (
-        <Card className="p-5">
+        <Card className="p-5" data-testid="user-accounts-card">
           <h3 className="font-heading font-bold text-ink mb-3">User Accounts <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end mb-4">
             <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
@@ -266,6 +278,7 @@ export default function Settings() {
               <option value="asm">ASM</option>
               <option value="rm">RM</option>
               <option value="owner">Owner</option>
+              <option value="oem_finance">OEM Finance (read-only, no contacts)</option>
             </Select></Field>
             <Button data-testid="add-user-btn" onClick={addUser}><UserPlus size={15} /> Add User</Button>
           </div>
@@ -289,6 +302,8 @@ export default function Settings() {
             rows={users}
           />
         </Card>
+      )}
+      </>
       )}
     </div>
   );
