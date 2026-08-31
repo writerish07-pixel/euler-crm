@@ -775,26 +775,45 @@ function LoginIdCell({ row, onSaved }) {
   );
 }
 
+function realCoulsonUsername(u) {
+  return u && !String(u).includes("*") ? String(u).trim() : "";
+}
+
 function CoulsonCard() {
   const [cfg, setCfg] = useState(null);
   const [form, setForm] = useState({ username: "", password: "" });
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
+  const loginFailed = cfg?.loginOk === false;
+
   const load = useCallback(() => {
     get("/integrations/coulson").then((d) => {
       setCfg(d);
-      setForm((f) => ({ ...f, username: d.username && !d.username.includes("*") ? d.username : f.username }));
+      setForm((f) => ({ ...f, username: realCoulsonUsername(d.username) || f.username }));
     }).catch(() => {});
   }, []);
   useEffect(() => { load(); }, [load]);
 
+  const requireTypedLogin = () => {
+    const user = (form.username || "").trim();
+    if (!user || user.includes("*")) {
+      toast.error("Type the full Coulson username (same as coulson.eulerlogistics.com), not the hidden va***r hint");
+      return false;
+    }
+    if (!form.password && (loginFailed || !cfg?.configured || cfg?.loginOk !== true)) {
+      toast.error("Type the Coulson password, then Save. Do not leave it as unchanged until Euler accepts it.");
+      return false;
+    }
+    return true;
+  };
+
   const save = async () => {
-    if (!form.username && !cfg?.configured) return toast.error("Coulson username is required");
+    if (!requireTypedLogin()) return;
     setBusy(true);
     try {
-      const st = await put("/integrations/coulson", { username: form.username, password: form.password });
-      setForm((f) => ({ ...f, password: "" }));
+      const st = await put("/integrations/coulson", { username: form.username.trim(), password: form.password });
+      setForm((f) => ({ ...f, password: "", username: f.username.trim() }));
       setCfg(st);
       if (st.loginOk) toast.success("Euler OEM login works — you can Sync now");
       else toast.error(st.lastError || "Coulson rejected this username/password");
@@ -804,18 +823,15 @@ function CoulsonCard() {
   };
 
   const sync = async () => {
+    if (!requireTypedLogin()) return;
     setSyncing(true);
     try {
-      // Sync must pick up whatever is in the form. Clicking Sync without Save
-      // used to keep a previously rejected password.
-      if (form.username || form.password) {
-        const st = await put("/integrations/coulson", { username: form.username, password: form.password });
-        setCfg(st);
-        setForm((f) => ({ ...f, password: "" }));
-        if (st.loginOk === false) {
-          toast.error(st.lastError || "Coulson rejected this username/password");
-          return;
-        }
+      const st = await put("/integrations/coulson", { username: form.username.trim(), password: form.password });
+      setCfg(st);
+      setForm((f) => ({ ...f, password: "", username: f.username.trim() }));
+      if (st.loginOk === false) {
+        toast.error(st.lastError || "Coulson rejected this username/password");
+        return;
       }
       const r = await post("/integrations/coulson/sync", {});
       if (r.ok) toast.success(`Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices`);
@@ -826,34 +842,39 @@ function CoulsonCard() {
     } finally { setSyncing(false); }
   };
 
+  const badgeTone = !cfg?.configured
+    ? "bg-amber-50 text-amber-700 ring-amber-600/20"
+    : (cfg.loginOk === false || loginFailed)
+      ? "bg-red-50 text-red-700 ring-red-600/20"
+      : "bg-emerald-50 text-emerald-700 ring-emerald-600/20";
+  const badgeLabel = !cfg?.configured
+    ? "Not configured"
+    : cfg.loginOk === false ? "Login failed"
+      : cfg.lastSyncOk === false ? "Sync failed"
+        : "Configured";
+
   return (
     <Card className="p-5 mb-6" data-testid="coulson-settings">
       <div className="flex items-center gap-2 mb-1">
         <Warehouse size={16} className="text-cobalt" />
         <h3 className="font-heading font-bold text-ink">Euler OEM (Coulson)</h3>
-        {cfg && <Badge tone={cfg.configured
-          ? (cfg.loginOk === false || cfg.lastSyncOk === false
-            ? "bg-red-50 text-red-700 ring-red-600/20"
-            : "bg-emerald-50 text-emerald-700 ring-emerald-600/20")
-          : "bg-amber-50 text-amber-700 ring-amber-600/20"}>
-          {!cfg.configured ? "Not configured"
-            : (cfg.loginOk === false || cfg.lastSyncOk === false) ? "Login failed" : "Configured"}
-        </Badge>}
+        {cfg && <Badge tone={badgeTone}>{badgeLabel}</Badge>}
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        Same username and password as <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>.
-        Type the password, then Save — we check it with Euler before syncing.
+        Type the <strong>full</strong> username and password you use at{" "}
+        <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>.
+        Do not type the hidden hint (va***r). No Railway variables are required.
         RTO, insurance and other charges stay on Price Master.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <Field label="Coulson username">
-          <Input data-testid="coulson-username" value={form.username} autoComplete="off"
-            placeholder={cfg?.username || "dealer username"}
+          <Input data-testid="coulson-username" name="coulson-oem-username" value={form.username}
+            autoComplete="off" placeholder="full Coulson username"
             onChange={(e) => setForm({ ...form, username: e.target.value })} />
         </Field>
         <Field label="Password">
-          <Input data-testid="coulson-password" type="password" autoComplete="new-password"
-            placeholder={cfg?.configured ? "unchanged" : "Coulson password"}
+          <Input data-testid="coulson-password" name="coulson-oem-password" type="password"
+            autoComplete="new-password" placeholder="type the Coulson password"
             value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
         </Field>
       </div>

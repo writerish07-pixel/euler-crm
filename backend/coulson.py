@@ -1,9 +1,8 @@
 """Coulson (Euler OEM portal) HTTP client.
 
 Login is Basic auth against euler-auth: base64(username:password:coulson),
-then Bearer JWT on coulson.eulerlogistics.com. Credentials come from env
-(COULSON_USERNAME / COULSON_PASSWORD) or owner Settings (Mongo). Never log
-the password.
+then Bearer JWT on coulson.eulerlogistics.com. Credentials come from owner Settings (Mongo), with optional env fallback
+(COULSON_USERNAME / COULSON_PASSWORD). Never log the password.
 """
 from __future__ import annotations
 
@@ -42,11 +41,27 @@ def api_url():
     return _env("COULSON_API_URL", DEFAULT_API_URL).rstrip("/")
 
 
+def basic_auth_value(username: str, password: str, app: str = "") -> str:
+    """Same encoding as Coulson's browser login: btoa(`${user}:${pass}:coulson`)."""
+    app = app or _env("COULSON_APP_NAME", APP_NAME)
+    raw = f"{username}:{password}:{app}"
+    try:
+        blob = raw.encode("latin-1")
+    except UnicodeEncodeError:
+        blob = raw.encode("utf-8")
+    return base64.b64encode(blob).decode("ascii")
+
+
 def _request(url, method="GET", headers=None, body=None):
-    hdrs = {"Accept": "application/json", "User-Agent": "EulerCRM/coulson-sync"}
+    hdrs = {"Accept": "application/json"}
     if headers:
         hdrs.update(headers)
-    data = body if body is None or isinstance(body, (bytes, bytearray)) else json.dumps(body).encode()
+    if body is None and str(method).upper() == "POST":
+        data = b""
+    elif body is None or isinstance(body, (bytes, bytearray)):
+        data = body
+    else:
+        data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
@@ -74,8 +89,7 @@ def _message_from_body(raw):
 def login(username: str, password: str) -> str:
     if not username or not password:
         raise CoulsonError("Coulson username and password are required")
-    token_src = f"{username}:{password}:{_env('COULSON_APP_NAME', APP_NAME)}"
-    basic = base64.b64encode(token_src.encode("utf-8")).decode("ascii")
+    basic = basic_auth_value(username, password)
     status, payload = _request(
         f"{auth_url()}/login",
         method="POST",

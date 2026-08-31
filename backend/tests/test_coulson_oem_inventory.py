@@ -229,4 +229,107 @@ async def test_save_verifies_valid_coulson_login(client, monkeypatch):
     body = r.json()
     assert body["loginOk"] is True
     assert body["configured"] is True
+    assert body["username"] == "dealer.user"
     assert "secret" not in str(body)
+
+
+def test_basic_auth_matches_browser_btoa():
+    import base64
+    expected = base64.b64encode(b"user:pass:coulson").decode("ascii")
+    assert coulson_client.basic_auth_value("user", "pass") == expected
+
+
+def test_masked_username_is_not_a_login():
+    assert oem_sync.looks_masked_username("va***r")
+    assert not oem_sync.looks_masked_username("vaibhav.akar")
+    assert oem_sync.mask_username("va***r") == ""
+
+
+@pytest.mark.asyncio
+async def test_save_rejects_masked_username(client, monkeypatch):
+    called = []
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: called.append(u) or "tok")
+    r = await client.put("/api/integrations/coulson",
+                         json={"username": "va***r", "password": "secret"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["loginOk"] is False
+    assert "hint" in (body.get("lastError") or "").lower()
+    assert called == []
+    assert "secret" not in str(body)
+
+
+@pytest.mark.asyncio
+async def test_owner_status_returns_full_username(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    await client.put("/api/integrations/coulson",
+                     json={"username": "vaibhav.akar", "password": "secret"})
+    r = await client.get("/api/integrations/coulson")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["username"] == "vaibhav.akar"
+    assert "secret" not in str(body)
+
+
+@pytest.mark.asyncio
+async def test_executive_status_masks_username(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    await client.put("/api/integrations/coulson",
+                     json={"username": "vaibhav.akar", "password": "secret"})
+    r = await client.post("/api/auth/login",
+                          json={"email": "executive@euler.com", "password": "euler@123"})
+    assert r.status_code == 200, r.text
+    token = r.json()["token"]
+    r = await client.get("/api/integrations/coulson",
+                         headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    assert r.json()["username"] == oem_sync.mask_username("vaibhav.akar")
+    assert r.json()["username"] != "vaibhav.akar"
+
+
+@pytest.mark.asyncio
+async def test_settings_credentials_win_over_env(client, monkeypatch):
+    monkeypatch.setenv("COULSON_USERNAME", "env.user")
+    monkeypatch.setenv("COULSON_PASSWORD", "env-secret")
+    await oem_sync.save_credentials(server.db, "dealer.user", "secret")
+    user, pw, src = await oem_sync.resolve_credentials(server.db)
+    assert src == "settings"
+    assert user == "dealer.user"
+    assert pw == "secret"
+
+
+@pytest.mark.asyncio
+async def test_save_verifies_typed_password_not_env(client, monkeypatch):
+    monkeypatch.setenv("COULSON_USERNAME", "env.user")
+    monkeypatch.setenv("COULSON_PASSWORD", "env-secret")
+    seen = []
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: seen.append((u, p)) or "tok")
+    r = await client.put("/api/integrations/coulson",
+                         json={"username": "vaibhav.akar", "password": "typed-secret"})
+    assert r.status_code == 200, r.text
+    assert r.json()["loginOk"] is True
+    assert seen == [("vaibhav.akar", "typed-secret")]
+    assert "typed-secret" not in str(r.json())
+    assert "env-secret" not in str(r.json())
+
+
+@pytest.mark.asyncio
+async def test_retry_without_password_after_failure(client, monkeypatch):
+    def _boom(u, p):
+        raise coulson_client.CoulsonError("Username/password is not valid, Please try again", status=203)
+    monkeypatch.setattr(coulson_client, "login", _boom)
+    r = await client.put("/api/integrations/coulson",
+                         json={"username": "vaibhav.akar", "password": "wrong"})
+    assert r.json()["loginOk"] is False
+    called = {"n": 0}
+
+    def _count(u, p):
+        called["n"] += 1
+        raise coulson_client.CoulsonError("nope")
+
+    monkeypatch.setattr(coulson_client, "login", _count)
+    r = await client.put("/api/integrations/coulson",
+                         json={"username": "vaibhav.akar", "password": ""})
+    assert r.json()["loginOk"] is False
+    assert called["n"] == 0
+    assert "password" in (r.json().get("lastError") or "").lower()
