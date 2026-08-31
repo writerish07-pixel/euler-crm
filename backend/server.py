@@ -5077,7 +5077,25 @@ async def coulson_status():
 async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
     user = await oem_sync.save_credentials(db, body.username, body.password)
     await write_audit(act, "update", "coulson", new={"username": oem_sync.mask_username(user)})
-    return await coulson_status()
+    st = await coulson_status()
+    _, pw, _src = await oem_sync.resolve_credentials(db)
+    if not oem_sync.credentials_configured(user, pw):
+        st["loginOk"] = False
+        st["lastError"] = "Coulson username and password are required"
+        return st
+    try:
+        coulson_client.login(user, pw)
+        await db["system"].update_one(
+            {"_id": "coulson"},
+            {"$set": {"lastError": "", "loginVerifiedAt": oem_sync.now_iso()}},
+        )
+        st = await coulson_status()
+        st["loginOk"] = True
+    except coulson_client.CoulsonError as e:
+        await oem_sync._record_sync(db, False, str(e))
+        st = await coulson_status()
+        st["loginOk"] = False
+    return st
 
 
 async def _reprice_after_oem(changed_ids):
