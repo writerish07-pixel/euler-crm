@@ -22,6 +22,9 @@ import commercial as ce
 import seed as seeder
 import auth as authmod
 import gsheets
+import oem_catalog as oem_cat
+import oem_sync
+import coulson as coulson_client
 import botspace as wa
 
 ROOT_DIR = Path(__file__).parent
@@ -2505,10 +2508,15 @@ async def _sync_booking_amount_edit(lead_id, lead, old_amount, new_amount, act=N
 async def _price_master_row(model, variant):
     """Authoritative Price Master lookup, keyed on model + variant exactly as the
     Price Master defines them (case/whitespace-insensitive, active rows only).
+    OEM aliases (Turbo→Turbo Max, Hi-Load/XR→HiCity/XR, Maxx (DV200)→DV220, …)
+    resolve to the canonical catalog row so old leads still book.
     Returns None when there is no matching row — the caller must refuse to book
     rather than fall back to zero."""
     m = str(model or "").strip()
     v = str(variant or "").strip()
+    sku = oem_cat.resolve_sku(m, v)
+    if sku:
+        m, v = sku.crm_model, sku.crm_variant
     if not m:
         return None
     rows = await db.price_master.find({"model": {"$regex": f"^{re.escape(m)}$", "$options": "i"}}).to_list(500)
@@ -3659,6 +3667,8 @@ async def _import_allowed_values():
     """
     vehicles, seen = [], set()
     for r in await db.price_master.find().to_list(2000):
+        if str(r.get("status") or "active").lower() == "inactive":
+            continue
         model = str(r.get("model") or "").strip()
         variant = str(r.get("variant") or "").strip()
         if not model:
@@ -3758,21 +3768,27 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
 
         model_raw = str(row.get("interestedModel") or "").strip()
         variant_raw = str(row.get("variant") or "").strip()
-        model = _import_match(model_raw, allowed["models"]) if model_raw else ""
-        if model_raw and model is None:
-            errors.append(f"Interested Model '{model_raw}' is not in Price Master")
-            model = model_raw
-        variant = variant_raw
-        if variant_raw and not model_raw:
-            errors.append("Variant needs an Interested Model in the same row")
-        elif variant_raw and model:
-            options = variants_by_model.get(str(model).lower(), [])
-            match = _import_match(variant_raw, [o for o in options if o])
-            if match is None and (str(model).lower(), variant_raw.lower()) not in pairs:
-                errors.append(f"Variant '{variant_raw}' does not belong to {model} "
-                              f"(allowed: {', '.join([o for o in options if o]) or 'none in Price Master'})")
-            else:
-                variant = match or variant_raw
+        sku = oem_cat.resolve_sku(model_raw, variant_raw) if model_raw else None
+        if sku:
+            model, variant = sku.crm_model, sku.crm_variant
+            if (model.lower(), variant.lower()) not in pairs:
+                errors.append(f"{model} / {variant} is not an active Price Master row")
+        else:
+            model = _import_match(model_raw, allowed["models"]) if model_raw else ""
+            if model_raw and model is None:
+                errors.append(f"Interested Model '{model_raw}' is not in Price Master")
+                model = model_raw
+            variant = variant_raw
+            if variant_raw and not model_raw:
+                errors.append("Variant needs an Interested Model in the same row")
+            elif variant_raw and model:
+                options = variants_by_model.get(str(model).lower(), [])
+                match = _import_match(variant_raw, [o for o in options if o])
+                if match is None and (str(model).lower(), variant_raw.lower()) not in pairs:
+                    errors.append(f"Variant '{variant_raw}' does not belong to {model} "
+                                  f"(allowed: {', '.join([o for o in options if o]) or 'none in Price Master'})")
+                else:
+                    variant = match or variant_raw
         row["interestedModel"] = model or ""
         row["variant"] = variant
 
@@ -4945,7 +4961,12 @@ async def sync_incentive_register_sheet(act=Depends(actor)):
 @api.get("/price-master")
 async def list_price_master(model: Optional[str] = None):
     q = {"model": model} if model else {}
-    return [clean(p) for p in await db.price_master.find(q).to_list(2000)]
+    rows = [clean(p) for p in await db.price_master.find(q).to_list(2000)]
+    counts = await oem_sync.inventory_counts(db)
+    for r in rows:
+        r["inYard"] = counts.get((r.get("model") or "", r.get("variant") or ""), 0)
+        r["priceSource"] = r.get("priceSource") or "manual"
+    return rows
 
 
 @api.get("/price-list")
@@ -4964,6 +4985,7 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
     scheme_rows = await get_scheme_rows()
     on = today()
     rows = await db.price_master.find({"model": model} if model else {}).to_list(2000)
+    counts = await oem_sync.inventory_counts(db)
     needle = (q or "").strip().lower()
     grouped, review = {}, []
     for r in rows:
@@ -4997,6 +5019,7 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
             "tcs": tcs, "tcsApplies": applies and tcs > 0,
             "onRoad": ce.round2(gvc + tcs),
             "schemeAvailable": scheme,
+            "inYard": counts.get((mdl, variant), 0),
         })
     out = [{"model": m, "count": len(v),
             "rows": sorted(v, key=lambda x: x["onRoad"])}
@@ -5011,8 +5034,100 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
 
 @api.get("/price-master/variants")
 async def price_variants(model: str):
-    rows = await db.price_master.find({"model": model}).to_list(500)
+    wanted = str(model or "").strip()
+    sku = oem_cat.resolve_sku(wanted, "")
+    key = "".join(ch for ch in wanted.lower() if ch.isalnum())
+    canon = (sku.crm_model if sku else None) or oem_cat.MODEL_ALIASES.get(key, wanted)
+    rows = await db.price_master.find({
+        "model": {"$regex": f"^{re.escape(canon)}$", "$options": "i"},
+    }).to_list(500)
+    active = [clean(r) for r in rows if str(r.get("status") or "active").lower() != "inactive"]
+    counts = await oem_sync.inventory_counts(db)
+    for r in active:
+        r["inYard"] = counts.get((r.get("model") or "", r.get("variant") or ""), 0)
+    return active
+
+
+class CoulsonCredIn(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
+@api.get("/integrations/coulson")
+async def coulson_status():
+    """Presence-only status. Never returns the password."""
+    user, pw, src = await oem_sync.resolve_credentials(db)
+    doc = await db["system"].find_one({"_id": "coulson"}) or {}
+    cat_doc = await db["system"].find_one({"_id": "oem_catalog"}) or {}
+    count = await db.oem_inventory.count_documents({})
+    return {
+        "configured": oem_sync.credentials_configured(user, pw),
+        "username": oem_sync.mask_username(user),
+        "source": src or None,
+        "lastSyncAt": doc.get("lastSyncAt"),
+        "lastSyncOk": doc.get("lastSyncOk"),
+        "lastError": doc.get("lastError") or "",
+        "inventoryCount": count,
+        "catalogSize": cat_doc.get("catalogSize") or len(oem_cat.CATALOG),
+        "pricesUpdated": doc.get("pricesUpdated"),
+    }
+
+
+@api.put("/integrations/coulson", dependencies=[Depends(owner_only)])
+async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
+    user = await oem_sync.save_credentials(db, body.username, body.password)
+    await write_audit(act, "update", "coulson", new={"username": oem_sync.mask_username(user)})
+    return await coulson_status()
+
+
+async def _reprice_after_oem(changed_ids):
+    repriced_total = 0
+    for pid in changed_ids or []:
+        row = await db.price_master.find_one({"priceId": pid})
+        if not row:
+            continue
+        result = await reprice_leads_for_price_row(row, {"exShowroom"}, None)
+        repriced_total += int(result.get("repricedCount") or 0)
+    return repriced_total
+
+
+@api.post("/integrations/coulson/sync", dependencies=[Depends(owner_only)])
+async def coulson_sync(act=Depends(actor)):
+    """Pull live OEM prices + yard stock. RTO/insurance stay as manual Price Master fields."""
+    try:
+        result = await oem_sync.sync_from_coulson(db)
+    except coulson_client.CoulsonError as e:
+        await oem_sync._record_sync(db, False, str(e))
+        raise HTTPException(502, str(e))
+    except Exception as e:
+        logging.exception("Coulson sync failed")
+        await oem_sync._record_sync(db, False, str(e))
+        raise HTTPException(502, "Coulson sync failed")
+    repriced = 0
+    try:
+        repriced = await _reprice_after_oem(result.get("changedPriceIds"))
+    except Exception:
+        logging.exception("OEM reprice after sync failed")
+    result["leadsRepriced"] = repriced
+    # Don't leak price-id lists or credential source internals to the client more than needed.
+    result.pop("changedPriceIds", None)
+    await write_audit(act, "sync", "coulson", new={"ok": result.get("ok"),
+                                                   "inventoryCount": result.get("inventoryCount"),
+                                                   "pricesUpdated": result.get("pricesUpdated")})
+    return result
+
+
+@api.get("/inventory")
+async def list_oem_inventory(model: Optional[str] = None):
+    rows = await oem_sync.list_inventory(db, model)
     return [clean(r) for r in rows]
+
+
+@api.get("/inventory/summary")
+async def inventory_summary():
+    counts = await oem_sync.inventory_counts(db)
+    out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
+    return {"total": sum(c["count"] for c in out), "rows": out}
 
 
 # ---------------------------------------------------------------- masters registers
@@ -6013,6 +6128,7 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/claims"), ("POST", "/api/claims/settle"), ("POST", "/api/claims/receipt"),
     ("GET", "/api/deliveries"), ("GET", "/api/bookings"), ("GET", "/api/activities"),
     ("GET", "/api/price-master"), ("GET", "/api/scheme-master"), ("GET", "/api/incentive-master"),
+    ("GET", "/api/inventory"), ("GET", "/api/integrations/coulson"),
     ("GET", "/api/dealer-earnings"), ("GET", "/api/reports/owner-commercial"),
     ("GET", "/api/reports/oem-claim-dashboard"), ("GET", "/api/reports/claim-exceptions"),
     ("GET", "/api/reports/insurance-payout"), ("GET", "/api/reports/dealer-earnings"),
@@ -6030,7 +6146,7 @@ OWNER_ONLY_ENDPOINTS = [
 EXPECTED_COLLECTIONS = ["leads", "price_master", "scheme_master", "incentive_master", "incentive_register",
                         "bookings", "payments", "deliveries", "finance", "insurance", "dealer_earnings",
                         "activities", "claims", "quotations", "counters", "audit_log", "masters_list",
-                        "insurance_agents", "cancel_reasons"]
+                        "insurance_agents", "cancel_reasons", "oem_inventory"]
 FIELD_MAPPING_LEAD = ["leadId", "customerName", "mobile", "interestedModel", "variant",
                       "currentStatus", "accountStatus"]
 PORTED_COMMERCIAL_FNS = ["compute_commercial_totals", "compute_dealer_margin", "derive_claim",
@@ -6685,8 +6801,9 @@ def _price_row_changed(before: dict, after: dict) -> list:
 def _lead_matches_price_row(lead: dict, row: dict) -> bool:
     def norm(v):
         return str(v or "").strip().lower()
-    return (norm(lead.get("interestedModel")) == norm(row.get("model"))
-            and norm(lead.get("variant")) == norm(row.get("variant")))
+    lm, lv = oem_cat.canonical_model_variant(lead.get("interestedModel"), lead.get("variant"))
+    rm, rv = oem_cat.canonical_model_variant(row.get("model"), row.get("variant"))
+    return norm(lm) == norm(rm) and norm(lv) == norm(rv)
 
 
 async def reprice_leads_for_price_row(row: dict, changed_fields=None, act=None) -> dict:
@@ -6770,6 +6887,8 @@ async def update_price_row(price_id: str, body: PriceRowIn, act=Depends(actor)):
     if not existing:
         raise HTTPException(404, "Price row not found")
     payload = body.model_dump()
+    if str(existing.get("priceSource") or "") == oem_sync.OEM_PRICE_SOURCE:
+        payload.pop("exShowroom", None)
     await db.price_master.update_one({"priceId": price_id}, {"$set": payload})
     updated = await db.price_master.find_one({"priceId": price_id})
     changed = _price_row_changed(existing, updated)
@@ -7949,7 +8068,7 @@ def _config_diagnostics():
     """Names + presence only — never values. Logged once at startup so a
     misconfigured deploy is obvious without ever exposing a secret."""
     required = ["MONGO_URL", "DB_NAME", "JWT_SECRET"]
-    optional = ["GSHEET_ID", "CORS_ORIGINS"]
+    optional = ["GSHEET_ID", "CORS_ORIGINS", "COULSON_USERNAME"]
     missing = [k for k in required if not os.environ.get(k, "").strip()]
     cred = gsheets.credential_diagnostics()
     return {
@@ -8077,6 +8196,21 @@ async def _backfill_close_won_status():
     return fixed
 
 
+async def _coulson_sync_loop():
+    """Periodic Coulson pull. Never raises into the event loop."""
+    while True:
+        try:
+            result = await oem_sync.sync_from_coulson(db)
+            if result.get("ok"):
+                try:
+                    await _reprice_after_oem(result.get("changedPriceIds"))
+                except Exception:
+                    logging.exception("OEM reprice after scheduled sync failed")
+        except Exception:
+            logging.exception("Scheduled Coulson sync failed")
+        await asyncio.sleep(15 * 60)
+
+
 @app.on_event("startup")
 async def startup():
     global _finance_index_status
@@ -8115,6 +8249,7 @@ async def startup():
         await db.whatsapp_threads.create_index("leadId", unique=True)
         await db.whatsapp_threads.create_index([("lastMessageAt", -1)])
         await db.cancel_reasons.create_index("reasonId", unique=True)
+        await db.oem_inventory.create_index("chassis")
         # The daily revival sweep queries on these two together.
         await db.leads.create_index([("accountStatus", 1), ("reviveOn", 1)])
     except Exception:
@@ -8177,6 +8312,23 @@ async def startup():
         await _repair_duplicate_finance_receipts()
     except Exception:
         logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
+    # OEM catalog: rename/drop/add Price Master rows. Live Coulson pull is
+    # separate and fail-soft (credentials may be missing).
+    try:
+        cat_res = await oem_sync.apply_catalog(db)
+        try:
+            await _reprice_after_oem(cat_res.get("changedPriceIds"))
+        except Exception:
+            logging.exception("OEM_CATALOG_REPRICE_ERROR")
+    except Exception:
+        logging.exception("OEM_CATALOG_APPLY_ERROR")
+    try:
+        if os.environ.get("ENVIRONMENT", "").lower() != "test":
+            user, pw, _src = await oem_sync.resolve_credentials(db)
+            if oem_sync.credentials_configured(user, pw):
+                asyncio.create_task(_coulson_sync_loop())
+    except Exception:
+        logging.exception("COULSON_SYNC_LOOP_START_ERROR")
     try:
         if os.environ.get("ENVIRONMENT", "").lower() != "test":
             asyncio.create_task(wa.scheduler_loop())

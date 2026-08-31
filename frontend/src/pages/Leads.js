@@ -150,7 +150,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{masters.executives.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{masters.models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label="Variant"><Select value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}</option>)}</Select></Field>
+        <Field label="Variant"><Select value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Budget (₹)"><Input type="number" value={form.budget} onChange={set("budget")} /></Field>
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
