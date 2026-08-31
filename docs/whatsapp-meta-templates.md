@@ -161,36 +161,46 @@ Reports** — nothing here is hard-coded.
 
 ---
 
-## E. `exec_day_ahead`
+## E. `exec_morning_statement` (replaces `exec_day_ahead`)
 
 | Field | Value |
 |---|---|
-| Category | **Utility** |
+| Category | **Utility** — see the note under H |
 | Language | English (`en`) |
-| Name | `exec_day_ahead` |
+| Name | `exec_morning_statement` |
 | Sent | every executive, 08:30 IST |
 
 **Body**
 ```
-Good morning {{1}}.
+Daily task summary for {{1}}, dated {{2}}.
 
-Pending deliveries: {{2}}
-To collect: Rs {{3}}
-Follow-ups due today: {{4}}
-Overdue follow-ups: {{5}}
+Deliveries pending completion: {{3}}
+Amount pending collection: Rs {{4}}
+Follow-ups scheduled for today: {{5}}
+Follow-ups past their due date: {{6}}
 
-Open the app for the customer list.
+Open the Euler CRM app to view these records.
 ```
 
 | Variable | Meaning | Sample |
 |---|---|---|
 | {{1}} | Executive name | Amit |
-| {{2}} | Booked, not yet delivered | 6 |
-| {{3}} | Outstanding on those bookings | 4,20,000 |
-| {{4}} | Follow-ups dated today | 3 |
-| {{5}} | Follow-ups already past due | 2 |
+| {{2}} | Statement date | 2026-08-31 |
+| {{3}} | Booked, not yet delivered | 6 |
+| {{4}} | Outstanding on those bookings | 4,20,000 |
+| {{5}} | Follow-ups dated today | 3 |
+| {{6}} | Follow-ups already past due | 2 |
 
-**Button (URL):** `Open my leads` → your app URL
+> **Why this one changed too.** `exec_day_ahead` was believed to be Utility
+> because it kept arriving. It was not. It is the first send of the day, so it
+> consumed the recipient's marketing allowance and the EOD reports were refused
+> after it. Once the cap tightened it failed as well, labelled **"Re-engagement
+> message"** in WhatsApp — that phrase is WhatsApp's own wording for a marketing
+> send, and it is the plainest confirmation you will get of a template's real
+> category.
+>
+> "Good morning {{1}}" was the giveaway: a friendly greeting reads as
+> conversational marketing, not as an account notice.
 
 ---
 

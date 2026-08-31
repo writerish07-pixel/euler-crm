@@ -36,6 +36,7 @@ import ClaimExceptions from "./pages/ClaimExceptions";
 import ERPProductionAudit from "./pages/ERPProductionAudit";
 import AuditLog from "./pages/AuditLog";
 import OemFinance from "./pages/OemFinance";
+import Allocation from "./pages/Allocation";
 
 function homePath(auth) {
   // The OEM finance desk has exactly one page. Sending it anywhere else would
@@ -46,9 +47,9 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials } = auth;
   const loc = useLocation();
   if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
@@ -56,6 +57,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   // redirect here and a 403 on the API — the browser is not the enforcement.
   if (isOemFinance && !oemOk) return <Navigate to="/oem-finance" replace />;
   if (ownerOnly && !isOwner) return <Navigate to={homePath(auth)} replace />;
+  if (dealDesk && !canEditCommercials) return <Navigate to={homePath(auth)} replace />;
   if (fieldOnly && !isField && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (accountsHome && !isAccounts && !isOwner && !isSalesStaff) {
     return <Navigate to={homePath(auth)} replace />;
@@ -88,6 +90,7 @@ function AppRoutes() {
       fieldOnly={opts.fieldOnly}
       accountsHome={opts.accountsHome}
       oemOk={opts.oemOk}
+      dealDesk={opts.dealDesk}
     >
       {el}
     </Protected>
@@ -109,6 +112,7 @@ function AppRoutes() {
       <Route path="/cancellations" element={P(<Cancellations />, { fieldOk: true })} />
       {/* Owner too, so you can see exactly what the OEM sees before issuing a login. */}
       <Route path="/oem-finance" element={P(<OemFinance />, { oemOk: true })} />
+      <Route path="/allocation" element={P(<Allocation />, { dealDesk: true })} />
       <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
       <Route path="/finance" element={P(<Finance />, { financeView: true })} />
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />

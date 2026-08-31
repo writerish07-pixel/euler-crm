@@ -2158,6 +2158,31 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
 
 
 # ---------------------------------------------------------------- leads
+def _is_own_lead(lead, user) -> bool:
+    """Does this lead belong to the signed-in executive?"""
+    return bool(_leads_for_executive([lead or {}], user or {}))
+
+
+async def _own_lead_ids(user) -> set:
+    return {l["leadId"] for l in
+            _leads_for_executive(await db.leads.find().to_list(5000), user)}
+
+
+def _require_own_lead(lead, user):
+    """An executive may only open a lead assigned to them.
+
+    Scoping the LIST alone would be cosmetic — lead ids run in sequence, so a
+    colleague's deal is one guessed URL away. This is the check that makes the
+    scoping real, and it is applied wherever a single lead is returned.
+    """
+    if (user or {}).get("role") != "executive":
+        return
+    if not _is_own_lead(lead, user):
+        raise HTTPException(
+            403, "This lead is assigned to another executive. "
+                 "Ask the owner or your team leader to reallocate it.")
+
+
 @api.get("/leads")
 async def list_leads(status: Optional[str] = None, q: Optional[str] = None, user=Depends(current_user)):
     query = {}
@@ -2170,6 +2195,9 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None, user
             {"leadId": {"$regex": q, "$options": "i"}},
         ]
     leads = await db.leads.find(query).sort("leadId", -1).to_list(3000)
+    # An executive works their own leads only. Owner, TL and Accounts see all.
+    if user.get("role") == "executive":
+        leads = _leads_for_executive(leads, user)
     rows = [clean(l) for l in leads]
     if user.get("role") in authmod.FIELD_ROLES:
         return [_field_safe_lead(l) for l in rows]
@@ -2218,6 +2246,7 @@ async def create_lead(body: LeadIn, _sales=Depends(sales_staff_only)):
 @api.get("/leads/{lead_id}")
 async def get_lead(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
     if user.get("role") in authmod.FIELD_ROLES:
         return _field_safe_lead(lead)
     return lead
@@ -2226,6 +2255,7 @@ async def get_lead(lead_id: str, user=Depends(current_user)):
 @api.get("/leads/{lead_id}/360")
 async def customer_360(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
     # ASM / RM — pipeline snapshot only (no commercials, payments, claims)
     if user.get("role") in authmod.FIELD_ROLES:
         delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
@@ -3399,6 +3429,94 @@ async def admin_run_revivals(day: Optional[str] = None):
     return await run_scheduled_revivals(day)
 
 
+
+# ---------------------------------------------------------------- lead allocation
+class AllocateIn(BaseModel):
+    leadIds: list = []
+    executive: str = ""
+    remarks: str = ""
+
+
+@api.get("/leads/allocation/summary")
+async def allocation_summary(_desk=Depends(deal_desk_only)):
+    """Who is carrying what, and what nobody is carrying.
+
+    Unassigned leads are the point of the page: with executives scoped to their
+    own leads, a lead with no executive is visible to nobody but the owner and
+    the TL, and would otherwise sit unworked and unnoticed.
+    """
+    leads = await db.leads.find().to_list(5000)
+    active = [l for l in leads if (l.get("accountStatus") or "Active") == "Active"]
+    names = await _executive_names()
+    rows = {n: {"executive": n, "total": 0, "open": 0, "booked": 0} for n in names}
+    unassigned = 0
+    for l in active:
+        ex = str(l.get("executive") or "").strip()
+        if not ex:
+            unassigned += 1
+            continue
+        row = rows.setdefault(ex, {"executive": ex, "total": 0, "open": 0, "booked": 0})
+        row["total"] += 1
+        if _is_booked_lead(l):
+            row["booked"] += 1
+        else:
+            row["open"] += 1
+    return {
+        "executives": sorted(rows.values(), key=lambda r: -r["total"]),
+        "unassigned": unassigned,
+        "activeLeads": len(active),
+        "generatedAt": now_iso(),
+    }
+
+
+@api.post("/leads/allocate")
+async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
+    """Assign or reassign leads to an executive, in bulk.
+
+    The previous owner is kept in an allocation history rather than overwritten.
+    Cancellations and bookings are already attributed to whoever held the lead at
+    the time, so moving a lead must not quietly move that record with it.
+    """
+    name = str(body.executive or "").strip()
+    if not name:
+        raise HTTPException(422, "Pick an executive to allocate to")
+    if name not in await _executive_names():
+        raise HTTPException(422, f"'{name}' is not an active executive on the staff master")
+    lead_ids = [str(x).strip() for x in (body.leadIds or []) if str(x).strip()]
+    if not lead_ids:
+        raise HTTPException(422, "Select at least one lead")
+
+    moved, skipped = [], []
+    for lid in lead_ids:
+        lead = await db.leads.find_one({"leadId": lid})
+        if not lead:
+            skipped.append({"leadId": lid, "reason": "not found"})
+            continue
+        if (lead.get("accountStatus") or "Active") != "Active":
+            skipped.append({"leadId": lid, "reason": f"{_acct(lead)} lead"})
+            continue
+        previous = str(lead.get("executive") or "").strip()
+        if previous == name:
+            skipped.append({"leadId": lid, "reason": "already theirs"})
+            continue
+        entry = {"from": previous, "to": name, "at": now_iso(),
+                 "by": act.get("email", ""), "remarks": str(body.remarks or "").strip()}
+        await db.leads.update_one({"leadId": lid}, {
+            "$set": {"executive": name, "lastUpdated": now_iso(),
+                     "lastUpdatedBy": act.get("email", "")},
+            "$push": {"allocationHistory": entry}})
+        await write_audit(act, "allocate", "lead", leadId=lid,
+                          old={"executive": previous}, new={"executive": name})
+        await _log_activity_safe(lead, "Note",
+                                 f"Lead allocated to {name}"
+                                 + (f" (was {previous})" if previous else " (was unassigned)"))
+        updated = clean(await db.leads.find_one({"leadId": lid}))
+        await sheet_sync("leads", updated)
+        moved.append(lid)
+    return {"ok": True, "executive": name, "moved": moved,
+            "movedCount": len(moved), "skipped": skipped}
+
+
 # ---------------------------------------------------------------- lead bulk import
 IMPORT_COLUMNS = [
     ("Customer Name", "customerName"), ("Mobile", "mobile"), ("Alternate Mobile", "altMobile"),
@@ -4465,9 +4583,11 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
 
 # ---------------------------------------------------------------- deliveries
 @api.get("/deliveries")
-async def list_deliveries():
+async def list_deliveries(user=Depends(current_user)):
     # active-booked leads that are not delivered = pending deliveries; plus delivered ones
     leads = await db.leads.find({"currentStatus": {"$in": ["Booked", "Finance Process", "Delivered"]}}).to_list(2000)
+    if user.get("role") == "executive":
+        leads = _leads_for_executive(leads, user)
     result = []
     for l in leads:
         d = await db.deliveries.find_one({"leadId": l["leadId"]}) or {}
@@ -4909,6 +5029,9 @@ async def list_incentive_master():
 @api.get("/bookings")
 async def list_bookings(user=Depends(current_user)):
     rows = [clean(b) for b in await db.bookings.find().sort("bookingId", -1).to_list(1000)]
+    if user.get("role") == "executive":
+        mine = await _own_lead_ids(user)
+        rows = [b for b in rows if b.get("leadId") in mine]
     if user.get("role") in authmod.FIELD_ROLES:
         safe = []
         for b in rows:
@@ -4923,9 +5046,13 @@ async def list_bookings(user=Depends(current_user)):
 
 
 @api.get("/activities")
-async def list_activities(lead_id: Optional[str] = None):
+async def list_activities(lead_id: Optional[str] = None, user=Depends(current_user)):
     q = {"leadId": lead_id} if lead_id else {}
-    return [clean(a) for a in await db.activities.find(q).sort("activityId", -1).to_list(2000)]
+    rows = [clean(a) for a in await db.activities.find(q).sort("activityId", -1).to_list(2000)]
+    if user.get("role") == "executive":
+        mine = await _own_lead_ids(user)
+        rows = [a for a in rows if a.get("leadId") in mine]
+    return rows
 
 
 @api.post("/leads/{lead_id}/activities")

@@ -59,7 +59,13 @@ export default function Login() {
           <h2 className="font-heading text-2xl font-extrabold text-ink">Sign in</h2>
           <p className="text-sm text-ink-soft mt-1 mb-6">Enter your credentials to continue</p>
           <div className="space-y-4">
-            <Field label="Email"><Input data-testid="login-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@euler.com" /></Field>
+            {/* type="text", not "email" — the browser would refuse to submit a
+                plain user ID as an email address. */}
+            <Field label="User ID or email">
+              <Input data-testid="login-email" type="text" autoCapitalize="none" autoCorrect="off"
+                value={email} onChange={(e) => setEmail(e.target.value)}
+                placeholder="e.g. amit — or owner@euler.com" />
+            </Field>
             <Field label="Password"><Input data-testid="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" /></Field>
             <Button data-testid="login-submit" type="submit" disabled={busy} className="w-full"><LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}</Button>
           </div>

@@ -25,13 +25,16 @@ DEFAULT_TEMPLATES = {
     "finance": "finance_overdue_exec",
     # Internal daily reports (English, Utility category). Staff messages, so they
     # bypass customer quiet hours.
-    # exec_day_ahead is categorised Utility by Meta and delivers, so it is left
-    # alone. The three EOD bodies were categorised MARKETING — Meta decides from
-    # the text, and its decision overrides the category requested at submission —
-    # which put them under the marketing frequency cap and stopped delivery.
-    # Rewritten as dated account statements under NEW names, because a template
-    # already classified Marketing keeps that classification.
-    "execMorning": "exec_day_ahead",
+    # ALL FOUR reports were categorised MARKETING by Meta — its classifier reads
+    # the body and overrides the category asked for at submission — which put them
+    # under the per-user marketing frequency cap and stopped delivery.
+    # exec_day_ahead was believed to be Utility because it kept arriving; it was
+    # not. It is the first send of the day, so it consumed the recipient's
+    # marketing allowance and the EOD ones were refused. Once the cap tightened it
+    # failed too, labelled "Re-engagement message" — WhatsApp's own wording for a
+    # marketing send. Rewritten as dated statements under NEW names, because a
+    # template already classified Marketing keeps that classification.
+    "execMorning": "exec_morning_statement",
     "execEod": "exec_eod_statement",
     "managerEod": "manager_eod_statement",
     "ownerEod": "owner_eod_statement",
@@ -1086,17 +1089,18 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
                 continue
             await deliver(st, "exec_morning", [
                 _one_line(e["name"]),
+                _one_line(today_s),
                 _one_line(e["pendingBookings"]),
                 _inr(e["pendingCollection"]),
                 _one_line(e["followupsDue"]),
                 _one_line(e["followupsOverdue"]),
             ], f"Day ahead {today_s} for {e['name']}", "\n".join([
-                f"Good morning {e['name']}.", "",
-                f"Pending deliveries: {e['pendingBookings']}",
-                f"To collect: Rs {_inr(e['pendingCollection'])}",
-                f"Follow-ups due today: {e['followupsDue']}",
-                f"Overdue follow-ups: {e['followupsOverdue']}", "",
-                "Open the app for the customer list.",
+                f"Daily task summary for {e['name']}, dated {today_s}.", "",
+                f"Deliveries pending completion: {e['pendingBookings']}",
+                f"Amount pending collection: Rs {_inr(e['pendingCollection'])}",
+                f"Follow-ups scheduled for today: {e['followupsDue']}",
+                f"Follow-ups past their due date: {e['followupsOverdue']}", "",
+                "Open the Euler CRM app to view these records.",
             ]))
     elif slot == "eod":
         for st in await server._staff_for_report("exec_eod"):

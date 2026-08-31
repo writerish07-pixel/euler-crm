@@ -5,8 +5,9 @@ name+mobile list in the WhatsApp settings. The two drifted silently: a mismatche
 name meant that executive was never messaged, with no error anywhere. The staff
 master holds name, mobile, role, target and report subscriptions in one place.
 
-Reports (English, Utility templates):
-  morning -> exec_day_ahead        each executive
+Reports (English). ALL FOUR were categorised MARKETING by Meta and rewritten as
+dated statements; the morning one last, once it started failing too:
+  morning -> exec_morning_statement  each executive
   eod     -> exec_eod_statement     each executive
              manager_eod_statement  RM + ASM, volume only, NO money
              owner_eod_statement    owner, volume + money
@@ -289,7 +290,7 @@ async def test_morning_slot_messages_every_executive(wired):
     kinds = {s["kind"] for s in sends}
     assert kinds == {"exec_morning"}, "morning must not send EOD reports"
     assert {s["phone"] for s in sends} >= {"9812341111", "9812342222"}
-    assert all(s["template"] == "exec_day_ahead" for s in sends)
+    assert all(s["template"] == "exec_morning_statement" for s in sends)
 
 
 @pytest.mark.asyncio
@@ -397,7 +398,7 @@ def test_an_empty_error_produces_no_guess():
 async def test_report_status_names_the_template_behind_every_report(client):
     d = (await client.get("/api/integrations/botspace/report-status")).json()
     # The template a send actually uses, so a mismatch with Meta is visible.
-    assert d["templates"]["exec_morning"]["templateId"] == "exec_day_ahead"
+    assert d["templates"]["exec_morning"]["templateId"] == "exec_morning_statement"
     assert d["templates"]["exec_eod"]["templateId"] == "exec_eod_statement"
     assert d["templates"]["manager_eod"]["templateId"] == "manager_eod_statement"
     assert d["templates"]["owner_eod"]["templateId"] == "owner_eod_statement"

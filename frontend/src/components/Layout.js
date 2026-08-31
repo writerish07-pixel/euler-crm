@@ -5,7 +5,7 @@ import {
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
-  MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon,
+  MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -26,6 +26,7 @@ const NAV = [
     { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
     { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle, salesOnly: true },
     { to: "/cancellations", label: "Cancellations", icon: Ban },
+    { to: "/allocation", label: "Lead Allocation", icon: UserCheck, dealDesk: true },
   ]},
   { section: "Money", items: [
     { to: "/payments", label: "Payment Ledger", icon: Wallet, moneyDesk: true },
@@ -68,7 +69,7 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
     : isAccounts ? "Accounts desk" : isField ? "Field desk" : "EV Dealership";
   const nav = isOemFinance ? OEM_NAV : NAV;
@@ -106,6 +107,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             if (i.salesOnly && !isSalesStaff) return false;
             if (i.moneyDesk && !isMoneyDesk) return false;
             if (i.financeView && !canViewFinance) return false;
+            if (i.dealDesk && !canEditCommercials) return false;
             if (i.accountsHome && !isAccounts && !isOwner) return false;
             if (i.fieldHome && !isField && !isOwner) return false;
             return true;
@@ -235,7 +237,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const location = useLocation();
 
@@ -271,6 +273,7 @@ export default function Layout({ children }) {
         isMoneyDesk={isMoneyDesk}
         canViewFinance={canViewFinance}
         isOemFinance={isOemFinance}
+        canEditCommercials={canEditCommercials}
         open={navOpen}
         onClose={() => setNavOpen(false)}
         onNavigate={() => setNavOpen(false)}
