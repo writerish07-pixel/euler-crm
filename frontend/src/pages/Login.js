@@ -70,7 +70,8 @@ export default function Login() {
             <Button data-testid="login-submit" type="submit" disabled={busy} className="w-full"><LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}</Button>
           </div>
           <p className="text-xs text-ink-faint mt-6 text-center">
-            owner / executive / accounts / asm / rm · pwd euler@123
+            Email (owner@euler.com) or user ID. The owner password is whatever was last
+            saved in Settings — deploys do not reset it.
           </p>
         </form>
       </div>

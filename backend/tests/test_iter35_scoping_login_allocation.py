@@ -212,15 +212,20 @@ async def test_a_login_id_cannot_look_like_an_email(client):
 @pytest.mark.asyncio
 async def test_an_existing_account_can_be_given_an_id_later(client):
     """The migration path: no account is locked out while IDs are handed out."""
-    users = (await client.get("/api/auth/users")).json()
-    target = next(u for u in users if u["email"] == "accounts@euler.com")
+    email = "iter35.noid@euler.com"
+    await server.db.users.delete_many({"email": email})
+    created = await client.post("/api/auth/users", json={
+        "email": email, "password": "noidPass#1", "name": "ITER35 NoId",
+        "role": "accounts"})
+    assert created.status_code == 200, created.text
+    target = created.json()
     assert target["loginId"] == ""
 
     r = await client.put(f"/api/auth/users/{target['userId']}/login-id",
                          json={"loginId": "accounts35"})
     assert r.status_code == 200, r.text
 
-    c = await _client_for("accounts35", "euler@123")
+    c = await _client_for("accounts35", "noidPass#1")
     try:
         assert (await c.get("/api/auth/me")).json()["role"] == "accounts"
     finally:
