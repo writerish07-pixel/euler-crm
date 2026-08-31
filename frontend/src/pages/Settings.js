@@ -274,6 +274,7 @@ export default function Settings() {
             <Field label="Password"><Input data-testid="new-user-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
             <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
               <option value="executive">Executive</option>
+              <option value="tl">Team Leader (completes the deal)</option>
               <option value="accounts">Accounts</option>
               <option value="asm">ASM</option>
               <option value="rm">RM</option>

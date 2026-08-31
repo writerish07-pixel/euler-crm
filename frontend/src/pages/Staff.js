@@ -6,7 +6,7 @@ import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
 
 const ROLES = [
-  ["executive", "Executive"], ["ASM", "ASM"], ["RM", "RM"],
+  ["executive", "Executive"], ["TL", "Team Leader"], ["ASM", "ASM"], ["RM", "RM"],
   ["owner", "Owner"], ["accounts", "Accounts"],
 ];
 
@@ -19,6 +19,7 @@ const REPORTS = [
 
 const DEFAULTS = {
   executive: ["exec_morning", "exec_eod"],
+  TL: ["manager_eod"],
   ASM: ["manager_eod"], RM: ["manager_eod"],
   owner: ["owner_eod"], accounts: [],
 };

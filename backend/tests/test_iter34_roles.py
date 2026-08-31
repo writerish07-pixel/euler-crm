@@ -9,9 +9,11 @@ The guard is therefore an ALLOWLIST enforced in current_user, which every /api
 route depends on. It fails closed: a route added tomorrow is denied to that role
 until someone deliberately opens it. These tests exist to keep it that way.
 
-Separately, executives now feed the funnel only — leads, booking + booking
-amount, activities, quotations. Pricing, scheme, delivery, close, cancel and
-every money movement moved to the owner or the money desk.
+Separately, executives feed the funnel only — leads, booking + booking amount,
+activities, quotations. The commercial half of the journey belongs to a TEAM
+LEADER: pricing, scheme, collection, delivery, close and cancel. The TL exists
+so that half never queues behind the owner, which is what happened when those
+steps were owner-only — a handover could not complete until the owner logged in.
 """
 import os
 import sys
@@ -346,8 +348,122 @@ async def test_accounts_still_records_money(client):
 
 def test_the_role_constants_say_what_changed():
     assert "oem_finance" in authmod.ALLOWED_ROLES
+    assert "tl" in authmod.ALLOWED_ROLES
     assert "executive" in authmod.SALES_ROLES        # still feeds leads
     assert "executive" not in authmod.MONEY_ROLES    # no longer moves money
-    assert authmod.MONEY_ROLES == ("owner", "accounts")
-    # ...but can still READ the finance register to answer a customer.
+    assert authmod.MONEY_ROLES == ("owner", "tl", "accounts")
+    # ...but an executive can still READ the finance register to answer a customer.
     assert "executive" in authmod.FINANCE_VIEW_ROLES
+
+
+# ============================================== the Team Leader closes the deal
+TL_EMAIL = "iter34.tl@euler.com"
+TL_PW = "teamLead#2026"
+
+
+@pytest_asyncio.fixture
+async def tl(client):
+    await server.db.users.delete_many({"email": TL_EMAIL})
+    r = await client.post("/api/auth/users", json={
+        "email": TL_EMAIL, "password": TL_PW, "name": "ITER34 TL", "role": "tl"})
+    assert r.status_code == 200, r.text
+    tok = await _token(TL_EMAIL, TL_PW)
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        c.headers.update({"Authorization": f"Bearer {tok}"})
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_an_executive_hands_over_and_a_tl_completes_it(exec_client, tl):
+    """The whole point of the role, walked end to end across two people.
+
+    The executive takes the enquiry and the booking; the TL prices it, collects
+    and hands the vehicle over. If any step regressed to owner-only, a delivery
+    would stall waiting for the owner to log in — which is exactly what the TL
+    exists to prevent, and what this test catches.
+    """
+    lid = await make_lead(exec_client, "ITER34 Handover", executive="Executive")
+    assert (await exec_client.post(f"/api/leads/{lid}/convert-booking", json={
+        "bookingDate": server.today(), "bookingAmount": 10000,
+        "executive": "Executive"})).status_code == 200
+
+    # Executive stops here.
+    ps = (await tl.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    assert (await exec_client.put(f"/api/leads/{lid}/price-structure",
+                                  json=ps)).status_code == 403
+
+    # TL takes it the rest of the way.
+    assert (await tl.put(f"/api/leads/{lid}/price-structure", json=ps)).status_code == 200
+    assert (await tl.put(f"/api/leads/{lid}/scheme",
+                         json={"benefitMode": "No Benefit"})).status_code == 200
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert (await tl.post(f"/api/leads/{lid}/payments", json={
+        "amount": lead["customerOutstanding"], "paymentMode": "Cash"})).status_code == 200
+
+    agents = (await tl.get("/api/insurance-agents")).json()
+    r = await tl.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes",
+        "rc": "Yes", "insurerName": "ICICI Lombard",
+        "insuranceAgentId": agents[0]["agentId"],
+        "invoiceNumber": "INV-ITER34-TL", "chassisNumber": "CH-ITER34-TL",
+        "numberPlate": "RJ34-TL01", "delivered": "Yes"})
+    assert r.status_code == 200, r.text
+
+    doc = await server.db.leads.find_one({"leadId": lid})
+    assert server._is_delivered(doc) is True
+    assert server.ce.num(doc["customerOutstanding"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_tl_can_also_do_everything_an_executive_does(tl):
+    """So a TL can cover for an executive who is out."""
+    lid = await make_lead(tl, "ITER34 TL covers", executive="Amit")
+    assert (await tl.put(f"/api/leads/{lid}", json={"remarks": "TL called"})).status_code == 200
+    assert (await tl.post(f"/api/leads/{lid}/activities", json={
+        "activityType": "Call", "discussion": "covered for Amit"})).status_code == 200
+    assert (await tl.post(f"/api/leads/{lid}/convert-booking", json={
+        "bookingAmount": 5000, "executive": "Amit"})).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_tl_can_close_and_cancel(tl):
+    lid = await make_lead(tl, "ITER34 TL cancels")
+    assert (await tl.post(f"/api/leads/{lid}/cancel", json={
+        "cancelReason": "Bought other brand"})).status_code == 200
+    assert (await tl.post(f"/api/leads/{lid}/revive")).status_code == 200
+    assert (await tl.post(f"/api/leads/{lid}/close", json={
+        "closeReason": "Settled"})).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_tl_does_not_get_the_owner_only_commercials(tl):
+    """Finishing deals is not the same as seeing what the dealership earns."""
+    for path in ("/api/dealer-earnings", "/api/reports/owner-commercial",
+                 "/api/reports/dealer-earnings", "/api/audit-log",
+                 "/api/reports/oem-finance"):
+        assert (await tl.get(path)).status_code == 403, path
+
+
+@pytest.mark.asyncio
+async def test_a_tl_cannot_change_masters_or_staff(tl):
+    assert (await tl.post("/api/staff", json={"name": "x", "role": "owner"})).status_code == 403
+    assert (await tl.post("/api/cancel-reasons", json={"reason": "x"})).status_code == 403
+    assert (await tl.post("/api/admin/reseed", json={})).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_the_tl_sees_the_whole_showroom(tl, client):
+    """Chosen deliberately over a TL-to-executive mapping: whoever is free closes
+    the deal, which is how a single showroom actually runs."""
+    lid = await make_lead(client, "ITER34 Someone elses", executive="Sanjay")
+    assert (await tl.get(f"/api/leads/{lid}/360")).status_code == 200
+
+
+def test_the_deal_desk_is_owner_and_tl():
+    assert authmod.DEAL_DESK_ROLES == ("owner", "tl")
+    assert "tl" in authmod.SALES_ROLES        # covers for an executive
+    assert "tl" in authmod.MONEY_ROLES        # collection precedes delivery
+    assert "executive" in authmod.SALES_ROLES
+    assert "executive" not in authmod.MONEY_ROLES
+    assert "executive" not in authmod.DEAL_DESK_ROLES
