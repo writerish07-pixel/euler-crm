@@ -87,6 +87,19 @@ class UserIn(BaseModel):
     password: str
     name: str = ""
     role: str = "executive"
+    # The ID staff actually type at the login screen. Distinct from `userId`,
+    # which is an internal UUID and can never be a login handle.
+    loginId: str = ""
+
+
+class LoginIdIn(BaseModel):
+    loginId: str = ""
+
+
+def norm_login_id(v) -> str:
+    """Login IDs are compared case- and space-insensitively, so "Amit" and
+    "amit " are the same person and cannot both be created."""
+    return " ".join(str(v or "").strip().lower().split())
 
 
 class ChangePasswordIn(BaseModel):
@@ -176,10 +189,17 @@ def build_router(db):
 
     @router.post("/login")
     async def login(body: LoginIn):
-        email = body.email.strip().lower()
-        user = await db.users.find_one({"email": email})
+        # The field is still called `email` so existing clients keep working, but
+        # it now accepts a login ID too. Both are honoured on purpose: switching
+        # to IDs alone would lock out every account created before they existed —
+        # including the owner's.
+        typed = (body.email or "").strip()
+        user = await db.users.find_one({"email": typed.lower()})
+        if not user:
+            user = await db.users.find_one({"loginIdNorm": norm_login_id(typed)}) \
+                if norm_login_id(typed) else None
         if not user or not verify_password(body.password, user["passwordHash"]):
-            raise HTTPException(401, "Invalid email or password")
+            raise HTTPException(401, "Invalid user ID or password")
         token = create_token(user)
         return {"token": token, "user": {"email": user["email"], "name": user.get("name", ""), "role": user["role"], "userId": user["userId"]}}
 
@@ -210,18 +230,51 @@ def build_router(db):
     @router.get("/users")
     async def list_users(user=Depends(owner_only)):
         users = await db.users.find().to_list(200)
-        return [{"userId": u["userId"], "email": u["email"], "name": u.get("name", ""), "role": u["role"]} for u in users]
+        return [{"userId": u["userId"], "email": u["email"], "loginId": u.get("loginId", ""),
+                 "name": u.get("name", ""), "role": u["role"]} for u in users]
 
     @router.post("/users")
     async def create_user(body: UserIn, user=Depends(owner_only)):
         email = body.email.strip().lower()
         if await db.users.find_one({"email": email}):
             raise HTTPException(400, "Email already exists")
+        login_id = (body.loginId or "").strip()
+        norm = norm_login_id(login_id)
+        if norm:
+            if await db.users.find_one({"loginIdNorm": norm}):
+                raise HTTPException(400, f"User ID '{login_id}' is already taken")
+            if "@" in login_id:
+                raise HTTPException(422, "A user ID cannot contain '@' — that looks like an email")
         role = body.role if body.role in ALLOWED_ROLES else "executive"
-        doc = {"userId": str(uuid.uuid4()), "email": email, "passwordHash": hash_password(body.password),
+        doc = {"userId": str(uuid.uuid4()), "email": email,
+               "loginId": login_id, "loginIdNorm": norm,
+               "passwordHash": hash_password(body.password),
                "name": body.name, "role": role, "createdAt": datetime.now(timezone.utc).isoformat()}
         await db.users.insert_one(doc)
-        return {"userId": doc["userId"], "email": email, "name": body.name, "role": role}
+        return {"userId": doc["userId"], "email": email, "loginId": login_id,
+                "name": body.name, "role": role}
+
+    @router.put("/users/{user_id}/login-id")
+    async def set_login_id(user_id: str, body: LoginIdIn, user=Depends(owner_only)):
+        """Give an existing account the ID its owner will type.
+
+        Accounts made before login IDs existed have none; this is how they get
+        one without anybody being locked out in the meantime.
+        """
+        target = await db.users.find_one({"userId": user_id})
+        if not target:
+            raise HTTPException(404, "User not found")
+        login_id = (body.loginId or "").strip()
+        norm = norm_login_id(login_id)
+        if norm and "@" in login_id:
+            raise HTTPException(422, "A user ID cannot contain '@' — that looks like an email")
+        if norm:
+            clash = await db.users.find_one({"loginIdNorm": norm})
+            if clash and clash["userId"] != user_id:
+                raise HTTPException(400, f"User ID '{login_id}' is already taken")
+        await db.users.update_one({"userId": user_id},
+                                  {"$set": {"loginId": login_id, "loginIdNorm": norm}})
+        return {"ok": True, "userId": user_id, "loginId": login_id}
 
     @router.delete("/users/{user_id}")
     async def delete_user(user_id: str, user=Depends(owner_only)):

@@ -17,7 +17,7 @@ export default function Settings() {
   const { isOwner, user, isOemFinance } = useAuth();
   const [users, setUsers] = useState([]);
   const [gs, setGs] = useState(null);
-  const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive" });
+  const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive", loginId: "" });
   const [backfilling, setBackfilling] = useState(false);
   const [ensuringOem, setEnsuringOem] = useState(false);
   const [ensuringIns, setEnsuringIns] = useState(false);
@@ -130,7 +130,7 @@ export default function Settings() {
 
   const addUser = async () => {
     if (!form.email || !form.password) return toast.error("Email & password required");
-    try { await post("/auth/users", form); toast.success("User created"); setForm({ email: "", password: "", name: "", role: "executive" }); loadUsers(); }
+    try { await post("/auth/users", form); toast.success("User created"); setForm({ email: "", password: "", name: "", role: "executive", loginId: "" }); loadUsers(); }
     catch (e) { toast.error(e.response?.data?.detail || "Failed"); }
   };
   const removeUser = async (id) => { await del(`/auth/users/${id}`); toast.success("User removed"); loadUsers(); };
@@ -268,8 +268,18 @@ export default function Settings() {
       {isOwner && (
         <Card className="p-5" data-testid="user-accounts-card">
           <h3 className="font-heading font-bold text-ink mb-3">User Accounts <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end mb-4">
+          <p className="text-sm text-ink-soft mb-3">
+            Staff sign in with the <b>User ID</b> you set here. Email still works, so
+            accounts created before user IDs existed are never locked out — give them
+            one below whenever you like.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end mb-4">
             <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+            <Field label="User ID">
+              <Input data-testid="new-user-loginid" value={form.loginId}
+                onChange={(e) => setForm({ ...form, loginId: e.target.value })}
+                placeholder="e.g. amit" />
+            </Field>
             <Field label="Email"><Input data-testid="new-user-email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
             <Field label="Password"><Input data-testid="new-user-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
             <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
@@ -287,6 +297,7 @@ export default function Settings() {
             rowKey="userId"
             columns={[
               { key: "name", label: "Name", render: (r) => <span className="font-semibold">{r.name || "—"}</span> },
+              { key: "loginId", label: "User ID", render: (r) => <LoginIdCell row={r} onSaved={loadUsers} /> },
               { key: "email", label: "Email", mono: true },
               { key: "role", label: "Role", render: (r) => {
                 const tone = r.role === "owner"
@@ -721,6 +732,43 @@ function ModelAskCampaign() {
             </>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The ID this person types at the login screen.
+ *
+ * Editable in place because every account that existed before login IDs has an
+ * empty one — and until it is filled, that person can only sign in with their
+ * email. Showing the gap in the table is what makes it get fixed.
+ */
+function LoginIdCell({ row, onSaved }) {
+  const [value, setValue] = useState(row.loginId || "");
+  const [busy, setBusy] = useState(false);
+  const dirty = value.trim() !== (row.loginId || "");
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await put(`/auth/users/${row.userId}/login-id`, { loginId: value.trim() });
+      toast.success(value.trim() ? `User ID set to ${value.trim()}` : "User ID cleared");
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not set the user ID");
+      setValue(row.loginId || "");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <Input data-testid={`login-id-${row.email}`} value={value} className="!py-1 text-xs w-28"
+        placeholder="not set" onChange={(e) => setValue(e.target.value)} />
+      {dirty && (
+        <Button variant="secondary" className="!py-1 !px-2 text-xs" disabled={busy} onClick={save}>
+          Save
+        </Button>
       )}
     </div>
   );
