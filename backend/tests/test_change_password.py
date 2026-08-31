@@ -122,3 +122,39 @@ async def test_seed_does_not_reset_changed_owner_password(client):
     old = await client.post("/api/auth/login",
                             json={"email": "owner@euler.com", "password": "euler@123"})
     assert old.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_seeded_login_ids_work(client):
+    """The login screen offers user IDs (owner, executive). Seed must attach them
+    to existing accounts that were created before login IDs existed."""
+    await authmod.seed_users(server.db)
+    r = await client.post("/api/auth/login", json={"email": "executive", "password": "euler@123"})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["email"] == "executive@euler.com"
+    r = await client.post("/api/auth/login", json={"email": "owner", "password": "euler@123"})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["role"] == "owner"
+
+
+@pytest.mark.asyncio
+async def test_owner_reset_password_env_is_explicit_and_idempotent(client, monkeypatch):
+    await _login(client, "owner@euler.com")
+    await client.post("/api/auth/change-password", json={
+        "currentPassword": "euler@123", "newPassword": "ownerKept9",
+    })
+    monkeypatch.setenv("OWNER_RESET_PASSWORD", "resetOnce#1")
+    await authmod.seed_users(server.db)
+    ok = await client.post("/api/auth/login",
+                           json={"email": "owner@euler.com", "password": "resetOnce#1"})
+    assert ok.status_code == 200, ok.text
+    # Leftover env must not undo a later Change password.
+    tok = ok.json()["token"]
+    r = await client.post("/api/auth/change-password",
+                          headers={"Authorization": f"Bearer {tok}"},
+                          json={"currentPassword": "resetOnce#1", "newPassword": "afterReset9"})
+    assert r.status_code == 200, r.text
+    await authmod.seed_users(server.db)
+    still = await client.post("/api/auth/login",
+                              json={"email": "owner@euler.com", "password": "afterReset9"})
+    assert still.status_code == 200, still.text

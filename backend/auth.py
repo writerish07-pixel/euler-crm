@@ -1,4 +1,5 @@
 """JWT email+password auth — Owner / TL / Executive / Accounts / ASM / RM / OEM (Bearer)."""
+import hashlib
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -298,6 +299,28 @@ def build_router(db):
     return router
 
 
+def _reset_marker(pw: str) -> str:
+    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+
+
+async def _ensure_login_id(db, email, login_id):
+    """Give a seeded account a typeable user ID without overwriting a custom one."""
+    login_id = (login_id or "").strip()
+    if not login_id or "@" in login_id:
+        return
+    row = await db.users.find_one({"email": email})
+    if not row or (row.get("loginId") or "").strip():
+        return
+    norm = norm_login_id(login_id)
+    clash = await db.users.find_one({"loginIdNorm": norm})
+    if clash:
+        return
+    await db.users.update_one(
+        {"userId": row["userId"]},
+        {"$set": {"loginId": login_id, "loginIdNorm": norm}},
+    )
+
+
 async def seed_users(db):
     await db.users.create_index("email", unique=True)
     owner_email = os.environ.get("OWNER_EMAIL", "owner@euler.com").strip().lower()
@@ -305,22 +328,44 @@ async def seed_users(db):
     existing = await db.users.find_one({"email": owner_email})
     if not existing:
         await db.users.insert_one({
-            "userId": str(uuid.uuid4()), "email": owner_email, "passwordHash": hash_password(owner_pw),
+            "userId": str(uuid.uuid4()), "email": owner_email,
+            "loginId": "owner", "loginIdNorm": "owner",
+            "passwordHash": hash_password(owner_pw),
             "name": "Owner", "role": "owner", "createdAt": datetime.now(timezone.utc).isoformat(),
         })
-    # Never reset an existing owner's password on startup — that would undo
-    # Settings → Change password after every deploy/restart.
+    else:
+        # Never reset an existing owner's password on startup — that would undo
+        # Settings → Change password after every deploy/restart.
+        # OWNER_RESET_PASSWORD is the explicit recovery: set it on Railway, restart
+        # once, then remove it. The marker stops a leftover env from clobbering
+        # the next Change-password.
+        reset_pw = (os.environ.get("OWNER_RESET_PASSWORD") or "").strip()
+        if reset_pw:
+            marker = _reset_marker(reset_pw)
+            if existing.get("passwordResetEnvMarker") != marker:
+                await db.users.update_one(
+                    {"userId": existing["userId"]},
+                    {"$set": {
+                        "passwordHash": hash_password(reset_pw),
+                        "passwordResetEnvMarker": marker,
+                        "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
+                    }},
+                )
+        await _ensure_login_id(db, owner_email, "owner")
     demos = [
-        ("executive@euler.com", "Executive", "executive"),
-        ("accounts@euler.com", "Accounts", "accounts"),
-        ("asm@euler.com", "ASM", "asm"),
-        ("rm@euler.com", "RM", "rm"),
+        ("executive@euler.com", "Executive", "executive", "executive"),
+        ("accounts@euler.com", "Accounts", "accounts", "accounts"),
+        ("asm@euler.com", "ASM", "asm", "asm"),
+        ("rm@euler.com", "RM", "rm", "rm"),
     ]
-    for email, name, role in demos:
+    for email, name, role, login_id in demos:
         if not await db.users.find_one({"email": email}):
             await db.users.insert_one({
                 "userId": str(uuid.uuid4()), "email": email,
+                "loginId": login_id, "loginIdNorm": login_id,
                 "passwordHash": hash_password("euler@123"),
                 "name": name, "role": role,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
             })
+        else:
+            await _ensure_login_id(db, email, login_id)
