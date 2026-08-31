@@ -5053,19 +5053,22 @@ class CoulsonCredIn(BaseModel):
     password: str = ""
 
 
-@api.get("/integrations/coulson")
-async def coulson_status():
-    """Presence-only status. Never returns the password."""
+async def _coulson_status_payload(viewer=None):
+    """Presence-only status. Password is never returned. Owner gets the real username
+    so Settings can pre-fill it; everyone else gets the masked hint."""
     user, pw, src = await oem_sync.resolve_credentials(db)
     doc = await db["system"].find_one({"_id": "coulson"}) or {}
     cat_doc = await db["system"].find_one({"_id": "oem_catalog"}) or {}
     count = await db.oem_inventory.count_documents({})
+    is_owner = (viewer or {}).get("role") == "owner"
+    shown = user if is_owner and not oem_sync.looks_masked_username(user) else oem_sync.mask_username(user)
     return {
         "configured": oem_sync.credentials_configured(user, pw),
-        "username": oem_sync.mask_username(user),
+        "username": shown,
         "source": src or None,
         "lastSyncAt": doc.get("lastSyncAt"),
         "lastSyncOk": doc.get("lastSyncOk"),
+        "loginOk": doc.get("loginOk"),
         "lastError": doc.get("lastError") or "",
         "inventoryCount": count,
         "catalogSize": cat_doc.get("catalogSize") or len(oem_cat.CATALOG),
@@ -5073,28 +5076,54 @@ async def coulson_status():
     }
 
 
+@api.get("/integrations/coulson")
+async def coulson_status(viewer=Depends(current_user)):
+    return await _coulson_status_payload(viewer)
+
+
 @api.put("/integrations/coulson", dependencies=[Depends(owner_only)])
 async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
-    user = await oem_sync.save_credentials(db, body.username, body.password)
-    await write_audit(act, "update", "coulson", new={"username": oem_sync.mask_username(user)})
-    st = await coulson_status()
-    _, pw, _src = await oem_sync.resolve_credentials(db)
+    """Verify with Euler first using the typed login, then store. Never persist the
+    hidden va***r hint, and never re-test a password Euler already rejected."""
+    existing = await db["system"].find_one({"_id": "coulson"}) or {}
+    typed_user = (body.username or "").strip()
+    if oem_sync.looks_masked_username(typed_user):
+        st = await _coulson_status_payload(act)
+        st["loginOk"] = False
+        st["lastError"] = ("Type the full Coulson username from coulson.eulerlogistics.com "
+                           "— not the hidden va***r hint")
+        return st
+    user = typed_user or (existing.get("username") or "")
+    if oem_sync.looks_masked_username(user):
+        user = ""
+    pw = body.password if body.password not in (None, "") else (existing.get("password") or "")
+    last_failed = existing.get("loginOk") is False
+    if last_failed and not (body.password or ""):
+        st = await _coulson_status_payload(act)
+        st["loginOk"] = False
+        st["lastError"] = "Type the Coulson password again, then Save. Euler rejected the last login."
+        return st
     if not oem_sync.credentials_configured(user, pw):
+        st = await _coulson_status_payload(act)
         st["loginOk"] = False
         st["lastError"] = "Coulson username and password are required"
         return st
     try:
         coulson_client.login(user, pw)
-        await db["system"].update_one(
-            {"_id": "coulson"},
-            {"$set": {"lastError": "", "loginVerifiedAt": oem_sync.now_iso()}},
-        )
-        st = await coulson_status()
-        st["loginOk"] = True
     except coulson_client.CoulsonError as e:
         await oem_sync._record_sync(db, False, str(e))
-        st = await coulson_status()
+        await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
+        st = await _coulson_status_payload(act)
         st["loginOk"] = False
+        return st
+    await oem_sync.save_credentials(db, user, pw)
+    await write_audit(act, "update", "coulson", new={"username": oem_sync.mask_username(user)})
+    await db["system"].update_one(
+        {"_id": "coulson"},
+        {"$set": {"lastError": "", "loginVerifiedAt": oem_sync.now_iso(), "loginOk": True}},
+    )
+    st = await _coulson_status_payload(act)
+    st["loginOk"] = True
     return st
 
 
@@ -5116,6 +5145,7 @@ async def coulson_sync(act=Depends(actor)):
         result = await oem_sync.sync_from_coulson(db)
     except coulson_client.CoulsonError as e:
         await oem_sync._record_sync(db, False, str(e))
+        await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
         raise HTTPException(502, str(e))
     except Exception as e:
         logging.exception("Coulson sync failed")

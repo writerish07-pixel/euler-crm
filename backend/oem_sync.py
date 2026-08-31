@@ -137,32 +137,44 @@ async def apply_catalog(db, *, overwrite_ex_showroom=True):
             "changedPriceIds": changed_ids}
 
 
+def looks_masked_username(username):
+    """True if this is our hidden hint (va***r), not a real Coulson login."""
+    return "***" in str(username or "")
+
+
 def _credential_from_env():
     user = (os.environ.get("COULSON_USERNAME") or "").strip()
     pw = (os.environ.get("COULSON_PASSWORD") or "").strip()
-    if user and pw:
+    if user and pw and not looks_masked_username(user):
         return user, pw, "env"
     return "", "", ""
 
 
-async def resolve_credentials(db):
-    user, pw, src = _credential_from_env()
-    if src:
-        return user, pw, src
-    doc = await db["system"].find_one({"_id": "coulson"}) or {}
+def _credential_from_doc(doc):
     user = (doc.get("username") or "").strip()
-    pw = (doc.get("password") or "").strip()
-    if user and pw:
+    pw = doc.get("password") or ""
+    if user and pw and not looks_masked_username(user):
         return user, pw, "settings"
     return "", "", ""
 
 
+async def resolve_credentials(db):
+    """Settings win. Railway env is only used when Settings has no real login."""
+    doc = await db["system"].find_one({"_id": "coulson"}) or {}
+    user, pw, src = _credential_from_doc(doc)
+    if src:
+        return user, pw, src
+    return _credential_from_env()
+
+
 def credentials_configured(username, password):
-    return bool(username and password)
+    return bool(username and password) and not looks_masked_username(username)
 
 
 def mask_username(username):
     u = str(username or "")
+    if looks_masked_username(u):
+        return ""
     if len(u) <= 3:
         return "*" * len(u) if u else ""
     return u[:2] + "***" + u[-1]
@@ -172,13 +184,17 @@ async def save_credentials(db, username, password):
     """Store owner-entered Coulson login. Empty password keeps the previous one."""
     existing = await db["system"].find_one({"_id": "coulson"}) or {}
     user = (username or "").strip() or existing.get("username") or ""
+    if looks_masked_username(user):
+        raise coulson_client.CoulsonError(
+            "Type the full Coulson username from coulson.eulerlogistics.com — "
+            "not the hidden va***r hint")
     pw = password if password not in (None, "") else existing.get("password") or ""
     await db["system"].update_one(
         {"_id": "coulson"},
         {"$set": {"username": user, "password": pw, "updatedAt": now_iso()}},
         upsert=True,
     )
-    return user
+    return user, pw
 
 
 async def _record_sync(db, ok, error="", extra=None):
