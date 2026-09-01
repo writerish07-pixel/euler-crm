@@ -197,6 +197,51 @@ async def save_credentials(db, username, password):
     return user, pw
 
 
+def session_from_doc(doc) -> str:
+    """Return the stored Coulson JWT if it is still usable, else empty.
+
+    Expired or malformed sessions are treated as absent so Sync can say so
+    instead of sending a dead Bearer token.
+    """
+    token = str((doc or {}).get("sessionToken") or "").strip()
+    if not token:
+        return ""
+    try:
+        coulson_client.parse_session_token(token)
+    except coulson_client.CoulsonError:
+        return ""
+    return coulson_client.clean_session_token(token)
+
+
+def session_expired(doc) -> bool:
+    token = str((doc or {}).get("sessionToken") or "").strip()
+    if not token:
+        return False
+    return not bool(session_from_doc(doc))
+
+
+async def save_session(db, token: str, username: str = ""):
+    """Store a browser-issued Coulson JWT. Does not overwrite a saved password."""
+    token = coulson_client.clean_session_token(token)
+    claims = coulson_client.parse_session_token(token)
+    existing = await db["system"].find_one({"_id": "coulson"}) or {}
+    user = (username or "").strip() or coulson_client.session_username(claims) or existing.get("username") or ""
+    if looks_masked_username(user):
+        user = coulson_client.session_username(claims) or ""
+    patch = {
+        "sessionToken": token,
+        "sessionSavedAt": now_iso(),
+        "sessionExpiresAt": coulson_client.session_expires_iso(claims),
+        "updatedAt": now_iso(),
+        "loginOk": True,
+        "lastError": "",
+    }
+    if user:
+        patch["username"] = user
+    await db["system"].update_one({"_id": "coulson"}, {"$set": patch}, upsert=True)
+    return user, token
+
+
 async def _record_sync(db, ok, error="", extra=None):
     patch = {
         "lastSyncAt": now_iso(),
@@ -230,19 +275,37 @@ def _inventory_doc(vehicle, sku, price):
     }
 
 
+async def _access_token(db, username=None, password=None):
+    """Prefer a pasted Coulson session. Only call euler-auth /login when there is none.
+
+    Euler accepts the dealer password in a browser on coulson.eulerlogistics.com and
+    refuses the same password from this server. A live session skips that login.
+    Returns (token, source) — source is session / settings / env / inline, or empty.
+    """
+    if username and password:
+        return coulson_client.login(username, password), "inline"
+    doc = await db["system"].find_one({"_id": "coulson"}) or {}
+    token = session_from_doc(doc)
+    if token:
+        return token, "session"
+    if session_expired(doc):
+        raise coulson_client.CoulsonError(
+            "Coulson session expired — sign in at coulson.eulerlogistics.com and paste a new session")
+    user, pw, src = await resolve_credentials(db)
+    if not credentials_configured(user, pw):
+        return "", ""
+    return coulson_client.login(user, pw), src or "settings"
+
+
 async def sync_from_coulson(db, *, username=None, password=None):
     """Pull OEM prices + PRESENT inventory. Fail-soft: raises CoulsonError on auth/API failure."""
     catalog_result = await apply_catalog(db)
-    if username and password:
-        user, pw, src = username, password, "inline"
-    else:
-        user, pw, src = await resolve_credentials(db)
-    if not credentials_configured(user, pw):
+    token, src = await _access_token(db, username, password)
+    if not token:
         await _record_sync(db, False, "Coulson credentials not configured")
         return {"ok": False, "reason": "not_configured", "catalog": catalog_result,
                 "changedPriceIds": catalog_result.get("changedPriceIds") or []}
 
-    token = coulson_client.login(user, pw)
     oem_models = coulson_client.fetch_sap_models(token)
     vehicles = coulson_client.fetch_present_inventory(token)
 

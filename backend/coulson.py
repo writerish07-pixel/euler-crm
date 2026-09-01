@@ -10,12 +10,15 @@ import base64
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
+import jwt
 
 log = logging.getLogger("coulson")
 
@@ -134,6 +137,7 @@ def _message_from_body(raw):
 PORTAL_ORIGIN = "https://coulson.eulerlogistics.com"
 LOGIN_HEADERS = {
     "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
     "Origin": PORTAL_ORIGIN,
     "Referer": f"{PORTAL_ORIGIN}/",
     "User-Agent": (
@@ -141,6 +145,9 @@ LOGIN_HEADERS = {
         "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
     ),
     "Access-Control-Allow-Origin": "*",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "cross-site",
 }
 
 
@@ -193,6 +200,92 @@ def login(username: str, password: str) -> str:
     if not token:
         raise CoulsonError("Coulson login returned no token", status=resp.status_code)
     return token
+
+
+def clean_session_token(v: str) -> str:
+    """Strip paste artefacts from a coulson_auth value copied out of the dealer site."""
+    s = str(v or "").strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    if s.lower().startswith("bearer "):
+        s = s[7:].strip()
+    return s
+
+
+def session_username(claims: dict) -> str:
+    if not isinstance(claims, dict):
+        return ""
+    return str(claims.get("username") or claims.get("email") or claims.get("sub") or "").strip()
+
+
+def session_expires_iso(claims: dict) -> str:
+    if not isinstance(claims, dict) or claims.get("exp") is None:
+        return ""
+    try:
+        exp = int(claims["exp"])
+    except (TypeError, ValueError):
+        return ""
+    return datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_session_token(token: str) -> dict:
+    """Read a Coulson JWT without verifying Euler's signature (we do not have their key).
+
+    The dealer site stores this in localStorage as coulson_auth after a browser login.
+    We still check shape, expiry, and application=coulson before sending it to their API.
+    """
+    token = clean_session_token(token)
+    if not token or token.count(".") != 2:
+        raise CoulsonError(
+            "That is not a Coulson session. Sign in at coulson.eulerlogistics.com, then copy "
+            "localStorage key coulson_auth and paste it here."
+        )
+    try:
+        claims = jwt.decode(
+            token,
+            options={"verify_signature": False, "verify_aud": False, "verify_exp": False},
+        )
+    except Exception:
+        raise CoulsonError(
+            "That session could not be read. Sign in at coulson.eulerlogistics.com and copy "
+            "coulson_auth again."
+        )
+    if not isinstance(claims, dict):
+        raise CoulsonError("That session could not be read.")
+    app = str(claims.get("application") or "")
+    if app and app != APP_NAME:
+        raise CoulsonError(f"That session is for '{app}', not Coulson.")
+    exp = claims.get("exp")
+    if exp is not None:
+        try:
+            exp_i = int(exp)
+        except (TypeError, ValueError):
+            exp_i = 0
+        if exp_i <= time.time():
+            raise CoulsonError(
+                "That Coulson session has expired. Sign in at coulson.eulerlogistics.com again "
+                "and paste a new session."
+            )
+    return claims
+
+
+def verify_session_token(token: str) -> dict:
+    """Confirm the pasted session is a live Coulson JWT.
+
+    This hits the inventory API with Bearer auth — not euler-auth /login — so it cannot
+    lock the dealer password. Euler already issued this token to the owner's browser.
+    """
+    token = clean_session_token(token)
+    claims = parse_session_token(token)
+    try:
+        fetch_sap_models(token)
+    except CoulsonError as e:
+        raise CoulsonError(
+            "Coulson did not accept that session. Sign in at coulson.eulerlogistics.com and "
+            "copy coulson_auth again.",
+            status=e.status,
+        ) from e
+    return claims
 
 
 def _bearer(token):
@@ -299,13 +392,12 @@ def _diagnose_hint(d: dict) -> str:
                 "trimmed. If it still fails, the secret itself is wrong.")
     # Euler returns HTTP 203 (not 401) with success:false for a bad login.
     if d.get("status") in (203, 401, 403) or "not valid" in said:
-        return (f"Euler rejected the credentials as sent. The username reached it as "
+        return (f"Euler refused this password from our server. The username reached it as "
                 f"'{d.get('usernameSent')}' with a {d.get('passwordLength')}-character "
-                f"password, encoded as {d.get('encoding')} with app segment "
-                f"'{d.get('appSegment')}'. Open coulson.eulerlogistics.com in a private window "
-                f"and sign in with that same Username field. If the dealer site accepts it and "
-                f"this app still does not, wait a minute (repeat tests can lock the account) "
-                f"and Save login once — do not click Test login first.")
+                f"password. If the same Username and Password work in a private window on "
+                f"coulson.eulerlogistics.com, Euler is blocking the login unless it comes from "
+                f"their own site — a Railway variable will not change that. Sign in on Coulson, "
+                f"then paste the session (localStorage key coulson_auth) in Settings.")
     if d.get("status") == 404:
         return ("That login path does not exist on Euler's side. Check COULSON_AUTH_URL.")
     return "Euler refused the login. The message above is theirs, verbatim."

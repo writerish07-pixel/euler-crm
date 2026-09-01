@@ -779,15 +779,19 @@ function realCoulsonUsername(u) {
   return u && !String(u).includes("*") ? String(u).trim() : "";
 }
 
+const COULSON_SESSION_COPY = 'copy(localStorage.getItem("coulson_auth"))';
+
 function CoulsonCard() {
   const [cfg, setCfg] = useState(null);
-  const [form, setForm] = useState({ username: "", password: "" });
+  const [form, setForm] = useState({ username: "", password: "", session: "" });
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [savingSession, setSavingSession] = useState(false);
   const [diag, setDiag] = useState(null);
 
   const loginFailed = cfg?.loginOk === false;
+  const sessionReady = cfg?.hasSession && cfg?.loginOk !== false && !cfg?.sessionExpired;
 
   const load = useCallback(() => {
     get("/integrations/coulson").then((d) => {
@@ -824,7 +828,63 @@ function CoulsonCard() {
     } finally { setBusy(false); }
   };
 
+  const saveSession = async () => {
+    const session = (form.session || "").trim();
+    if (!session) {
+      toast.error("Paste the Coulson session first (copy coulson_auth after you sign in on their site)");
+      return;
+    }
+    setSavingSession(true);
+    try {
+      const st = await put("/integrations/coulson", {
+        username: (form.username || "").trim(),
+        sessionToken: session,
+      });
+      setForm((f) => ({ ...f, session: "", username: realCoulsonUsername(st.username) || f.username }));
+      setCfg(st);
+      if (st.loginOk) toast.success("Coulson session saved — you can Sync now");
+      else toast.error(st.lastError || "Coulson did not accept that session");
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not save Coulson session");
+    } finally { setSavingSession(false); }
+  };
+
   const sync = async () => {
+    const pasted = (form.session || "").trim();
+    if (pasted) {
+      setSyncing(true);
+      try {
+        const st = await put("/integrations/coulson", {
+          username: (form.username || "").trim(),
+          sessionToken: pasted,
+        });
+        setCfg(st);
+        setForm((f) => ({ ...f, session: "", username: realCoulsonUsername(st.username) || f.username }));
+        if (st.loginOk === false) {
+          toast.error(st.lastError || "Coulson did not accept that session");
+          return;
+        }
+        const r = await post("/integrations/coulson/sync", {});
+        if (r.ok) toast.success(`Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices`);
+        else toast.error(r.reason === "not_configured" ? "Save the Coulson session first" : "Sync did not run");
+        load();
+      } catch (e) {
+        toast.error(e?.response?.data?.detail || "Coulson sync failed");
+      } finally { setSyncing(false); }
+      return;
+    }
+    if (sessionReady) {
+      setSyncing(true);
+      try {
+        const r = await post("/integrations/coulson/sync", {});
+        if (r.ok) toast.success(`Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices`);
+        else toast.error(r.reason === "not_configured" ? "Save the Coulson session first" : "Sync did not run");
+        load();
+      } catch (e) {
+        toast.error(e?.response?.data?.detail || "Coulson sync failed");
+      } finally { setSyncing(false); }
+      return;
+    }
     if (!requireTypedLogin()) return;
     setSyncing(true);
     try {
@@ -846,14 +906,25 @@ function CoulsonCard() {
 
   const badgeTone = !cfg?.configured
     ? "bg-amber-50 text-amber-700 ring-amber-600/20"
-    : (cfg.loginOk === false || loginFailed)
+    : (cfg.loginOk === false || loginFailed || cfg.sessionExpired)
       ? "bg-red-50 text-red-700 ring-red-600/20"
       : "bg-emerald-50 text-emerald-700 ring-emerald-600/20";
   const badgeLabel = !cfg?.configured
     ? "Not configured"
+    : cfg.sessionExpired ? "Session expired"
     : cfg.loginOk === false ? "Login failed"
       : cfg.lastSyncOk === false ? "Sync failed"
+        : sessionReady ? "Session saved"
         : "Configured";
+
+  const copyConsoleLine = async () => {
+    try {
+      await navigator.clipboard.writeText(COULSON_SESSION_COPY);
+      toast.success("Copied. Paste it in the Console on coulson.eulerlogistics.com after you Sign in");
+    } catch {
+      toast.error("Could not copy — select the line and copy it yourself");
+    }
+  };
 
   return (
     <Card className="p-5 mb-6" data-testid="coulson-settings">
@@ -863,45 +934,88 @@ function CoulsonCard() {
         {cfg && <Badge tone={badgeTone}>{badgeLabel}</Badge>}
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        Type the same <strong>Username</strong> and <strong>Password</strong> as the Sign in page at{" "}
+        Euler accepts this password on{" "}
         <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>
-        {" "}(open it in a private window to confirm they work). Save talks to Euler once, from the server — not from this browser tab.
-        No Railway variables. RTO, insurance and other charges stay on Price Master.
+        {" "}and still refuses it from this app. That is on their side — a Railway variable will not change it.
+        Sign in on Coulson, then paste the session below. RTO, insurance and other charges stay on Price Master.
       </p>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
-        <Field label="Coulson username">
-          <Input data-testid="coulson-username" name="coulson-oem-username" value={form.username}
-            autoComplete="off" placeholder="full Coulson username"
-            onChange={(e) => setForm({ ...form, username: e.target.value })} />
-        </Field>
-        <Field label="Password">
-          <Input data-testid="coulson-password" name="coulson-oem-password" type="password"
-            autoComplete="new-password" placeholder="type the Coulson password"
-            value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
-        </Field>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <Button data-testid="coulson-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save login"}</Button>
+      <ol className="text-sm text-ink-soft mb-3 list-decimal pl-5 space-y-1">
+        <li>Open Coulson, sign in with the same Username and Password (a private window is fine).</li>
+        <li>Stay on that page. Press F12, click <strong>Console</strong>.</li>
+        <li>
+          Paste this line and press Enter
+          <span className="inline-flex items-center gap-1 ml-2 align-middle">
+            <code className="text-[11px] bg-amber-50 px-1.5 py-0.5 rounded ring-1 ring-line">{COULSON_SESSION_COPY}</code>
+            <button type="button" className="text-cobalt" onClick={copyConsoleLine} title="Copy Console line" data-testid="coulson-copy-console">
+              <Copy size={14} />
+            </button>
+          </span>
+        </li>
+        <li>Come back here, click Session, press Ctrl+V, then <strong>Save session</strong>.</li>
+      </ol>
+      <Field label="Coulson session (paste coulson_auth)">
+        <textarea
+          data-testid="coulson-session"
+          name="coulson-oem-session"
+          rows={3}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="paste here after Sign in on Coulson"
+          className="block w-full rounded-lg border-0 py-2 px-3 text-sm text-ink ring-1 ring-inset ring-line placeholder:text-ink-faint focus:ring-2 focus:ring-inset focus:ring-cobalt transition-shadow bg-white font-mono"
+          value={form.session}
+          onChange={(e) => setForm({ ...form, session: e.target.value })}
+        />
+      </Field>
+      <div className="flex flex-wrap gap-2 mt-3 mb-4">
+        <Button data-testid="coulson-session-save-btn" onClick={saveSession} disabled={savingSession}>
+          {savingSession ? "Saving…" : "Save session"}
+        </Button>
         <Button variant="secondary" data-testid="coulson-settings-sync-btn" onClick={sync} disabled={syncing}>
           <RefreshCcw size={14} /> {syncing ? "Syncing…" : "Sync now"}
         </Button>
-        <Button variant="ghost" data-testid="coulson-test-btn" disabled={testing}
-          onClick={async () => {
-            if (!requireTypedLogin()) return;
-            setTesting(true);
-            try {
-              const server = await post("/integrations/coulson/diagnose", {
-                username: form.username.trim(), password: form.password });
-              setDiag(server);
-              if (server.ok) toast.success("Euler accepted this login");
-              else toast.error(server.coulsonSaid || "Coulson rejected this username/password");
-            } catch (e) {
-              toast.error(e?.response?.data?.detail || "Could not run the test");
-            } finally { setTesting(false); }
-          }}>
-          {testing ? "Testing…" : "Test login"}
-        </Button>
       </div>
+      {cfg?.hasSession && (
+        <div className="text-xs text-ink-soft mb-4">
+          Session {cfg.sessionExpired ? "expired" : "saved"}
+          {cfg.username ? ` · ${cfg.username}` : ""}
+          {cfg.sessionExpiresAt ? ` · valid until ${cfg.sessionExpiresAt.replace("T", " ").replace("Z", " UTC")}` : ""}
+        </div>
+      )}
+
+      <details className="mb-1">
+        <summary className="text-sm text-ink-soft cursor-pointer">Password login (Euler usually refuses this from our server)</summary>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 mb-3">
+          <Field label="Coulson username">
+            <Input data-testid="coulson-username" name="coulson-oem-username" value={form.username}
+              autoComplete="off" placeholder="full Coulson username"
+              onChange={(e) => setForm({ ...form, username: e.target.value })} />
+          </Field>
+          <Field label="Password">
+            <Input data-testid="coulson-password" name="coulson-oem-password" type="password"
+              autoComplete="new-password" placeholder="type the Coulson password"
+              value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+          </Field>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button data-testid="coulson-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save login"}</Button>
+          <Button variant="ghost" data-testid="coulson-test-btn" disabled={testing}
+            onClick={async () => {
+              if (!requireTypedLogin()) return;
+              setTesting(true);
+              try {
+                const server = await post("/integrations/coulson/diagnose", {
+                  username: form.username.trim(), password: form.password });
+                setDiag(server);
+                if (server.ok) toast.success("Euler accepted this login");
+                else toast.error(server.coulsonSaid || "Coulson rejected this username/password");
+              } catch (e) {
+                toast.error(e?.response?.data?.detail || "Could not run the test");
+              } finally { setTesting(false); }
+            }}>
+            {testing ? "Testing…" : "Test login"}
+          </Button>
+        </div>
+      </details>
 
       {diag && (
         <div data-testid="coulson-diagnosis"
@@ -935,3 +1049,4 @@ function CoulsonCard() {
     </Card>
   );
 }
+
