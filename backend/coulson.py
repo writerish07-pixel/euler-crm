@@ -302,10 +302,10 @@ def _diagnose_hint(d: dict) -> str:
         return (f"Euler rejected the credentials as sent. The username reached it as "
                 f"'{d.get('usernameSent')}' with a {d.get('passwordLength')}-character "
                 f"password, encoded as {d.get('encoding')} with app segment "
-                f"'{d.get('appSegment')}'. This app now logs in the same way "
-                f"coulson.eulerlogistics.com does (empty POST, Basic btoa). "
-                f"If the same username and password still work on that site, "
-                f"type them here again after this deploy.")
+                f"'{d.get('appSegment')}'. Open coulson.eulerlogistics.com in a private window "
+                f"and sign in with that same Username field. If the dealer site accepts it and "
+                f"this app still does not, wait a minute (repeat tests can lock the account) "
+                f"and Save login once — do not click Test login first.")
     if d.get("status") == 404:
         return ("That login path does not exist on Euler's side. Check COULSON_AUTH_URL.")
     return "Euler refused the login. The message above is theirs, verbatim."
