@@ -2,7 +2,6 @@ import React, { useEffect, useState, useCallback } from "react";
 import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del, put } from "../lib/api";
-import { coulsonPortalLogin, isCoulsonNetworkError } from "../lib/coulsonAuth";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, Button, Field, Input, Select, Badge, Table } from "../components/ui";
 
@@ -811,28 +810,11 @@ function CoulsonCard() {
     return true;
   };
 
-  const portalThenSave = async () => {
-    const user = form.username.trim();
-    const pw = form.password;
-    try {
-      await coulsonPortalLogin(user, pw);
-    } catch (e) {
-      if (isCoulsonNetworkError(e)) {
-        // Localhost / blocked CORS — Railway will try the same login.
-      } else {
-        toast.error(e.message || "Coulson rejected this username/password");
-        return null;
-      }
-    }
-    return put("/integrations/coulson", { username: user, password: pw });
-  };
-
   const save = async () => {
     if (!requireTypedLogin()) return;
     setBusy(true);
     try {
-      const st = await portalThenSave();
-      if (!st) return;
+      const st = await put("/integrations/coulson", { username: form.username.trim(), password: form.password });
       setForm((f) => ({ ...f, password: "", username: f.username.trim() }));
       setCfg(st);
       if (st.loginOk) toast.success("Euler OEM login works — you can Sync now");
@@ -846,8 +828,7 @@ function CoulsonCard() {
     if (!requireTypedLogin()) return;
     setSyncing(true);
     try {
-      const st = await portalThenSave();
-      if (!st) return;
+      const st = await put("/integrations/coulson", { username: form.username.trim(), password: form.password });
       setCfg(st);
       setForm((f) => ({ ...f, password: "", username: f.username.trim() }));
       if (st.loginOk === false) {
@@ -882,10 +863,10 @@ function CoulsonCard() {
         {cfg && <Badge tone={badgeTone}>{badgeLabel}</Badge>}
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        Type the <strong>full</strong> username and password you use at{" "}
-        <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>.
-        Save logs in from <em>this</em> app the same way that site does — you do not need to open Coulson separately.
-        No Railway variables are required. RTO, insurance and other charges stay on Price Master.
+        Type the same <strong>Username</strong> and <strong>Password</strong> as the Sign in page at{" "}
+        <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>
+        {" "}(open it in a private window to confirm they work). Save talks to Euler once, from the server — not from this browser tab.
+        No Railway variables. RTO, insurance and other charges stay on Price Master.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <Field label="Coulson username">
@@ -909,23 +890,11 @@ function CoulsonCard() {
             if (!requireTypedLogin()) return;
             setTesting(true);
             try {
-              let browserOk = false;
-              let browserSaid = "";
-              try {
-                await coulsonPortalLogin(form.username.trim(), form.password);
-                browserOk = true;
-                browserSaid = "This browser logged in the same way coulson.eulerlogistics.com does.";
-              } catch (e) {
-                browserOk = false;
-                browserSaid = isCoulsonNetworkError(e)
-                  ? "This browser could not reach Euler (blocked or offline). The server will still try."
-                  : (e.message || "Coulson rejected this username/password");
-              }
               const server = await post("/integrations/coulson/diagnose", {
                 username: form.username.trim(), password: form.password });
-              setDiag({ ...server, browserOk, browserSaid });
-              if (browserOk || server.ok) toast.success("Euler accepted this login from the app");
-              else toast.error(browserSaid || server.coulsonSaid || "Coulson rejected this username/password");
+              setDiag(server);
+              if (server.ok) toast.success("Euler accepted this login");
+              else toast.error(server.coulsonSaid || "Coulson rejected this username/password");
             } catch (e) {
               toast.error(e?.response?.data?.detail || "Could not run the test");
             } finally { setTesting(false); }
@@ -940,9 +909,8 @@ function CoulsonCard() {
             ? "bg-emerald-50 ring-emerald-200 text-emerald-900"
             : "bg-red-50 ring-red-200 text-red-900"}`}>
           <div className="font-semibold mb-1">
-            {diag.ok || diag.browserOk ? "Euler accepted this login." : "Euler refused this login."}
+            {diag.ok ? "Euler accepted this login." : "Euler refused this login."}
           </div>
-          {diag.browserSaid && <div className="mb-1">{diag.browserSaid}</div>}
           {diag.hint && <div className="mb-2">{diag.hint}</div>}
           <div className="font-mono text-[11px] space-y-0.5 opacity-80">
             <div>sent to: {diag.authUrl}</div>
