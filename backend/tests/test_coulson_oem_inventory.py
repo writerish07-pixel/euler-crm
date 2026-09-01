@@ -357,15 +357,88 @@ def test_clean_credential_leaves_the_middle_alone():
 
 
 def test_a_redirect_is_reported_rather_than_read_as_a_bad_password(monkeypatch):
-    """urllib turns a redirected POST into a GET and drops the Authorization
-    header, so the login arrives with NO credentials and comes back as invalid.
-    That must not be reported as a password problem."""
-    handler = coulson_client._NoRedirect()
+    """A 302 must not be followed and must not be reported as a bad password."""
+    capture = {}
+
+    class FakeResp:
+        status_code = 302
+        headers = {"location": "https://elsewhere.example/api/v1/login"}
+        content = b""
+        reason_phrase = "Found"
+
+        def json(self):
+            return {}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            capture["follow"] = kw.get("follow_redirects")
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def post(self, url, headers=None, **kw):
+            return FakeResp()
+
+    monkeypatch.setattr(coulson_client.httpx, "Client", FakeClient)
     with pytest.raises(coulson_client.CoulsonError) as err:
-        handler.redirect_request(None, None, 302, "Found", {},
-                                 "https://elsewhere.example/api/v1/login")
+        coulson_client.login("user", "pass")
+    assert capture["follow"] is False
     assert "redirected" in str(err.value)
     assert "credentials" in str(err.value)
+
+
+def test_login_posts_an_empty_body_like_the_coulson_spa(monkeypatch):
+    """The dealer site is `new Request(url, {method:'POST'})` — no body, no Content-Type."""
+    capture = {}
+
+    class FakeResp:
+        status_code = 200
+        headers = {}
+        content = b'{"success":true,"data":{"token":"tok"}}'
+        reason_phrase = "OK"
+
+        def json(self):
+            return {"success": True, "data": {"token": "tok"}}
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def post(self, url, headers=None, content=None, data=None, json=None, **kw):
+            capture["url"] = url
+            capture["headers"] = headers or {}
+            capture["content"] = content
+            capture["data"] = data
+            capture["json"] = json
+            capture["extra"] = kw
+            return FakeResp()
+
+    monkeypatch.setattr(coulson_client.httpx, "Client", FakeClient)
+    assert coulson_client.login("vaibhav.akar", "secret") == "tok"
+    assert capture["content"] is None
+    assert capture["data"] is None
+    assert capture["json"] is None
+    hdrs = capture["headers"]
+    assert "Content-Type" not in hdrs and "content-type" not in hdrs
+    assert hdrs["Authorization"].startswith("Basic ")
+    assert hdrs["Origin"] == "https://coulson.eulerlogistics.com"
+    assert "/login" in capture["url"]
+
+
+def test_diagnose_treats_http_203_as_a_refused_login(monkeypatch):
+    def boom(user, pw):
+        raise coulson_client.CoulsonError(
+            "Username/password is not valid, Please try again", status=203)
+    monkeypatch.setattr(coulson_client, "login", boom)
+    d = coulson_client.diagnose("vaibhav.akar", "secret")
+    assert d["ok"] is False
+    assert d["status"] == 203
+    assert "not valid" in (d["coulsonSaid"] or "").lower()
+    assert "secret" not in json.dumps(d)
+
 
 
 def test_diagnose_reports_what_was_sent_without_the_password(monkeypatch):

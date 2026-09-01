@@ -15,6 +15,8 @@ import urllib.parse
 import urllib.request
 from typing import Optional
 
+import httpx
+
 log = logging.getLogger("coulson")
 
 DEFAULT_AUTH_URL = "https://euler-auth.eulerlogistics.com/api/v1"
@@ -126,22 +128,70 @@ def _message_from_body(raw):
         return ""
 
 
+# Same headers the Coulson SPA sends (plus Origin/Referer the browser adds).
+# Euler's CloudFront CORS list includes both coulson.eulerlogistics.com and
+# euler-crm.onrender.com; Origin must look like a dealer login, not a bot.
+PORTAL_ORIGIN = "https://coulson.eulerlogistics.com"
+LOGIN_HEADERS = {
+    "Accept": "*/*",
+    "Origin": PORTAL_ORIGIN,
+    "Referer": f"{PORTAL_ORIGIN}/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ),
+    "Access-Control-Allow-Origin": "*",
+}
+
+
+def login_headers(username: str, password: str) -> dict:
+    """Headers for POST /login — no Content-Type, no body. Matches the SPA fetch."""
+    return {
+        **LOGIN_HEADERS,
+        "Authorization": f"Basic {basic_auth_value(username, password)}",
+    }
+
+
 def login(username: str, password: str) -> str:
+    """Log in the same way coulson.eulerlogistics.com does.
+
+    The SPA is: POST euler-auth .../login with Authorization Basic
+    btoa(`${user}:${pass}:coulson`) and an empty body. urllib was sending
+    Content-Length 0 as a form POST, which Euler treats as a missing
+    credential and answers "Username/password is not valid".
+    """
     username, password = clean_credential(username), clean_credential(password)
     if not username or not password:
         raise CoulsonError("Coulson username and password are required")
-    basic = basic_auth_value(username, password)
-    status, payload = _request(
-        f"{auth_url()}/login",
-        method="POST",
-        headers={"Authorization": f"Basic {basic}"},
-        follow_redirects=False,
-    )
+    url = f"{auth_url()}/login"
+    headers = login_headers(username, password)
+    try:
+        with httpx.Client(timeout=TIMEOUT, follow_redirects=False) as client:
+            # No content=/json=/data= — a body-less POST, like `new Request(..., {method:"POST"})`.
+            resp = client.post(url, headers=headers)
+    except httpx.RequestError as e:
+        raise CoulsonError(f"Coulson unreachable: {e}") from e
+    if 300 <= resp.status_code < 400:
+        loc = resp.headers.get("location") or ""
+        raise CoulsonError(
+            f"Coulson redirected to {loc} ({resp.status_code}). The configured URL is not the "
+            f"final one — an authenticated POST loses its credentials across a redirect.",
+            status=resp.status_code,
+        )
+    try:
+        payload = resp.json() if resp.content else {}
+    except Exception:
+        raise CoulsonError(f"Non-JSON response from Coulson ({resp.status_code})")
+    if not isinstance(payload, dict):
+        payload = {}
     if not payload.get("success"):
-        raise CoulsonError(payload.get("message") or "Coulson login failed", status=status)
+        raise CoulsonError(
+            payload.get("message") or resp.reason_phrase or "Coulson login failed",
+            status=resp.status_code,
+        )
     token = ((payload.get("data") or {}) or {}).get("token") or ""
     if not token:
-        raise CoulsonError("Coulson login returned no token", status=status)
+        raise CoulsonError("Coulson login returned no token", status=resp.status_code)
     return token
 
 
@@ -247,13 +297,15 @@ def _diagnose_hint(d: dict) -> str:
     if d.get("passwordHadWhitespace"):
         return ("The password had a space or newline around it, which has now been "
                 "trimmed. If it still fails, the secret itself is wrong.")
-    if d.get("status") in (401, 403):
+    # Euler returns HTTP 203 (not 401) with success:false for a bad login.
+    if d.get("status") in (203, 401, 403) or "not valid" in said:
         return (f"Euler rejected the credentials as sent. The username reached it as "
                 f"'{d.get('usernameSent')}' with a {d.get('passwordLength')}-character "
                 f"password, encoded as {d.get('encoding')} with app segment "
-                f"'{d.get('appSegment')}'. If that username and password work in the "
-                f"browser at coulson.eulerlogistics.com, the app segment is the thing "
-                f"that differs — set COULSON_APP_NAME to whatever their login page uses.")
+                f"'{d.get('appSegment')}'. This app now logs in the same way "
+                f"coulson.eulerlogistics.com does (empty POST, Basic btoa). "
+                f"If the same username and password still work on that site, "
+                f"type them here again after this deploy.")
     if d.get("status") == 404:
         return ("That login path does not exist on Euler's side. Check COULSON_AUTH_URL.")
     return "Euler refused the login. The message above is theirs, verbatim."
