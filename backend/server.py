@@ -5138,6 +5138,30 @@ async def _reprice_after_oem(changed_ids):
     return repriced_total
 
 
+@api.post("/integrations/coulson/diagnose", dependencies=[Depends(owner_only)])
+async def coulson_diagnose(body: CoulsonCredIn, act=Depends(actor)):
+    """Owner-only: try one login and say exactly what was sent and what came back.
+
+    Coulson answers "Username/password is not valid" for a wrong password, a
+    wrong app segment, and a request that reached it with no credentials at all.
+    Those have nothing to do with each other, and the app could not tell them
+    apart. The password is never returned or logged — only its length and
+    whether it arrived wrapped in whitespace.
+    """
+    typed_user = (body.username or "").strip()
+    typed_pw = body.password or ""
+    if not typed_user or oem_sync.looks_masked_username(typed_user) or not typed_pw:
+        stored_user, stored_pw, _src = await oem_sync.resolve_credentials(db)
+        typed_user = typed_user if typed_user and not oem_sync.looks_masked_username(typed_user) else stored_user
+        typed_pw = typed_pw or stored_pw
+    result = await asyncio.to_thread(coulson_client.diagnose, typed_user, typed_pw)
+    # The username is business data, not a secret; the password never appears here.
+    await write_audit(act, "diagnose", "coulson", new={
+        "ok": result.get("ok"), "status": result.get("status"),
+        "appSegment": result.get("appSegment"), "authUrl": result.get("authUrl")})
+    return result
+
+
 @api.post("/integrations/coulson/sync", dependencies=[Depends(owner_only)])
 async def coulson_sync(act=Depends(actor)):
     """Pull live OEM prices + yard stock. RTO/insurance stay as manual Price Master fields."""

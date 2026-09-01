@@ -784,6 +784,8 @@ function CoulsonCard() {
   const [form, setForm] = useState({ username: "", password: "" });
   const [busy, setBusy] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [diag, setDiag] = useState(null);
 
   const loginFailed = cfg?.loginOk === false;
 
@@ -883,7 +885,43 @@ function CoulsonCard() {
         <Button variant="secondary" data-testid="coulson-settings-sync-btn" onClick={sync} disabled={syncing}>
           <RefreshCcw size={14} /> {syncing ? "Syncing…" : "Sync now"}
         </Button>
+        <Button variant="ghost" data-testid="coulson-test-btn" disabled={testing}
+          onClick={async () => {
+            setTesting(true);
+            try {
+              setDiag(await post("/integrations/coulson/diagnose", {
+                username: form.username.trim(), password: form.password }));
+            } catch (e) {
+              toast.error(e?.response?.data?.detail || "Could not run the test");
+            } finally { setTesting(false); }
+          }}>
+          {testing ? "Testing…" : "Test login"}
+        </Button>
       </div>
+
+      {diag && (
+        <div data-testid="coulson-diagnosis"
+          className={`mt-3 rounded-lg p-3 text-xs ring-1 ${diag.ok
+            ? "bg-emerald-50 ring-emerald-200 text-emerald-900"
+            : "bg-red-50 ring-red-200 text-red-900"}`}>
+          <div className="font-semibold mb-1">
+            {diag.ok ? "Euler accepted this login." : "Euler refused this login."}
+          </div>
+          {diag.hint && <div className="mb-2">{diag.hint}</div>}
+          <div className="font-mono text-[11px] space-y-0.5 opacity-80">
+            <div>sent to: {diag.authUrl}</div>
+            <div>username: {diag.usernameSent || "(empty)"}
+              {diag.usernameHadWhitespace ? " — had surrounding spaces" : ""}</div>
+            <div>password: {diag.passwordLength} characters
+              {diag.passwordHadWhitespace ? " — had surrounding spaces, now trimmed" : ""}</div>
+            <div>encoded as: {diag.encoding}</div>
+            <div>app segment: {diag.appSegment}</div>
+            {diag.status ? <div>http status: {diag.status}</div> : null}
+            {diag.coulsonSaid ? <div>Euler said: {diag.coulsonSaid}</div> : null}
+          </div>
+          <div className="mt-2 opacity-70">The password itself is never sent back here or written to any log.</div>
+        </div>
+      )}
       {cfg?.lastSyncAt && (
         <div className="text-xs text-ink-faint mt-3">
           Last sync {cfg.lastSyncOk === false ? "failed" : "ok"} · {cfg.inventoryCount || 0} in yard
