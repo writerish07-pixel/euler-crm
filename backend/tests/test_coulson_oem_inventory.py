@@ -1,4 +1,5 @@
 """OEM Coulson catalog mapping, Price Master apply, and mocked live sync."""
+import json
 import os
 import sys
 
@@ -333,3 +334,123 @@ async def test_retry_without_password_after_failure(client, monkeypatch):
     assert r.json()["loginOk"] is False
     assert called["n"] == 0
     assert "password" in (r.json().get("lastError") or "").lower()
+
+
+# ============================ reported live: correct credentials still refused
+def test_a_pasted_password_is_trimmed_before_it_is_encoded():
+    """A password pasted from a note carries a trailing space or newline, and
+    Coulson then answers "Username/password is not valid" — which reads exactly
+    like getting the secret wrong. The username was already trimmed; the
+    password was not."""
+    import base64
+    expected = base64.b64encode(b"user:pass:coulson").decode("ascii")
+    assert coulson_client.basic_auth_value(
+        coulson_client.clean_credential("  user "),
+        coulson_client.clean_credential("pass\n")) == expected
+
+
+def test_clean_credential_leaves_the_middle_alone():
+    """Only the ends. A space inside a password is part of the password."""
+    assert coulson_client.clean_credential("  a b c  ") == "a b c"
+    assert coulson_client.clean_credential("") == ""
+    assert coulson_client.clean_credential(None) == ""
+
+
+def test_a_redirect_is_reported_rather_than_read_as_a_bad_password(monkeypatch):
+    """urllib turns a redirected POST into a GET and drops the Authorization
+    header, so the login arrives with NO credentials and comes back as invalid.
+    That must not be reported as a password problem."""
+    handler = coulson_client._NoRedirect()
+    with pytest.raises(coulson_client.CoulsonError) as err:
+        handler.redirect_request(None, None, 302, "Found", {},
+                                 "https://elsewhere.example/api/v1/login")
+    assert "redirected" in str(err.value)
+    assert "credentials" in str(err.value)
+
+
+def test_diagnose_reports_what_was_sent_without_the_password(monkeypatch):
+    def boom(user, pw):
+        raise coulson_client.CoulsonError("Username/password is not valid", status=401)
+    monkeypatch.setattr(coulson_client, "login", boom)
+
+    d = coulson_client.diagnose("vaibhav.akar", "s3cr3t-value")
+    assert d["ok"] is False
+    assert d["status"] == 401
+    assert d["usernameSent"] == "vaibhav.akar"
+    assert d["passwordLength"] == len("s3cr3t-value")
+    assert d["appSegment"] == "coulson"
+    assert "base64" in d["encoding"]
+    # The secret must never travel back to the browser or into an audit row.
+    assert "s3cr3t-value" not in json.dumps(d)
+    # A 401 with a clean password points at the app segment, not the secret.
+    assert "app segment" in d["hint"]
+
+
+def test_diagnose_calls_out_a_pasted_password(monkeypatch):
+    def boom(user, pw):
+        raise coulson_client.CoulsonError("Username/password is not valid", status=401)
+    monkeypatch.setattr(coulson_client, "login", boom)
+
+    d = coulson_client.diagnose("vaibhav.akar", " s3cr3t \n")
+    assert d["passwordHadWhitespace"] is True
+    assert d["passwordLength"] == len("s3cr3t")
+    assert "trimmed" in d["hint"]
+
+
+def test_diagnose_tells_unreachable_apart_from_rejected(monkeypatch):
+    def boom(user, pw):
+        raise coulson_client.CoulsonError("Coulson unreachable: timed out")
+    monkeypatch.setattr(coulson_client, "login", boom)
+
+    d = coulson_client.diagnose("vaibhav.akar", "whatever")
+    assert d["status"] is None
+    assert "not a password problem" in d["hint"]
+
+
+def test_diagnose_makes_exactly_one_attempt(monkeypatch):
+    """A retry loop against a real portal locks the account out."""
+    calls = []
+
+    def boom(user, pw):
+        calls.append((user, pw))
+        raise coulson_client.CoulsonError("Username/password is not valid", status=401)
+    monkeypatch.setattr(coulson_client, "login", boom)
+
+    coulson_client.diagnose("vaibhav.akar", "nope")
+    assert len(calls) == 1
+
+
+def test_diagnose_reports_success_plainly(monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "token")
+    d = coulson_client.diagnose("vaibhav.akar", "right")
+    assert d["ok"] is True and d["status"] is None
+    assert "accepted" in d["hint"]
+
+
+@pytest.mark.asyncio
+async def test_the_diagnose_endpoint_is_owner_only(client):
+    r = await client.post("/api/auth/login",
+                          json={"email": "executive@euler.com", "password": "euler@123"})
+    tok = r.json()["token"]
+    res = await client.post("/api/integrations/coulson/diagnose", json={},
+                            headers={"Authorization": f"Bearer {tok}"})
+    assert res.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_the_diagnose_endpoint_falls_back_to_the_saved_login(client, monkeypatch):
+    """Pressing Test with the password box empty should still test the stored
+    credentials rather than reporting an empty username."""
+    seen = {}
+
+    def fake_login(user, pw):
+        seen["user"], seen["pw"] = user, pw
+        return "token"
+    monkeypatch.setattr(coulson_client, "login", fake_login)
+
+    await client.put("/api/integrations/coulson",
+                     json={"username": "vaibhav.akar", "password": "storedpass"})
+    r = await client.post("/api/integrations/coulson/diagnose", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["usernameSent"] == "vaibhav.akar"
+    assert seen["user"] == "vaibhav.akar" and seen["pw"] == "storedpass"
