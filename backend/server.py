@@ -5051,10 +5051,11 @@ async def price_variants(model: str):
 class CoulsonCredIn(BaseModel):
     username: str = ""
     password: str = ""
+    sessionToken: str = ""
 
 
 async def _coulson_status_payload(viewer=None):
-    """Presence-only status. Password is never returned. Owner gets the real username
+    """Presence-only status. Password and session token are never returned. Owner gets the real username
     so Settings can pre-fill it; everyone else gets the masked hint."""
     user, pw, src = await oem_sync.resolve_credentials(db)
     doc = await db["system"].find_one({"_id": "coulson"}) or {}
@@ -5062,10 +5063,20 @@ async def _coulson_status_payload(viewer=None):
     count = await db.oem_inventory.count_documents({})
     is_owner = (viewer or {}).get("role") == "owner"
     shown = user if is_owner and not oem_sync.looks_masked_username(user) else oem_sync.mask_username(user)
+    live_session = oem_sync.session_from_doc(doc)
+    has_session = bool(live_session)
+    if oem_sync.session_expired(doc):
+        src = src or "session"
+    elif has_session:
+        src = "session"
+    configured = oem_sync.credentials_configured(user, pw) or bool(doc.get("sessionToken"))
     return {
-        "configured": oem_sync.credentials_configured(user, pw),
+        "configured": configured,
         "username": shown,
         "source": src or None,
+        "hasSession": has_session,
+        "sessionExpired": oem_sync.session_expired(doc),
+        "sessionExpiresAt": (doc.get("sessionExpiresAt") or "") if is_owner else "",
         "lastSyncAt": doc.get("lastSyncAt"),
         "lastSyncOk": doc.get("lastSyncOk"),
         "loginOk": doc.get("loginOk"),
@@ -5083,9 +5094,36 @@ async def coulson_status(viewer=Depends(current_user)):
 
 @api.put("/integrations/coulson", dependencies=[Depends(owner_only)])
 async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
-    """Verify with Euler first using the typed login, then store. Never persist the
-    hidden va***r hint, and never re-test a password Euler already rejected."""
+    """Verify with Euler first using the typed login or a pasted Coulson session, then store.
+
+    Never persist the hidden va***r hint, never re-test a password Euler already rejected,
+    and never return the session token. A pasted session is checked against the inventory
+    API (Bearer) — not euler-auth /login — so it cannot lock the dealer password.
+    """
     existing = await db["system"].find_one({"_id": "coulson"}) or {}
+    typed_session = (body.sessionToken or "").strip()
+    if typed_session:
+        try:
+            claims = await asyncio.to_thread(coulson_client.verify_session_token, typed_session)
+        except coulson_client.CoulsonError as e:
+            await oem_sync._record_sync(db, False, str(e))
+            await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
+            st = await _coulson_status_payload(act)
+            st["loginOk"] = False
+            return st
+        typed_user = (body.username or "").strip()
+        if oem_sync.looks_masked_username(typed_user):
+            typed_user = ""
+        await oem_sync.save_session(db, typed_session, typed_user)
+        await write_audit(act, "update", "coulson", new={
+            "username": oem_sync.mask_username(
+                typed_user or coulson_client.session_username(claims)),
+            "via": "session",
+        })
+        st = await _coulson_status_payload(act)
+        st["loginOk"] = True
+        return st
+
     typed_user = (body.username or "").strip()
     if oem_sync.looks_masked_username(typed_user):
         st = await _coulson_status_payload(act)
@@ -5098,11 +5136,15 @@ async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
         user = ""
     pw = body.password if body.password not in (None, "") else (existing.get("password") or "")
     last_failed = existing.get("loginOk") is False
-    if last_failed and not (body.password or ""):
+    if last_failed and not (body.password or "") and not oem_sync.session_from_doc(existing):
         st = await _coulson_status_payload(act)
         st["loginOk"] = False
         st["lastError"] = "Type the Coulson password again, then Save. Euler rejected the last login."
         return st
+    # A live pasted session is enough. Do not re-hit euler-auth /login unless they
+    # typed a password — Euler refuses that login from this server and can lock the account.
+    if not (body.password or "") and oem_sync.session_from_doc(existing):
+        return await _coulson_status_payload(act)
     if not oem_sync.credentials_configured(user, pw):
         st = await _coulson_status_payload(act)
         st["loginOk"] = False
@@ -8302,7 +8344,8 @@ async def _oem_catalog_boot():
     try:
         if os.environ.get("ENVIRONMENT", "").lower() != "test":
             user, pw, _src = await oem_sync.resolve_credentials(db)
-            if oem_sync.credentials_configured(user, pw):
+            doc = await db["system"].find_one({"_id": "coulson"}) or {}
+            if oem_sync.credentials_configured(user, pw) or oem_sync.session_from_doc(doc):
                 asyncio.create_task(_coulson_sync_loop())
     except Exception:
         logging.exception("COULSON_SYNC_LOOP_START_ERROR")

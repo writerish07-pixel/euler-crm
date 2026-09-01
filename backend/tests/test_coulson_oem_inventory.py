@@ -204,6 +204,7 @@ async def test_coulson_status_hides_password(client):
     r = await client.get("/api/integrations/coulson")
     assert r.status_code == 200
     assert "password" not in r.json()
+    assert "sessionToken" not in r.json()
 
 
 @pytest.mark.asyncio
@@ -455,8 +456,9 @@ def test_diagnose_reports_what_was_sent_without_the_password(monkeypatch):
     assert "base64" in d["encoding"]
     # The secret must never travel back to the browser or into an audit row.
     assert "s3cr3t-value" not in json.dumps(d)
-    # A 401 with a clean password points at the app segment, not the secret.
-    assert "app segment" in d["hint"]
+    # A 401 with a clean password from this server is Euler refusing a
+    # login that already works on their own site — not an app-segment mixup.
+    assert "Railway" in d["hint"] or "paste" in d["hint"].lower()
 
 
 def test_diagnose_calls_out_a_pasted_password(monkeypatch):
@@ -540,3 +542,101 @@ def test_only_the_login_refuses_redirects():
     # ...and the default is still to follow.
     sig = inspect.signature(coulson_client._request)
     assert sig.parameters["follow_redirects"].default is True
+
+
+def _coulson_jwt(username="vaibhav.akar", exp_offset=3600, application="coulson"):
+    import time
+    import jwt as pyjwt
+    return pyjwt.encode(
+        {"application": application, "username": username, "sub": username,
+         "exp": int(time.time()) + exp_offset},
+        "not-euler-secret", algorithm="HS256")
+
+
+def test_session_token_strips_paste_artefacts_and_reads_claims():
+    raw = _coulson_jwt()
+    wrapped = f'  "Bearer {raw}"  '
+    claims = coulson_client.parse_session_token(wrapped)
+    assert claims["application"] == "coulson"
+    assert coulson_client.session_username(claims) == "vaibhav.akar"
+    assert coulson_client.clean_session_token(wrapped) == raw
+
+
+def test_session_token_rejects_expiry_and_the_wrong_app():
+    with pytest.raises(coulson_client.CoulsonError) as expired:
+        coulson_client.parse_session_token(_coulson_jwt(exp_offset=-10))
+    assert "expired" in str(expired.value).lower()
+    with pytest.raises(coulson_client.CoulsonError) as other:
+        coulson_client.parse_session_token(_coulson_jwt(application="other-app"))
+    assert "coulson" in str(other.value).lower()
+    with pytest.raises(coulson_client.CoulsonError):
+        coulson_client.parse_session_token("not-a-jwt")
+
+
+@pytest.mark.asyncio
+async def test_save_session_does_not_call_euler_login(client, monkeypatch):
+    """A pasted coulson_auth is already issued. Hitting /login would only
+    risk locking the password Euler already refused from this server."""
+    calls = {"login": 0, "models": 0}
+
+    def boom(*a, **k):
+        calls["login"] += 1
+        raise AssertionError("euler-auth login must not run for a pasted session")
+
+    monkeypatch.setattr(coulson_client, "login", boom)
+    monkeypatch.setattr(
+        coulson_client, "fetch_sap_models",
+        lambda token: calls.__setitem__("models", calls["models"] + 1) or [])
+
+    tok = _coulson_jwt()
+    r = await client.put("/api/integrations/coulson",
+                         json={"sessionToken": f"Bearer {tok}"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["loginOk"] is True
+    assert body["hasSession"] is True
+    assert body["configured"] is True
+    assert body["username"] == "vaibhav.akar"
+    assert calls["login"] == 0 and calls["models"] == 1
+    dumped = json.dumps(body)
+    assert "sessionToken" not in body
+    assert tok not in dumped
+    assert "not-euler-secret" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_sync_uses_pasted_session_and_skips_password_login(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+
+    def boom(*a, **k):
+        raise AssertionError("login must not run when a live session is stored")
+
+    monkeypatch.setattr(coulson_client, "login", boom)
+    tok = _coulson_jwt()
+    saved = await client.put("/api/integrations/coulson", json={"sessionToken": tok})
+    assert saved.json()["loginOk"] is True
+    r = await client.post("/api/integrations/coulson/sync", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert r.json()["credentialSource"] == "session"
+    assert tok not in r.text
+
+
+@pytest.mark.asyncio
+async def test_expired_session_is_not_sent_to_coulson(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
+    tok = _coulson_jwt()
+    await client.put("/api/integrations/coulson", json={"sessionToken": tok})
+    # Overwrite with an expired JWT as if time passed.
+    expired = _coulson_jwt(exp_offset=-60)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"sessionToken": expired}})
+    st = (await client.get("/api/integrations/coulson")).json()
+    assert st["sessionExpired"] is True
+    assert st["hasSession"] is False
+    r = await client.post("/api/integrations/coulson/sync", json={})
+    assert r.status_code == 502
+    assert "expired" in r.text.lower()
+    assert expired not in r.text
+
