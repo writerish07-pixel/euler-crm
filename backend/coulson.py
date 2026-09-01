@@ -85,10 +85,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
             status=code)
 
 
-_opener = urllib.request.build_opener(_NoRedirect)
+# Login only. The data calls keep urllib's default behaviour: if Coulson
+# legitimately redirects a GET, breaking that would trade one failure for
+# another, and only the LOGIN misreports a dropped credential as a bad password.
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
 
 
-def _request(url, method="GET", headers=None, body=None):
+def _request(url, method="GET", headers=None, body=None, follow_redirects=True):
     hdrs = {"Accept": "application/json"}
     if headers:
         hdrs.update(headers)
@@ -99,8 +102,9 @@ def _request(url, method="GET", headers=None, body=None):
     else:
         data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
+    opener = urllib.request.urlopen if follow_redirects else _no_redirect_opener.open
     try:
-        with _opener.open(req, timeout=TIMEOUT) as resp:
+        with opener(req, timeout=TIMEOUT) as resp:
             raw = resp.read()
             status = getattr(resp, "status", 200)
     except urllib.error.HTTPError as e:
@@ -131,6 +135,7 @@ def login(username: str, password: str) -> str:
         f"{auth_url()}/login",
         method="POST",
         headers={"Authorization": f"Basic {basic}"},
+        follow_redirects=False,
     )
     if not payload.get("success"):
         raise CoulsonError(payload.get("message") or "Coulson login failed", status=status)

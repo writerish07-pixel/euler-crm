@@ -454,3 +454,16 @@ async def test_the_diagnose_endpoint_falls_back_to_the_saved_login(client, monke
     assert r.status_code == 200, r.text
     assert r.json()["usernameSent"] == "vaibhav.akar"
     assert seen["user"] == "vaibhav.akar" and seen["pw"] == "storedpass"
+
+
+def test_only_the_login_refuses_redirects():
+    """Blast radius: a dropped credential is misreported as a bad password only
+    on the LOGIN. Breaking a data GET that legitimately redirects would trade one
+    failure for another, so the data calls keep urllib's default behaviour."""
+    import inspect
+    src = inspect.getsource(coulson_client.login)
+    assert "follow_redirects=False" in src
+    assert "follow_redirects" not in inspect.getsource(coulson_client.get_json)
+    # ...and the default is still to follow.
+    sig = inspect.signature(coulson_client._request)
+    assert sig.parameters["follow_redirects"].default is True
