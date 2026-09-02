@@ -52,6 +52,7 @@ export default function Settings() {
       });
       toast.success("Password updated — use it next time you sign in");
       setPwForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
+      if (isOwner) loadUsers();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Could not change password");
     } finally {
@@ -141,9 +142,16 @@ export default function Settings() {
   };
   const addUser = async () => {
     if (!form.name) return toast.error("Pick the person from Staff & Reports so leads match their dashboard");
-    if (!form.email || !form.password) return toast.error("Email & password required");
+    if (!form.password) return toast.error("Password is required");
+    if (!form.loginId && !form.email) return toast.error("User ID is required when email is left blank");
     try {
-      await post("/auth/users", { email: form.email, password: form.password, name: form.name, role: form.role, loginId: form.loginId });
+      await post("/auth/users", {
+        email: form.email || undefined,
+        password: form.password,
+        name: form.name,
+        role: form.role,
+        loginId: form.loginId,
+      });
       toast.success("User created");
       setForm({ email: "", password: "", name: "", role: "executive", loginId: "", staffId: "" });
       loadUsers();
@@ -163,8 +171,9 @@ export default function Settings() {
           <h3 className="font-heading font-bold text-ink">Change password</h3>
         </div>
         <p className="text-sm text-ink-soft mb-3">
-          Signed in as <span className="font-mono text-ink">{user?.email}</span>
-          {user?.role ? ` (${user.role})` : ""}. Each user can change their own login password.
+          Signed in as <span className="font-mono text-ink">{user?.loginId || user?.email}</span>
+          {user?.role ? ` (${user.role})` : ""}. After the first login, every staff member can
+          change this password here. The owner sees the new password on User Accounts.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
           <Field label="Current password">
@@ -288,7 +297,9 @@ export default function Settings() {
           <p className="text-sm text-ink-soft mb-3">
             Pick the person from <b>Staff & Reports</b> so the login name matches the
             Executive on existing leads — that is what fills their dashboard.
-            Staff sign in with the <b>User ID</b> you set here. Email still works.
+            Staff sign in with the <b>User ID</b>. Email is optional.
+            After they log in they can change their password; the Password column
+            here updates to whatever they saved.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end mb-4">
             <Field label="Name (from Staff)">
@@ -309,7 +320,7 @@ export default function Settings() {
                 onChange={(e) => setForm({ ...form, loginId: e.target.value })}
                 placeholder="e.g. amit" />
             </Field>
-            <Field label="Email"><Input data-testid="new-user-email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+            <Field label="Email (optional)"><Input data-testid="new-user-email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="optional" /></Field>
             <Field label="Password"><Input data-testid="new-user-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
             <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
               <option value="executive">Executive</option>
@@ -327,7 +338,12 @@ export default function Settings() {
             columns={[
               { key: "name", label: "Name", render: (r) => <span className="font-semibold">{r.name || "—"}</span> },
               { key: "loginId", label: "User ID", render: (r) => <LoginIdCell row={r} onSaved={loadUsers} /> },
-              { key: "email", label: "Email", mono: true },
+              { key: "email", label: "Email", mono: true, render: (r) => r.email || <span className="text-ink-faint">—</span> },
+              { key: "password", label: "Password", render: (r) => (
+                r.password
+                  ? <span className="font-mono text-sm" data-testid={`user-password-${r.userId}`}>{r.password}</span>
+                  : <span className="text-ink-faint">—</span>
+              ) },
               { key: "role", label: "Role", render: (r) => {
                 const tone = r.role === "owner"
                   ? "bg-amber-50 text-amber-700 ring-amber-600/20"
