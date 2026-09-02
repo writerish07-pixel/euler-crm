@@ -19,7 +19,7 @@ const SCHEME_FIELDS = [
 ];
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner, isField } = useAuth();
+  const { isOwner, isField, isExecutive } = useAuth();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
@@ -62,6 +62,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const c = data.commercials;
   const actions = data.actions || {};
   const fieldView = isField || !!data.fieldView || !!actions.fieldView;
+  const execHandover = isExecutive || !!actions.execPipelineOnly;
   const leadLocked = !!actions.isLocked || !actions.isActive;
 
   const tabs = fieldView
@@ -70,16 +71,22 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         { key: "delivery", label: "Delivery" },
         { key: "activity", label: `Activity (${(data.activities || []).length})` },
       ]
-    : [
-        { key: "overview", label: "Overview" },
-        { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
-        { key: "price", label: "Price Structure" },
-        { key: "scheme", label: "Scheme" },
-        { key: "payments", label: `Payments (${data.payments.length})` },
-        { key: "delivery", label: "Delivery" },
-        ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
-        { key: "activity", label: `Activity (${data.activities.length})` },
-      ];
+    : execHandover
+      ? [
+          { key: "overview", label: "Overview" },
+          { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
+          { key: "activity", label: `Activity (${(data.activities || []).length})` },
+        ]
+      : [
+          { key: "overview", label: "Overview" },
+          { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
+          { key: "price", label: "Price Structure" },
+          { key: "scheme", label: "Scheme" },
+          { key: "payments", label: `Payments (${data.payments.length})` },
+          { key: "delivery", label: "Delivery" },
+          ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
+          { key: "activity", label: `Activity (${data.activities.length})` },
+        ];
 
   return (
     <Drawer open onClose={onClose} width="max-w-3xl"
@@ -97,13 +104,13 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
               )}
             <span className="ml-auto text-xs">Field view · pipeline only</span>
           </div>
-        : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => advance("price")} />}
+        : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => (execHandover ? refresh() : advance("price"))} />}
     >
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
         {leadLocked && <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="lead-locked-badge">Locked</Badge>}
-        {!fieldView && !leadLocked && (
+        {!fieldView && !leadLocked && actions.canEditLead && (
           <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
         )}
         {!fieldView && isOwner && (
@@ -146,11 +153,18 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         <StepLock text="ASM / RM field view — pipeline status only. Commercial amounts, payments and claims are hidden." />
       )}
 
+      {execHandover && !fieldView && !actions.isBooked && (
+        <StepLock text="You can convert this lead to a booking. After that, the Team Leader completes Price, Scheme, Payments and Delivery." />
+      )}
+      {execHandover && !fieldView && actions.isBooked && (
+        <StepLock text="Booked. Remaining steps are with the Team Leader — Price, Scheme, Payments and Delivery." />
+      )}
+
       {!fieldView && leadLocked && (
         <StepLock text="This lead is Closed — commercial steps are locked. Active leads (including Delivered) can still be edited by the owner." />
       )}
 
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={execHandover && !["overview", "whatsapp", "activity"].includes(tab) ? "overview" : tab} onChange={setTab} />
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
@@ -168,6 +182,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
               isOwner={isOwner}
               delivery={data.delivery}
               billingSummary={data.billingSummary}
+              oemSold={data.oemSold}
               onSaved={refresh}
             />
           )
@@ -445,7 +460,16 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
           </Select>
         </Field>
         <Field label="Final Exchange Value"><Input type="number" value={form.finalExchangeValue} onChange={set("finalExchangeValue")} disabled={locked} /></Field>
-        <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={set("tcsApplicable")} disabled={locked}><option>No</option><option>Yes</option></Select></Field>
+        <Field label="TCS (auto)">
+          <Input
+            data-testid="price-tcs-auto"
+            value={preview && preview.tcs > 0
+              ? `Yes · ${inr(preview.tcs)} (1% of after-discount price)`
+              : "No — charged at 1% only when after-discount price exceeds ₹10,00,000"}
+            disabled
+            readOnly
+          />
+        </Field>
       </div>
       {form.insuranceArrangedBy === "self" && (
         <p className="text-xs text-ink-soft mt-2" data-testid="insurance-self-note">
@@ -1067,7 +1091,7 @@ function yardRowsForLead(yard, lead, selectedChassis) {
   return { rows: yard, fallback: yard.length > 0 };
 }
 
-function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, onSaved }) {
+function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, oemSold = null, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
   // Staff freeze after Mark Delivered; owner may edit delivery paperwork until closed.
@@ -1084,12 +1108,44 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   // that Mark Delivered opens.
   const [agents, setAgents] = useState([]);
   const [yard, setYard] = useState([]);
+  const [sold, setSold] = useState(oemSold && oemSold.matched ? oemSold : null);
   // Customer-arranged insurance earns no payout, so no agent is required there.
   const selfArranged = String(lead.insuranceArrangedBy || "dealer").toLowerCase() === "self";
 
   useEffect(() => { setSummary(billingSummary || null); }, [billingSummary]);
 
   useEffect(() => { get("/insurance-agents").then(setAgents).catch(() => setAgents([])); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    get(`/leads/${lead.leadId}/oem-sold`, { refresh: true })
+      .then((row) => {
+        if (cancelled) return;
+        setSold(row && row.matched ? row : null);
+      })
+      .catch(() => { if (!cancelled) setSold(oemSold && oemSold.matched ? oemSold : null); });
+    return () => { cancelled = true; };
+  }, [lead.leadId, oemSold]);
+  useEffect(() => {
+    const outstanding = Number(lead.customerOutstanding || 0);
+    if (!sold?.chassis || locked || outstanding > 0.01) return;
+    setForm((f) => {
+      const next = { ...f };
+      let changed = false;
+      if (!String(next.chassisNumber || "").trim()) {
+        next.chassisNumber = sold.chassis;
+        changed = true;
+      }
+      if (!String(next.invoiceNumber || "").trim() && sold.invoiceNumber) {
+        next.invoiceNumber = sold.invoiceNumber;
+        changed = true;
+      }
+      if (!String(next.numberPlate || "").trim() && sold.numberPlate) {
+        next.numberPlate = sold.numberPlate;
+        changed = true;
+      }
+      return changed ? next : f;
+    });
+  }, [sold, lead.customerOutstanding, locked]);
   useEffect(() => {
     const params = { family: true };
     if (lead.interestedModel) params.model = lead.interestedModel;
@@ -1123,8 +1179,19 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   }, [alreadyDelivered, lead.leadId, billingSummary]);
 
   const liveYard = isLiveYardDelivery(form.deliveryDate || todayISO());
-  const { rows: yardChoices, fallback: yardFallback } = yardRowsForLead(yard, lead, form.chassisNumber);
-  const showYardSelect = liveYard && yard.length > 0;
+  const soldChassis = sold?.chassis || "";
+  const mergedYard = [...yard];
+  if (soldChassis && !yard.some((r) => r.chassis === soldChassis)) {
+    mergedYard.unshift({
+      chassis: soldChassis,
+      model: sold.model || lead.interestedModel,
+      variant: sold.variant || lead.variant || "",
+      source: "sold",
+    });
+  }
+  const { rows: yardChoices, fallback: yardFallback } = yardRowsForLead(mergedYard, lead, form.chassisNumber);
+  const showYardSelect = liveYard && mergedYard.length > 0;
+  const outstandingCleared = Number(lead.customerOutstanding || 0) <= 0.01;
   const toggle = (k) => { if (!locked) setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" })); };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
@@ -1161,28 +1228,39 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
         Invoice, chassis, and number plate must be unique on live leads from 1 Sep.
         Last-month or cancelled files do not block a recreated delivery.
       </p>
+      {soldChassis && (
+        <p className="text-xs text-emerald-800 bg-emerald-50 ring-1 ring-emerald-600/15 rounded-lg px-3 py-2 mb-3" data-testid="delivery-sold-match">
+          Coulson Sold tab matched this customer’s mobile to chassis <b>{soldChassis}</b>
+          {sold.invoiceNumber ? ` · invoice ${sold.invoiceNumber}` : ""}.
+          {outstandingCleared
+            ? " Outstanding is cleared — chassis is filled automatically."
+            : " Clear outstanding, then delivery will pick this chassis automatically."}
+        </p>
+      )}
       {liveYard && (
         <p className="text-xs text-ink-soft mb-3" data-testid="delivery-yard-live-hint">
-          Delivery on/after 1 Sep uses live yard stock. Last-month Coulson deliveries will not appear.
+          Delivery on/after 1 Sep uses live yard stock, plus any chassis already billed in Coulson for this mobile.
           {yardFallback ? " No exact model match — showing all chassis currently in yard." : ""}
         </p>
       )}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Invoice Number"><Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")} disabled={locked} /></Field>
-        <Field label="Chassis (from yard)">
+        <Field label="Chassis">
           {showYardSelect ? (
             <Select data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked}>
-              <option value="">Select chassis in yard…</option>
+              <option value="">Select chassis…</option>
               {yardChoices.map((r) => (
-                <option key={r.chassis} value={r.chassis}>{r.chassis} · {r.model} {r.variant || ""}</option>
+                <option key={r.chassis} value={r.chassis}>
+                  {r.chassis} · {r.model} {r.variant || ""}{r.source === "sold" ? " · billed in Coulson" : ""}
+                </option>
               ))}
-              {form.chassisNumber && !yard.some((r) => r.chassis === form.chassisNumber) ? (
+              {form.chassisNumber && !mergedYard.some((r) => r.chassis === form.chassisNumber) ? (
                 <option value={form.chassisNumber}>{form.chassisNumber}</option>
               ) : null}
             </Select>
           ) : (
             <Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked}
-              placeholder={liveYard ? "No live yard stock — type chassis" : "Last-month delivery — type chassis"} />
+              placeholder={liveYard ? "No live yard or Coulson sold match — type chassis" : "Last-month delivery — type chassis"} />
           )}
         </Field>
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>

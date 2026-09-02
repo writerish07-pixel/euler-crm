@@ -31,12 +31,22 @@ export default function PriceMaster() {
           { key: "model", label: "Model", render: (r) => <span className="font-semibold">{r.model}</span> },
           { key: "variant", label: "Variant" },
           { key: "exShowroom", label: "Ex-Showroom", align: "right", mono: true, render: (r) => (
-            <span>{inr(r.exShowroom)}{r.priceSource === "oem" ? <span className="ml-1 text-[10px] text-cobalt font-semibold">OEM</span> : null}</span>
+            <span>
+              {inr(r.exShowroom)}
+              {r.priceSource === "oem" ? <span className="ml-1 text-[10px] text-cobalt font-semibold">OEM</span> : null}
+              {Number(r.turboUplift) > 0 ? (
+                <span className="block text-[10px] text-amber-700 font-semibold">From 1 Sep {inr(r.sellingExShowroom)}</span>
+              ) : null}
+            </span>
           ) },
           { key: "inYard", label: "In yard", align: "right", mono: true, render: (r) => r.inYard || 0 },
           { key: "rto", label: "RTO", align: "right", mono: true, render: (r) => inr(r.rto) },
           { key: "insurance", label: "Insurance", align: "right", mono: true, render: (r) => inr(r.insurance) },
-          { key: "tcsApplicable", label: "TCS", render: (r) => <Badge tone={r.tcsApplicable === "Yes" ? "bg-amber-50 text-amber-700 ring-amber-600/20" : "bg-zinc-100 text-zinc-500 ring-zinc-400/20"}>{r.tcsApplicable}</Badge> },
+          { key: "tcsApplicable", label: "TCS", render: (r) => (
+            <Badge tone={r.tcsAuto ? "bg-amber-50 text-amber-700 ring-amber-600/20" : "bg-zinc-100 text-zinc-500 ring-zinc-400/20"}>
+              {r.tcsAuto ? `Auto ${inr(r.sellingTcs)}` : "—"}
+            </Badge>
+          ) },
           { key: "status", label: "Status", render: (r) => <Badge tone={String(r.status).toLowerCase() === "inactive" ? "bg-zinc-100 text-zinc-500 ring-zinc-400/20" : "bg-emerald-50 text-emerald-700 ring-emerald-600/20"}>{r.status}</Badge> },
           { key: "act", label: "", align: "right", render: (r) => (
             <div className="flex justify-end gap-2">

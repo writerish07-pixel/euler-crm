@@ -308,6 +308,13 @@ async def sync_from_coulson(db, *, username=None, password=None):
 
     oem_models = coulson_client.fetch_sap_models(token)
     vehicles = coulson_client.fetch_present_inventory(token)
+    sold_vehicles = []
+    try:
+        sold_vehicles = coulson_client.fetch_sold_inventory(token) or []
+    except coulson_client.CoulsonError as e:
+        log.warning("Coulson sold inventory skipped: %s", e)
+    except Exception:
+        log.exception("Coulson sold inventory failed")
 
     # Index OEM rows by catalog sku key (multiple SAP ids can share a SKU).
     by_key = {s.key: [] for s in cat.CATALOG}
@@ -375,9 +382,11 @@ async def sync_from_coulson(db, *, username=None, password=None):
         await db.oem_inventory.insert_many(inv_docs)
     dropped = await drop_delivered_from_inventory(db)
     yard_count = await db.oem_inventory.count_documents({})
+    sold_count = await replace_sold_inventory(db, sold_vehicles, oem_by_id, by_key)
 
     extra = {
         "inventoryCount": yard_count,
+        "soldCount": sold_count,
         "deliveredDropped": dropped,
         "oemModelCount": len(oem_models),
         "pricesUpdated": prices_updated,
@@ -398,6 +407,213 @@ YARD_LIVE_FROM = "2026-09-01"
 
 def _norm_chassis(s):
     return re.sub(r"\s+", "", str(s or "")).strip().upper()
+
+
+def _digits10(phone):
+    d = re.sub(r"\D", "", str(phone or ""))
+    return d[-10:] if len(d) >= 10 else d
+
+
+_MOBILE_KEYS = (
+    "customer_mobile", "customer_phone", "customer_phone_number",
+    "customerMobile", "customerPhone", "billed_customer_phone",
+    "mobile", "phone", "contact_number", "contact_no", "primary_mobile",
+    "registered_mobile", "buyer_mobile", "buyer_phone", "customer_contact",
+    "mobile_number", "phone_number", "contact", "whatsapp",
+)
+_NESTED_CUSTOMER_KEYS = (
+    "customer", "buyer", "contact", "customer_details", "billing",
+    "invoice_customer", "sold_to", "retail_customer",
+)
+_INVOICE_KEYS = (
+    "invoice_number", "invoice_no", "invoiceNumber", "invoice",
+    "sap_invoice_number", "bill_number", "billing_number", "tax_invoice_number",
+    "retail_invoice_number",
+)
+_PLATE_KEYS = (
+    "registration_number", "emch", "number_plate", "numberPlate",
+    "vehicle_number", "reg_no",
+)
+_CHASSIS_KEYS = ("chassis", "chassis_number", "chassisNumber", "vin")
+
+
+def _first_str(row, keys):
+    for k in keys:
+        v = str((row or {}).get(k) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def vehicle_mobile(row):
+    """Last 10 digits of the customer mobile on a Coulson inventory/sold row."""
+    if not isinstance(row, dict):
+        return ""
+    for k in _MOBILE_KEYS:
+        d = _digits10(row.get(k))
+        if len(d) == 10:
+            return d
+    for nested_key in _NESTED_CUSTOMER_KEYS:
+        sub = row.get(nested_key)
+        if isinstance(sub, dict):
+            d = vehicle_mobile(sub)
+            if d:
+                return d
+        elif isinstance(sub, str):
+            d = _digits10(sub)
+            if len(d) == 10:
+                return d
+    for k, v in row.items():
+        if k in _MOBILE_KEYS or k in _NESTED_CUSTOMER_KEYS:
+            continue
+        kl = str(k).lower()
+        if "mobile" in kl or kl in ("phone", "contact"):
+            if isinstance(v, dict):
+                d = vehicle_mobile(v)
+            else:
+                d = _digits10(v)
+            if len(d) == 10:
+                return d
+    return ""
+
+
+def vehicle_chassis(row):
+    return _norm_chassis(_first_str(row, _CHASSIS_KEYS))
+
+
+def vehicle_invoice(row):
+    return _first_str(row, _INVOICE_KEYS)
+
+
+def vehicle_plate(row):
+    return _first_str(row, _PLATE_KEYS)
+
+
+def _sold_doc(vehicle, sku, price):
+    inv = _inventory_doc(vehicle, sku, price)
+    mobile = vehicle_mobile(vehicle)
+    return {
+        **inv,
+        "chassis": vehicle_chassis(vehicle) or inv.get("chassis") or "",
+        "mobile": mobile,
+        "invoiceNumber": vehicle_invoice(vehicle),
+        "numberPlate": vehicle_plate(vehicle) or inv.get("emch") or "",
+        "customerName": str(
+            vehicle.get("customer_name") or vehicle.get("customerName")
+            or vehicle.get("billed_customer_name")
+            or (vehicle.get("customer") or {}).get("name")
+            or ""
+        ).strip(),
+        "coulsonStatus": vehicle.get("_coulsonStatus") or "SOLD",
+        "source": "coulson_sold",
+    }
+
+
+async def replace_sold_inventory(db, vehicles, oem_by_id, by_key):
+    """Replace oem_sold with the latest Coulson Sold/Billed list."""
+    docs = []
+    seen = set()
+    for v in vehicles or []:
+        sku = None
+        price = 0.0
+        oem_full = oem_by_id.get(v.get("sap_vehicle_model_id")) if oem_by_id else None
+        if oem_full:
+            sku = cat.sku_for_oem_row(oem_full)
+            if sku:
+                price = cat.jaipur_price(oem_full)
+        if not sku:
+            oem_stub = {
+                "model": v.get("model"),
+                "variant": v.get("variant"),
+                "load_body": v.get("updated_load_body") or v.get("load_body_assembly"),
+                "sap_product_name": v.get("sap_product_name"),
+                "model_registered_name": v.get("model_registered_name"),
+            }
+            sku = cat.sku_for_oem_row(oem_stub)
+            if sku and by_key.get(sku.key):
+                price = cat.jaipur_price(by_key[sku.key][0])
+        doc = _sold_doc(v, sku, price)
+        ch = _norm_chassis(doc.get("chassis"))
+        if not ch or ch in seen:
+            continue
+        seen.add(ch)
+        docs.append(doc)
+    await db.oem_sold.delete_many({})
+    if docs:
+        await db.oem_sold.insert_many(docs)
+    return len(docs)
+
+
+async def refresh_sold_inventory(db):
+    """Live Sold-tab pull without rewriting yard PRESENT stock."""
+    token, _src = await _access_token(db)
+    if not token:
+        return 0
+    sold_vehicles = coulson_client.fetch_sold_inventory(token) or []
+    oem_models = []
+    try:
+        oem_models = coulson_client.fetch_sap_models(token) or []
+    except coulson_client.CoulsonError:
+        oem_models = []
+    oem_by_id = {m.get("id"): m for m in oem_models if m.get("id")}
+    by_key = {s.key: [] for s in cat.CATALOG}
+    for oem in oem_models:
+        sku = cat.sku_for_oem_row(oem)
+        if sku:
+            by_key[sku.key].append(oem)
+    return await replace_sold_inventory(db, sold_vehicles, oem_by_id, by_key)
+
+
+def sold_match_score(row, lead):
+    """Higher is better. Mobile is required; model family is a tie-break."""
+    if not row or not lead:
+        return 0
+    want_m = _digits10(lead.get("mobile") or lead.get("altMobile"))
+    got_m = _digits10(row.get("mobile"))
+    if not want_m or len(want_m) != 10 or want_m != got_m:
+        return 0
+    score = 1
+    if inventory_row_matches_lead(row, lead.get("interestedModel"), lead.get("variant") or ""):
+        score += 2
+    return score
+
+
+async def match_sold_for_lead(db, lead):
+    """Unique CRM mobile → Coulson sold vehicle. None when missing or ambiguous."""
+    mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
+    if len(mobile) != 10:
+        return None
+    candidates = []
+    async for row in db.oem_sold.find({"mobile": mobile}):
+        score = sold_match_score(row, lead)
+        if score:
+            candidates.append((score, row))
+    if not candidates:
+        async for row in db.oem_sold.find({}):
+            if _digits10(row.get("mobile")) == mobile:
+                score = sold_match_score(row, lead)
+                if score:
+                    candidates.append((score, row))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: -x[0])
+    best_score = candidates[0][0]
+    top = [r for s, r in candidates if s == best_score]
+    if len(top) != 1:
+        return None
+    row = top[0]
+    return {
+        "matched": True,
+        "chassis": row.get("chassis") or "",
+        "invoiceNumber": row.get("invoiceNumber") or "",
+        "numberPlate": row.get("numberPlate") or "",
+        "mobile": mobile,
+        "model": row.get("model") or "",
+        "variant": row.get("variant") or "",
+        "customerName": row.get("customerName") or "",
+        "coulsonStatus": row.get("coulsonStatus") or "SOLD",
+        "source": "coulson_sold",
+    }
 
 
 def inventory_family_key(model, variant=""):

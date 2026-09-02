@@ -399,11 +399,26 @@ async def test_an_executive_hands_over_and_a_tl_completes_it(client, exec_client
     exists to prevent, and what this test catches.
     """
     lid = await make_lead(client, "ITER34 Handover", executive="Executive")
+    before = (await exec_client.get(f"/api/leads/{lid}/360")).json()["actions"]
+    assert before["canBook"] is True
+    assert before["execPipelineOnly"] is True
+    assert before["canPrice"] is False
+    assert before["canScheme"] is False
+    assert before["canPayment"] is False
+    assert before["canDeliver"] is False
+    assert before["canClose"] is False
+    assert before["canCancel"] is False
     assert (await exec_client.post(f"/api/leads/{lid}/convert-booking", json={
         "bookingDate": server.today(), "bookingAmount": 10000,
         "executive": "Executive"})).status_code == 200
 
     # Executive stops here.
+    after = (await exec_client.get(f"/api/leads/{lid}/360")).json()["actions"]
+    assert after["canBook"] is False
+    assert after["canEditLead"] is False
+    assert after["isBooked"] is True
+    assert (await exec_client.put(f"/api/leads/{lid}",
+                                  json={"remarks": "should be blocked"})).status_code == 403
     ps = (await tl.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
     assert (await exec_client.put(f"/api/leads/{lid}/price-structure",
                                   json=ps)).status_code == 403

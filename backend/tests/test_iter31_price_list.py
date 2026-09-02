@@ -121,31 +121,36 @@ async def test_tcs_is_charged_only_where_the_engine_charges_it(client):
     for r in all_rows(body):
         base = ce.round2(r["exShowroom"] + r["rto"] + r["insurance"] + r["otherCharges"])
         if r["tcsApplies"]:
-            assert base >= ce.TCS_THRESHOLD, "TCS on a row under the threshold"
+            assert base > ce.TCS_THRESHOLD, "TCS on a row at or under the threshold"
             assert r["tcs"] == ce.round2(base * ce.TCS_RATE)
             assert r["onRoad"] == ce.round2(base + r["tcs"])
         else:
             assert r["tcs"] == 0
             assert r["onRoad"] == base
+            assert base <= ce.TCS_THRESHOLD
 
 
 @pytest.mark.asyncio
-async def test_a_row_over_the_threshold_with_the_flag_off_gets_no_tcs(client):
-    """Seven live rows are like this. Quoting TCS the app will never bill is worse
-    than omitting it — but the owner still needs to know."""
+async def test_a_row_over_the_threshold_is_charged_even_if_flag_is_off(client):
+    """TCS is mandatory above ₹10L. The Price Master flag is not a waiver."""
+    await server.db.price_master.update_one(
+        {"status": "active", "exShowroom": {"$gte": 1_000_001}},
+        {"$set": {"tcsApplicable": "No"}},
+    )
     body = (await client.get("/api/price-list")).json()
-    review = body.get("tcsReview")
-    assert review is not None, "owner should get the data-quality flag"
-    for row in review:
-        match = next(r for r in all_rows(body) if r["priceId"] == row["priceId"])
-        assert match["tcs"] == 0
-        assert match["onRoad"] >= ce.TCS_THRESHOLD
+    over = [r for r in all_rows(body)
+            if ce.round2(r["exShowroom"] + r["rto"] + r["insurance"] + r["otherCharges"]) > ce.TCS_THRESHOLD]
+    assert over, "catalog should still have a row above ₹10L"
+    for r in over:
+        assert r["tcsApplies"] is True
+        assert r["tcs"] > 0
+    assert "tcsReview" not in body
 
 
 @pytest.mark.asyncio
-async def test_the_tcs_review_flag_is_owner_only(staff, client):
+async def test_tcs_review_flag_is_gone(staff, client):
     body = (await client.get("/api/price-list", headers=staff)).json()
-    assert "tcsReview" not in body, "sales staff must not see the data-quality flag"
+    assert "tcsReview" not in body
 
 
 # =================================================================== access
