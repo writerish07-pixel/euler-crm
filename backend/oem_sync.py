@@ -518,6 +518,29 @@ def vehicle_plate(row):
     return _first_str(row, _PLATE_KEYS)
 
 
+_CUSTOMER_NAME_KEYS = (
+    "customer_name", "customerName", "billed_customer_name", "buyer_name",
+    "retail_customer_name", "billed_to_name",
+)
+
+
+def vehicle_customer_name(row, *, nested=False):
+    """Customer name on a Coulson sold row (never the vehicle model)."""
+    if not isinstance(row, dict):
+        return ""
+    keys = _CUSTOMER_NAME_KEYS + (("name",) if nested else ())
+    n = _first_str(row, keys)
+    if n:
+        return n
+    for nested_key in _NESTED_CUSTOMER_KEYS:
+        sub = row.get(nested_key)
+        if isinstance(sub, dict):
+            n = vehicle_customer_name(sub, nested=True)
+            if n:
+                return n
+    return ""
+
+
 def _sold_doc(vehicle, sku, price):
     inv = _inventory_doc(vehicle, sku, price)
     mobile = vehicle_mobile(vehicle)
@@ -527,12 +550,7 @@ def _sold_doc(vehicle, sku, price):
         "mobile": mobile,
         "invoiceNumber": vehicle_invoice(vehicle),
         "numberPlate": vehicle_plate(vehicle) or inv.get("emch") or "",
-        "customerName": str(
-            vehicle.get("customer_name") or vehicle.get("customerName")
-            or vehicle.get("billed_customer_name")
-            or (vehicle.get("customer") or {}).get("name")
-            or ""
-        ).strip(),
+        "customerName": vehicle_customer_name(vehicle),
         "coulsonStatus": vehicle.get("_coulsonStatus") or "SOLD",
         "source": "coulson_sold",
     }
@@ -608,24 +626,29 @@ def sold_match_score(row, lead):
 
 
 async def match_sold_for_lead(db, lead):
-    """Unique CRM mobile → Coulson sold vehicle. None when missing or ambiguous."""
-    mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
-    if len(mobile) != 10:
-        return None
-    rows = []
-    async for row in db.oem_sold.find({"mobile": mobile}):
-        rows.append(row)
-    if not rows:
-        async for row in db.oem_sold.find({}):
-            rows.append(row)
+    """Unique CRM mobile, or unique customer name, → Coulson sold vehicle."""
+    rows = [r async for r in db.oem_sold.find({})]
     row = match_sold_row(lead, rows)
     if not row:
         return None
-    return _sold_match_payload(row, mobile)
+    return _sold_match_payload(row, _digits10(row.get("mobile")))
 
 
-def match_sold_row(lead, sold_rows):
-    """Pick the unique sold row for this lead, or None if missing/ambiguous."""
+def _norm_person_name(s):
+    t = str(s or "").casefold()
+    t = re.sub(r"[^a-z0-9\s]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _name_key_usable(key):
+    """Single-token names are too weak to copy a mobile from OEM."""
+    if not key or len(key) < 6:
+        return False
+    return len(key.split()) >= 2
+
+
+def _match_sold_by_mobile(lead, sold_rows):
     mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
     if len(mobile) != 10:
         return None
@@ -644,6 +667,35 @@ def match_sold_row(lead, sold_rows):
     if len(top) != 1:
         return None
     return top[0]
+
+
+def _match_sold_by_name(lead, sold_rows):
+    """Exactly one Sold row and this lead share a usable customer name."""
+    key = _norm_person_name((lead or {}).get("customerName"))
+    if not _name_key_usable(key):
+        return None
+    hits = []
+    for row in sold_rows or []:
+        if _norm_person_name(row.get("customerName")) != key:
+            continue
+        if not _norm_chassis(row.get("chassis")):
+            continue
+        if len(_digits10(row.get("mobile"))) != 10:
+            continue
+        hits.append(row)
+    if len(hits) != 1:
+        return None
+    return hits[0]
+
+
+def match_sold_row(lead, sold_rows):
+    """Pick the unique sold row for this lead, or None if missing/ambiguous.
+
+    Mobile wins when it uniquely matches. If the CRM mobile is blank or does
+    not appear on Sold, a unique customer name is enough — that is how
+    Roshan Sharma / Prakash Chand Ranwa style mismatches get a chassis.
+    """
+    return _match_sold_by_mobile(lead, sold_rows) or _match_sold_by_name(lead, sold_rows)
 
 
 def _sold_match_payload(row, mobile):
@@ -689,6 +741,20 @@ def _sold_apply_rank(lead, chassis):
     return (already, status)
 
 
+def _mobile_taken(leads, mobile, except_id):
+    want = _digits10(mobile)
+    if len(want) != 10:
+        return False
+    for other in leads:
+        if (other or {}).get("leadId") == except_id:
+            continue
+        if not live_occupies_vehicle_id(other):
+            continue
+        if _digits10(other.get("mobile")) == want:
+            return True
+    return False
+
+
 def _field_taken(leads, field, value, except_id, *, chassis=False):
     if not value:
         return False
@@ -710,9 +776,10 @@ def _field_taken(leads, field, value, except_id, *, chassis=False):
 async def apply_sold_vehicle_ids_to_leads(db):
     """Write Coulson Sold chassis / invoice / plate onto every uniquely matched lead.
 
-    OEM is the source of truth for those three fields when the customer mobile
-    maps to exactly one sold vehicle. Ambiguous mobiles and live uniqueness
-    conflicts are left unchanged.
+    OEM is the source of truth when the customer mobile maps to exactly one sold
+    vehicle, or when a usable customer name is unique on both sides (blank or
+    mismatched CRM mobile). Ambiguous matches and live uniqueness conflicts are
+    left unchanged. A name match also copies the OEM mobile onto the lead.
     """
     stats = {
         "updated": 0,
@@ -720,6 +787,7 @@ async def apply_sold_vehicle_ids_to_leads(db):
         "skippedNoMatch": 0,
         "skippedAmbiguous": 0,
         "skippedConflict": 0,
+        "mobilesUpdated": 0,
     }
     sold = [r async for r in db.oem_sold.find({})]
     if not sold:
@@ -764,6 +832,8 @@ async def apply_sold_vehicle_ids_to_leads(db):
         chassis = _norm_chassis(row.get("chassis"))
         invoice = str(row.get("invoiceNumber") or "").strip()
         plate = str(row.get("numberPlate") or "").strip()
+        oem_mobile = _digits10(row.get("mobile"))
+        lead_mobile = _digits10(lead.get("mobile") or lead.get("altMobile"))
         patch = {}
         if chassis and _norm_chassis(lead.get("chassisNumber")) != chassis:
             patch["chassisNumber"] = chassis
@@ -771,6 +841,12 @@ async def apply_sold_vehicle_ids_to_leads(db):
             patch["invoiceNumber"] = invoice
         if plate and _norm_invoice(lead.get("numberPlate")) != _norm_invoice(plate):
             patch["numberPlate"] = plate
+        if oem_mobile and len(oem_mobile) == 10 and oem_mobile != lead_mobile:
+            old = str(lead.get("mobile") or "").strip()
+            old10 = _digits10(old)
+            if old10 and len(old10) == 10 and old10 != oem_mobile and not str(lead.get("altMobile") or "").strip():
+                patch["altMobile"] = old
+            patch["mobile"] = oem_mobile
         if not patch:
             stats["unchanged"] += 1
             continue
@@ -783,6 +859,8 @@ async def apply_sold_vehicle_ids_to_leads(db):
             conflict = True
         if "numberPlate" in patch and _field_taken(
                 leads, "numberPlate", patch["numberPlate"], lid):
+            conflict = True
+        if "mobile" in patch and _mobile_taken(leads, patch["mobile"], lid):
             conflict = True
         if conflict:
             stats["skippedConflict"] += 1
@@ -797,6 +875,8 @@ async def apply_sold_vehicle_ids_to_leads(db):
                 {"leadId": lid}, {"$set": {"invoiceNumber": patch["invoiceNumber"]}})
         lead.update(patch)
         stats["updated"] += 1
+        if "mobile" in patch:
+            stats["mobilesUpdated"] += 1
     return stats
 
 
