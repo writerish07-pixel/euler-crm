@@ -336,6 +336,7 @@ export default function OemClaims() {
             ) : <Badge tone="bg-zinc-100 text-zinc-600 ring-zinc-500/20">Not linked</Badge>
           )},
           { key: "vehicle", label: "Chassis / Invoice", render: (r) => (
+            (r.lineItems || []).length ? (
             <div className="text-xs">
               {(r.lineItems || []).map((li, i) => (
                 <div key={i} className="mb-1">
@@ -347,6 +348,7 @@ export default function OemClaims() {
                 </div>
               ))}
             </div>
+            ) : <span className="text-xs text-ink-faint">Not pulled — sync again</span>
           )},
           { key: "claimedAmount", label: "Claimed", align: "right", mono: true,
             render: (r) => inr(r.claimedAmount) },

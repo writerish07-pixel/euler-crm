@@ -245,11 +245,27 @@ def normalise_line_item(item):
     }
 
 
+def _normalise_lines(raw):
+    out = []
+    for item in raw or []:
+        line = normalise_line_item(item)
+        if line:
+            out.append(line)
+    return out
+
+
+def _lines_have_vehicle(lines):
+    return any((li.get("chassis") or li.get("sourceInvoiceNumber")) for li in (lines or []))
+
+
 def claim_doc_from_row(row):
-    """The list row — everything except chassis, which only the journey call has."""
+    """The list row. Chassis usually lives only on the journey, but some list
+    payloads already include line items — keep them so a failed journey does not
+    blank Chassis / Invoice on OEM Claim Settlements.
+    """
     created = parse_list_datetime(row.get("_created_at"))
     status = str(row.get("status") or "").strip()
-    return {
+    doc = {
         "debitNoteId": str(row.get("id") or ""),
         "claimNumber": str(row.get("debit_note_number") or "").strip(),
         "status": status,
@@ -269,21 +285,29 @@ def claim_doc_from_row(row):
         "terminal": is_terminal(status),
         "syncedAt": now_iso(),
     }
+    lines = _normalise_lines(coulson_client.pick_line_items(row if isinstance(row, dict) else {}))
+    if lines:
+        doc["lineItems"] = lines
+    return doc
 
 
 def merge_detail(doc, detail):
-    """Fold a journey response into a claim doc: line items and ladder position."""
+    """Fold a journey response into a claim doc: line items and ladder position.
+
+    An empty journey must NOT wipe line items we already have (from the list row
+    or a previous fetch). That wipe is what left AF-122-CL2627127 with a blank
+    Chassis / Invoice column after a successful list sync.
+    """
     doc = dict(doc)
     if not isinstance(detail, dict):
         return doc
+    detail = coulson_client.journey_body(detail)
     header = detail.get("header") if isinstance(detail.get("header"), dict) else {}
-    raw_lines = (detail.get("line_items") or detail.get("lineItems")
-                 or detail.get("items") or [])
-    if not raw_lines and header:
-        raw_lines = header.get("line_items") or header.get("lineItems") or []
-    lines = [normalise_line_item(li) for li in raw_lines]
-    doc["lineItems"] = [li for li in lines if li]
-    doc.update(stage_progress(detail.get("timeline")))
+    lines = _normalise_lines(coulson_client.pick_line_items(detail))
+    if lines:
+        doc["lineItems"] = lines
+    if isinstance(detail.get("timeline"), dict):
+        doc.update(stage_progress(detail.get("timeline")))
     if header:
         # The header repeats the money in UTC-stamped form; the list row is the
         # display of record, so only fill gaps rather than overwrite.
@@ -296,22 +320,24 @@ def merge_detail(doc, detail):
         showroom = header.get("showroom") if isinstance(header.get("showroom"), dict) else {}
         if showroom.get("id"):
             doc["showroomId"] = str(showroom.get("id"))
-    doc["detailFetchedAt"] = now_iso()
-    doc["detailStatusAtFetch"] = doc.get("status") or ""
-    doc["detailAmountAtFetch"] = doc.get("approvedAmount") or 0.0
+    if lines or doc.get("lineItems"):
+        doc["detailFetchedAt"] = now_iso()
+        doc["detailStatusAtFetch"] = doc.get("status") or ""
+        doc["detailAmountAtFetch"] = doc.get("approvedAmount") or 0.0
     return doc
 
 
 def needs_detail(existing, row_doc):
-    """Fetch the journey only when it can have changed. Chassis never moves.
+    """Fetch the journey only when it can have changed, or when chassis is still missing.
 
     First sight always. After that, only when Euler advanced the status or approved a
     different amount — which keeps the steady state at a couple of calls per sync
-    instead of one per claim.
+    instead of one per claim. A stored row with no chassis / invoice is NOT done:
+    that is the OEM Claim Settlements blank column, and we keep asking.
     """
     if not existing or not existing.get("detailFetchedAt"):
         return True
-    if not (existing.get("lineItems") or []):
+    if not _lines_have_vehicle(existing.get("lineItems")):
         return True
     if str(existing.get("detailStatusAtFetch") or "") != str(row_doc.get("status") or ""):
         return True
@@ -520,6 +546,16 @@ async def sync_claims(db, *, detail_budget=250, token=None):
     detail_failures = 0
     linked = 0
     coll = db[CLAIMS_COLLECTION]
+    held_by_id = {}
+    async for held in coll.find({}, {"debitNoteId": 1, "lineItems": 1, "detailFetchedAt": 1,
+                                     "detailStatusAtFetch": 1, "detailAmountAtFetch": 1}):
+        held_by_id[held.get("debitNoteId")] = held
+
+    def _need_chassis_first(row):
+        rid = str(row.get("id") or "")
+        return 0 if needs_detail(held_by_id.get(rid) or {}, claim_doc_from_row(row)) else 1
+
+    rows = sorted(rows, key=_need_chassis_first)
     for row in rows:
         row_doc = claim_doc_from_row(row)
         note_id = row_doc["debitNoteId"]

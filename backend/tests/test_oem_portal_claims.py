@@ -243,6 +243,38 @@ def test_needs_detail_only_when_something_could_have_changed():
     assert oem_claims.needs_detail(fetched, paid) is True
 
 
+def test_needs_detail_when_chassis_never_landed():
+    """A stored row with no vehicle ids is the blank OEM Settlements column."""
+    row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
+    blank = {"detailFetchedAt": "x", "lineItems": [{"chassis": "", "sourceInvoiceNumber": ""}],
+             "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0}
+    assert oem_claims.needs_detail(blank, row) is True
+
+
+def test_empty_journey_does_not_wipe_list_line_items():
+    doc = oem_claims.claim_doc_from_row({
+        **list_row("n1", "AF-122-CL2627127"),
+        "line_items": journey("n1", "AF-122-CL2627127")["line_items"],
+    })
+    assert doc["lineItems"][0]["chassis"] == CHASSIS
+    merged = oem_claims.merge_detail(doc, {})
+    assert merged["lineItems"][0]["chassis"] == CHASSIS
+
+
+def test_journey_body_unwraps_the_envelopes_coulson_actually_sends():
+    inner = journey("n1", "AF-999-CL0001")
+    wrapped = coulson_client.journey_body({"success": True, "data": inner})
+    assert coulson_client.pick_line_items(wrapped)[0]["chassis"] == CHASSIS
+    double = coulson_client.journey_body({"success": True, "data": {"data": inner}})
+    assert coulson_client.pick_line_items(double)
+    listed = coulson_client.journey_body({"success": True, "data": inner["line_items"]})
+    assert listed["line_items"][0]["chassis"] == CHASSIS
+    nested = coulson_client.journey_body(
+        {"success": True, "data": {"debit_note": {"line_items": inner["line_items"],
+                                                 "timeline": inner["timeline"]}}})
+    assert coulson_client.pick_line_items(nested)
+
+
 # ---------------------------------------------------------------- completeness
 def _rows(n):
     return [list_row(f"n{i}", f"AF-999-CL{i:04d}") for i in range(n)]
@@ -386,6 +418,52 @@ async def test_second_sync_does_not_refetch_an_unchanged_claim(client, wired):
     first = wired["journey"]
     await client.post("/api/integrations/coulson/sync-claims")
     assert wired["journey"] == first, "unchanged claim was fetched again"
+
+
+@pytest.mark.asyncio
+async def test_list_line_items_still_link_when_journey_returns_nothing(client, monkeypatch):
+    """AF-122-CL2627127: the list synced, the journey came back empty, chassis
+    was blank on OEM Claim Settlements. If the list row already has line items,
+    keep them and join the lead.
+    """
+    lead_id = await _delivered_lead(client)
+    row = list_row("n1", "AF-122-CL2627127")
+    row["line_items"] = journey("n1", "AF-122-CL2627127")["line_items"]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000: ([row], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: {})
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims")).json()
+    assert rows[0]["claimNumber"] == "AF-122-CL2627127"
+    assert rows[0]["lineItems"][0]["chassis"] == CHASSIS
+    assert rows[0]["lineItems"][0]["sourceInvoiceNumber"] == INVOICE
+    assert rows[0]["leadIds"] == [lead_id]
+
+
+@pytest.mark.asyncio
+async def test_sync_retries_journey_until_chassis_lands(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("n1", "AF-999-CL0001")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    calls = {"n": 0}
+
+    def fake_journey(token, note_id):
+        calls["n"] += 1
+        return {}
+
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", fake_journey)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    first = calls["n"]
+    await client.post("/api/integrations/coulson/sync-claims")
+    assert calls["n"] > first
 
 
 @pytest.mark.asyncio
