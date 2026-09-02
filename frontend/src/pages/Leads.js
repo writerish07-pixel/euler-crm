@@ -149,6 +149,8 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   };
 
   if (!masters) return null;
+  const execOptions = [...(masters.executives || [])];
+  if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
   return (
     <Drawer open onClose={onClose} width="max-w-xl" title={isExecutive ? "Request a lead" : "New Lead"}
       subtitle={isExecutive ? "GM or Owner must Approve before this becomes a live lead" : "Capture a fresh enquiry"}
@@ -160,7 +162,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <Field label="Mobile"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
         <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{masters.executives.map((s) => <option key={s}>{s}</option>)}</Select></Field>
+        <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{execOptions.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{masters.models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Variant"><Select value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
