@@ -7529,21 +7529,8 @@ async def list_claims():
         })
         seen_ids.add(claim_id)
 
-    # Cross-check every register row against what Euler actually holds. This ADDS a
-    # field; no money, status or date on the register is touched by the OEM mirror —
-    # Owner Commercial, Dealer Earnings and the OEM Claim Dashboard all read those.
-    oem_index = await oem_claims.register_match_index(db)
-    for row in result:
-        if row.get("manual"):
-            # Manual and executive-incentive claims are not filed as scheme lines in
-            # Coulson, so "not filed there" would be noise rather than a finding.
-            row["oemMatch"] = {"state": "not_applicable", "claimNumbers": [],
-                               "filedAmount": 0.0, "detail": ""}
-            continue
-        row["oemMatch"] = oem_claims.match_state(
-            oem_index, row.get("leadId") or "", row.get("componentKey") or "")
-    # Chassis and invoice live on the lead, not the register row. Copy them on so the
-    # desk can join this page to OEM Claim Settlements the same way the sync does.
+    # Chassis and invoice live on the lead. Copy them BEFORE matching so a debit
+    # note that was never stamped with leadId still joins this row on the vehicle.
     lead_ids = list({r.get("leadId") for r in result if r.get("leadId")})
     by_id = {}
     if lead_ids:
@@ -7556,6 +7543,22 @@ async def list_claims():
         lead = by_id.get(row.get("leadId") or "") or {}
         row["chassisNumber"] = lead.get("chassisNumber") or row.get("chassisNumber") or ""
         row["invoiceNumber"] = lead.get("invoiceNumber") or row.get("invoiceNumber") or ""
+
+    # Cross-check every register row against what Euler actually holds. This ADDS a
+    # field; no money, status or date on the register is touched by the OEM mirror —
+    # Owner Commercial, Dealer Earnings and the OEM Claim Dashboard all read those.
+    oem_index = await oem_claims.register_match_index(db)
+    for row in result:
+        if row.get("manual"):
+            # Manual and executive-incentive claims are not filed as scheme lines in
+            # Coulson, so "not filed there" would be noise rather than a finding.
+            row["oemMatch"] = {"state": "not_applicable", "claimNumbers": [],
+                               "filedAmount": 0.0, "detail": ""}
+            continue
+        row["oemMatch"] = oem_claims.match_state(
+            oem_index, row.get("leadId") or "", row.get("componentKey") or "",
+            chassis=row.get("chassisNumber") or "",
+            invoice=row.get("invoiceNumber") or "")
     return result
 
 
