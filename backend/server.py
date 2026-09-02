@@ -44,6 +44,22 @@ _finance_index_status = {
     "checkedAt": None,
     "auditCounts": {},
 }
+# Railway healthchecks 502 until FastAPI finishes startup() and binds PORT.
+# Heavy boot work (sheet backfills, OEM catalog) runs after listen; this flag
+# only reports that background job, it does not block /health.
+_boot_state = {"maintenance": "idle", "recomputeSeeded": False}
+_boot_maintenance_task = None
+
+
+def _is_test_env():
+    return os.environ.get("ENVIRONMENT", "").strip().lower() in ("test", "pytest")
+
+
+@app.get("/health")
+@app.get("/")
+async def health():
+    """Unauthenticated liveness for Railway. Always 200 once the process is listening."""
+    return {"ok": True, "status": "up", "maintenance": _boot_state.get("maintenance", "idle")}
 
 auth_router = authmod.build_router(db)
 current_user = auth_router.current_user
@@ -9142,6 +9158,83 @@ async def _oem_catalog_boot():
         logging.exception("COULSON_SYNC_LOOP_START_ERROR")
 
 
+async def _run_boot_maintenance():
+    """Idempotent heal + OEM catalog. Safe to run after PORT is bound.
+
+    These used to sit inside FastAPI startup(). Each recompute_lead writes the
+    Google Sheet; a few thousand rows plus the OEM catalog took minutes, Railway
+    healthchecks 502'd, and the replica was killed mid-boot (RAM spike then drop).
+    """
+    global _finance_index_status
+    _boot_state["maintenance"] = "running"
+    logging.info("BOOT_MAINTENANCE: starting (process is already listening)")
+    try:
+        if _boot_state.get("recomputeSeeded"):
+            try:
+                for l in await db.leads.find().to_list(3000):
+                    await recompute_lead(l["leadId"])
+            except Exception:
+                logging.exception("BOOT_SEEDED_RECOMPUTE_ERROR")
+        try:
+            await _ensure_finance_unique_indexes()
+        except Exception as e:
+            _finance_index_status = {
+                "status": "ERROR",
+                "ready": False,
+                "reason": f"finance uniqueness audit failed ({type(e).__name__})",
+                "checkedAt": now_iso(),
+                "auditCounts": {},
+            }
+            logging.exception("FINANCE_UNIQUE_INDEX_AUDIT_ERROR: finance uniqueness audit failed")
+        try:
+            await _backfill_close_won_status()
+        except Exception:
+            logging.exception("CLOSE_WON_BACKFILL_ERROR")
+        try:
+            await _migrate_insurance_rates()
+        except Exception:
+            pass
+        try:
+            await run_scheduled_revivals()
+        except Exception:
+            logging.exception("LEAD_REVIVAL_STARTUP_ERROR")
+        try:
+            await _backfill_deal_cancelled()
+        except Exception:
+            logging.exception("DEAL_CANCELLED_BACKFILL_ERROR")
+        try:
+            await _backfill_booking_advances()
+        except Exception:
+            pass
+        try:
+            if not _is_test_env():
+                await _apply_turbo_sept_uplift_to_open_leads()
+        except Exception:
+            logging.exception("TURBO_SEPT_UPLIFT_ERROR")
+        try:
+            await _repair_duplicate_finance_receipts()
+        except Exception:
+            logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
+        try:
+            await _oem_catalog_boot()
+        except Exception:
+            logging.exception("OEM_CATALOG_BOOT_ERROR")
+        _boot_state["maintenance"] = "done"
+        logging.info("BOOT_MAINTENANCE: finished")
+    except Exception:
+        _boot_state["maintenance"] = "error"
+        logging.exception("BOOT_MAINTENANCE: failed")
+
+
+def _schedule_boot_maintenance():
+    """Production: fire-and-forget. Tests: caller awaits _run_boot_maintenance."""
+    global _boot_maintenance_task
+    if _boot_maintenance_task is not None and not _boot_maintenance_task.done():
+        return _boot_maintenance_task
+    _boot_maintenance_task = asyncio.create_task(_run_boot_maintenance())
+    return _boot_maintenance_task
+
+
 @app.on_event("startup")
 async def startup():
     global _finance_index_status
@@ -9156,9 +9249,7 @@ async def startup():
         logging.info("CONFIG: Google Sheet sync enabled (credential source: %s)", cfg["googleCredentialSource"])
     await authmod.seed_users(db)
     res = await seeder.run_seed(db)
-    if res.get("seeded"):
-        for l in await db.leads.find().to_list(3000):
-            await recompute_lead(l["leadId"])
+    _boot_state["recomputeSeeded"] = bool(res.get("seeded"))
     # Indexes (M2/M3 performance) — idempotent
     try:
         await db.leads.create_index("leadId")
@@ -9187,35 +9278,12 @@ async def startup():
         await db.leads.create_index([("accountStatus", 1), ("reviveOn", 1)])
     except Exception:
         pass
-    try:
-        await _ensure_finance_unique_indexes()
-    except Exception as e:
-        _finance_index_status = {
-            "status": "ERROR",
-            "ready": False,
-            "reason": f"finance uniqueness audit failed ({type(e).__name__})",
-            "checkedAt": now_iso(),
-            "auditCounts": {},
-        }
-        logging.exception("FINANCE_UNIQUE_INDEX_AUDIT_ERROR: finance uniqueness audit failed")
-    # Closed leads must show Close Won (not leftover Booked/Delivered) in app + sheet.
-    try:
-        await _backfill_close_won_status()
-    except Exception:
-        logging.exception("CLOSE_WON_BACKFILL_ERROR")
-    # Insurance rate consistency migration (INS-1)
-    try:
-        await _migrate_insurance_rates()
-    except Exception:
-        pass
-    # Insurance agents (brokers) + stamp pre-agent entries with the default agent.
-    # Idempotent and amount-preserving.
+    # Insurance agents / staff / cancel reasons are small and needed on the first
+    # authenticated request. Sheet backfills and OEM catalog are not.
     try:
         await _seed_insurance_agents()
     except Exception:
         logging.exception("INSURANCE_AGENT_SEED_ERROR")
-    # Staff master, built from the existing executive list + any WhatsApp number
-    # already saved in the BotSpace settings. Idempotent.
     try:
         await _seed_staff()
     except Exception:
@@ -9224,43 +9292,15 @@ async def startup():
         await _seed_cancel_reasons()
     except Exception:
         logging.exception("CANCEL_REASON_SEED_ERROR")
-    # Parked leads whose cool-off expired while the service was down. Cheap, and it
-    # means a revival is never lost just because nobody hit the app that morning.
     try:
-        await run_scheduled_revivals()
-    except Exception:
-        logging.exception("LEAD_REVIVAL_STARTUP_ERROR")
-    try:
-        await _backfill_deal_cancelled()
-    except Exception:
-        logging.exception("DEAL_CANCELLED_BACKFILL_ERROR")
-    # Self-heal: booked leads whose booking advance was never recorded as a payment
-    # (so Customer Outstanding wasn't reduced). Idempotent.
-    try:
-        await _backfill_booking_advances()
-    except Exception:
-        pass
-    try:
-        if os.environ.get("ENVIRONMENT", "").lower() != "test":
-            await _apply_turbo_sept_uplift_to_open_leads()
-    except Exception:
-        logging.exception("TURBO_SEPT_UPLIFT_ERROR")
-    # Finance files that recorded one disbursement twice before the dedupe guard.
-    try:
-        await _repair_duplicate_finance_receipts()
-    except Exception:
-        logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
-    # OEM catalog: tests await it so Price Master is ready on the first request.
-    # Production runs it after the server is listening (Railway healthcheck).
-    try:
-        if os.environ.get("ENVIRONMENT", "").lower() == "test":
-            await _oem_catalog_boot()
+        if _is_test_env():
+            await _run_boot_maintenance()
         else:
-            asyncio.create_task(_oem_catalog_boot())
+            _schedule_boot_maintenance()
     except Exception:
-        logging.exception("OEM_CATALOG_BOOT_ERROR")
+        logging.exception("BOOT_MAINTENANCE_SCHEDULE_ERROR")
     try:
-        if os.environ.get("ENVIRONMENT", "").lower() != "test":
+        if not _is_test_env():
             asyncio.create_task(wa.scheduler_loop())
     except Exception:
         logging.exception("WHATSAPP_SCHEDULER_START_ERROR")
