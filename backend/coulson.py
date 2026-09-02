@@ -342,8 +342,8 @@ def fetch_present_inventory(token: str, limit=200):
 
 
 # Billed vehicles leave PRESENT immediately. The dealer Sold tab is the same
-# inventory API with SOLD (and BILLED on some dealer builds).
-SOLD_INVENTORY_STATUSES = ("SOLD", "BILLED")
+# inventory API with vehicle_status=SOLD (Coulson SPA: Present / In Transit / Sold).
+SOLD_INVENTORY_STATUSES = ("SOLD",)
 
 
 def fetch_sold_inventory(token: str, limit=200):

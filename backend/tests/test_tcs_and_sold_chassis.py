@@ -71,6 +71,8 @@ def test_tcs_uses_after_discount_price():
 
 def test_vehicle_mobile_reads_nested_customer():
     assert oem_sync.vehicle_mobile({"customer_mobile": "919876543210"}) == "9876543210"
+    assert oem_sync.vehicle_mobile({"customer_phone": "+91 98765-43210"}) == "9876543210"
+    assert oem_sync.vehicle_mobile({"billed_customer_phone": "9876543210"}) == "9876543210"
     assert oem_sync.vehicle_mobile({"customer": {"phone": "+91 98765-43210"}}) == "9876543210"
     assert oem_sync.vehicle_mobile({"chassis": "X"}) == ""
 

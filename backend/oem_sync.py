@@ -415,7 +415,8 @@ def _digits10(phone):
 
 
 _MOBILE_KEYS = (
-    "customer_mobile", "customer_phone", "customerMobile", "customerPhone",
+    "customer_mobile", "customer_phone", "customer_phone_number",
+    "customerMobile", "customerPhone", "billed_customer_phone",
     "mobile", "phone", "contact_number", "contact_no", "primary_mobile",
     "registered_mobile", "buyer_mobile", "buyer_phone", "customer_contact",
     "mobile_number", "phone_number", "contact", "whatsapp",
@@ -499,6 +500,7 @@ def _sold_doc(vehicle, sku, price):
         "numberPlate": vehicle_plate(vehicle) or inv.get("emch") or "",
         "customerName": str(
             vehicle.get("customer_name") or vehicle.get("customerName")
+            or vehicle.get("billed_customer_name")
             or (vehicle.get("customer") or {}).get("name")
             or ""
         ).strip(),
