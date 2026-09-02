@@ -663,6 +663,15 @@ def test_component_mapping_reads_eulers_prose():
     assert m("Scheme Claim",
              "Insurance Benefits Up to for invoice AF-122-I26270162") == "insuranceBenefit"
     assert m("Scheme Claim", "OEM Extra Support") == "oemExtraSupport"
+    assert m("Additional Support", "") == "oemExtraSupport"
+    assert m("Dealer Incentive", "") == "oemExtraSupport"
+    assert m("Support Scheme (BTL)", "anything") == "oemExtraSupport"
+    assert m("additional_support", "") == "oemExtraSupport"
+    # Claim type wins: Coulson Additional Support lines still say Insurance in the
+    # description, which used to paint OEM Extra Support as Not claimed.
+    assert m("Additional Support",
+             "Insurance Benefits Up to for invoice AF-122-I26270117") == "oemExtraSupport"
+    assert m("Additional Discount Claim", "") == "additionalDiscount"
 
 
 def test_rto_plus_insurance_beats_either_alone():
@@ -690,6 +699,21 @@ def test_unmapped_is_never_reported_as_unclaimed():
 
 def test_a_lead_with_no_claim_at_all_is_a_genuine_gap():
     assert oem_claims.match_state({}, "LD-NONE", "loyaltyBonus")["state"] == "not_filed"
+
+
+def test_not_filed_does_not_wear_another_components_claim_number():
+    """Sita Ram Sharma / AF-122-CL2627077: Euler filed a claim that mapped to a
+    different component. Putting that number under OEM Extra Support + Not claimed
+    looked like a contradiction with OEM Claim Settlements 'In scheme register'.
+    """
+    index = {"LD1": {"byComponent": {"insuranceBenefit": [
+        _hit("AF-122-CL2627077", "Dealer Development Department Approval Pending")]},
+        "unmapped": [], "claimNumbers": ["AF-122-CL2627077"], "filedTotal": 10000.0,
+        "acceptedTotal": 0.0, "rejectedOpen": [], "hasAnyClaim": True}}
+    got = oem_claims.match_state(index, "LD1", "oemExtraSupport")
+    assert got["state"] == "not_filed"
+    assert got["claimNumbers"] == []
+    assert "AF-122-CL2627077" not in (got["claimNumbers"] or [])
 
 
 def _hit(number, status, **kw):
@@ -841,7 +865,39 @@ async def test_a_component_euler_never_saw_reads_as_unclaimed(client, wired):
     by_key = {r["componentKey"]: r for r in rows if r["leadId"] == lead_id}
     assert by_key["referralBonus"]["oemMatch"]["state"] == "filed"
     assert by_key["exchangeBonus"]["oemMatch"]["state"] == "not_filed"
+    assert by_key["exchangeBonus"]["oemMatch"]["claimNumbers"] == []
     assert by_key["exchangeBonus"]["oemMatch"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_additional_support_claim_type_files_oem_extra_support(client, monkeypatch):
+    """AF-122-CL2627077: Coulson typed the line Additional Support, description still
+    said Insurance Benefits Up to. OEM Extra Support must read Filed, not Not claimed.
+    """
+    lead_id = await _delivered_lead(client)
+    await _register_row(lead_id, "oemExtraSupport", 7000.0)
+    inner = journey("n1", "AF-122-CL2627077")
+    inner["line_items"][0]["claim_type"] = "Additional Support"
+    inner["line_items"][0]["description"] = (
+        "Insurance Benefits Up to for invoice AF-999-I26279001")
+    inner["line_items"][0]["total_amount"] = 10000.0
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("n1", "AF-122-CL2627077")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/claims")).json()
+    extra = next(r for r in rows if r["leadId"] == lead_id
+                 and r["componentKey"] == "oemExtraSupport")
+    assert extra["oemMatch"]["state"] == "filed"
+    assert "AF-122-CL2627077" in extra["oemMatch"]["claimNumbers"]
+    oem = (await client.get("/api/oem-claims")).json()
+    assert oem[0]["registerMatch"]["state"] == "in_register"
+    assert "oemExtraSupport" in oem[0]["registerMatch"]["mappedComponents"]
 
 
 @pytest.mark.asyncio
