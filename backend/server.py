@@ -7573,7 +7573,7 @@ async def list_claims():
     # Cross-check every register row against what Euler actually holds. Filing
     # status/dates/reference follow the OEM note; money on the register is not
     # overwritten (Owner Commercial, Dealer Earnings, OEM Claim Dashboard).
-    for row in result:
+    for i, row in enumerate(result):
         if row.get("manual"):
             # Manual and executive-incentive claims are not filed as scheme lines in
             # Coulson, so "not filed there" would be noise rather than a finding.
@@ -7588,6 +7588,7 @@ async def list_claims():
         row["oemMatch"] = match
         row["ageingDays"] = _claim_ageing_days(
             row.get("submittedDate", ""), row.get("claimStatus", ""), row.get("approvedDate", ""))
+        result[i] = row
     return result
 
 
