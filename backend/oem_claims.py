@@ -642,10 +642,35 @@ COMPONENT_PHRASES = (
 # Euler has agreed the money (or paid it). Anything else open is still in the ladder.
 ACCEPTED_STATUSES = GENERATED_STATUSES + ("Settled",)
 
+# Coulson's Create Claim chips. The value is what lands on line_item.claim_type.
+# These are checked BEFORE description prose: an Additional Support line often
+# still says "Insurance Benefits Up to…" in the description, and the word
+# "insurance" used to steal the match — OEM Extra Support then read Not claimed
+# while OEM Claim Settlements said In scheme register (AF-122-CL2627077).
+CLAIM_TYPE_KEYS = (
+    ("oemExtraSupport", (
+        "additional support", "dealer incentive", "support scheme (btl)",
+        "support scheme", "oem extra support", "oem extra",
+    )),
+    ("additionalDiscount", ("additional discount claim",)),
+)
+
+
+def _fold_claim_text(value):
+    return re.sub(r"[_-]+", " ", str(value or "").lower()).strip()
+
 
 def map_claim_type_to_component(claim_type, description=""):
-    """Best-effort componentKey for a Coulson line. Empty when nothing matches."""
-    hay = f"{description or ''} {claim_type or ''}".lower()
+    """Best-effort componentKey for a Coulson line. Empty when nothing matches.
+
+    Claim type wins over description. Scheme Claim lines still fall through to
+    COMPONENT_PHRASES on the prose ("Referral Commission for invoice …").
+    """
+    type_folded = _fold_claim_text(claim_type)
+    for key, phrases in CLAIM_TYPE_KEYS:
+        if any(p in type_folded for p in phrases):
+            return key
+    hay = f"{_fold_claim_text(description)} {type_folded}".strip()
     for key, phrases in COMPONENT_PHRASES:
         if any(p in hay for p in phrases):
             return key
@@ -832,9 +857,14 @@ def match_state(index, lead_id, component_key, chassis="", invoice=""):
                 "detail": "This lead has claims in Euler, but none of them names this "
                           "component. Check before treating it as unclaimed.",
             }
-        return {"state": "not_filed", "claimNumbers": entry["claimNumbers"], "oemStatus": "",
-                "filedAmount": round2(entry["filedTotal"]),
-                "detail": "Euler holds claims for this lead, but not this component."}
+        # Euler filed something else for this vehicle. That is a per-component gap,
+        # but the other claim's number must NOT appear here — the Scheme Claim
+        # Register was showing AF-122-CL2627077 under OEM Extra Support / Not claimed
+        # while OEM Claim Settlements said that same note was In scheme register.
+        return {"state": "not_filed", "claimNumbers": [], "oemStatus": "",
+                "filedAmount": 0.0,
+                "detail": "Euler holds a claim for this vehicle, but it maps to a "
+                          "different component than this register row."}
     live = [h for h in hits if h["oemStatus"] not in ("Rejected", "Cancelled")]
     rejected = [h for h in hits if h["oemStatus"] == "Rejected"]
     pick = live[0] if live else (rejected[0] if rejected else hits[0])

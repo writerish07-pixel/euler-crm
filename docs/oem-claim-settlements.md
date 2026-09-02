@@ -50,10 +50,15 @@ writes money, status or dates into `db.claims`.**
 | `not_applicable` | — | Manual / executive-incentive claim, not filed as a scheme line | nothing |
 
 `unmapped` exists because Euler describes a claim in prose ("Referral Commission for
-invoice AF-122-…") and types every one of them `"Scheme Claim"`, while the register
-speaks component keys. `COMPONENT_PHRASES` maps the words they actually use, most
-specific first. **A mapping miss must never render as "not claimed"** — that would send
+invoice AF-122-…") and types many of them `"Scheme Claim"`, while the register
+speaks component keys. `CLAIM_TYPE_KEYS` maps Coulson's own chips first
+(`Additional Support`, `Dealer Incentive` / Support Scheme (BTL) → OEM Extra Support)
+so a line whose description still says "Insurance Benefits Up to…" is not stolen by
+the word "insurance". `COMPONENT_PHRASES` then maps Scheme Claim prose, most specific
+first. **A mapping miss must never render as "not claimed"** — that would send
 the money desk chasing money already sitting in Euler's queue. A test pins it.
+A register row whose vehicle has an Euler claim for a *different* mapped component
+stays `not_filed`, but that other claim's number is not shown on the red row.
 
 The reverse colour on OEM Claim Settlements is `registerMatch`:
 

@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
@@ -321,6 +321,11 @@ export default function OemClaims() {
             return (
               <div className="flex flex-col items-start gap-1" title={r.registerMatch?.detail || ""}>
                 <Badge tone={m.tone}>{m.label}</Badge>
+                {(r.registerMatch?.mappedComponents || []).length ? (
+                  <span className="text-[10px] text-ink-faint">
+                    {(r.registerMatch.mappedComponents || []).map(componentLabel).join(", ")}
+                  </span>
+                ) : null}
                 {r.registerMatch?.resubmittedBy
                   ? <span className="text-[10px] text-sky-700">Refiled as {r.registerMatch.resubmittedBy}</span>
                   : r.registerMatch?.needsResubmission

@@ -25,6 +25,23 @@ export const REGISTER_MATCH = {
 export const oemMatchOf = (r) => OEM_MATCH[r?.oemMatch?.state] || OEM_MATCH.not_applicable;
 export const registerMatchOf = (r) => REGISTER_MATCH[r?.registerMatch?.state] || REGISTER_MATCH.unknown_lead;
 
+const COMPONENT_LABEL = {
+  rtoInsuranceBenefit: "RTO + Insurance",
+  insuranceBenefit: "Insurance Benefit",
+  rtoBenefit: "RTO Benefit",
+  referralBonus: "Referral",
+  loyaltyBonus: "Loyalty",
+  exchangeBonus: "Exchange",
+  consumerDiscount: "Consumer Discount",
+  dsaDiscount: "DSA",
+  oemExtraSupport: "OEM Extra Support",
+  additionalDiscount: "Additional Discount",
+};
+
+export function componentLabel(key) {
+  return COMPONENT_LABEL[key] || key || "";
+}
+
 export function oemClaimsHref({ q, chassis, invoice, leadId } = {}) {
   const p = new URLSearchParams();
   if (q) p.set("q", q);
