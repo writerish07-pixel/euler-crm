@@ -377,7 +377,10 @@ def fetch_sold_inventory(token: str, limit=200):
 # debit note; the money detail — chassis, source invoice, claim type — lives only on
 # that note's line items, which arrive from a second call.
 CLAIM_LIST_PATH = "debit-note"
-CLAIM_JOURNEY_PATH = "journey"
+# The dealer SPA (getDebitNoteDetails) calls this — not a bare `journey` path.
+# Hitting /api/v1/journey left every OEM Claim Settlements row with empty line
+# items, so Chassis / Invoice stayed "Not pulled" after a successful list sync.
+CLAIM_JOURNEY_PATH = "debit-note/journey"
 
 # Line-item lists hide under several names depending on which envelope we got.
 _LINE_ITEM_KEYS = (
@@ -476,16 +479,23 @@ def fetch_claim_journey(token: str, debit_note_id: str):
     Chassis and source invoice exist ONLY on the line items. The list row has
     neither, so a claim cannot be tied to a lead without this call (or without
     line items already on the list row).
+
+    The live portal asks `GET debit-note/journey?debit_note_id=<uuid>` and unwraps
+    `{success, data: {header, line_items, timeline}}`. Older guesses (`journey`,
+    `debit-note/<id>`) stay as fallbacks so a renamed route does not blank the
+    column again.
     """
     note_id = str(debit_note_id or "").strip()
     if not note_id:
         raise CoulsonError("A debit note id is required")
     attempts = (
         (CLAIM_JOURNEY_PATH, {"debit_note_id": note_id}),
-        (CLAIM_JOURNEY_PATH, {"id": note_id}),
+        ("journey", {"debit_note_id": note_id}),
+        ("journey", {"id": note_id}),
         (f"debit-note/{note_id}", None),
     )
     last = {}
+    last_keys = []
     for path, params in attempts:
         try:
             payload = get_json(token, path, params)
@@ -493,8 +503,11 @@ def fetch_claim_journey(token: str, debit_note_id: str):
             continue
         body = journey_body(payload)
         last = body
+        last_keys = list(body)[:12] if isinstance(body, dict) else []
         if pick_line_items(body):
             return body
+    if last_keys:
+        log.info("Coulson journey %s returned no line items (keys=%s)", note_id, last_keys)
     return last
 
 # The eleven buckets the Claim Settlements List tabs across, approval order first

@@ -545,6 +545,7 @@ async def sync_claims(db, *, detail_budget=250, token=None):
     detail_calls = 0
     detail_failures = 0
     linked = 0
+    with_vehicle = 0
     coll = db[CLAIMS_COLLECTION]
     held_by_id = {}
     async for held in coll.find({}, {"debitNoteId": 1, "lineItems": 1, "detailFetchedAt": 1,
@@ -581,6 +582,8 @@ async def sync_claims(db, *, detail_budget=250, token=None):
         merged["missingFromOem"] = False
         if merged.get("linkedLineCount"):
             linked += 1
+        if _lines_have_vehicle(merged.get("lineItems")):
+            with_vehicle += 1
         await coll.update_one({"debitNoteId": note_id}, {"$set": merged}, upsert=True)
 
     # Anything we hold that Coulson no longer lists: keep the row, flag it.
@@ -602,6 +605,7 @@ async def sync_claims(db, *, detail_budget=250, token=None):
         "claimsFetchMode": mode,
         "claimsIncomplete": incomplete,
         "claimsLinked": linked,
+        "claimsWithVehicle": with_vehicle,
         "claimDetailCalls": detail_calls,
         "claimDetailFailures": detail_failures,
         "claimsMissingFromOem": stale,
@@ -1074,9 +1078,12 @@ async def claims_summary(db):
     totals = {"claimed": 0.0, "approved": 0.0, "openClaimed": 0.0}
     stuck, rejected, conflicts = [], [], []
     total = 0
+    with_vehicle = 0
     async for row in db[CLAIMS_COLLECTION].find({}):
         row.pop("_id", None)
         total += 1
+        if _lines_have_vehicle(row.get("lineItems")):
+            with_vehicle += 1
         status = str(row.get("status") or "Unknown")
         b = buckets.setdefault(status, {"status": status, "count": 0, "claimed": 0.0, "approved": 0.0})
         b["count"] += 1
@@ -1128,5 +1135,6 @@ async def claims_summary(db):
             "fetchMode": doc.get("claimsFetchMode") or "",
             "syncedAt": doc.get("claimsSyncedAt") or "",
             "detailFailures": doc.get("claimDetailFailures") or 0,
+            "withVehicle": with_vehicle,
         },
     }

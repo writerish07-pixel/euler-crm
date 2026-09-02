@@ -87,6 +87,11 @@ export default function OemClaims() {
       if (r.claimsIncomplete) {
         toast.error(`Only ${r.claimsMirrored} of ${r.claimsExpected} claims came back`);
       }
+      if ((r.claimsWithVehicle || 0) < (r.claimsMirrored || 0)) {
+        toast.error(
+          `Chassis/invoice on ${r.claimsWithVehicle || 0} of ${r.claimsMirrored} claims — sync again after deploy if this stays 0`
+        );
+      }
       load();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Could not reach Coulson");
@@ -143,6 +148,18 @@ export default function OemClaims() {
             <div className="font-semibold">This list is incomplete.</div>
             Euler reports {mirror.expected} claims; {mirror.mirrored} were mirrored. Every
             total on this page is understated until the next sync succeeds.
+          </div>
+        </Card>
+      )}
+
+      {summary.total > 0 && (mirror.withVehicle || 0) < summary.total && (
+        <Card className="mb-4 border-amber-200 bg-amber-50 p-4 flex items-start gap-3" data-testid="oem-missing-chassis">
+          <AlertTriangle size={18} className="text-amber-700 shrink-0 mt-0.5" />
+          <div className="text-sm text-amber-900">
+            <div className="font-semibold">Chassis and invoice are missing on some claims.</div>
+            {mirror.withVehicle || 0} of {summary.total} have a vehicle id. Use{" "}
+            <b>Sync from Euler</b> — the detail call is{" "}
+            <code className="text-xs">debit-note/journey</code>, not the list row.
           </div>
         </Card>
       )}

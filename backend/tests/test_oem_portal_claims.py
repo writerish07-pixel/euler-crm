@@ -275,6 +275,44 @@ def test_journey_body_unwraps_the_envelopes_coulson_actually_sends():
     assert coulson_client.pick_line_items(nested)
 
 
+def test_fetch_claim_journey_hits_the_path_the_dealer_spa_uses(monkeypatch):
+    """Coulson's Claim Settlement detail is GET debit-note/journey?debit_note_id=.
+
+    We used to call GET journey, which never returned line items — every OEM
+    Claim Settlements row then stayed on 'Not pulled — sync again'.
+    """
+    calls = []
+    inner = journey("n1", "AF-122-CL2627127")
+
+    def fake_get(token, path, params=None):
+        calls.append((path, dict(params or {})))
+        if path == "debit-note/journey" and (params or {}).get("debit_note_id") == "n1":
+            return {"success": True, "data": inner}
+        raise coulson_client.CoulsonError("not this path", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get)
+    body = coulson_client.fetch_claim_journey("tok", "n1")
+    assert calls[0] == ("debit-note/journey", {"debit_note_id": "n1"})
+    assert coulson_client.pick_line_items(body)[0]["chassis"] == CHASSIS
+    assert body["header"]["debit_note_number"] == "AF-122-CL2627127"
+
+
+def test_fetch_claim_journey_falls_back_when_debit_note_journey_404s(monkeypatch):
+    """If Euler rename the route, the older guesses still have to work."""
+    inner = journey("n1", "AF-122-CL2627032")
+
+    def fake_get(token, path, params=None):
+        if path == "debit-note/journey":
+            raise coulson_client.CoulsonError("not found", status=404)
+        if path == "journey" and (params or {}).get("debit_note_id") == "n1":
+            return {"success": True, "data": inner}
+        raise coulson_client.CoulsonError("not this path", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get)
+    body = coulson_client.fetch_claim_journey("tok", "n1")
+    assert coulson_client.pick_line_items(body)[0]["source_invoice_number"] == INVOICE
+
+
 # ---------------------------------------------------------------- completeness
 def _rows(n):
     return [list_row(f"n{i}", f"AF-999-CL{i:04d}") for i in range(n)]
@@ -347,11 +385,14 @@ async def test_claim_links_to_the_lead_by_chassis(client, wired):
     lead_id = await _delivered_lead(client)
     r = await client.post("/api/integrations/coulson/sync-claims")
     assert r.status_code == 200, r.text
+    assert r.json()["claimsWithVehicle"] == 1
     rows = (await client.get("/api/oem-claims")).json()
     assert len(rows) == 1
     assert rows[0]["leadIds"] == [lead_id]
     assert rows[0]["lineItems"][0]["matchedBy"] == "chassis"
     assert rows[0]["linkedLineCount"] == 1
+    summary = (await client.get("/api/oem-claims/summary")).json()
+    assert summary["mirror"]["withVehicle"] == 1
 
 
 @pytest.mark.asyncio
