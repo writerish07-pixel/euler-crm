@@ -38,6 +38,7 @@ import ERPProductionAudit from "./pages/ERPProductionAudit";
 import AuditLog from "./pages/AuditLog";
 import OemFinance from "./pages/OemFinance";
 import Allocation from "./pages/Allocation";
+import SalesGmDashboard from "./pages/SalesGmDashboard";
 
 function homePath(auth) {
   // The OEM finance desk has exactly one page. Sending it anywhere else would
@@ -48,9 +49,9 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, gmHome }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm } = auth;
   const loc = useLocation();
   if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
@@ -60,6 +61,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   if (ownerOnly && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (dealDesk && !canEditCommercials) return <Navigate to={homePath(auth)} replace />;
   if (fieldOnly && !isField && !isOwner) return <Navigate to={homePath(auth)} replace />;
+  if (gmHome && !isSalesGm && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (accountsHome && !isAccounts && !isOwner && !isSalesStaff) {
     return <Navigate to={homePath(auth)} replace />;
   }
@@ -72,10 +74,11 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
 }
 
 function HomeRedirect() {
-  const { isAccounts, isField, isExecutive, isOemFinance } = useAuth();
+  const { isAccounts, isField, isExecutive, isOemFinance, isSalesGm } = useAuth();
   if (isOemFinance) return <Navigate to="/oem-finance" replace />;
   if (isAccounts) return <Navigate to="/accounts" replace />;
   if (isField) return <Navigate to="/field" replace />;
+  if (isSalesGm) return <SalesGmDashboard />;
   if (isExecutive) return <ExecutiveDashboard />;
   return <Dashboard />;
 }
@@ -92,6 +95,7 @@ function AppRoutes() {
       accountsHome={opts.accountsHome}
       oemOk={opts.oemOk}
       dealDesk={opts.dealDesk}
+      gmHome={opts.gmHome}
     >
       {el}
     </Protected>
@@ -103,6 +107,7 @@ function AppRoutes() {
       <Route path="/" element={P(<HomeRedirect />)} />
       <Route path="/accounts" element={P(<AccountsDashboard />, { accountsHome: true })} />
       <Route path="/field" element={P(<FieldDashboard />, { fieldOnly: true })} />
+      <Route path="/gm" element={P(<SalesGmDashboard />, { gmHome: true })} />
       <Route path="/leads" element={P(<Leads />, { salesOnly: true, fieldOk: true })} />
       <Route path="/bookings" element={P(<Bookings />, { salesOnly: true, fieldOk: true })} />
       <Route path="/quotations" element={P(<Quotations />, { salesOnly: true })} />

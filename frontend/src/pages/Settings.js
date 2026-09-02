@@ -132,7 +132,7 @@ export default function Settings() {
   };
 
   const STAFF_ROLE_TO_LOGIN = {
-    executive: "executive", TL: "tl", ASM: "asm", RM: "rm", owner: "owner", accounts: "accounts",
+    executive: "executive", TL: "tl", GM: "sales_gm", ASM: "asm", RM: "rm", owner: "owner", accounts: "accounts",
   };
   const pickStaff = (staffId) => {
     const row = staff.find((s) => s.staffId === staffId);
@@ -325,6 +325,7 @@ export default function Settings() {
             <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
               <option value="executive">Executive</option>
               <option value="tl">Team Leader (completes the deal)</option>
+              <option value="sales_gm">Sales GM (showroom sales, no money desk)</option>
               <option value="accounts">Accounts</option>
               <option value="asm">ASM</option>
               <option value="rm">RM</option>
@@ -349,6 +350,8 @@ export default function Settings() {
                   ? "bg-amber-50 text-amber-700 ring-amber-600/20"
                   : r.role === "accounts"
                     ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
+                    : r.role === "sales_gm"
+                      ? "bg-violet-50 text-violet-700 ring-violet-600/20"
                     : r.role === "asm" || r.role === "rm"
                       ? "bg-sky-50 text-sky-700 ring-sky-600/20"
                       : "bg-blue-50 text-blue-700 ring-blue-600/20";

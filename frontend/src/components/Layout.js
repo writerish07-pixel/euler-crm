@@ -16,6 +16,7 @@ import { downloadFile, get } from "../lib/api";
 const NAV = [
   { section: "Overview", items: [
     { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, salesOnly: true },
+    { to: "/gm", label: "Sales GM Dashboard", icon: BarChart3, ownerOnly: true },
     { to: "/field", label: "Field Dashboard", icon: Map, fieldHome: true },
     { to: "/accounts", label: "Accounts Dashboard", icon: Calculator, accountsHome: true },
   ]},
@@ -70,9 +71,9 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
-    : isAccounts ? "Accounts desk" : isField ? "Field desk" : "EV Dealership";
+    : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk" : "EV Dealership";
   const nav = isOemFinance ? OEM_NAV : NAV;
   return (
     <aside
@@ -111,6 +112,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             if (i.dealDesk && !canEditCommercials) return false;
             if (i.accountsHome && !isAccounts && !isOwner) return false;
             if (i.fieldHome && !isField && !isOwner) return false;
+            if (i.gmHome && !isSalesGm && !isOwner) return false;
             return true;
           });
           if (!items.length) return null;
@@ -238,7 +240,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const location = useLocation();
 
@@ -275,6 +277,7 @@ export default function Layout({ children }) {
         canViewFinance={canViewFinance}
         isOemFinance={isOemFinance}
         canEditCommercials={canEditCommercials}
+        isSalesGm={isSalesGm}
         open={navOpen}
         onClose={() => setNavOpen(false)}
         onNavigate={() => setNavOpen(false)}
