@@ -25,7 +25,9 @@ export default function Inventory() {
     setBusy(true);
     try {
       const r = await post("/integrations/coulson/sync", {});
-      if (r.ok) toast.success(`Synced ${r.inventoryCount || 0} vehicles from Euler OEM`);
+      if (r.ok) toast.success(
+        `Synced ${r.inventoryCount || 0} vehicles from Euler OEM · ${(r.leadsVehicleIds && r.leadsVehicleIds.updated) || 0} leads chassis/invoice`,
+      );
       else toast.error(r.reason === "not_configured" ? "Save Coulson login in Settings first" : "Sync did not run");
       load();
     } catch (e) {

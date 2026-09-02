@@ -206,3 +206,137 @@ async def test_coulson_sync_stores_sold_by_mobile(client, monkeypatch):
     assert row["mobile"] == "9812309876"
     assert row["invoiceNumber"] == "CINV-SYNC"
     assert row["model"] == "Turbo Max"
+    assert r.json()["leadsVehicleIds"]["updated"] == 0
+
+
+@pytest.mark.asyncio
+async def test_coulson_sync_writes_sold_ids_onto_matching_leads(client, monkeypatch):
+    mobile = "9812301111"
+    chassis = "MD9SOLDBACKFILL01"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.leads.insert_one({
+        "leadId": "LD-SOLD-BF-1", "customerName": "Backfill One", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-02",
+        "invoiceNumber": "WRONG-INV", "chassisNumber": "WRONG-CH",
+    })
+    await server.db.deliveries.insert_one({
+        "leadId": "LD-SOLD-BF-1", "invoiceNumber": "WRONG-INV", "chassisNumber": "WRONG-CH",
+    })
+    oem_models = [{
+        "id": "oem-maxx-pv", "model": "Turbo", "variant": "Range Maxx", "load_body": "PV",
+        "sap_product_id": "CD00001500", "sap_product_name": "TURBO RANGEMAXX PV",
+        "showroom_price_non_delhi": 770000, "showroom_price_delhi": 770000,
+    }]
+    sold = [{
+        "chassis": chassis, "model": "Turbo", "variant": "Range Maxx",
+        "updated_load_body": "PV", "sap_vehicle_model_id": "oem-maxx-pv",
+        "customer_mobile": "91" + mobile, "invoice_number": "CINV-BF-1",
+        "registration_number": "RJ14BF0001",
+        "_coulsonStatus": "SOLD",
+    }]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: sold)
+    await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
+    r = await client.post("/api/integrations/coulson/sync")
+    assert r.status_code == 200, r.text
+    assert r.json()["leadsVehicleIds"]["updated"] >= 1
+    lead = await server.db.leads.find_one({"leadId": "LD-SOLD-BF-1"})
+    assert lead["chassisNumber"] == chassis
+    assert lead["invoiceNumber"] == "CINV-BF-1"
+    assert lead["numberPlate"] == "RJ14BF0001"
+    delivery = await server.db.deliveries.find_one({"leadId": "LD-SOLD-BF-1"})
+    assert delivery["chassisNumber"] == chassis
+    assert delivery["invoiceNumber"] == "CINV-BF-1"
+
+
+@pytest.mark.asyncio
+async def test_sold_id_backfill_skips_ambiguous_same_mobile(client):
+    mobile = "9812302222"
+    chassis = "MD9SOLDAMBIG0001"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.insert_one({
+        "leadId": "LD-SOLD-A", "customerName": "Twin A", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-SOLD-B", "customerName": "Twin B", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-AMB",
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["updated"] == 0
+    assert stats["skippedAmbiguous"] >= 2
+    a = await server.db.leads.find_one({"leadId": "LD-SOLD-A"})
+    b = await server.db.leads.find_one({"leadId": "LD-SOLD-B"})
+    assert not a.get("chassisNumber")
+    assert not b.get("chassisNumber")
+
+
+@pytest.mark.asyncio
+async def test_sold_id_backfill_prefers_delivered_when_mobile_is_shared(client):
+    mobile = "9812303333"
+    chassis = "MD9SOLDPREF0001"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.insert_one({
+        "leadId": "LD-SOLD-NEW", "customerName": "Open Twin", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "New",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-SOLD-DEL", "customerName": "Delivered Twin", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-02",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-PREF",
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["updated"] == 1
+    del_lead = await server.db.leads.find_one({"leadId": "LD-SOLD-DEL"})
+    new_lead = await server.db.leads.find_one({"leadId": "LD-SOLD-NEW"})
+    assert del_lead["chassisNumber"] == chassis
+    assert del_lead["invoiceNumber"] == "CINV-PREF"
+    assert not new_lead.get("chassisNumber")
+
+
+@pytest.mark.asyncio
+async def test_sold_id_backfill_does_not_steal_live_chassis(client):
+    mobile = "9812304444"
+    chassis = "MD9SOLDTAKEN0001"
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-SOLD-WANT", "LD-SOLD-HAS"]}})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.insert_one({
+        "leadId": "LD-SOLD-WANT", "customerName": "Wants Chassis", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-SOLD-HAS", "customerName": "Already Has", "mobile": "9812305555",
+        "interestedModel": "Storm", "variant": "Storm LR (PV) Reg C7 6.6kWh",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-02",
+        "chassisNumber": chassis, "invoiceNumber": "CINV-HAS-KEEP",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-TAKE",
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["updated"] == 0
+    assert stats["skippedConflict"] >= 1
+    want = await server.db.leads.find_one({"leadId": "LD-SOLD-WANT"})
+    assert not want.get("chassisNumber")
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-SOLD-WANT", "LD-SOLD-HAS"]}})
