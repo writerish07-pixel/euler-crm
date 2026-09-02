@@ -1,9 +1,27 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { HandCoins, Plus } from "lucide-react";
+import { HandCoins, Plus, AlertTriangle, RotateCcw } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
+import { useLeadDrawer, LeadLink } from "../components/LeadLink";
+
+// How this row stands against Euler's own claim register. The whole point is that
+// "we think we're owed this" and "we actually asked for it" stop being the same claim.
+//
+// `unmapped` is deliberately amber, not red: Euler describes a claim in prose and we
+// match on words, so a miss means "look at this", never "nobody claimed it". Calling a
+// filed claim unclaimed would send the desk chasing money that is already in the queue.
+const MATCH = {
+  accepted:    { label: "Approved in Euler", tone: "bg-emerald-50 text-emerald-700 ring-emerald-600/20", row: "" },
+  filed:       { label: "Filed with Euler",  tone: "bg-blue-50 text-blue-700 ring-blue-600/20",          row: "" },
+  resubmitted: { label: "Refiled",           tone: "bg-sky-50 text-sky-700 ring-sky-600/20",             row: "" },
+  rejected:    { label: "Rejected — refile", tone: "bg-rose-100 text-rose-800 ring-rose-600/30",         row: "bg-rose-50/60" },
+  not_filed:   { label: "Not claimed",       tone: "bg-red-50 text-red-700 ring-red-600/20",             row: "bg-red-50/50" },
+  unmapped:    { label: "Check match",       tone: "bg-amber-50 text-amber-800 ring-amber-600/20",       row: "bg-amber-50/40" },
+  not_applicable: { label: "", tone: "", row: "" },
+};
+const matchOf = (r) => MATCH[r?.oemMatch?.state] || MATCH.not_applicable;
 
 export default function Claims() {
   const [rows, setRows] = useState([]);
@@ -11,8 +29,14 @@ export default function Claims() {
   const [receipt, setReceipt] = useState(false);
   const [manual, setManual] = useState(false);
   const [leads, setLeads] = useState([]);
-  const load = useCallback(() => get("/claims").then(setRows), []);
+  const [oemOnly, setOemOnly] = useState(null);
+  const [matchFilter, setMatchFilter] = useState("");
+  const load = useCallback(() => {
+    get("/claims").then(setRows);
+    get("/claims/oem-only").then(setOemOnly).catch(() => setOemOnly(null));
+  }, []);
   useEffect(() => { load(); get("/leads").then(setLeads); }, [load]);
+  const { openLead, drawer } = useLeadDrawer(load);
 
   const isIncentive = (r) => String(r.componentKey || "").startsWith("executiveIncentive")
     || /executive incentive/i.test(String(r.component || r.claimType || ""));
@@ -27,9 +51,23 @@ export default function Claims() {
   const totalOutstanding = schemeOutstanding + incentiveOutstanding;
   const outstandingRows = rows.filter((r) => Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0) > 0.01);
 
+  const stateOf = (r) => r?.oemMatch?.state || "not_applicable";
+  const counts = rows.reduce((acc, r) => {
+    const s = stateOf(r);
+    if (s !== "not_applicable") acc[s] = (acc[s] || 0) + 1;
+    return acc;
+  }, {});
+  const unclaimedValue = rows
+    .filter((r) => stateOf(r) === "not_filed")
+    .reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
+  const rejectedValue = rows
+    .filter((r) => stateOf(r) === "rejected")
+    .reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
+  const visibleRows = matchFilter ? rows.filter((r) => stateOf(r) === matchFilter) : rows;
+
   return (
     <div>
-      <PageHeader title="OEM Claim Register" subtitle={`${rows.length} claims · ${inr(eligible)} eligible`}
+      <PageHeader title="Scheme Claim Register" subtitle={`${rows.length} claims · ${inr(eligible)} eligible`}
         actions={<div className="flex items-center gap-2">
           <Button variant="secondary" data-testid="add-manual-claim-btn" onClick={() => setManual(true)}><Plus size={16} /> Add Manual Claim</Button>
           <Button data-testid="record-claim-receipt-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Claim Received</Button>
@@ -40,12 +78,74 @@ export default function Claims() {
         <StatCard label="Total Eligible" value={inr(eligible)} tone="text-emerald-600" />
         <StatCard label="Total Outstanding" value={inr(totalOutstanding)} tone="text-red-600" />
       </div>
+
+      {/* Cross-check against Euler. Nothing here changes a rupee in this register —
+          it only says whether the claim was actually filed on their side. */}
+      <Card className="mb-6 p-4" data-testid="oem-crosscheck">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div className="text-xs font-semibold text-ink-faint uppercase tracking-wide">
+            Cross-check with Euler
+          </div>
+          {matchFilter && (
+            <button className="text-xs text-cobalt hover:underline" onClick={() => setMatchFilter("")}>
+              Clear filter
+            </button>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {["accepted", "filed", "resubmitted", "unmapped", "rejected", "not_filed"].map((s) => (
+            counts[s] ? (
+              <button key={s} onClick={() => setMatchFilter(matchFilter === s ? "" : s)}
+                data-testid={`match-filter-${s}`}
+                className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                  matchFilter === s ? "border-cobalt bg-cobalt/5" : "border-line hover:bg-zinc-50"}`}>
+                <Badge tone={MATCH[s].tone}>{MATCH[s].label}</Badge>
+                <div className="text-lg font-semibold text-ink mt-1">{counts[s]}</div>
+              </button>
+            ) : null
+          ))}
+        </div>
+        {(unclaimedValue > 0.01 || rejectedValue > 0.01) && (
+          <div className="mt-3 space-y-1 text-sm">
+            {unclaimedValue > 0.01 && (
+              <div className="flex items-start gap-2 text-red-700">
+                <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+                <span><b>{inr(unclaimedValue)}</b> is eligible here with no claim filed in
+                  Coulson. Raise these before the scheme month closes.</span>
+              </div>
+            )}
+            {rejectedValue > 0.01 && (
+              <div className="flex items-start gap-2 text-rose-800">
+                <RotateCcw size={15} className="shrink-0 mt-0.5" />
+                <span><b>{inr(rejectedValue)}</b> was rejected by Euler and has not been
+                  refiled. A rejection is not reopened — it needs a fresh claim.</span>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
       <Table
         rowKey="claimId"
         onRowClick={setActive}
+        rowClassName={(r) => matchOf(r).row}
         columns={[
-          { key: "leadId", label: "Lead", mono: true, render: (r) => r.leadId || "—" },
+          { key: "leadId", label: "Lead", mono: true, render: (r) => (
+            <LeadLink leadId={r.leadId} onOpen={openLead} />
+          )},
           { key: "customer", label: "Customer", render: (r) => <span className="font-semibold">{r.customer || "—"}</span> },
+          { key: "oemMatch", label: "In Euler", render: (r) => {
+            const m = matchOf(r);
+            if (!m.label) return <span className="text-ink-faint text-xs">—</span>;
+            return (
+              <div className="flex flex-col items-start gap-1" title={r.oemMatch?.detail || ""}>
+                <Badge tone={m.tone}>{m.label}</Badge>
+                {(r.oemMatch?.claimNumbers || []).slice(0, 2).map((n) => (
+                  <span key={n} className="font-mono text-[10px] text-ink-faint">{n}</span>
+                ))}
+              </div>
+            );
+          }},
           { key: "model", label: "Vehicle", render: (r) => r.model || "—" },
           { key: "component", label: "Component", render: (r) => (
             <div className="flex items-center gap-1.5">
@@ -66,9 +166,59 @@ export default function Claims() {
           { key: "approvedDate", label: "Approved", render: (r) => r.approvedDate ? fmtDate(r.approvedDate) : "—" },
           { key: "ageingDays", label: "Ageing", align: "right", render: (r) => r.ageingDays ? <Badge tone={r.ageingDays > 30 ? "bg-red-50 text-red-700 ring-red-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>{r.ageingDays}d</Badge> : "—" },
         ]}
-        rows={rows}
-        empty="No claims yet — apply schemes on booked leads, mark incentives paid, or click Add Manual Claim"
+        rows={visibleRows}
+        empty={matchFilter ? "No claims in this state" : "No claims yet — apply schemes on booked leads, mark incentives paid, or click Add Manual Claim"}
       />
+
+      {/* The other direction. Euler is processing these and this register has no row
+          for them — either the lead was never matched, or the entitlement was never
+          raised here. Both are worth knowing before the books are trusted. */}
+      {oemOnly && oemOnly.count > 0 && (
+        <Card className="mt-6 p-4 border-violet-200" data-testid="oem-only-claims">
+          <div className="flex items-center gap-2 mb-1 text-violet-800 font-semibold text-sm">
+            <AlertTriangle size={16} />
+            In Euler but not in this register — {oemOnly.count} line(s), {inr(oemOnly.total)}
+          </div>
+          <p className="text-xs text-ink-faint mb-3">
+            Claims Euler is working on that this register does not raise. A line with no
+            lead never matched a chassis; one with a lead is entitlement this app never
+            recorded.
+          </p>
+          <Table
+            rowKey="claimNumber"
+            columns={[
+              { key: "claimNumber", label: "Claim", mono: true, render: (r) => (
+                <div>
+                  <div className="font-semibold text-cobalt">{r.claimNumber}</div>
+                  <div className="text-xs text-ink-faint">{fmtDate(r.createdDate)}</div>
+                </div>
+              )},
+              { key: "leadId", label: "Lead", render: (r) => (
+                r.leadId
+                  ? <LeadLink leadId={r.leadId} onOpen={openLead} subtitle={r.customer} />
+                  : <Badge tone="bg-zinc-100 text-zinc-600 ring-zinc-500/20">No lead matched</Badge>
+              )},
+              { key: "chassis", label: "Chassis", mono: true, render: (r) => (
+                <span className="text-xs">{r.chassis || "—"}</span>
+              )},
+              { key: "description", label: "What Euler is claiming", render: (r) => (
+                <div className="text-xs max-w-xs whitespace-normal">
+                  {r.description || r.claimType || "—"}
+                </div>
+              )},
+              { key: "amount", label: "Amount", align: "right", mono: true,
+                render: (r) => inr(r.amount) },
+              { key: "oemStatus", label: "Status", render: (r) => (
+                <Badge tone="bg-violet-50 text-violet-700 ring-violet-600/20">{r.oemStatus}</Badge>
+              )},
+            ]}
+            rows={oemOnly.rows}
+            empty="Nothing"
+          />
+        </Card>
+      )}
+
+      {drawer}
       {active && <SettleModal claim={active} onClose={() => setActive(null)} onDone={() => { setActive(null); load(); }} />}
       {receipt && <ClaimReceiptModal rows={outstandingRows} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />}
       {manual && <ManualClaimModal leads={leads} onClose={() => setManual(false)} onDone={() => { setManual(false); load(); }} />}

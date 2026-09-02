@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select } from "../components/ui";
+import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
 
 // Euler's own ladder. Approval stages are the ones worth chasing; the terminal
@@ -43,6 +44,7 @@ export default function OemClaims() {
   }, [status, unlinked]);
 
   useEffect(() => { load(); }, [load]);
+  const { openLead, drawer } = useLeadDrawer(load);
 
   const sync = async () => {
     setSyncing(true);
@@ -190,11 +192,11 @@ export default function OemClaims() {
           )},
           { key: "lead", label: "Lead", render: (r) => (
             r.leadIds && r.leadIds.length ? (
-              <div className="text-sm">
-                {r.leadIds.map((id) => <div key={id} className="font-mono text-xs">{id}</div>)}
-                <div className="text-xs text-ink-faint">
-                  {(r.lineItems || []).map((li) => li.leadCustomer).filter(Boolean).join(", ")}
-                </div>
+              <div className="flex flex-col items-start gap-0.5">
+                {r.leadIds.map((id) => (
+                  <LeadLink key={id} leadId={id} onOpen={openLead}
+                    subtitle={(r.lineItems || []).find((li) => li.leadId === id)?.leadCustomer} />
+                ))}
               </div>
             ) : <Badge tone="bg-zinc-100 text-zinc-600 ring-zinc-500/20">Not linked</Badge>
           )},
@@ -229,6 +231,7 @@ export default function OemClaims() {
         rows={rows}
         empty={mirror.syncedAt ? "No claims match this filter" : "Not synced from Euler yet"}
       />
+      {drawer}
     </div>
   );
 }
