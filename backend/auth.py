@@ -139,6 +139,7 @@ def _owner_user_row(u) -> dict:
         "name": u.get("name") or "",
         "role": u["role"],
         "password": u.get("passwordPlain") or "",
+        "passwordChangedAt": u.get("passwordChangedAt") or "",
     }
 
 
@@ -266,15 +267,22 @@ def build_router(db):
 
     @router.post("/change-password")
     async def change_password(body: ChangePasswordIn, user=Depends(current_user)):
-        """Any logged-in user can change their own password."""
+        """Any logged-in user can change their own password.
+
+        Stores the new plaintext on the user row so the owner User Accounts
+        Password column is overwritten with whatever they just chose. Wrong
+        current password is 400 (form error), not 401 — 401 would look like a
+        dead session and the browser would dump them at login.
+        """
+        current = (body.currentPassword or "").strip()
         new_pw = (body.newPassword or "").strip()
         if len(new_pw) < 6:
             raise HTTPException(422, "New password must be at least 6 characters")
-        if body.currentPassword == new_pw:
+        if current == new_pw:
             raise HTTPException(422, "New password must be different from the current password")
         row = await db.users.find_one({"userId": user["userId"]})
-        if not row or not verify_password(body.currentPassword, row["passwordHash"]):
-            raise HTTPException(401, "Current password is incorrect")
+        if not row or not verify_password(current, row.get("passwordHash") or ""):
+            raise HTTPException(400, "Current password is incorrect")
         await db.users.update_one(
             {"userId": user["userId"]},
             {"$set": {
@@ -389,6 +397,20 @@ async def _ensure_login_id(db, email, login_id):
     )
 
 
+async def _ensure_password_plain_if_still_default(db, email, default_pw):
+    """If this account still logs in with the known seed password and the owner
+    list has no plaintext, copy it so User Accounts is not blank. Never invent a
+    password for an account whose hash no longer matches the seed."""
+    row = await db.users.find_one({"email": email})
+    if not row or (row.get("passwordPlain") or "").strip():
+        return
+    if verify_password(default_pw, row.get("passwordHash") or ""):
+        await db.users.update_one(
+            {"userId": row["userId"]},
+            {"$set": {"passwordPlain": default_pw}},
+        )
+
+
 async def seed_users(db):
     await db.users.create_index("email", unique=True)
     owner_email = os.environ.get("OWNER_EMAIL", "owner@euler.com").strip().lower()
@@ -399,6 +421,7 @@ async def seed_users(db):
             "userId": str(uuid.uuid4()), "email": owner_email,
             "loginId": "owner", "loginIdNorm": "owner",
             "passwordHash": hash_password(owner_pw),
+            "passwordPlain": owner_pw,
             "name": "Owner", "role": "owner", "createdAt": datetime.now(timezone.utc).isoformat(),
         })
     else:
@@ -421,6 +444,7 @@ async def seed_users(db):
                     }},
                 )
         await _ensure_login_id(db, owner_email, "owner")
+        await _ensure_password_plain_if_still_default(db, owner_email, owner_pw)
     demos = [
         ("executive@euler.com", "Executive", "executive", "executive"),
         ("accounts@euler.com", "Accounts", "accounts", "accounts"),
@@ -434,8 +458,10 @@ async def seed_users(db):
                 "userId": str(uuid.uuid4()), "email": email,
                 "loginId": login_id, "loginIdNorm": login_id,
                 "passwordHash": hash_password("euler@123"),
+                "passwordPlain": "euler@123",
                 "name": name, "role": role,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
             })
         else:
             await _ensure_login_id(db, email, login_id)
+            await _ensure_password_plain_if_still_default(db, email, "euler@123")

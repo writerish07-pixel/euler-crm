@@ -97,11 +97,53 @@ async def test_staff_change_password_updates_owner_list(client):
     listed = (await client.get("/api/auth/users")).json()
     row = _row(listed, "s.mathur")
     assert row["password"] == "newPass9"
+    assert row.get("passwordChangedAt")
 
     ok = await client.post("/api/auth/login", json={"email": "s.mathur", "password": "newPass9"})
     assert ok.status_code == 200
     bad = await client.post("/api/auth/login", json={"email": "s.mathur", "password": "oldPass1"})
     assert bad.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_seed_fills_password_plain_when_hash_still_default(client):
+    """Existing demo rows that never stored plaintext get it backfilled if the hash is still euler@123."""
+    import auth as authmod
+
+    await server.db.users.update_one(
+        {"email": "executive@euler.com"},
+        {"$unset": {"passwordPlain": ""}},
+    )
+    await server.db.users.update_one(
+        {"email": "executive@euler.com"},
+        {"$set": {"passwordHash": authmod.hash_password("euler@123")}},
+    )
+    await authmod.seed_users(server.db)
+    listed = (await client.get("/api/auth/users")).json()
+    row = next(u for u in listed if u["email"] == "executive@euler.com")
+    assert row["password"] == "euler@123"
+
+
+@pytest.mark.asyncio
+async def test_seed_does_not_overwrite_staff_password_after_change(client):
+    import auth as authmod
+
+    await client.post("/api/auth/users", json={
+        "name": "Kept", "loginId": "kept.pw", "password": "oldPass1",
+        "role": "executive",
+    })
+    tok = (await client.post("/api/auth/login",
+                             json={"email": "kept.pw", "password": "oldPass1"})).json()["token"]
+    r = await client.post("/api/auth/change-password",
+                          headers={"Authorization": f"Bearer {tok}"},
+                          json={"currentPassword": "oldPass1", "newPassword": "keptPass9"})
+    assert r.status_code == 200, r.text
+    await authmod.seed_users(server.db)
+    listed = (await client.get("/api/auth/users")).json()
+    row = _row(listed, "kept.pw")
+    assert row["password"] == "keptPass9"
+    ok = await client.post("/api/auth/login", json={"email": "kept.pw", "password": "keptPass9"})
+    assert ok.status_code == 200
 
 
 @pytest.mark.asyncio

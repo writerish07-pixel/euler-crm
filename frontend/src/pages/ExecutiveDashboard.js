@@ -9,6 +9,7 @@ import { get } from "../lib/api";
 import { inr, compactInr, num } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
+import ChangePasswordCard from "../components/ChangePasswordCard";
 
 export default function ExecutiveDashboard() {
   const [d, setD] = useState(null);
@@ -16,17 +17,24 @@ export default function ExecutiveDashboard() {
     get("/executive/dashboard").then(setD).catch(() => toast.error("Could not load executive dashboard"));
   }, []);
 
-  if (!d) return <div className="text-ink-faint text-sm">Loading executive dashboard…</div>;
-  const k = d.kpis || {};
-  const scope = d.scope || {};
+  const k = (d && d.kpis) || {};
+  const scope = (d && d.scope) || {};
 
   return (
     <div data-testid="executive-dashboard">
       <PageHeader
         title="Executive Dashboard"
-        subtitle={`${scope.note || "My pipeline"} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
+        subtitle={d
+          ? `${scope.note || "My pipeline"} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`
+          : "My pipeline"}
       />
 
+      <ChangePasswordCard compact />
+
+      {!d ? (
+        <div className="text-ink-faint text-sm">Loading executive dashboard…</div>
+      ) : (
+      <>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="My leads (MTD)" value={num(k.myLeadsMtd)} sub={`${k.todayLeads || 0} today`} icon={Users} />
         <StatCard label="My bookings (MTD)" value={num(k.myBookingsMtd)} sub={`${k.activeBookings || 0} active`} icon={ClipboardCheck} tone="text-emerald-600" />
@@ -154,6 +162,8 @@ export default function ExecutiveDashboard() {
       <div className="mt-6">
         <YardStockCard />
       </div>
+      </>
+      )}
     </div>
   );
 }
