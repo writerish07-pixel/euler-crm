@@ -27,9 +27,12 @@ The two are compared in four places:
   the register, violet filed-in-Euler-only, grey unmatched lead)
 - the lead-level **Claim Reconciliation** report (`/claim-reconciliation`, owner-only)
 
-Join key is the lead's **chassis**, then **source invoice**. The scheme drawer writes
-the register row against `leadId`; the OEM tab finds the same lead by chassis/invoice
-on the debit-note line, so both pages and the lead 360 drawer stay in lockstep.
+Join key is the lead's **chassis**, then **source invoice**, then `leadId` if the
+sync already stamped it. Opening the Scheme Claim Register **relinks** stored Euler
+lines against current lead chassis/invoice, so a debit note mirrored before those
+ids landed on the lead still reads as Filed (not Not claimed). Auto-generated
+Coulson lines such as `Insurance Benefits Up to for invoice AF-122-I26270162` map
+to `insuranceBenefit`.
 
 ## The two-way cross-check
 

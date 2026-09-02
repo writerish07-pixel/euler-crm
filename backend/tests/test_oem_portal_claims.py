@@ -541,6 +541,8 @@ def test_component_mapping_reads_eulers_prose():
     assert m("Scheme Claim", "Loyalty Bonus payout") == "loyaltyBonus"
     assert m("Scheme Claim", "Exchange Benefit") == "exchangeBonus"
     assert m("Scheme Claim", "Insurance Benefit passed to customer") == "insuranceBenefit"
+    assert m("Scheme Claim",
+             "Insurance Benefits Up to for invoice AF-122-I26270162") == "insuranceBenefit"
     assert m("Scheme Claim", "OEM Extra Support") == "oemExtraSupport"
 
 
@@ -858,3 +860,81 @@ async def test_lead_crosscheck_lists_scheme_rows_with_match_state(client, wired)
     assert by_key["referralBonus"]["oemMatch"]["state"] == "filed"
     assert by_key["exchangeBonus"]["oemMatch"]["state"] == "not_filed"
     assert body["claims"][0]["registerMatch"]["state"] == "in_register"
+
+
+def test_match_state_joins_by_chassis_when_the_line_has_no_lead_id():
+    """The Divine Public School case: Euler has the debit note, the register has the
+    chassis, but sync never stamped leadId because the lead got its vehicle ids later.
+    """
+    packs = {
+        "byLead": {},
+        "byChassis": {
+            "MD9EMVDL26H217561": {
+                "byComponent": {"insuranceBenefit": [{
+                    "claimNumber": "AF-122-CLINS", "oemStatus": "RM Approval Pending",
+                    "amount": 10000.0, "stageLabel": "RM Approval", "stageDays": 2,
+                    "createdAt": "", "needsResubmission": False, "resubmittedBy": "",
+                    "description": "Insurance Benefits Up to",
+                }]},
+                "unmapped": [], "claimNumbers": ["AF-122-CLINS"],
+                "filedTotal": 10000.0, "acceptedTotal": 0.0, "rejectedOpen": [],
+                "hasAnyClaim": True,
+            }
+        },
+        "byInvoice": {},
+    }
+    got = oem_claims.match_state(
+        packs, "LD26000056", "insuranceBenefit",
+        chassis="MD9EMVDL26H217561", invoice="AF-122-I26270162")
+    assert got["state"] == "filed"
+    assert "AF-122-CLINS" in got["claimNumbers"]
+
+
+def test_line_item_reads_coulson_chassis_number_alias():
+    line = oem_claims.normalise_line_item({
+        "claim_type": "Scheme Claim",
+        "chassis_number": "  md9emvdl26h217561 ",
+        "source_invoice": "AF-122-I26270162",
+        "description": "Insurance Benefits Up to for invoice AF-122-I26270162",
+        "total_amount": 10000,
+        "documents": [],
+    })
+    assert line["chassis"] == "MD9EMVDL26H217561"
+    assert line["sourceInvoiceNumber"] == "AF-122-I26270162"
+
+
+@pytest.mark.asyncio
+async def test_register_reads_an_unlinked_oem_claim_as_filed_by_chassis(client):
+    """Opening the register must not require a fresh Coulson sync once the lead
+    already carries chassis and invoice and the debit note is in the mirror.
+    """
+    chassis, invoice = "MD9EMVDL26H217561", "AF-122-I26270162"
+    lead_id = await _delivered_lead(client, chassis=chassis, invoice=invoice)
+    await _register_row(lead_id, "insuranceBenefit", 10000.0)
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "divine-1",
+        "claimNumber": "AF-122-CLINS",
+        "status": "RM Approval Pending",
+        "stageLabel": "RM Approval",
+        "stageDays": 2,
+        "lineItems": [{
+            "claimType": "Scheme Claim",
+            "description": "Insurance Benefits Up to for invoice AF-122-I26270162",
+            "chassis": chassis,
+            "sourceInvoiceNumber": invoice,
+            "totalAmount": 10000.0,
+            "leadId": "",
+        }],
+        "leadIds": [],
+        "unlinkedLineCount": 1,
+        "linkedLineCount": 0,
+        "_testSeed": SEED_TAG,
+    })
+    rows = (await client.get("/api/claims")).json()
+    mine = [r for r in rows if r["leadId"] == lead_id
+            and r["componentKey"] == "insuranceBenefit"]
+    assert mine, "insurance benefit row missing from the register"
+    assert mine[0]["oemMatch"]["state"] == "filed"
+    assert "AF-122-CLINS" in mine[0]["oemMatch"]["claimNumbers"]
+    stored = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "divine-1"})
+    assert lead_id in (stored.get("leadIds") or [])
