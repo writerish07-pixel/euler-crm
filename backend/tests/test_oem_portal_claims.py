@@ -243,6 +243,38 @@ def test_needs_detail_only_when_something_could_have_changed():
     assert oem_claims.needs_detail(fetched, paid) is True
 
 
+def test_needs_detail_when_chassis_never_landed():
+    """A stored row with no vehicle ids is the blank OEM Settlements column."""
+    row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
+    blank = {"detailFetchedAt": "x", "lineItems": [{"chassis": "", "sourceInvoiceNumber": ""}],
+             "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0}
+    assert oem_claims.needs_detail(blank, row) is True
+
+
+def test_empty_journey_does_not_wipe_list_line_items():
+    doc = oem_claims.claim_doc_from_row({
+        **list_row("n1", "AF-122-CL2627127"),
+        "line_items": journey("n1", "AF-122-CL2627127")["line_items"],
+    })
+    assert doc["lineItems"][0]["chassis"] == CHASSIS
+    merged = oem_claims.merge_detail(doc, {})
+    assert merged["lineItems"][0]["chassis"] == CHASSIS
+
+
+def test_journey_body_unwraps_the_envelopes_coulson_actually_sends():
+    inner = journey("n1", "AF-999-CL0001")
+    wrapped = coulson_client.journey_body({"success": True, "data": inner})
+    assert coulson_client.pick_line_items(wrapped)[0]["chassis"] == CHASSIS
+    double = coulson_client.journey_body({"success": True, "data": {"data": inner}})
+    assert coulson_client.pick_line_items(double)
+    listed = coulson_client.journey_body({"success": True, "data": inner["line_items"]})
+    assert listed["line_items"][0]["chassis"] == CHASSIS
+    nested = coulson_client.journey_body(
+        {"success": True, "data": {"debit_note": {"line_items": inner["line_items"],
+                                                 "timeline": inner["timeline"]}}})
+    assert coulson_client.pick_line_items(nested)
+
+
 # ---------------------------------------------------------------- completeness
 def _rows(n):
     return [list_row(f"n{i}", f"AF-999-CL{i:04d}") for i in range(n)]
@@ -386,6 +418,52 @@ async def test_second_sync_does_not_refetch_an_unchanged_claim(client, wired):
     first = wired["journey"]
     await client.post("/api/integrations/coulson/sync-claims")
     assert wired["journey"] == first, "unchanged claim was fetched again"
+
+
+@pytest.mark.asyncio
+async def test_list_line_items_still_link_when_journey_returns_nothing(client, monkeypatch):
+    """AF-122-CL2627127: the list synced, the journey came back empty, chassis
+    was blank on OEM Claim Settlements. If the list row already has line items,
+    keep them and join the lead.
+    """
+    lead_id = await _delivered_lead(client)
+    row = list_row("n1", "AF-122-CL2627127")
+    row["line_items"] = journey("n1", "AF-122-CL2627127")["line_items"]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000: ([row], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: {})
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims")).json()
+    assert rows[0]["claimNumber"] == "AF-122-CL2627127"
+    assert rows[0]["lineItems"][0]["chassis"] == CHASSIS
+    assert rows[0]["lineItems"][0]["sourceInvoiceNumber"] == INVOICE
+    assert rows[0]["leadIds"] == [lead_id]
+
+
+@pytest.mark.asyncio
+async def test_sync_retries_journey_until_chassis_lands(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("n1", "AF-999-CL0001")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    calls = {"n": 0}
+
+    def fake_journey(token, note_id):
+        calls["n"] += 1
+        return {}
+
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", fake_journey)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    first = calls["n"]
+    await client.post("/api/integrations/coulson/sync-claims")
+    assert calls["n"] > first
 
 
 @pytest.mark.asyncio
@@ -541,6 +619,8 @@ def test_component_mapping_reads_eulers_prose():
     assert m("Scheme Claim", "Loyalty Bonus payout") == "loyaltyBonus"
     assert m("Scheme Claim", "Exchange Benefit") == "exchangeBonus"
     assert m("Scheme Claim", "Insurance Benefit passed to customer") == "insuranceBenefit"
+    assert m("Scheme Claim",
+             "Insurance Benefits Up to for invoice AF-122-I26270162") == "insuranceBenefit"
     assert m("Scheme Claim", "OEM Extra Support") == "oemExtraSupport"
 
 
@@ -858,3 +938,81 @@ async def test_lead_crosscheck_lists_scheme_rows_with_match_state(client, wired)
     assert by_key["referralBonus"]["oemMatch"]["state"] == "filed"
     assert by_key["exchangeBonus"]["oemMatch"]["state"] == "not_filed"
     assert body["claims"][0]["registerMatch"]["state"] == "in_register"
+
+
+def test_match_state_joins_by_chassis_when_the_line_has_no_lead_id():
+    """The Divine Public School case: Euler has the debit note, the register has the
+    chassis, but sync never stamped leadId because the lead got its vehicle ids later.
+    """
+    packs = {
+        "byLead": {},
+        "byChassis": {
+            "MD9EMVDL26H217561": {
+                "byComponent": {"insuranceBenefit": [{
+                    "claimNumber": "AF-122-CLINS", "oemStatus": "RM Approval Pending",
+                    "amount": 10000.0, "stageLabel": "RM Approval", "stageDays": 2,
+                    "createdAt": "", "needsResubmission": False, "resubmittedBy": "",
+                    "description": "Insurance Benefits Up to",
+                }]},
+                "unmapped": [], "claimNumbers": ["AF-122-CLINS"],
+                "filedTotal": 10000.0, "acceptedTotal": 0.0, "rejectedOpen": [],
+                "hasAnyClaim": True,
+            }
+        },
+        "byInvoice": {},
+    }
+    got = oem_claims.match_state(
+        packs, "LD26000056", "insuranceBenefit",
+        chassis="MD9EMVDL26H217561", invoice="AF-122-I26270162")
+    assert got["state"] == "filed"
+    assert "AF-122-CLINS" in got["claimNumbers"]
+
+
+def test_line_item_reads_coulson_chassis_number_alias():
+    line = oem_claims.normalise_line_item({
+        "claim_type": "Scheme Claim",
+        "chassis_number": "  md9emvdl26h217561 ",
+        "source_invoice": "AF-122-I26270162",
+        "description": "Insurance Benefits Up to for invoice AF-122-I26270162",
+        "total_amount": 10000,
+        "documents": [],
+    })
+    assert line["chassis"] == "MD9EMVDL26H217561"
+    assert line["sourceInvoiceNumber"] == "AF-122-I26270162"
+
+
+@pytest.mark.asyncio
+async def test_register_reads_an_unlinked_oem_claim_as_filed_by_chassis(client):
+    """Opening the register must not require a fresh Coulson sync once the lead
+    already carries chassis and invoice and the debit note is in the mirror.
+    """
+    chassis, invoice = "MD9EMVDL26H217561", "AF-122-I26270162"
+    lead_id = await _delivered_lead(client, chassis=chassis, invoice=invoice)
+    await _register_row(lead_id, "insuranceBenefit", 10000.0)
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "divine-1",
+        "claimNumber": "AF-122-CLINS",
+        "status": "RM Approval Pending",
+        "stageLabel": "RM Approval",
+        "stageDays": 2,
+        "lineItems": [{
+            "claimType": "Scheme Claim",
+            "description": "Insurance Benefits Up to for invoice AF-122-I26270162",
+            "chassis": chassis,
+            "sourceInvoiceNumber": invoice,
+            "totalAmount": 10000.0,
+            "leadId": "",
+        }],
+        "leadIds": [],
+        "unlinkedLineCount": 1,
+        "linkedLineCount": 0,
+        "_testSeed": SEED_TAG,
+    })
+    rows = (await client.get("/api/claims")).json()
+    mine = [r for r in rows if r["leadId"] == lead_id
+            and r["componentKey"] == "insuranceBenefit"]
+    assert mine, "insurance benefit row missing from the register"
+    assert mine[0]["oemMatch"]["state"] == "filed"
+    assert "AF-122-CLINS" in mine[0]["oemMatch"]["claimNumbers"]
+    stored = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "divine-1"})
+    assert lead_id in (stored.get("leadIds") or [])

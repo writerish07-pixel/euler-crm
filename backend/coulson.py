@@ -379,6 +379,124 @@ def fetch_sold_inventory(token: str, limit=200):
 CLAIM_LIST_PATH = "debit-note"
 CLAIM_JOURNEY_PATH = "journey"
 
+# Line-item lists hide under several names depending on which envelope we got.
+_LINE_ITEM_KEYS = (
+    "line_items", "lineItems", "items", "debit_note_items", "debitNoteItems",
+    "claim_items", "claimItems", "debit_note_line_items",
+)
+
+
+def pick_line_items(blob):
+    """First non-empty list of dicts that looks like debit-note lines."""
+    if not isinstance(blob, dict):
+        return []
+    for key in _LINE_ITEM_KEYS:
+        val = blob.get(key)
+        if isinstance(val, list) and val and isinstance(val[0], dict):
+            return val
+    header = blob.get("header") if isinstance(blob.get("header"), dict) else {}
+    for key in _LINE_ITEM_KEYS:
+        val = header.get(key)
+        if isinstance(val, list) and val and isinstance(val[0], dict):
+            return val
+    return []
+
+
+def journey_has_vehicle_lines(blob):
+    """True when at least one line carries a chassis or a source invoice."""
+    for item in pick_line_items(blob):
+        if (item.get("chassis") or item.get("chassis_number") or item.get("chassisNumber")
+                or item.get("source_invoice_number") or item.get("sourceInvoiceNumber")
+                or item.get("source_invoice") or item.get("invoice_number")):
+            return True
+        desc = f"{item.get('description') or ''} {item.get('claim_type') or ''}"
+        if "MD9" in desc.upper() or "AF-" in desc.upper():
+            return True
+    return False
+
+
+def journey_body(payload):
+    """Unwrap Coulson's journey envelope to `{header, line_items, timeline}`.
+
+    Live captures used `{success, data: {header, line_items, timeline}}`. Production
+    has also answered with a double `data`, with `data` as the line-item list, and
+    with the lines hanging off `debit_note`. Returning `{}` for any of those left
+    every OEM Claim Settlements row with a blank Chassis / Invoice column.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    candidates = [payload]
+    data = payload.get("data")
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        return {
+            "line_items": data,
+            "header": payload.get("header") if isinstance(payload.get("header"), dict) else {},
+            "timeline": payload.get("timeline") if isinstance(payload.get("timeline"), dict) else {},
+        }
+    if isinstance(data, dict):
+        candidates.append(data)
+        nested = data.get("data")
+        if isinstance(nested, dict):
+            candidates.append(nested)
+        elif isinstance(nested, list) and nested and isinstance(nested[0], dict):
+            return {
+                "line_items": nested,
+                "header": data.get("header") if isinstance(data.get("header"), dict) else {},
+                "timeline": data.get("timeline") if isinstance(data.get("timeline"), dict) else {},
+            }
+        for key in ("debit_note", "debitNote", "claim", "journey"):
+            inner = data.get(key)
+            if isinstance(inner, dict):
+                candidates.append(inner)
+    for blob in candidates:
+        lines = pick_line_items(blob)
+        if not lines:
+            continue
+        out = dict(blob)
+        out["line_items"] = lines
+        if not isinstance(out.get("timeline"), dict):
+            for other in candidates:
+                if isinstance(other.get("timeline"), dict):
+                    out["timeline"] = other["timeline"]
+                    break
+        if not isinstance(out.get("header"), dict):
+            for other in candidates:
+                if isinstance(other.get("header"), dict):
+                    out["header"] = other["header"]
+                    break
+        return out
+    if isinstance(data, dict):
+        return data
+    return payload
+
+
+def fetch_claim_journey(token: str, debit_note_id: str):
+    """One claim in full: {header, line_items[], timeline{}}.
+
+    Chassis and source invoice exist ONLY on the line items. The list row has
+    neither, so a claim cannot be tied to a lead without this call (or without
+    line items already on the list row).
+    """
+    note_id = str(debit_note_id or "").strip()
+    if not note_id:
+        raise CoulsonError("A debit note id is required")
+    attempts = (
+        (CLAIM_JOURNEY_PATH, {"debit_note_id": note_id}),
+        (CLAIM_JOURNEY_PATH, {"id": note_id}),
+        (f"debit-note/{note_id}", None),
+    )
+    last = {}
+    for path, params in attempts:
+        try:
+            payload = get_json(token, path, params)
+        except CoulsonError:
+            continue
+        body = journey_body(payload)
+        last = body
+        if pick_line_items(body):
+            return body
+    return last
+
 # The eleven buckets the Claim Settlements List tabs across, approval order first
 # and terminal states last. Used to sweep per-status when one unfiltered pull comes
 # back short of the true total.
@@ -433,20 +551,6 @@ def fetch_debit_notes(token: str, *, status: str = "", limit=100, max_rows=5000)
         if offset >= max_rows:
             break
     return rows, total
-
-
-def fetch_claim_journey(token: str, debit_note_id: str):
-    """One claim in full: {header, line_items[], timeline{}}.
-
-    Chassis and source invoice exist ONLY here — the list row has neither, so a claim
-    cannot be tied to a lead without this call.
-    """
-    note_id = str(debit_note_id or "").strip()
-    if not note_id:
-        raise CoulsonError("A debit note id is required")
-    payload = get_json(token, CLAIM_JOURNEY_PATH, {"debit_note_id": note_id})
-    data = payload.get("data")
-    return data if isinstance(data, dict) else {}
 
 
 def fetch_allowed_showrooms(token: str):

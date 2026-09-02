@@ -182,6 +182,35 @@ def stage_progress(timeline, *, now=None):
     return out
 
 
+def _line_chassis(item):
+    """Chassis from whatever key (or nested vehicle) Coulson used on this line."""
+    if not isinstance(item, dict):
+        return ""
+    vehicle = item.get("vehicle") if isinstance(item.get("vehicle"), dict) else {}
+    ch = oem_sync._norm_chassis(
+        item.get("chassis") or item.get("chassis_number") or item.get("chassisNumber")
+        or item.get("vin") or vehicle.get("chassis") or vehicle.get("chassis_number"))
+    if ch:
+        return ch
+    hay = f"{item.get('description') or ''} {item.get('claim_type') or ''}"
+    m = re.search(r"\bMD9[A-Z0-9]{10,}\b", hay, re.I)
+    return oem_sync._norm_chassis(m.group(0) if m else "")
+
+
+def _line_invoice(item):
+    if not isinstance(item, dict):
+        return ""
+    inv = (item.get("source_invoice_number") or item.get("sourceInvoiceNumber")
+           or item.get("source_invoice") or item.get("invoice_number")
+           or item.get("invoiceNumber") or "")
+    inv = str(inv).strip()
+    if inv:
+        return inv
+    hay = f"{item.get('description') or ''} {item.get('claim_type') or ''}"
+    m = re.search(r"\bAF-\d+-I\d+\b", hay, re.I)
+    return m.group(0) if m else ""
+
+
 def normalise_line_item(item):
     """One claim line. Chassis and source invoice are the keys back to a lead.
 
@@ -191,30 +220,52 @@ def normalise_line_item(item):
     """
     if not isinstance(item, dict):
         return None
+    claim_type = str(item.get("claim_type") or item.get("claimType")
+                     or item.get("type") or "").strip()
+    description = str(item.get("description") or item.get("remarks") or "").strip()
     return {
-        "lineId": str(item.get("id") or ""),
-        "claimType": str(item.get("claim_type") or "").strip(),
-        "description": str(item.get("description") or "").strip(),
-        "chassis": oem_sync._norm_chassis(item.get("chassis")),
-        "sourceInvoiceNumber": str(item.get("source_invoice_number") or "").strip(),
+        "lineId": str(item.get("id") or item.get("line_id") or ""),
+        "claimType": claim_type,
+        "description": description,
+        "chassis": _line_chassis(item),
+        "sourceInvoiceNumber": _line_invoice(item),
         "model": str(item.get("model") or "").strip(),
         "variant": str(item.get("variant") or "").strip(),
         "status": str(item.get("status") or "").strip(),
-        "baseAmount": round2(item.get("base_amount")),
-        "totalAmount": round2(item.get("total_amount")),
-        "rejectedBy": str(item.get("rejected_by") or "") or "",
+        "baseAmount": round2(item.get("base_amount") or item.get("baseAmount")),
+        "totalAmount": round2(item.get("total_amount") or item.get("totalAmount")),
+        "rejectedBy": str(item.get("rejected_by") or item.get("rejectedBy") or "") or "",
         "remarks": str(item.get("remarks") or "") or "",
         "documentCount": len(item.get("documents") or []),
-        "sourceInvoiceUrl": str(item.get("source_invoice_s3_link") or ""),
-        "leadId": "", "leadCustomer": "", "matchedBy": "",
+        "sourceInvoiceUrl": str(item.get("source_invoice_s3_link")
+                                or item.get("sourceInvoiceUrl") or ""),
+        "leadId": str(item.get("leadId") or ""),
+        "leadCustomer": str(item.get("leadCustomer") or ""),
+        "matchedBy": str(item.get("matchedBy") or ""),
     }
 
 
+def _normalise_lines(raw):
+    out = []
+    for item in raw or []:
+        line = normalise_line_item(item)
+        if line:
+            out.append(line)
+    return out
+
+
+def _lines_have_vehicle(lines):
+    return any((li.get("chassis") or li.get("sourceInvoiceNumber")) for li in (lines or []))
+
+
 def claim_doc_from_row(row):
-    """The list row — everything except chassis, which only the journey call has."""
+    """The list row. Chassis usually lives only on the journey, but some list
+    payloads already include line items — keep them so a failed journey does not
+    blank Chassis / Invoice on OEM Claim Settlements.
+    """
     created = parse_list_datetime(row.get("_created_at"))
     status = str(row.get("status") or "").strip()
-    return {
+    doc = {
         "debitNoteId": str(row.get("id") or ""),
         "claimNumber": str(row.get("debit_note_number") or "").strip(),
         "status": status,
@@ -234,17 +285,29 @@ def claim_doc_from_row(row):
         "terminal": is_terminal(status),
         "syncedAt": now_iso(),
     }
+    lines = _normalise_lines(coulson_client.pick_line_items(row if isinstance(row, dict) else {}))
+    if lines:
+        doc["lineItems"] = lines
+    return doc
 
 
 def merge_detail(doc, detail):
-    """Fold a journey response into a claim doc: line items and ladder position."""
+    """Fold a journey response into a claim doc: line items and ladder position.
+
+    An empty journey must NOT wipe line items we already have (from the list row
+    or a previous fetch). That wipe is what left AF-122-CL2627127 with a blank
+    Chassis / Invoice column after a successful list sync.
+    """
     doc = dict(doc)
     if not isinstance(detail, dict):
         return doc
+    detail = coulson_client.journey_body(detail)
     header = detail.get("header") if isinstance(detail.get("header"), dict) else {}
-    lines = [normalise_line_item(li) for li in (detail.get("line_items") or [])]
-    doc["lineItems"] = [li for li in lines if li]
-    doc.update(stage_progress(detail.get("timeline")))
+    lines = _normalise_lines(coulson_client.pick_line_items(detail))
+    if lines:
+        doc["lineItems"] = lines
+    if isinstance(detail.get("timeline"), dict):
+        doc.update(stage_progress(detail.get("timeline")))
     if header:
         # The header repeats the money in UTC-stamped form; the list row is the
         # display of record, so only fill gaps rather than overwrite.
@@ -257,22 +320,24 @@ def merge_detail(doc, detail):
         showroom = header.get("showroom") if isinstance(header.get("showroom"), dict) else {}
         if showroom.get("id"):
             doc["showroomId"] = str(showroom.get("id"))
-    doc["detailFetchedAt"] = now_iso()
-    doc["detailStatusAtFetch"] = doc.get("status") or ""
-    doc["detailAmountAtFetch"] = doc.get("approvedAmount") or 0.0
+    if lines or doc.get("lineItems"):
+        doc["detailFetchedAt"] = now_iso()
+        doc["detailStatusAtFetch"] = doc.get("status") or ""
+        doc["detailAmountAtFetch"] = doc.get("approvedAmount") or 0.0
     return doc
 
 
 def needs_detail(existing, row_doc):
-    """Fetch the journey only when it can have changed. Chassis never moves.
+    """Fetch the journey only when it can have changed, or when chassis is still missing.
 
     First sight always. After that, only when Euler advanced the status or approved a
     different amount — which keeps the steady state at a couple of calls per sync
-    instead of one per claim.
+    instead of one per claim. A stored row with no chassis / invoice is NOT done:
+    that is the OEM Claim Settlements blank column, and we keep asking.
     """
     if not existing or not existing.get("detailFetchedAt"):
         return True
-    if not (existing.get("lineItems") or []):
+    if not _lines_have_vehicle(existing.get("lineItems")):
         return True
     if str(existing.get("detailStatusAtFetch") or "") != str(row_doc.get("status") or ""):
         return True
@@ -481,6 +546,16 @@ async def sync_claims(db, *, detail_budget=250, token=None):
     detail_failures = 0
     linked = 0
     coll = db[CLAIMS_COLLECTION]
+    held_by_id = {}
+    async for held in coll.find({}, {"debitNoteId": 1, "lineItems": 1, "detailFetchedAt": 1,
+                                     "detailStatusAtFetch": 1, "detailAmountAtFetch": 1}):
+        held_by_id[held.get("debitNoteId")] = held
+
+    def _need_chassis_first(row):
+        rid = str(row.get("id") or "")
+        return 0 if needs_detail(held_by_id.get(rid) or {}, claim_doc_from_row(row)) else 1
+
+    rows = sorted(rows, key=_need_chassis_first)
     for row in rows:
         row_doc = claim_doc_from_row(row)
         note_id = row_doc["debitNoteId"]
@@ -548,7 +623,8 @@ async def sync_claims(db, *, detail_budget=250, token=None):
 # for a human eye instead of sending the money desk chasing a claim that already exists.
 COMPONENT_PHRASES = (
     ("rtoInsuranceBenefit", ("free rto + free insurance", "rto + insurance", "rto and insurance")),
-    ("insuranceBenefit", ("insurance benefit", "free insurance", "insurance")),
+    ("insuranceBenefit", ("insurance benefits up to", "insurance benefits", "insurance benefit",
+                          "free insurance", "insurance")),
     ("rtoBenefit", ("rto benefit", "free rto", "rto")),
     ("referralBonus", ("referral commission", "referral bonus", "referral")),
     ("loyaltyBonus", ("loyalty bonus", "loyalty")),
@@ -612,60 +688,133 @@ async def annotate_resubmissions(db):
     return flagged
 
 
-async def register_match_index(db):
-    """Per lead, what Euler actually holds — indexed the way the register asks for it."""
-    index = {}
+def _empty_match_entry():
+    return {
+        "byComponent": {}, "unmapped": [], "claimNumbers": [],
+        "filedTotal": 0.0, "acceptedTotal": 0.0,
+        "rejectedOpen": [], "hasAnyClaim": False,
+    }
+
+
+def _absorb_line(entry, row, line):
+    """Fold one Euler line into a match entry (by lead, chassis or invoice)."""
+    status = str(row.get("status") or "")
+    entry["hasAnyClaim"] = True
+    amount = round2(line.get("totalAmount"))
+    if status != "Cancelled":
+        entry["filedTotal"] = round2(entry["filedTotal"] + amount)
+    if status in ACCEPTED_STATUSES:
+        entry["acceptedTotal"] = round2(entry["acceptedTotal"] + amount)
+    if row.get("claimNumber") and row["claimNumber"] not in entry["claimNumbers"]:
+        entry["claimNumbers"].append(row["claimNumber"])
+    hit = {
+        "claimNumber": row.get("claimNumber") or "",
+        "oemStatus": status,
+        "amount": amount,
+        "stageLabel": row.get("stageLabel") or "",
+        "stageDays": int(row.get("stageDays") or 0),
+        "createdAt": row.get("createdAt") or "",
+        "needsResubmission": bool(row.get("needsResubmission")),
+        "resubmittedBy": row.get("resubmittedBy") or "",
+        "description": line.get("description") or "",
+    }
+    if status == "Rejected" and row.get("needsResubmission"):
+        entry["rejectedOpen"].append(hit)
+    key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
+    if key:
+        entry["byComponent"].setdefault(key, []).append(hit)
+    else:
+        entry["unmapped"].append(hit)
+    return entry
+
+
+async def relink_stored_claims(db):
+    """Stamp leadId onto stored Euler lines now that leads have chassis / invoice.
+
+    Claim sync often runs before Sold/delivery writes those ids onto the lead, so
+    every register row then reads as Not claimed even though Euler already holds
+    the debit note. Relinking is local — no Coulson call.
+    """
+    lead_index = await build_lead_index(db)
+    patched = 0
     async for row in db[CLAIMS_COLLECTION].find({}):
-        status = str(row.get("status") or "")
+        before = list(row.get("leadIds") or [])
+        updated = await link_claim_lines(db, row, lead_index)
+        if list(updated.get("leadIds") or []) == before:
+            continue
+        await db[CLAIMS_COLLECTION].update_one(
+            {"_id": row["_id"]} if row.get("_id") else {"debitNoteId": row.get("debitNoteId")},
+            {"$set": {
+                "lineItems": updated.get("lineItems") or [],
+                "leadIds": updated.get("leadIds") or [],
+                "linkedLineCount": updated.get("linkedLineCount") or 0,
+                "unlinkedLineCount": updated.get("unlinkedLineCount") or 0,
+                "invoiceConflicts": updated.get("invoiceConflicts") or [],
+            }})
+        patched += 1
+    return patched
+
+
+async def register_match_index(db):
+    """What Euler holds, keyed the way the register asks: lead, then chassis, then invoice.
+
+    A line with no leadId still belongs to a vehicle. Indexing it by chassis / invoice
+    is what stops Divine Public School (and every other row) reading as Not claimed
+    when the debit note is sitting in oem_portal_claims unlinked.
+    """
+    await relink_stored_claims(db)
+    by_lead, by_chassis, by_invoice = {}, {}, {}
+    async for row in db[CLAIMS_COLLECTION].find({}):
+        row.pop("_id", None)
         for line in row.get("lineItems") or []:
-            lead_id = line.get("leadId")
-            if not lead_id:
-                continue
-            entry = index.setdefault(lead_id, {
-                "byComponent": {}, "unmapped": [], "claimNumbers": [],
-                "filedTotal": 0.0, "acceptedTotal": 0.0,
-                "rejectedOpen": [], "hasAnyClaim": False,
-            })
-            entry["hasAnyClaim"] = True
-            amount = round2(line.get("totalAmount"))
-            if str(row.get("status")) != "Cancelled":
-                entry["filedTotal"] = round2(entry["filedTotal"] + amount)
-            if status in ACCEPTED_STATUSES:
-                entry["acceptedTotal"] = round2(entry["acceptedTotal"] + amount)
-            if row.get("claimNumber") and row["claimNumber"] not in entry["claimNumbers"]:
-                entry["claimNumbers"].append(row["claimNumber"])
-            hit = {
-                "claimNumber": row.get("claimNumber") or "",
-                "oemStatus": status,
-                "amount": amount,
-                "stageLabel": row.get("stageLabel") or "",
-                "stageDays": int(row.get("stageDays") or 0),
-                "createdAt": row.get("createdAt") or "",
-                "needsResubmission": bool(row.get("needsResubmission")),
-                "resubmittedBy": row.get("resubmittedBy") or "",
-                "description": line.get("description") or "",
-            }
-            if status == "Rejected" and row.get("needsResubmission"):
-                entry["rejectedOpen"].append(hit)
-            key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
-            if key:
-                entry["byComponent"].setdefault(key, []).append(hit)
-            else:
-                entry["unmapped"].append(hit)
-    return index
+            lead_id = line.get("leadId") or ""
+            if lead_id:
+                _absorb_line(by_lead.setdefault(lead_id, _empty_match_entry()), row, line)
+            ch = oem_sync._norm_chassis(line.get("chassis"))
+            if ch:
+                _absorb_line(by_chassis.setdefault(ch, _empty_match_entry()), row, line)
+            inv = str(line.get("sourceInvoiceNumber") or "").strip().lower()
+            if not inv:
+                desc = f"{line.get('description') or ''} {line.get('claimType') or ''}"
+                m = re.search(r"\bAF-\d+-I\d+\b", desc, re.I)
+                inv = (m.group(0) if m else "").lower()
+            if inv:
+                _absorb_line(by_invoice.setdefault(inv, _empty_match_entry()), row, line)
+    return {"byLead": by_lead, "byChassis": by_chassis, "byInvoice": by_invoice}
 
 
-def match_state(index, lead_id, component_key):
+def _index_packs(index):
+    """Accept the packed index and the older by-lead-id shape the unit tests use."""
+    if isinstance(index, dict) and "byLead" in index and "byChassis" in index:
+        return index
+    return {"byLead": index or {}, "byChassis": {}, "byInvoice": {}}
+
+
+def match_state(index, lead_id, component_key, chassis="", invoice=""):
     """How this register row stands against Euler. Never guesses "unclaimed".
+
+    Join order: lead id (sync-time link), then the lead's chassis, then invoice.
+    Chassis/invoice are how the desk actually ties a scheme-drawer row to a
+    Coulson debit note; lead id alone misses every claim that was mirrored
+    before those ids landed on the lead.
 
     filed / accepted  — Euler has it, and has agreed it where `accepted`
     rejected          — refused and nobody filed it again: act
     resubmitted       — refused, but a newer claim exists: informational
     unmapped          — the lead has claims, none of them reads as this component:
                         needs a human, NOT a gap
-    not_filed         — nothing at all was filed for this lead: a genuine gap
+    not_filed         — nothing at all was filed for this vehicle: a genuine gap
     """
-    entry = (index or {}).get(lead_id)
+    packs = _index_packs(index)
+    entry = packs["byLead"].get(lead_id)
+    if not entry:
+        ch = oem_sync._norm_chassis(chassis)
+        if ch:
+            entry = packs["byChassis"].get(ch)
+    if not entry:
+        inv = str(invoice or "").strip().lower()
+        if inv:
+            entry = packs["byInvoice"].get(inv)
     if not entry:
         return {"state": "not_filed", "claimNumbers": [], "oemStatus": "",
                 "filedAmount": 0.0, "detail": "No claim filed with Euler for this lead."}
@@ -884,6 +1033,8 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
     The scheme drawer creates the register rows; this is what the drawer reads so a
     salesperson can see, on the same lead, whether Euler actually filed them.
     """
+    lead = lead or {}
+    await relink_stored_claims(db)
     oem = await claims_for_lead(db, lead_id)
     await attach_register_match(db, oem)
     index = await register_match_index(db)
@@ -899,9 +1050,11 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
             "eligibleClaim": round2(c.get("eligibleClaim") if c.get("eligibleClaim") is not None
                                     else c.get("claimAmount")),
             "claimStatus": c.get("claimStatus") or "",
-            "oemMatch": match_state(index, lead_id, key),
+            "oemMatch": match_state(
+                index, lead_id, key,
+                chassis=lead.get("chassisNumber") or "",
+                invoice=lead.get("invoiceNumber") or ""),
         })
-    lead = lead or {}
     return {
         "claims": oem,
         "schemeRegister": register,

@@ -27,9 +27,12 @@ The two are compared in four places:
   the register, violet filed-in-Euler-only, grey unmatched lead)
 - the lead-level **Claim Reconciliation** report (`/claim-reconciliation`, owner-only)
 
-Join key is the lead's **chassis**, then **source invoice**. The scheme drawer writes
-the register row against `leadId`; the OEM tab finds the same lead by chassis/invoice
-on the debit-note line, so both pages and the lead 360 drawer stay in lockstep.
+Join key is the lead's **chassis**, then **source invoice**, then `leadId` if the
+sync already stamped it. Opening the Scheme Claim Register **relinks** stored Euler
+lines against current lead chassis/invoice, so a debit note mirrored before those
+ids landed on the lead still reads as Filed (not Not claimed). Auto-generated
+Coulson lines such as `Insurance Benefits Up to for invoice AF-122-I26270162` map
+to `insuranceBenefit`.
 
 ## The two-way cross-check
 
@@ -95,7 +98,7 @@ session the yard sync uses. No second login is ever made.
 | Call | Purpose |
 |---|---|
 | `GET debit-note?limit=&offset=` | The claim list. `{success, data[], extras.total_count}` — same envelope as `vehicle-inventory/transfer` |
-| `GET journey?debit_note_id=<uuid>` | `{header, line_items[], timeline{}}`. **Chassis and source invoice exist only here** |
+| `GET journey?debit_note_id=<uuid>` | `{header, line_items[], timeline{}}`. **Chassis and source invoice exist only here** (also tried as `?id=` and `GET debit-note/{id}`). Live envelopes vary (`data.data`, `data` as the line list, `debit_note.line_items`); an empty unwrap used to leave OEM Claim Settlements with a blank Chassis / Invoice column. |
 | `GET status-counts?showroom_id=` | The eleven bucket totals, pre-aggregated |
 | `GET allowed-showrooms` | Showroom scoping |
 
