@@ -109,6 +109,57 @@ def this_month():
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
+def _scheme_as_of(lead=None, on=None):
+    """Date used to pick Scheme Master month for a lead.
+
+    Order: explicit `on` / schemeDate > lead.schemeAsOf > bookingDate > today.
+    Changing Scheme Date on an unbooked lead must not invent a bookingDate.
+    """
+    for raw in (on, (lead or {}).get("schemeAsOf"), (lead or {}).get("bookingDate")):
+        d = str(raw or "").strip()[:10]
+        if len(d) == 10 and d[4] == "-" and d[7] == "-":
+            return d
+    return today()
+
+
+def _normalize_scheme_row(payload):
+    """Tag a Scheme Master row to a circular month from its dates.
+
+    The UI used to send only Valid To. Without schemeMonth the row was treated as
+    belonging to whatever month a lead asked for, so changing the date never
+    switched circulars.
+    """
+    payload = dict(payload or {})
+    eff_from = str(payload.get("effectiveFrom") or "").strip()[:10]
+    eff_to = str(payload.get("effectiveTo") or "").strip()[:10]
+    month = ce._norm_month(payload.get("schemeMonth") or "")
+    if not month:
+        month = ce.scheme_month_from_date(eff_from or eff_to or today())
+    payload["schemeMonth"] = month
+    if not eff_from and month and len(str(month)) >= 7:
+        payload["effectiveFrom"] = f"{str(month)[:7]}-01"
+    if eff_from:
+        payload["effectiveFrom"] = eff_from
+    if eff_to:
+        payload["effectiveTo"] = eff_to
+    return payload
+
+
+def _scheme_row_matches_as_of(row, on):
+    iso = str(on or "")[:10]
+    month = ce.scheme_month_from_date(iso)
+    r_month = ce._norm_month(row.get("schemeMonth") or "")
+    if r_month:
+        return r_month == month
+    eff_from = str(row.get("effectiveFrom") or "")[:10]
+    eff_to = str(row.get("effectiveTo") or "")[:10]
+    if eff_from and iso and iso < eff_from:
+        return False
+    if eff_to and iso and iso > eff_to:
+        return False
+    return bool(eff_from or eff_to)
+
+
 def _add_days(day: str, days: int) -> str:
     """Calendar arithmetic on a YYYY-MM-DD string. Unparseable in, empty out —
     a bad date must not become a revival that fires on the wrong day."""
@@ -418,6 +469,7 @@ def lead_to_snapshot(lead):
             used = {}
     return {
         "bookingDate": lead.get("bookingDate", ""),
+        "schemeAsOf": lead.get("schemeAsOf") or "",
         "benefitPassedBreakup": lead.get("benefitPassedBreakup", ""),
         # schemeAllocationV2: legacy Full Benefit may apply to entitlements when set.
         # schemeAllocationExplicit: new UI — CB only from explicit breakup (default 0).
@@ -743,7 +795,7 @@ async def recompute_lead(lead_id):
                 "claimStatus": (_ex or {}).get("claimStatus", "Pending"),
                 "claimReference": (_ex or {}).get("claimReference", ""),
                 "bookingId": ((await _live_booking(lead_id)) or {}).get("bookingId", ""),
-                "schemeMonth": ce.scheme_month_from_date(merged.get("bookingDate", "")),
+                "schemeMonth": ce.scheme_month_from_date(_scheme_as_of(merged)),
                 "executive": merged.get("executive", ""),
                 **_comp_cols,
                 "totalDiscount": _amt,
@@ -891,6 +943,8 @@ class SchemeIn(BaseModel):
     schemeComponentsUsed: Optional[str] = None
     oemExtraSupportReceived: float = 0
     oemExtraSupportPassed: float = 0
+    # As-of date for which Scheme Master month to apply. Does not invent a booking.
+    schemeDate: Optional[str] = None
 
 
 class PaymentIn(BaseModel):
@@ -2569,7 +2623,7 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
         scheme_rows = await get_scheme_rows()
         model = lead.get("interestedModel") or ""
         variant = lead.get("variant") or ""
-        booking_date = lead.get("bookingDate") or today()
+        booking_date = _scheme_as_of(lead)
         rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
             model, variant, booking_date, scheme_rows)
         for key, rule in (rules_ctx.get("rules") or {}).items():
@@ -2826,15 +2880,17 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
 
 
 @api.get("/leads/{lead_id}/scheme-rules")
-async def scheme_rules(lead_id: str):
+async def scheme_rules(lead_id: str, on: Optional[str] = None):
     lead = await get_lead_or_404(lead_id)
     scheme_rows = await get_scheme_rows()
     model = lead.get("interestedModel") or ""
     variant = lead.get("variant") or ""
-    booking_date = lead.get("bookingDate") or today()
-    out = ce.get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
-    # The Lead Drawer must render the SAME allocation every other module consumes.
-    out["allocation"] = ce.compute_scheme_allocation(lead_to_snapshot(lead), scheme_rows)
+    as_of = _scheme_as_of(lead, on)
+    out = ce.get_scheme_offer_rules_for_vehicle(model, variant, as_of, scheme_rows)
+    # Preview allocation for the same as-of date the rules were resolved against.
+    snap = {**lead_to_snapshot(lead), "schemeAsOf": as_of}
+    out["allocation"] = ce.compute_scheme_allocation(snap, scheme_rows)
+    out["asOf"] = as_of
     return out
 
 
@@ -2844,6 +2900,9 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
     payload = body.model_dump()
+    scheme_date = payload.pop("schemeDate", None)
+    as_of = _scheme_as_of(lead, scheme_date)
+    payload["schemeAsOf"] = as_of
     if payload.get("benefitPassedBreakup") is None:
         payload.pop("benefitPassedBreakup", None)
     if payload.get("schemeComponentsUsed") is None:
@@ -2853,7 +2912,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     offers = {k: payload.get(k, 0) for k in ce.OFFER_KEYS}
     errors = ce.validate_scheme_offers(
         lead.get("interestedModel") or "", lead.get("variant") or "",
-        lead.get("bookingDate") or today(), offers, scheme_rows)
+        as_of, offers, scheme_rows)
     if errors:
         raise HTTPException(422, "Please fix these scheme fields:\n" + "\n".join(errors))
     import json as _json
@@ -2885,7 +2944,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     if isinstance(parsed_breakup, dict):
         alloc_errs = ce.validate_scheme_allocation_breakup(
             lead.get("interestedModel") or "", lead.get("variant") or "",
-            lead.get("bookingDate") or today(), parsed_breakup, scheme_rows)
+            as_of, parsed_breakup, scheme_rows)
         if alloc_errs:
             raise HTTPException(422, "Please fix these scheme allocation fields:\n" + "\n".join(alloc_errs))
         payload["schemeAllocationExplicit"] = True
@@ -2904,7 +2963,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         # when customer benefit is ₹0 (Use Scheme = No). Available = Scheme Master.
         rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
             lead.get("interestedModel") or "", lead.get("variant") or "",
-            lead.get("bookingDate") or today(), scheme_rows)
+            as_of, scheme_rows)
         for key, rule in (rules_ctx.get("rules") or {}).items():
             if key == "additionalDiscount":
                 continue
@@ -5246,8 +5305,12 @@ async def inventory_summary():
 
 # ---------------------------------------------------------------- masters registers
 @api.get("/scheme-master")
-async def list_scheme_master():
-    return [clean(s) for s in await db.scheme_master.find().to_list(1000)]
+async def list_scheme_master(on: Optional[str] = None):
+    rows = [clean(s) for s in await db.scheme_master.find().to_list(1000)]
+    iso = str(on or "").strip()[:10]
+    if len(iso) == 10 and iso[4] == "-" and iso[7] == "-":
+        rows = [r for r in rows if _scheme_row_matches_as_of(r, iso)]
+    return rows
 
 
 @api.get("/incentive-master")
@@ -7082,7 +7145,7 @@ class SchemeRowIn(BaseModel):
 @api.post("/scheme-master", dependencies=[Depends(owner_only)])
 async def create_scheme_row(body: SchemeRowIn):
     count = await db.scheme_master.count_documents({})
-    payload = body.model_dump()
+    payload = _normalize_scheme_row(body.model_dump())
     payload["totalBenefit"] = payload["totalBenefit"] or ce.round2(payload["dealerShare"] + payload["companyShare"])
     doc = {"schemeId": f"SCM{count + 1:04d}", **payload}
     await db.scheme_master.insert_one(doc)
@@ -7091,11 +7154,16 @@ async def create_scheme_row(body: SchemeRowIn):
 
 @api.put("/scheme-master/{scheme_id}", dependencies=[Depends(owner_only)])
 async def update_scheme_row(scheme_id: str, body: SchemeRowIn):
-    payload = body.model_dump()
-    payload["totalBenefit"] = payload["totalBenefit"] or ce.round2(payload["dealerShare"] + payload["companyShare"])
-    res = await db.scheme_master.update_one({"schemeId": scheme_id}, {"$set": payload})
-    if res.matched_count == 0:
+    existing = await db.scheme_master.find_one({"schemeId": scheme_id})
+    if not existing:
         raise HTTPException(404, "Scheme row not found")
+    raw = body.model_dump()
+    for k in ("schemeMonth", "effectiveFrom", "effectiveTo"):
+        if not str(raw.get(k) or "").strip():
+            raw[k] = existing.get(k) or ""
+    payload = _normalize_scheme_row(raw)
+    payload["totalBenefit"] = payload["totalBenefit"] or ce.round2(payload["dealerShare"] + payload["companyShare"])
+    await db.scheme_master.update_one({"schemeId": scheme_id}, {"$set": payload})
     return clean(await db.scheme_master.find_one({"schemeId": scheme_id}))
 
 

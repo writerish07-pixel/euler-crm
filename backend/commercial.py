@@ -692,7 +692,7 @@ def compute_scheme_allocation(s, scheme_rows):
     explicit = bool(s.get("schemeAllocationExplicit")) or bool(flat_decisions)
     model = str(s.get("model") or s.get("interestedModel") or "").strip()
     variant = str(s.get("variant") or "").strip()
-    booking_date = s.get("bookingDate") or ""
+    booking_date = s.get("schemeAsOf") or s.get("bookingDate") or ""
     master = get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows) if (model and scheme_rows) else {}
 
     # Pre-compute offer available amounts so Partial waterfall can run once
