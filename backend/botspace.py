@@ -50,6 +50,15 @@ MODEL_ASK_COOLOFF_DAYS = 45
 # Slots the daily scheduler fires. Times are IST hours, overridable from settings.
 REPORT_SLOTS = {"morning": 8, "eod": 20}
 
+# If Meta never approved the rewritten Utility names, try the previous ones
+# rather than silently skipping the whole slot.
+TEMPLATE_ALIASES = {
+    "execMorning": ["exec_morning_statement", "exec_day_ahead"],
+    "execEod": ["exec_eod_statement", "exec_eod_scorecard"],
+    "managerEod": ["manager_eod_statement", "manager_eod_volume"],
+    "ownerEod": ["owner_eod_statement", "owner_eod_summary"],
+}
+
 # Messages sent to our own people, not to customers. They carry no leadId, so
 # they are kept out of the customer inbox — and they are the sends whose
 # failures had nowhere to surface.
@@ -307,6 +316,20 @@ async def _http(method: str, path: str, cfg: dict, json_body=None) -> dict:
     return data if isinstance(data, dict) else {"data": data}
 
 
+def _provider_id(res: dict) -> str:
+    data = (res or {}).get("data") if isinstance(res, dict) else {}
+    if not isinstance(data, dict):
+        return ""
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    if not isinstance(inner, dict):
+        return ""
+    for k in ("id", "messageId", "message_id", "_id"):
+        v = inner.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
 async def send_template(phone: str, template_id: str, variables: list, name: str = "") -> dict:
     cfg = await get_config()
     if not cfg["enabled"]:
@@ -457,17 +480,13 @@ async def _enqueue_or_send(*, lead: dict, kind: str, phone: str, template_id: st
         if not res.get("ok") and not res.get("skipped"):
             status = "failed"
             err = str(res)
-        provider_id = ""
-        data = res.get("data") or {}
-        inner = data.get("data") if isinstance(data.get("data"), dict) else data
-        if isinstance(inner, dict):
-            provider_id = str(inner.get("id") or "")
+        provider_id = _provider_id(res)
         await _store_message(
             lead, direction="outbound", kind=kind, text=text, phone=phone,
             status=status, template_id=template_id, provider_id=provider_id,
             extra={"error": err} if err else None,
         )
-        return res
+        return {**res, "providerId": provider_id}
     except Exception as e:
         logger.exception("whatsapp send failed %s %s", kind, lead.get("leadId"))
         await _store_message(
@@ -1028,17 +1047,27 @@ async def _send_report(staff: dict, kind: str, variables: list, text: str,
                 await _store_message(
                     who, direction="outbound", kind=kind, text=body_text, phone=phone,
                     status="accepted", extra={"audience": "executive", "viaSession": True,
-                                              "providerId": ""})
-                return {**res, "session": True}
+                                              "providerId": _provider_id(res)})
+                return {**res, "session": True, "providerId": _provider_id(res)}
             # Session send refused (window actually closed) — fall through to the
             # template rather than dropping the report.
         except Exception:
             logger.exception("session report send failed %s %s", kind, staff.get("name"))
 
-    return await _enqueue_or_send(
-        lead=who, kind=kind, phone=phone,
-        template_id=cfg["templates"].get(kind_to_template(kind), kind),
-        variables=variables, text=body_text or text, customer_hours=False)
+    last = {"ok": False, "error": "no-template"}
+    for template_id in template_candidates(kind_to_template(kind), cfg):
+        last = await _enqueue_or_send(
+            lead=who, kind=kind, phone=phone,
+            template_id=template_id,
+            variables=variables, text=body_text or text, customer_hours=False)
+        if last.get("ok"):
+            if template_id != cfg["templates"].get(kind_to_template(kind), kind):
+                await _remember_working_template(kind_to_template(kind), template_id)
+            return {**last, "templateId": template_id}
+        err = str(last.get("error") or last.get("reason") or "")
+        if not _is_missing_template(err):
+            return last
+    return last
 
 
 def kind_to_template(kind: str) -> str:
@@ -1046,9 +1075,102 @@ def kind_to_template(kind: str) -> str:
             "manager_eod": "managerEod", "owner_eod": "ownerEod"}.get(kind, kind)
 
 
-async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
-    """Send the reports for one slot. Idempotent per day+slot: a re-run (cron
-    retry, second worker) will not message anyone twice."""
+def template_candidates(key: str, cfg: dict) -> list:
+    """Configured name first, then documented aliases, de-duplicated."""
+    primary = (cfg.get("templates") or {}).get(key) or DEFAULT_TEMPLATES.get(key, "")
+    names = []
+    for n in [primary, *TEMPLATE_ALIASES.get(key, [])]:
+        n = str(n or "").strip()
+        if n and n not in names:
+            names.append(n)
+    return names
+
+
+def _is_missing_template(error: str) -> bool:
+    e = str(error or "").lower()
+    return any(h in e for h in (
+        "template not found", "does not exist", "132001", "not approved",
+        "pending", "rejected", "paused", "disabled",
+    ))
+
+
+async def _remember_working_template(key: str, template_id: str):
+    """Persist an alias that actually sent so the next run does not start on a dead name."""
+    db = _db()
+    doc = await db.settings.find_one({"_id": SETTINGS_ID}) or {}
+    templates = {**DEFAULT_TEMPLATES, **(doc.get("templates") or {})}
+    templates[key] = template_id
+    await db.settings.update_one(
+        {"_id": SETTINGS_ID},
+        {"$set": {"templates": templates, "updatedAt": datetime.now(timezone.utc).isoformat()}},
+        upsert=True,
+    )
+
+
+def _blank_exec(name: str) -> dict:
+    return {
+        "name": name or "Executive", "monthlyTarget": 0,
+        "bookingsToday": 0, "bookingsMtd": 0, "deliveriesToday": 0, "deliveriesMtd": 0,
+        "pendingBookings": 0, "pendingCollection": 0,
+        "followupsDue": 0, "followupsOverdue": 0, "attainmentPct": None,
+    }
+
+
+def _exec_stats_for(staff: dict, executives: list) -> dict:
+    """Match staff to daily-report rows the same way the rest of the app does.
+
+    A name mismatch used to `continue` and the person never received WhatsApp.
+    """
+    import server
+    key = server._norm_name(staff.get("name"))
+    for x in executives or []:
+        if server._norm_name(x.get("name")) == key:
+            return x
+    return _blank_exec(staff.get("name") or "Executive")
+
+
+def slots_due(when: Optional[datetime] = None) -> list:
+    """Slots whose IST hour has already arrived today (catch-up included)."""
+    t = when or now_ist()
+    return [slot for slot, hour in REPORT_SLOTS.items() if t.hour >= hour]
+
+
+async def configured_report_templates() -> dict:
+    """What morning / EOD will send — names, aliases, recipient counts."""
+    cfg = await get_config()
+    import server
+    out = {"configured": cfg["enabled"], "templates": []}
+    for kind, key in (("exec_morning", "execMorning"), ("exec_eod", "execEod"),
+                      ("manager_eod", "managerEod"), ("owner_eod", "ownerEod")):
+        names = template_candidates(key, cfg)
+        out["templates"].append({
+            "kind": kind,
+            "key": key,
+            "templateId": names[0] if names else DEFAULT_TEMPLATES.get(key, ""),
+            "aliases": names[1:],
+            "language": "en",
+            "recipients": len(await server._staff_for_report(kind)),
+        })
+    return out
+
+
+async def tick_due_reports(when: Optional[datetime] = None) -> dict:
+    """Send every slot that should already have gone out today and has not.
+
+    Railway (or any idle host) that misses 08:00 / 20:00 IST used to skip the
+    rest of the day. Catching up on the next tick — including process start —
+    is how today's EOD still leaves after a restart at 21:00.
+    """
+    results = {}
+    for slot in slots_due(when):
+        results[slot] = await run_daily_reports(slot)
+    return results
+
+
+async def run_daily_reports(slot: str, today_s: Optional[str] = None,
+                            force: bool = False) -> dict:
+    """Send the reports for one slot. Idempotent per day+slot unless force=True
+    (owner Send-now) or the previous attempt messaged nobody."""
     cfg = await get_config()
     if not cfg["enabled"]:
         return {"ok": False, "skipped": True, "reason": "not-configured", "sent": 0}
@@ -1056,8 +1178,13 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
     today_s = today_s or today_ist()
     db = _db()
     marker_id = f"report_{slot}_{today_s}"
-    if await db.settings.find_one({"_id": marker_id}):
-        return {"ok": True, "slot": slot, "sent": 0, "alreadySent": True}
+    existing = await db.settings.find_one({"_id": marker_id})
+    if existing and not force:
+        if (existing.get("sent") or 0) > 0 or (existing.get("failed") or 0) > 0:
+            return {"ok": True, "slot": slot, "sent": 0, "alreadySent": True}
+        # sent=0 failed=0: everyone was skipped (name mismatch, empty staff). Retry.
+    if existing:
+        await db.settings.delete_one({"_id": marker_id})
 
     data = await server._daily_report_data()
     sent, failed, recipients = 0, 0, []
@@ -1068,10 +1195,11 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
         # The provider's own words. Without this a failed report is a bare "not
         # sent" — and the report messages carry no leadId, so they never appear
         # in the Sent box either. There was nowhere at all to read the reason.
+        used = res.get("templateId") or cfg["templates"].get(kind_to_template(kind), kind)
         recipients.append({
             "name": staff.get("name"), "kind": kind, "ok": bool(res.get("ok")),
             "mobile": digits10(staff.get("mobile")),
-            "templateId": cfg["templates"].get(kind_to_template(kind), kind),
+            "templateId": used,
             "variableCount": len(variables),
             "viaSession": bool(res.get("ok") and res.get("session")),
             "error": "" if res.get("ok") else str(res.get("error") or res.get("reason") or "")[:400],
@@ -1083,10 +1211,7 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
 
     if slot == "morning":
         for st in await server._staff_for_report("exec_morning"):
-            e = next((x for x in data["executives"]
-                      if x["name"].strip().lower() == str(st.get("name") or "").strip().lower()), None)
-            if not e:
-                continue
+            e = _exec_stats_for(st, data["executives"])
             await deliver(st, "exec_morning", [
                 _one_line(e["name"]),
                 _one_line(today_s),
@@ -1104,10 +1229,7 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None) -> dict:
             ]))
     elif slot == "eod":
         for st in await server._staff_for_report("exec_eod"):
-            e = next((x for x in data["executives"]
-                      if x["name"].strip().lower() == str(st.get("name") or "").strip().lower()), None)
-            if not e:
-                continue
+            e = _exec_stats_for(st, data["executives"])
             await deliver(st, "exec_eod", [
                 _one_line(e["name"]),
                 _one_line(today_s),
@@ -1229,11 +1351,13 @@ async def report_status(days: int = 7) -> dict:
     cfg = await get_config()
     import server
     out = {"configured": cfg["enabled"], "slots": {}, "templates": {}, "generatedAt":
-           datetime.now(timezone.utc).isoformat()}
+           datetime.now(timezone.utc).isoformat(), "dueNow": slots_due()}
     for kind, key in (("exec_morning", "execMorning"), ("exec_eod", "execEod"),
                       ("manager_eod", "managerEod"), ("owner_eod", "ownerEod")):
+        names = template_candidates(key, cfg)
         out["templates"][kind] = {
-            "templateId": cfg["templates"].get(key, DEFAULT_TEMPLATES[key]),
+            "templateId": names[0] if names else DEFAULT_TEMPLATES[key],
+            "aliases": names[1:],
             "recipients": len(await server._staff_for_report(kind)),
         }
 
@@ -1442,23 +1566,21 @@ async def summary_for_lead(lead_id: str) -> dict:
 async def scheduler_loop():
     """Best-effort in-process ticker.
 
-    This only fires if the process happens to be awake in the right hour, so it
-    is a fallback, NOT the mechanism: an idle or restarting host silently skips a
-    day. External cron hitting /api/integrations/botspace/cron?slot=... is the
-    reliable path. Both are safe to run together — every job is idempotent per
-    day (and per day+slot for reports).
+    Fires every 15 minutes AND on process start. Any slot whose IST hour has
+    already passed today is sent if it has not gone out yet — so a Railway
+    restart at 21:00 still delivers the 20:00 EOD instead of skipping the day.
+    External cron hitting /api/integrations/botspace/cron?slot=... is still the
+    reliable path; both are idempotent per day+slot.
     """
     await asyncio.sleep(15)
     while True:
         try:
             now = now_ist()
-            if now.hour == 9:
+            if now.hour >= 9:
                 marker = await _db().settings.find_one({"_id": "botspace_job"}) or {}
                 if marker.get("lastRun") != today_ist():
                     await run_daily_jobs()
-            for slot, hour in REPORT_SLOTS.items():
-                if now.hour == hour:
-                    await run_daily_reports(slot)
+            await tick_due_reports(now)
         except Exception:
             logger.exception("whatsapp scheduler tick failed")
         await asyncio.sleep(15 * 60)
