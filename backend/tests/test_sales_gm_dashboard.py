@@ -65,6 +65,8 @@ async def test_sales_gm_dashboard_showroom_wide(client):
     assert "kpis" in body
     assert "executiveScoreboard" in body
     assert "worklist" in body
+    assert "executiveIncentive" in body
+    assert "executives" in body["executiveIncentive"]
     assert body["kpis"]["bookingsMtd"] >= 1
     assert body["kpis"]["customerOutstanding"] >= 12000
 
@@ -126,6 +128,11 @@ async def test_gm_is_deal_desk_not_money_desk(client):
         assert fin.status_code == 200, fin.text
         earn = await c.get("/api/dealer-earnings")
         assert earn.status_code == 403, earn.text
+        master = await c.get("/api/incentive-master")
+        assert master.status_code == 403, master.text
+        board = await c.get("/api/executive-incentive/board")
+        assert board.status_code == 200, board.text
+        assert "executives" in board.json()
 
 
 def test_sales_gm_is_on_the_role_constants():

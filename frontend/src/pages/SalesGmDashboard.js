@@ -2,11 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  Ban, IndianRupee, Percent, ClipboardList, Warehouse,
+  Ban, IndianRupee, Percent, ClipboardList, Warehouse, Trophy,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { compactInr, num } from "../lib/format";
+import { compactInr, inr, num } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 
@@ -53,6 +53,7 @@ export default function SalesGmDashboard() {
         <Link to="/finance"><Button variant="secondary" data-testid="gm-go-finance"><Landmark size={14} /> Finance Register</Button></Link>
         <Link to="/cancellations"><Button variant="secondary" data-testid="gm-go-cancels"><Ban size={14} /> Cancellations</Button></Link>
         <Link to="/inventory"><Button variant="secondary" data-testid="gm-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
+        <Link to="/executive-incentive"><Button variant="secondary" data-testid="gm-go-exec-incentive"><Trophy size={14} /> Executive Incentive</Button></Link>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
@@ -115,6 +116,37 @@ export default function SalesGmDashboard() {
             ) },
           ]}
           rows={d.executiveScoreboard || []}
+        />
+      </Card>
+
+      <Card className="p-5 mt-6" data-testid="gm-exec-incentive">
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+          <div>
+            <h3 className="font-heading font-bold text-ink">Executive incentive (this month)</h3>
+            <p className="text-xs text-ink-soft">
+              {(d.executiveIncentive && d.executiveIncentive.month) || "—"}
+              {" "}· units × each person’s ladder. GM and Owner set targets.
+            </p>
+          </div>
+          <Link to="/executive-incentive">
+            <Button variant="secondary" data-testid="gm-set-exec-targets"><Trophy size={14} /> Set targets</Button>
+          </Link>
+        </div>
+        <Table
+          rowKey="executive"
+          empty="No executives yet"
+          columns={[
+            { key: "executive", label: "Executive", render: (r) => <span className="font-semibold">{r.executive}</span> },
+            { key: "units", label: "Units", align: "right" },
+            { key: "hasOwnPlan", label: "Plan", render: (r) => (
+              <Badge tone={r.hasOwnPlan ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-zinc-100 text-zinc-600 ring-zinc-500/20"}>
+                {r.hasOwnPlan ? "Set" : "Not set"}
+              </Badge>
+            ) },
+            { key: "amountPerUnit", label: "₹ / unit", align: "right", mono: true, render: (r) => inr(r.amountPerUnit) },
+            { key: "total", label: "Incentive", align: "right", mono: true, render: (r) => inr(r.total) },
+          ]}
+          rows={(d.executiveIncentive && d.executiveIncentive.executives) || []}
         />
       </Card>
 
