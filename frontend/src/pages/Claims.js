@@ -1,29 +1,33 @@
 import React, { useEffect, useState, useCallback } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { HandCoins, Plus, AlertTriangle, RotateCcw } from "lucide-react";
+import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
+import { OEM_MATCH, oemMatchOf, oemClaimsHref } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 
-// How this row stands against Euler's own claim register. The whole point is that
-// "we think we're owed this" and "we actually asked for it" stop being the same claim.
-//
-// `unmapped` is deliberately amber, not red: Euler describes a claim in prose and we
-// match on words, so a miss means "look at this", never "nobody claimed it". Calling a
-// filed claim unclaimed would send the desk chasing money that is already in the queue.
-const MATCH = {
-  accepted:    { label: "Approved in Euler", tone: "bg-emerald-50 text-emerald-700 ring-emerald-600/20", row: "" },
-  filed:       { label: "Filed with Euler",  tone: "bg-blue-50 text-blue-700 ring-blue-600/20",          row: "" },
-  resubmitted: { label: "Refiled",           tone: "bg-sky-50 text-sky-700 ring-sky-600/20",             row: "" },
-  rejected:    { label: "Rejected — refile", tone: "bg-rose-100 text-rose-800 ring-rose-600/30",         row: "bg-rose-50/60" },
-  not_filed:   { label: "Not claimed",       tone: "bg-red-50 text-red-700 ring-red-600/20",             row: "bg-red-50/50" },
-  unmapped:    { label: "Check match",       tone: "bg-amber-50 text-amber-800 ring-amber-600/20",       row: "bg-amber-50/40" },
-  not_applicable: { label: "", tone: "", row: "" },
-};
-const matchOf = (r) => MATCH[r?.oemMatch?.state] || MATCH.not_applicable;
+const MATCH = OEM_MATCH;
+const matchOf = oemMatchOf;
+
+function OemClaimLink({ claimNumber }) {
+  if (!claimNumber) return null;
+  return (
+    <Link
+      to={oemClaimsHref({ q: claimNumber })}
+      onClick={(e) => e.stopPropagation()}
+      className="font-mono text-[10px] text-cobalt hover:underline"
+      title="Open this claim on OEM Claim Settlements"
+    >
+      {claimNumber}
+    </Link>
+  );
+}
 
 export default function Claims() {
+  const [params] = useSearchParams();
+  const leadFilter = params.get("leadId") || "";
   const [rows, setRows] = useState([]);
   const [active, setActive] = useState(null);
   const [receipt, setReceipt] = useState(false);
@@ -63,12 +67,17 @@ export default function Claims() {
   const rejectedValue = rows
     .filter((r) => stateOf(r) === "rejected")
     .reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
-  const visibleRows = matchFilter ? rows.filter((r) => stateOf(r) === matchFilter) : rows;
+  const visibleRows = (matchFilter ? rows.filter((r) => stateOf(r) === matchFilter) : rows)
+    .filter((r) => !leadFilter || r.leadId === leadFilter);
 
   return (
     <div>
       <PageHeader title="Scheme Claim Register" subtitle={`${rows.length} claims · ${inr(eligible)} eligible`}
         actions={<div className="flex items-center gap-2">
+          <Link to="/oem-claims" data-testid="open-oem-settlements"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
+            OEM Claim Settlements <ExternalLink size={14} />
+          </Link>
           <Button variant="secondary" data-testid="add-manual-claim-btn" onClick={() => setManual(true)}><Plus size={16} /> Add Manual Claim</Button>
           <Button data-testid="record-claim-receipt-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Claim Received</Button>
         </div>} />
@@ -79,8 +88,13 @@ export default function Claims() {
         <StatCard label="Total Outstanding" value={inr(totalOutstanding)} tone="text-red-600" />
       </div>
 
-      {/* Cross-check against Euler. Nothing here changes a rupee in this register —
-          it only says whether the claim was actually filed on their side. */}
+      {leadFilter && (
+        <Card className="mb-4 p-3 flex flex-wrap items-center gap-2 text-sm" data-testid="claims-lead-filter">
+          <span className="text-ink-soft">Showing scheme claims for</span>
+          <LeadLink leadId={leadFilter} onOpen={openLead} />
+          <Link to="/claims" className="text-xs text-cobalt hover:underline">Show all</Link>
+        </Card>
+      )}
       <Card className="mb-6 p-4" data-testid="oem-crosscheck">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
           <div className="text-xs font-semibold text-ink-faint uppercase tracking-wide">
@@ -134,6 +148,24 @@ export default function Claims() {
             <LeadLink leadId={r.leadId} onOpen={openLead} />
           )},
           { key: "customer", label: "Customer", render: (r) => <span className="font-semibold">{r.customer || "—"}</span> },
+          { key: "chassisNumber", label: "Chassis", mono: true, render: (r) => (
+            r.chassisNumber
+              ? <Link to={oemClaimsHref({ chassis: r.chassisNumber })}
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-xs text-cobalt hover:underline" title="Find this chassis on OEM Claim Settlements">
+                  {r.chassisNumber}
+                </Link>
+              : <span className="text-ink-faint text-xs">—</span>
+          )},
+          { key: "invoiceNumber", label: "Invoice", mono: true, render: (r) => (
+            r.invoiceNumber
+              ? <Link to={oemClaimsHref({ invoice: r.invoiceNumber })}
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-xs text-cobalt hover:underline" title="Find this invoice on OEM Claim Settlements">
+                  {r.invoiceNumber}
+                </Link>
+              : <span className="text-ink-faint text-xs">—</span>
+          )},
           { key: "oemMatch", label: "In Euler", render: (r) => {
             const m = matchOf(r);
             if (!m.label) return <span className="text-ink-faint text-xs">—</span>;
@@ -141,7 +173,7 @@ export default function Claims() {
               <div className="flex flex-col items-start gap-1" title={r.oemMatch?.detail || ""}>
                 <Badge tone={m.tone}>{m.label}</Badge>
                 {(r.oemMatch?.claimNumbers || []).slice(0, 2).map((n) => (
-                  <span key={n} className="font-mono text-[10px] text-ink-faint">{n}</span>
+                  <OemClaimLink key={n} claimNumber={n} />
                 ))}
               </div>
             );
@@ -189,7 +221,8 @@ export default function Claims() {
             columns={[
               { key: "claimNumber", label: "Claim", mono: true, render: (r) => (
                 <div>
-                  <div className="font-semibold text-cobalt">{r.claimNumber}</div>
+                  <Link to={oemClaimsHref({ q: r.claimNumber })}
+                    className="font-semibold text-cobalt hover:underline">{r.claimNumber}</Link>
                   <div className="text-xs text-ink-faint">{fmtDate(r.createdDate)}</div>
                 </div>
               )},
@@ -199,7 +232,16 @@ export default function Claims() {
                   : <Badge tone="bg-zinc-100 text-zinc-600 ring-zinc-500/20">No lead matched</Badge>
               )},
               { key: "chassis", label: "Chassis", mono: true, render: (r) => (
-                <span className="text-xs">{r.chassis || "—"}</span>
+                r.chassis
+                  ? <Link to={oemClaimsHref({ chassis: r.chassis })}
+                      className="text-xs text-cobalt hover:underline">{r.chassis}</Link>
+                  : <span className="text-xs">—</span>
+              )},
+              { key: "sourceInvoiceNumber", label: "Invoice", mono: true, render: (r) => (
+                r.sourceInvoiceNumber
+                  ? <Link to={oemClaimsHref({ invoice: r.sourceInvoiceNumber })}
+                      className="text-xs text-cobalt hover:underline">{r.sourceInvoiceNumber}</Link>
+                  : <span className="text-xs">—</span>
               )},
               { key: "description", label: "What Euler is claiming", render: (r) => (
                 <div className="text-xs max-w-xs whitespace-normal">
@@ -327,6 +369,16 @@ function SettleModal({ claim, onClose, onDone }) {
       <div className="overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Settle Claim</h3>
         <p className="text-xs text-ink-soft mb-4">{claim.customer} · {claim.component} · {inr(claim.claimAmount)}</p>
+        {(claim.chassisNumber || claim.invoiceNumber) && (
+          <p className="text-xs text-ink-faint mb-3 font-mono">
+            {claim.chassisNumber ? `Chassis ${claim.chassisNumber}` : ""}
+            {claim.chassisNumber && claim.invoiceNumber ? " · " : ""}
+            {claim.invoiceNumber ? `Invoice ${claim.invoiceNumber}` : ""}
+            {" · "}
+            <Link to={oemClaimsHref({ chassis: claim.chassisNumber, invoice: claim.invoiceNumber })}
+              className="text-cobalt hover:underline">Open on OEM Claim Settlements</Link>
+          </p>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Claim Status"><Select data-testid="claim-status" value={form.claimStatus} onChange={set("claimStatus")}>{["Pending","Submitted","Approved","Received","Rejected"].map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Received Amount"><Input type="number" value={form.receivedAmount} onChange={set("receivedAmount")} /></Field>

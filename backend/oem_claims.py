@@ -750,19 +750,116 @@ async def oem_only_lines(db, register_pairs):
 
 
 # ---------------------------------------------------------------- reporting
-async def list_claims(db, *, status="", lead_id="", unlinked=False):
-    q = {}
+async def register_pairs(db):
+    """(leadId, componentKey) the Scheme Claim Register actually holds.
+
+    Manual / executive-incentive rows are skipped — they are not filed as scheme
+    lines in Coulson, so comparing them here would paint every Euler claim as a gap.
+    """
+    pairs = set()
+    async for c in db.claims.find({"manual": {"$ne": True}},
+                                  {"leadId": 1, "componentKey": 1, "_id": 0}):
+        lid, key = c.get("leadId") or "", c.get("componentKey") or ""
+        if lid and key:
+            pairs.add((lid, key))
+    return pairs
+
+
+def claim_register_match(row, pairs):
+    """How this Euler debit note stands against the Scheme Claim Register.
+
+    The reverse of `match_state`: that function colours a register row by whether
+    Euler filed it; this colours an Euler claim by whether the register raised it.
+    A miss here is money Euler is processing that the books do not know they are owed.
+    """
+    lines = row.get("lineItems") or []
+    if not lines:
+        return {"state": "unknown_lead", "detail": "No line items on this claim.",
+                "mappedComponents": []}
+    states, keys = [], []
+    for line in lines:
+        lead_id = line.get("leadId") or ""
+        key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
+        if key:
+            keys.append(key)
+        if not lead_id:
+            states.append("unknown_lead")
+        elif not key:
+            states.append("unmapped")
+        elif (lead_id, key) in pairs:
+            states.append("in_register")
+        else:
+            states.append("missing_register")
+    order = ("unknown_lead", "missing_register", "unmapped", "in_register")
+    pick = min(states, key=lambda s: order.index(s) if s in order else 99)
+    detail = {
+        "unknown_lead": "No chassis or invoice on this claim matched a lead.",
+        "missing_register": "Euler filed this, but the Scheme Claim Register has no row.",
+        "unmapped": "This lead is in the register, but the claim wording did not map to a component.",
+        "in_register": "Connected to the Scheme Claim Register by chassis / invoice.",
+    }.get(pick, "")
+    if row.get("status") == "Rejected" and row.get("needsResubmission"):
+        detail = (detail + " " if detail else "") + "Rejected — nothing refiled on this chassis."
+    elif row.get("resubmittedBy"):
+        detail = (detail + " " if detail else "") + f"Rejected, refiled as {row['resubmittedBy']}."
+    return {"state": pick, "detail": detail.strip(),
+            "mappedComponents": keys,
+            "needsResubmission": bool(row.get("needsResubmission")),
+            "resubmittedBy": row.get("resubmittedBy") or ""}
+
+
+async def attach_register_match(db, rows):
+    pairs = await register_pairs(db)
+    for row in rows:
+        row["registerMatch"] = claim_register_match(row, pairs)
+    return rows
+
+
+def _claim_matches_query(row, *, q="", chassis="", invoice=""):
+    if chassis:
+        ch = oem_sync._norm_chassis(chassis)
+        if not any(oem_sync._norm_chassis(li.get("chassis")) == ch
+                   for li in (row.get("lineItems") or [])):
+            return False
+    if invoice:
+        inv = str(invoice or "").strip().lower()
+        if not any(str(li.get("sourceInvoiceNumber") or "").strip().lower() == inv
+                   for li in (row.get("lineItems") or [])):
+            return False
+    if q:
+        needle = str(q).strip().lower()
+        blob = " ".join([
+            str(row.get("claimNumber") or ""),
+            str(row.get("status") or ""),
+            " ".join(str(x) for x in (row.get("leadIds") or [])),
+            " ".join(str(li.get("chassis") or "") for li in (row.get("lineItems") or [])),
+            " ".join(str(li.get("sourceInvoiceNumber") or "") for li in (row.get("lineItems") or [])),
+            " ".join(str(li.get("leadCustomer") or "") for li in (row.get("lineItems") or [])),
+            " ".join(str(li.get("description") or "") for li in (row.get("lineItems") or [])),
+        ]).lower()
+        if needle not in blob:
+            return False
+    return True
+
+
+async def list_claims(db, *, status="", lead_id="", unlinked=False,
+                      q="", chassis="", invoice=""):
+    filt = {}
     if status:
-        q["status"] = status
+        filt["status"] = status
     if lead_id:
-        q["leadIds"] = lead_id
-    rows = [r async for r in db[CLAIMS_COLLECTION].find(q)]
+        filt["leadIds"] = lead_id
+    rows = [r async for r in db[CLAIMS_COLLECTION].find(filt)]
     if unlinked:
         rows = [r for r in rows if not (r.get("linkedLineCount") or 0)]
+    if q or chassis or invoice:
+        rows = [r for r in rows if _claim_matches_query(
+            r, q=q, chassis=chassis, invoice=invoice)]
     rows.sort(key=lambda r: (r.get("terminal") and 1 or 0, -int(r.get("stageDays") or 0),
                              str(r.get("createdAt") or "")))
     for r in rows:
         r.pop("_id", None)
+    await attach_register_match(db, rows)
     return rows
 
 
@@ -779,6 +876,39 @@ async def claims_for_lead(db, lead_id):
         })
     out.sort(key=lambda r: str(r.get("createdAt") or ""), reverse=True)
     return out
+
+
+async def lead_claim_crosscheck(db, lead_id, lead=None):
+    """OEM claims AND scheme-register rows for one lead, joined on chassis / invoice.
+
+    The scheme drawer creates the register rows; this is what the drawer reads so a
+    salesperson can see, on the same lead, whether Euler actually filed them.
+    """
+    oem = await claims_for_lead(db, lead_id)
+    await attach_register_match(db, oem)
+    index = await register_match_index(db)
+    register = []
+    async for c in db.claims.find({"leadId": lead_id, "manual": {"$ne": True}}):
+        key = c.get("componentKey") or ""
+        if not key:
+            continue
+        register.append({
+            "claimId": c.get("claimId") or f"CLM-{lead_id}-{key}",
+            "componentKey": key,
+            "component": c.get("component") or key,
+            "eligibleClaim": round2(c.get("eligibleClaim") if c.get("eligibleClaim") is not None
+                                    else c.get("claimAmount")),
+            "claimStatus": c.get("claimStatus") or "",
+            "oemMatch": match_state(index, lead_id, key),
+        })
+    lead = lead or {}
+    return {
+        "claims": oem,
+        "schemeRegister": register,
+        "chassisNumber": lead.get("chassisNumber") or "",
+        "invoiceNumber": lead.get("invoiceNumber") or "",
+        "leadId": lead_id,
+    }
 
 
 async def claims_summary(db):
@@ -816,7 +946,11 @@ async def claims_summary(db):
                 "claimNumber": row.get("claimNumber"),
                 "claimedAmount": round2(row.get("claimedAmount")),
                 "leadIds": row.get("leadIds") or [],
+                "needsResubmission": bool(row.get("needsResubmission")),
+                "resubmittedBy": row.get("resubmittedBy") or "",
                 "lineItems": [{"description": li.get("description"), "leadId": li.get("leadId"),
+                               "chassis": li.get("chassis") or "",
+                               "sourceInvoiceNumber": li.get("sourceInvoiceNumber") or "",
                                "totalAmount": round2(li.get("totalAmount")),
                                "rejectedBy": li.get("rejectedBy") or ""}
                               for li in (row.get("lineItems") or [])],

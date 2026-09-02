@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { Scale, AlertTriangle, XCircle } from "lucide-react";
 import { get } from "../lib/api";
 import { inr } from "../lib/format";
@@ -80,6 +81,9 @@ export default function ClaimReconciliation() {
           { key: "chassisNumber", label: "Chassis", mono: true, render: (r) => (
             <span className="text-xs">{r.chassisNumber || "—"}</span>
           )},
+          { key: "invoiceNumber", label: "Invoice", mono: true, render: (r) => (
+            <span className="text-xs">{r.invoiceNumber || "—"}</span>
+          )},
           { key: "entitled", label: "Entitled", align: "right", mono: true,
             render: (r) => inr(r.entitled) },
           { key: "filed", label: "Filed", align: "right", mono: true,
@@ -95,7 +99,8 @@ export default function ClaimReconciliation() {
             r.claimNumbers.length ? (
               <div className="flex flex-col gap-1 items-start">
                 {r.claimNumbers.map((n) => (
-                  <span key={n} className="font-mono text-[11px] text-ink-faint">{n}</span>
+                  <Link key={n} to={`/oem-claims?q=${encodeURIComponent(n)}`}
+                    className="font-mono text-[11px] text-cobalt hover:underline">{n}</Link>
                 ))}
                 {r.oemStatuses.map((s) => <Badge key={s}>{s}</Badge>)}
               </div>

@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle } from "lucide-react";
+import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink } from "lucide-react";
+import { Link } from "react-router-dom";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
+import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
@@ -657,6 +659,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
 
   return (
     <div>
+      <OemClaimStrip leadId={lead.leadId} />
       {inactive && <StepLock text="This lead is not Active — scheme is read-only." />}
       {!inactive && staffLocked && <StepLock text="Scheme is saved. Only the owner can edit a completed step." />}
       {rules && (
@@ -1091,39 +1094,88 @@ function yardRowsForLead(yard, lead, selectedChassis) {
   return { rows: yard, fallback: yard.length > 0 };
 }
 
-// What Euler's own claim desk is doing with this vehicle. Read-only, and silent
-// when there is nothing filed — an empty strip on every lead would be noise.
+// What Euler's own claim desk is doing with this vehicle, next to the scheme
+// register rows this drawer created. Silent when both sides are empty.
 function OemClaimStrip({ leadId }) {
-  const [rows, setRows] = useState([]);
+  const [pack, setPack] = useState(null);
   useEffect(() => {
     let cancelled = false;
     get(`/leads/${leadId}/oem-claims`)
-      .then((r) => { if (!cancelled) setRows(Array.isArray(r) ? r : []); })
-      .catch(() => { if (!cancelled) setRows([]); });
+      .then((r) => {
+        if (cancelled) return;
+        if (Array.isArray(r)) setPack({ claims: r, schemeRegister: [], chassisNumber: "", invoiceNumber: "" });
+        else setPack(r || { claims: [], schemeRegister: [] });
+      })
+      .catch(() => { if (!cancelled) setPack({ claims: [], schemeRegister: [] }); });
     return () => { cancelled = true; };
   }, [leadId]);
-  if (!rows.length) return null;
+  const claims = pack?.claims || [];
+  const register = pack?.schemeRegister || [];
+  if (!pack || (!claims.length && !register.length)) return null;
   return (
     <div className="mb-3 rounded-lg ring-1 ring-line bg-zinc-50 px-3 py-2" data-testid="lead-oem-claims">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint mb-1.5">
-        Claims filed with Euler
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
+          Scheme claims · Euler
+        </div>
+        <div className="flex items-center gap-2">
+          {(pack.chassisNumber || pack.invoiceNumber) && (
+            <span className="font-mono text-[10px] text-ink-faint">
+              {[pack.chassisNumber, pack.invoiceNumber].filter(Boolean).join(" · ")}
+            </span>
+          )}
+          <Link to={oemClaimsHref({ leadId })}
+            className="text-[11px] text-cobalt hover:underline inline-flex items-center gap-0.5">
+            OEM settlements <ExternalLink size={10} />
+          </Link>
+          <Link to={claimsHref({ leadId })}
+            className="text-[11px] text-cobalt hover:underline inline-flex items-center gap-0.5">
+            Scheme register <ExternalLink size={10} />
+          </Link>
+        </div>
       </div>
-      <div className="space-y-1.5">
-        {rows.map((c) => (
-          <div key={c.claimNumber} className="flex flex-wrap items-center gap-2 text-xs">
-            <span className="font-mono font-semibold text-cobalt">{c.claimNumber}</span>
-            <Badge tone={c.status === "Rejected"
-              ? "bg-rose-50 text-rose-700 ring-rose-600/20"
-              : c.status === "Settled"
-                ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
-                : "bg-amber-50 text-amber-800 ring-amber-600/20"}>{c.status}</Badge>
-            <span className="text-ink-soft">{inr(c.leadClaimedAmount)}</span>
-            {!c.terminal && c.stageLabel && (
-              <span className="text-ink-faint">{c.stageDays}d at {c.stageLabel}</span>
-            )}
-          </div>
-        ))}
-      </div>
+      {register.length > 0 && (
+        <div className="space-y-1 mb-2" data-testid="lead-scheme-register">
+          {register.map((row) => {
+            const m = oemMatchOf(row);
+            return (
+              <div key={row.claimId || row.componentKey} className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-ink">{row.component}</span>
+                <span className="font-mono text-ink-soft">{inr(row.eligibleClaim)}</span>
+                {m.label ? <Badge tone={m.tone}>{m.label}</Badge> : null}
+                {(row.oemMatch?.claimNumbers || []).slice(0, 2).map((n) => (
+                  <Link key={n} to={oemClaimsHref({ q: n })}
+                    className="font-mono text-[10px] text-cobalt hover:underline">{n}</Link>
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {claims.length > 0 && (
+        <div className="space-y-1.5">
+          {claims.map((c) => (
+            <div key={c.claimNumber} className="flex flex-wrap items-center gap-2 text-xs">
+              <Link to={oemClaimsHref({ q: c.claimNumber })}
+                className="font-mono font-semibold text-cobalt hover:underline">{c.claimNumber}</Link>
+              <Badge tone={c.status === "Rejected"
+                ? "bg-rose-50 text-rose-700 ring-rose-600/20"
+                : c.status === "Settled"
+                  ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
+                  : "bg-amber-50 text-amber-800 ring-amber-600/20"}>{c.status}</Badge>
+              <span className="text-ink-soft">{inr(c.leadClaimedAmount)}</span>
+              {c.resubmittedBy
+                ? <Badge tone="bg-sky-50 text-sky-700 ring-sky-600/20">Refiled as {c.resubmittedBy}</Badge>
+                : c.needsResubmission
+                  ? <Badge tone="bg-rose-100 text-rose-800 ring-rose-600/30">Needs refile</Badge>
+                  : null}
+              {!c.terminal && c.stageLabel && (
+                <span className="text-ink-faint">{c.stageDays}d at {c.stageLabel}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

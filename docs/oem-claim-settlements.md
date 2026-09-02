@@ -18,9 +18,18 @@ register's component keys. Writing Coulson statuses into `db.claims.claimStatus`
 corrupt every report that sums `eligibleClaim - receivedAmount`. A test pins this
 (`test_claim_sync_never_writes_to_the_scheme_claim_register`).
 
-The two are compared in three places: an **In Euler** column on every Scheme Claim
-Register row, an **In Euler but not in this register** section below it, and the
-lead-level **Claim Reconciliation** report (`/claim-reconciliation`, owner-only).
+The two are compared in four places:
+
+- **In Euler** on every Scheme Claim Register row (chassis + invoice columns join
+  that row to `/oem-claims?chassis=` / `?invoice=` / `?q=<claim number>`)
+- **In Euler but not in this register** below the Scheme Claim Register
+- **In this app** on every OEM Claim Settlements row (`registerMatch`: green in
+  the register, violet filed-in-Euler-only, grey unmatched lead)
+- the lead-level **Claim Reconciliation** report (`/claim-reconciliation`, owner-only)
+
+Join key is the lead's **chassis**, then **source invoice**. The scheme drawer writes
+the register row against `leadId`; the OEM tab finds the same lead by chassis/invoice
+on the debit-note line, so both pages and the lead 360 drawer stay in lockstep.
 
 ## The two-way cross-check
 
@@ -43,7 +52,16 @@ speaks component keys. `COMPONENT_PHRASES` maps the words they actually use, mos
 specific first. **A mapping miss must never render as "not claimed"** — that would send
 the money desk chasing money already sitting in Euler's queue. A test pins it.
 
-The reverse direction is `GET /claims/oem-only`: claim lines with no register row, each
+The reverse colour on OEM Claim Settlements is `registerMatch`:
+
+| State | Colour | Means |
+|---|---|---|
+| `in_register` | green | Chassis/invoice joined a scheme-register row |
+| `missing_register` | violet | Euler filed it; this register has no row |
+| `unmapped` | amber | Lead matched, wording did not map to a component |
+| `unknown_lead` | grey | No chassis or invoice matched a lead |
+
+The reverse direction is also `GET /claims/oem-only`: claim lines with no register row, each
 tagged `unknown_lead` (chassis never matched a lead), `unmapped_component`, or
 `missing_register_row`. Cancelled claims are excluded — nobody should chase those.
 
@@ -64,7 +82,10 @@ the register read `filed` again rather than staying red.
 
 Every lead id on the three claim pages opens the same lead 360 drawer the Lead Register
 opens (`components/LeadLink.js`), so the claim desk never has to go and search for the
-file by hand.
+file by hand. The scheme drawer (and the delivery tab) also show Euler's claims next to
+the register rows they created, with jumps to both `/claims?leadId=` and `/oem-claims`.
+Claim numbers, chassis and invoice on the Scheme Claim Register are links into the OEM
+tab; the OEM tab links back.
 
 ## Endpoints used on Euler's side
 
