@@ -24,6 +24,7 @@ import auth as authmod
 import gsheets
 import oem_catalog as oem_cat
 import oem_sync
+import oem_claims
 import coulson as coulson_client
 import botspace as wa
 import web_push
@@ -5585,6 +5586,13 @@ async def _coulson_status_payload(viewer=None):
         "inventoryCount": count,
         "catalogSize": cat_doc.get("catalogSize") or len(oem_cat.CATALOG),
         "pricesUpdated": doc.get("pricesUpdated"),
+        # A claim mirror that is short is worse than one that is missing: it looks
+        # like an answer. Say so on the same card that reports the yard sync.
+        "claimsMirrored": doc.get("claimsMirrored"),
+        "claimsExpected": doc.get("claimsExpected"),
+        "claimsIncomplete": bool(doc.get("claimsIncomplete")),
+        "claimsSyncedAt": doc.get("claimsSyncedAt"),
+        "claimsSyncOk": doc.get("claimsSyncOk"),
     }
 
 
@@ -5732,6 +5740,115 @@ async def coulson_sync(act=Depends(actor)):
                                                    "inventoryCount": result.get("inventoryCount"),
                                                    "pricesUpdated": result.get("pricesUpdated")})
     return result
+
+
+# ---------------------------------------------------------------- OEM portal claims
+# Euler's own claim-settlement workflow, mirrored read-only. Deliberately separate
+# from the Scheme Claim Register at /claims: see backend/oem_claims.py for why folding
+# the two together would corrupt the commercial reports.
+@api.post("/integrations/coulson/sync-claims", dependencies=[Depends(owner_only)])
+async def coulson_sync_claims(act=Depends(actor)):
+    try:
+        result = await oem_claims.sync_claims(db)
+    except coulson_client.CoulsonError as e:
+        await db["system"].update_one(
+            {"_id": "coulson"},
+            {"$set": {"claimsSyncOk": False, "claimsSyncError": str(e)[:500]}}, upsert=True)
+        raise HTTPException(502, str(e))
+    except Exception:
+        logging.exception("Coulson claim sync failed")
+        await db["system"].update_one(
+            {"_id": "coulson"},
+            {"$set": {"claimsSyncOk": False, "claimsSyncError": "Coulson claim sync failed"}},
+            upsert=True)
+        raise HTTPException(502, "Coulson claim sync failed")
+    if not result.get("ok"):
+        raise HTTPException(409, "Save the Coulson session in Settings first")
+    await write_audit(act, "sync", "coulson-claims",
+                      new={"mirrored": result.get("claimsMirrored"),
+                           "expected": result.get("claimsExpected"),
+                           "mode": result.get("claimsFetchMode")})
+    return result
+
+
+@api.get("/oem-claims", dependencies=[Depends(money_desk_only)])
+async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False):
+    return await oem_claims.list_claims(db, status=status, lead_id=leadId, unlinked=unlinked)
+
+
+@api.get("/oem-claims/summary", dependencies=[Depends(money_desk_only)])
+async def oem_portal_claims_summary():
+    return await oem_claims.claims_summary(db)
+
+
+@api.get("/leads/{lead_id}/oem-claims")
+async def lead_oem_portal_claims(lead_id: str, user=Depends(current_user)):
+    """Claims Euler holds against this lead's vehicle. Scoped like any other lead read."""
+    lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
+    return await oem_claims.claims_for_lead(db, lead_id)
+
+
+@api.get("/reports/claim-reconciliation", dependencies=[Depends(owner_only)])
+async def claim_reconciliation_report():
+    """The three-way gap: what Scheme Master says you are owed, what was actually
+    filed with Euler, and what Euler approved.
+
+    A lead with entitlement and no filed claim is money nobody has asked for. A lead
+    whose filed claim was rejected while the register still carries it as receivable is
+    money the books say is coming and is not.
+    """
+    leads = await _commercial_leads()
+    scheme_rows = await get_scheme_rows()
+    by_lead = {}
+    async for row in db[oem_claims.CLAIMS_COLLECTION].find({}):
+        for line in row.get("lineItems") or []:
+            lid = line.get("leadId")
+            if not lid:
+                continue
+            entry = by_lead.setdefault(lid, {"filed": 0.0, "approved": 0.0, "rejected": 0.0,
+                                             "claimNumbers": [], "statuses": []})
+            entry["filed"] = ce.round2(entry["filed"] + ce.num(line.get("totalAmount")))
+            if str(row.get("status") or "") == "Rejected":
+                entry["rejected"] = ce.round2(entry["rejected"] + ce.num(line.get("totalAmount")))
+            if str(row.get("status") or "") in oem_claims.GENERATED_STATUSES + ("Settled",):
+                entry["approved"] = ce.round2(entry["approved"] + ce.num(line.get("totalAmount")))
+            if row.get("claimNumber") and row["claimNumber"] not in entry["claimNumbers"]:
+                entry["claimNumbers"].append(row["claimNumber"])
+            if row.get("status") and row["status"] not in entry["statuses"]:
+                entry["statuses"].append(row["status"])
+
+    rows = []
+    totals = {"entitled": 0.0, "filed": 0.0, "approved": 0.0, "neverFiled": 0.0, "rejected": 0.0}
+    for l in leads:
+        shares = ce.compute_scheme_claim_shares(lead_to_snapshot(l), scheme_rows)
+        entitled = ce.round2(sum(ce.num(v) for v in (shares["eligibleByComponent"] or {}).values()))
+        got = by_lead.get(l["leadId"]) or {}
+        filed = ce.round2(ce.num(got.get("filed")))
+        approved = ce.round2(ce.num(got.get("approved")))
+        rejected = ce.round2(ce.num(got.get("rejected")))
+        if entitled <= 0 and filed <= 0:
+            continue
+        never_filed = ce.round2(max(0.0, entitled - filed))
+        totals["entitled"] = ce.round2(totals["entitled"] + entitled)
+        totals["filed"] = ce.round2(totals["filed"] + filed)
+        totals["approved"] = ce.round2(totals["approved"] + approved)
+        totals["neverFiled"] = ce.round2(totals["neverFiled"] + never_filed)
+        totals["rejected"] = ce.round2(totals["rejected"] + rejected)
+        rows.append({
+            "leadId": l["leadId"], "customer": l.get("customerName", ""),
+            "model": l.get("interestedModel", ""),
+            "chassisNumber": l.get("chassisNumber", ""),
+            "invoiceNumber": l.get("invoiceNumber", ""),
+            "entitled": entitled, "filed": filed, "approved": approved,
+            "rejected": rejected, "neverFiled": never_filed,
+            "claimNumbers": got.get("claimNumbers") or [],
+            "oemStatuses": got.get("statuses") or [],
+        })
+    rows.sort(key=lambda r: -r["neverFiled"])
+    return {"rows": rows, "totals": totals,
+            "note": "Entitled is Scheme Master's company share. Filed and approved come "
+                    "from Euler's claim settlements, matched on chassis."}
 
 
 @api.get("/inventory")
@@ -9146,6 +9263,12 @@ async def _coulson_sync_loop():
                     logging.exception("OEM reprice after scheduled sync failed")
         except Exception:
             logging.exception("Scheduled Coulson sync failed")
+        # Claims ride the same 15-minute cadence but in their own try: a claim-side
+        # failure must never stop the yard pull that Price Master and delivery depend on.
+        try:
+            await oem_claims.sync_claims(db)
+        except Exception:
+            logging.exception("Scheduled Coulson claim sync failed")
         await asyncio.sleep(15 * 60)
 
 
