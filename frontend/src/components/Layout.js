@@ -5,7 +5,7 @@ import {
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
-  MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse,
+  MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse, Bell,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -22,6 +22,7 @@ const NAV = [
   ]},
   { section: "Sales Pipeline", pipeline: true, items: [
     { to: "/leads", label: "Lead Register", icon: Users },
+    { to: "/approvals", label: "Approvals", icon: Bell, salesOnly: true, approvals: true },
     { to: "/bookings", label: "Bookings", icon: ClipboardList },
     { to: "/quotations", label: "Quotations", icon: FileText, salesOnly: true },
     { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
@@ -71,7 +72,7 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, pendingApprovals, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
     : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk" : "EV Dealership";
   const nav = isOemFinance ? OEM_NAV : NAV;
@@ -113,6 +114,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             if (i.accountsHome && !isAccounts && !isOwner) return false;
             if (i.fieldHome && !isField && !isOwner) return false;
             if (i.gmHome && !isSalesGm && !isOwner) return false;
+            if (i.approvals && !canApproveLeads && !isExecutive) return false;
             return true;
           });
           if (!items.length) return null;
@@ -127,6 +129,9 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
                     className={({ isActive }) => cx("group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors", isActive ? "bg-cobalt-tint text-cobalt" : "text-ink-soft hover:bg-zinc-100 hover:text-ink")}>
                     <item.icon size={17} className="shrink-0" />
                     <span className="truncate">{item.label}</span>
+                    {item.approvals && pendingApprovals > 0 && (
+                      <span className="ml-auto text-[10px] font-bold tabular bg-red-50 text-red-700 px-1.5 py-0.5 rounded-full">{pendingApprovals}</span>
+                    )}
                     {item.ownerOnly && <span className="ml-auto text-[9px] font-bold uppercase text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Owner</span>}
                   </NavLink>
                 ))}
@@ -240,9 +245,21 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   const location = useLocation();
+
+  useEffect(() => {
+    if (!canApproveLeads && !isExecutive) return undefined;
+    let live = true;
+    const load = () => get("/lead-requests/summary").then((d) => {
+      if (live) setPendingApprovals(Number(d?.pending || 0));
+    }).catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => { live = false; clearInterval(t); };
+  }, [canApproveLeads, isExecutive, location.pathname]);
 
   // Close mobile drawer on route change
   useEffect(() => { setNavOpen(false); }, [location.pathname]);
@@ -278,6 +295,9 @@ export default function Layout({ children }) {
         isOemFinance={isOemFinance}
         canEditCommercials={canEditCommercials}
         isSalesGm={isSalesGm}
+        canApproveLeads={canApproveLeads}
+        isExecutive={isExecutive}
+        pendingApprovals={pendingApprovals}
         open={navOpen}
         onClose={() => setNavOpen(false)}
         onNavigate={() => setNavOpen(false)}

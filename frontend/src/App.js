@@ -39,6 +39,7 @@ import AuditLog from "./pages/AuditLog";
 import OemFinance from "./pages/OemFinance";
 import Allocation from "./pages/Allocation";
 import SalesGmDashboard from "./pages/SalesGmDashboard";
+import Approvals from "./pages/Approvals";
 
 function homePath(auth) {
   // The OEM finance desk has exactly one page. Sending it anywhere else would
@@ -109,6 +110,7 @@ function AppRoutes() {
       <Route path="/field" element={P(<FieldDashboard />, { fieldOnly: true })} />
       <Route path="/gm" element={P(<SalesGmDashboard />, { gmHome: true })} />
       <Route path="/leads" element={P(<Leads />, { salesOnly: true, fieldOk: true })} />
+      <Route path="/approvals" element={P(<Approvals />, { salesOnly: true })} />
       <Route path="/bookings" element={P(<Bookings />, { salesOnly: true, fieldOk: true })} />
       <Route path="/quotations" element={P(<Quotations />, { salesOnly: true })} />
       <Route path="/activities" element={P(<Activities />, { salesOnly: true })} />
