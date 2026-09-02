@@ -107,6 +107,8 @@ async def test_executive_dashboard_scoped(client):
     assert body["scope"]["matchedLeads"] >= 1
     assert "myLeadsMtd" in body["kpis"]
     assert "worklist" in body
+    assert "incentive" in body
+    assert "units" in body["incentive"]
 
 
 @pytest.mark.asyncio
@@ -294,3 +296,37 @@ async def test_asm_can_view_finance_register_readonly(client):
 
     await _login(client, "rm@euler.com")
     assert (await client.get("/api/finance")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_executive_finance_register_is_own_files_only(client):
+    import server as srv
+    await srv.db.finance.delete_many({})
+    await srv.db.leads.insert_one({
+        "leadId": "LD-FIN-MINE", "customerName": "Mine", "executive": "Executive",
+        "currentStatus": "Booked", "accountStatus": "Active",
+        "createdDate": "2026-08-01", "mobile": "9000000101",
+    })
+    await srv.db.leads.insert_one({
+        "leadId": "LD-FIN-THEIRS", "customerName": "Theirs", "executive": "Sanjay",
+        "currentStatus": "Booked", "accountStatus": "Active",
+        "createdDate": "2026-08-01", "mobile": "9000000102",
+    })
+    await srv.db.finance.insert_one({
+        "fileNumber": "FN-MINE", "leadId": "LD-FIN-MINE", "customerName": "Mine",
+        "financer": "HDFC", "sanctionedAmount": 80000, "receivedAgainstFile": 0,
+        "fileOutstanding": 80000, "status": "Pending",
+    })
+    await srv.db.finance.insert_one({
+        "fileNumber": "FN-THEIRS", "leadId": "LD-FIN-THEIRS", "customerName": "Theirs",
+        "financer": "AXIS", "sanctionedAmount": 90000, "receivedAgainstFile": 0,
+        "fileOutstanding": 90000, "status": "Pending",
+    })
+    await _login(client, "executive@euler.com")
+    rows = (await client.get("/api/finance")).json()
+    ids = {f["fileNumber"] for f in rows}
+    assert "FN-MINE" in ids
+    assert "FN-THEIRS" not in ids
+    await _login(client, "owner@euler.com")
+    owner_ids = {f["fileNumber"] for f in (await client.get("/api/finance")).json()}
+    assert "FN-MINE" in owner_ids and "FN-THEIRS" in owner_ids

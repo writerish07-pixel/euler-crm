@@ -30,8 +30,7 @@ export default function Settings() {
   useEffect(() => {
     loadUsers();
     if (isOwner) get("/staff").then(setStaff).catch(() => setStaff([]));
-    // The OEM role is denied every route but its own report, so do not even ask.
-    if (!isOemFinance) get("/integrations/gsheets").then(setGs).catch(() => {});
+    if (isOwner) get("/integrations/gsheets").then(setGs).catch(() => {});
   }, [loadUsers, isOemFinance, isOwner]);
 
   const changePassword = async () => {
@@ -208,7 +207,9 @@ export default function Settings() {
       {isOwner && <BotspaceCard />}
       {isOwner && <CoulsonCard />}
 
-      <Card className="p-5 mb-6">
+      {isOwner && (
+      <>
+      <Card className="p-5 mb-6" data-testid="gsheet-sync-card">
         <div className="flex items-center gap-2 mb-3">
           <h3 className="font-heading font-bold text-ink">Google Sheet Sync</h3>
           {gs && <Badge tone={gs.enabled ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>{gs.enabled ? "Connected" : "Not configured"}</Badge>}
@@ -277,7 +278,7 @@ export default function Settings() {
         )}
       </Card>
 
-      <Card className="p-5 mb-6">
+      <Card className="p-5 mb-6" data-testid="share-board-card">
         <h3 className="font-heading font-bold text-ink mb-3">Company Share Board</h3>
         <p className="text-sm text-ink-soft mb-3">A public, read-only board for company people — active bookings & monthly retail only. No customer or staff data.</p>
         <div className="flex items-center gap-2">
@@ -286,6 +287,8 @@ export default function Settings() {
           <a href={shareUrl} target="_blank" rel="noreferrer"><Button variant="secondary"><ExternalLink size={14} /> Open</Button></a>
         </div>
       </Card>
+      </>
+      )}
 
       {isOwner && <CancelReasonsCard />}
 

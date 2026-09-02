@@ -982,6 +982,82 @@ def get_incentive_rate_for_lead(model, variant, delivery_date, incentive_rows):
     return None
 
 
+def _level_bounds(level):
+    lo = int(num(level.get("fromUnits")))
+    raw_hi = level.get("toUnits")
+    hi = None if raw_hi in (None, "",) else int(num(raw_hi))
+    if hi is not None and hi <= 0:
+        hi = None
+    return lo, hi
+
+
+def evaluate_executive_incentive(units, plan):
+    """Highest matching slab × all units this month. Below minUnits → ₹0.
+
+    levels: [{fromUnits, toUnits (blank = and above), amount}] amount is ₹ per unit.
+    """
+    units = int(num(units))
+    plan = plan or {}
+    min_u = max(0, int(num(plan.get("minUnits"))))
+    levels = []
+    for raw in plan.get("levels") or []:
+        lo, hi = _level_bounds(raw)
+        if lo <= 0:
+            continue
+        levels.append({
+            "fromUnits": lo,
+            "toUnits": hi,
+            "amount": round2(num(raw.get("amount"))),
+        })
+    levels.sort(key=lambda L: (L["fromUnits"], L["toUnits"] if L["toUnits"] is not None else 10**9))
+
+    def next_after(current_from):
+        for L in levels:
+            if current_from is None or L["fromUnits"] > current_from:
+                return {
+                    "fromUnits": L["fromUnits"],
+                    "toUnits": L["toUnits"],
+                    "amount": L["amount"],
+                    "unitsNeeded": max(0, L["fromUnits"] - units),
+                }
+        return None
+
+    out = {
+        "units": units,
+        "minUnits": min_u,
+        "started": units >= min_u and min_u > 0 or (min_u == 0 and units > 0 and bool(levels)),
+        "amountPerUnit": 0.0,
+        "total": 0.0,
+        "fromUnits": None,
+        "toUnits": None,
+        "next": None,
+    }
+    if units < min_u:
+        out["started"] = False
+        out["next"] = next_after(None)
+        if out["next"]:
+            out["next"]["unitsNeeded"] = max(0, max(min_u, out["next"]["fromUnits"]) - units)
+        return out
+
+    matched = None
+    for L in levels:
+        lo, hi = L["fromUnits"], L["toUnits"]
+        if units < lo:
+            continue
+        if hi is not None and units > hi:
+            continue
+        matched = L
+    if not matched:
+        out["next"] = next_after(None)
+        return out
+    out["amountPerUnit"] = matched["amount"]
+    out["fromUnits"] = matched["fromUnits"]
+    out["toUnits"] = matched["toUnits"]
+    out["total"] = round2(matched["amount"] * units)
+    out["next"] = next_after(matched["fromUnits"])
+    return out
+
+
 def suggested_insurance_payout_rate(model, variant=""):
     """Storm/Turbo -> 49%, all other models -> 36.5% (decimal).
 
