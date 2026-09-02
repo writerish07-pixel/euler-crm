@@ -1689,9 +1689,10 @@ async def executive_dashboard(user=Depends(current_user)):
 
     conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
 
-    plan = await _load_exec_incentive_plan()
+    plan = await _load_exec_incentive_plan_for(user.get("name") or "")
     incentive = ce.evaluate_executive_incentive(len(monthly_deliveries), plan)
     incentive["month"] = ym
+    incentive["executive"] = plan.get("executive") or (user.get("name") or "")
 
     return {
         "scope": {
@@ -5746,12 +5747,24 @@ class ExecIncentiveLevelIn(BaseModel):
 
 
 class ExecIncentivePlanIn(BaseModel):
+    executive: str
     minUnits: int = 0
     levels: List[ExecIncentiveLevelIn] = []
 
 
-async def _load_exec_incentive_plan():
-    doc = await db.executive_incentive.find_one({"_id": "plan"}) or {}
+def _exec_incentive_id(name: str) -> str:
+    return "exec:" + _norm_name(name)
+
+
+def _exec_names_match(a: str, b: str) -> bool:
+    x, y = _norm_name(a), _norm_name(b)
+    if not x or not y:
+        return False
+    return x == y or x in y or y in x
+
+
+def _plan_from_doc(doc, executive_name=""):
+    doc = doc or {}
     levels = []
     for raw in doc.get("levels") or []:
         hi = raw.get("toUnits")
@@ -5760,12 +5773,48 @@ async def _load_exec_incentive_plan():
             "toUnits": None if hi in (None, "") else int(ce.num(hi)),
             "amount": ce.round2(ce.num(raw.get("amount"))),
         })
+    doc_id = str(doc.get("_id") or "")
+    if doc_id.startswith("exec:"):
+        source = "personal"
+    elif doc_id == "plan":
+        source = "shared"
+    else:
+        source = "none"
     return {
+        "executive": (doc.get("executive") or executive_name or "").strip(),
         "minUnits": int(ce.num(doc.get("minUnits"))),
         "levels": levels,
         "updatedAt": doc.get("updatedAt") or "",
         "updatedBy": doc.get("updatedBy") or "",
+        "source": source,
     }
+
+
+async def _find_exec_incentive_doc(name: str):
+    """Personal plan first; leftover global `_id: plan` only if this person has none."""
+    key = _norm_name(name)
+    if not key:
+        return {}
+    doc = await db.executive_incentive.find_one({"_id": _exec_incentive_id(name)})
+    if doc:
+        return doc
+    exact, fuzzy = None, None
+    for d in await db.executive_incentive.find({"_id": {"$regex": r"^exec:"}}).to_list(500):
+        stored = d.get("executive") or str(d.get("_id") or "")[5:]
+        if _norm_name(stored) == key:
+            exact = d
+            break
+        if fuzzy is None and _exec_names_match(name, stored):
+            fuzzy = d
+    if exact:
+        return exact
+    if fuzzy:
+        return fuzzy
+    return await db.executive_incentive.find_one({"_id": "plan"}) or {}
+
+
+async def _load_exec_incentive_plan_for(name: str):
+    return _plan_from_doc(await _find_exec_incentive_doc(name), name)
 
 
 def _validate_exec_incentive_plan(body: ExecIncentivePlanIn):
@@ -5792,47 +5841,87 @@ def _validate_exec_incentive_plan(body: ExecIncentivePlanIn):
 
 
 @api.get("/executive-incentive/plan")
-async def get_exec_incentive_plan(user=Depends(current_user)):
+async def get_exec_incentive_plan(executive: Optional[str] = None, user=Depends(current_user)):
     role = str(user.get("role") or "")
     if role not in ("owner", "executive"):
         raise HTTPException(403, "Executive incentive is for Owner and executives.")
-    return await _load_exec_incentive_plan()
+    if role == "executive":
+        name = (user.get("name") or "").strip()
+        if not name:
+            raise HTTPException(422, "Your user has no name; cannot load incentive.")
+        return await _load_exec_incentive_plan_for(name)
+    name = (executive or "").strip()
+    if not name:
+        raise HTTPException(422, "Pick an executive to load their incentive.")
+    return await _load_exec_incentive_plan_for(name)
 
 
 @api.put("/executive-incentive/plan", dependencies=[Depends(owner_only)])
 async def save_exec_incentive_plan(body: ExecIncentivePlanIn, act=Depends(actor)):
+    name = (body.executive or "").strip()
+    if not name:
+        raise HTTPException(422, "Pick an executive. Each person has their own target and steps.")
     rows = _validate_exec_incentive_plan(body)
     levels = [{"fromUnits": lo, "toUnits": hi, "amount": amt} for lo, hi, amt in rows]
     doc = {
-        "_id": "plan",
+        "_id": _exec_incentive_id(name),
+        "executive": name,
         "minUnits": int(body.minUnits),
         "levels": levels,
         "updatedAt": now_iso(),
         "updatedBy": (act or {}).get("email") or "",
     }
-    await db.executive_incentive.replace_one({"_id": "plan"}, doc, upsert=True)
-    return await _load_exec_incentive_plan()
+    await db.executive_incentive.replace_one({"_id": doc["_id"]}, doc, upsert=True)
+    return await _load_exec_incentive_plan_for(name)
 
 
 @api.get("/executive-incentive/board", dependencies=[Depends(owner_only)])
 async def exec_incentive_board():
-    plan = await _load_exec_incentive_plan()
     ym = this_month()
     leads = await db.leads.find().to_list(8000)
-    by_exec = {}
+    units_by_key = {}
+    display = {}
+
+    def remember(name: str, prefer=False):
+        n = (name or "").strip()
+        if not n or n == "—":
+            return
+        k = _norm_name(n)
+        if not k:
+            return
+        if prefer or k not in display:
+            display[k] = n
+
+    for n in await _executive_names():
+        remember(n, prefer=True)
+    for u in await db.users.find({"role": "executive"}).to_list(200):
+        remember(u.get("name") or "")
+    for d in await db.executive_incentive.find({"_id": {"$regex": r"^exec:"}}).to_list(500):
+        remember(d.get("executive") or "")
     for l in leads:
         if not _is_delivered_lead(l):
             continue
         if not str(_retail_date(l) or "").startswith(ym):
             continue
-        name = (l.get("executive") or "").strip() or "—"
-        by_exec[name] = by_exec.get(name, 0) + 1
+        name = (l.get("executive") or "").strip()
+        if not name:
+            continue
+        k = _norm_name(name)
+        if not k:
+            continue
+        remember(name)
+        units_by_key[k] = units_by_key.get(k, 0) + 1
+
     board = []
-    for name, units in sorted(by_exec.items(), key=lambda x: (-x[1], x[0].lower())):
+    for k, name in display.items():
+        plan = await _load_exec_incentive_plan_for(name)
+        units = int(units_by_key.get(k) or 0)
         row = ce.evaluate_executive_incentive(units, plan)
         row["executive"] = name
+        row["hasOwnPlan"] = plan.get("source") == "personal"
         board.append(row)
-    return {"month": ym, "plan": plan, "executives": board}
+    board.sort(key=lambda x: (-int(x.get("units") or 0), str(x.get("executive") or "").lower()))
+    return {"month": ym, "executives": board}
 
 
 @api.get("/bookings")
