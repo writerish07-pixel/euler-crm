@@ -12,11 +12,16 @@ Euler's claim workflow, mirrored read-only into the CRM and tied to leads by cha
 | Keyed on | `(leadId, componentKey)` | Coulson debit-note id, linked to leads by chassis |
 | Feeds | Owner Commercial, Dealer Earnings, OEM Claim Dashboard | Nothing financial — it is a mirror |
 
-**These must never be merged.** One Coulson debit note can carry line items for several
+**These must never be merged on money.** One Coulson debit note can carry line items for several
 leads, and its claim types (`"Referral Commission"`) share no vocabulary with the
-register's component keys. Writing Coulson statuses into `db.claims.claimStatus` would
+register's component keys. Writing Coulson **amounts** into `db.claims` would
 corrupt every report that sums `eligibleClaim - receivedAmount`. A test pins this
-(`test_claim_sync_never_writes_to_the_scheme_claim_register`).
+(`test_claim_sync_never_writes_money_into_the_scheme_claim_register`).
+
+Filing **status, dates and claim reference** do follow Euler: when a register row
+matches a live debit note, `claimStatus` becomes Submitted / Approved / Rejected,
+`claimReference` takes the Coulson number, and empty submitted/approved dates fill
+from the note. `eligibleClaim`, `claimAmount` and `receivedAmount` stay the dealer's.
 
 The two are compared in four places:
 
@@ -36,8 +41,9 @@ to `insuranceBenefit`.
 
 ## The two-way cross-check
 
-Each register row carries an `oemMatch` state. **It is an added field — the mirror never
-writes money, status or dates into `db.claims`.**
+Each register row carries an `oemMatch` state. **The mirror never writes money into
+`db.claims`.** It does stamp filing status / dates / the Coulson claim number so the
+Scheme Claim Register STATUS column matches the OEM app.
 
 | State | Colour | Means | Do |
 |---|---|---|---|
@@ -57,8 +63,13 @@ so a line whose description still says "Insurance Benefits Up to…" is not stol
 the word "insurance". `COMPONENT_PHRASES` then maps Scheme Claim prose, most specific
 first. **A mapping miss must never render as "not claimed"** — that would send
 the money desk chasing money already sitting in Euler's queue. A test pins it.
-A register row whose vehicle has an Euler claim for a *different* mapped component
-stays `not_filed`, but that other claim's number is not shown on the red row.
+
+**OEM Extra Support is a staff-typed side ledger, not a Scheme Master component.**
+Coulson often files it as Additional Support / Dealer Incentive, or as a Scheme Claim
+whose description still says insurance. If no Extra Support-specific line exists,
+any live Euler debit note on the same chassis/invoice **is** that filing (`filed` /
+`accepted`, claim number shown). Other scheme components (exchange vs referral, …)
+stay per-component: a referral note does not mark Exchange as filed.
 
 The reverse colour on OEM Claim Settlements is `registerMatch`:
 
@@ -150,6 +161,20 @@ and listed under "Not linked", never dropped.
 - **Customer photographs are not mirrored.** Line items carry `documents[]` with S3
   URLs to customer WhatsApp images on an open bucket; only `documentCount` is stored.
   The claim PDF (`debit_note_s3_link`) is a business document and is kept.
+
+## Google Sheet (Scheme Claim Register)
+
+Opening the register or syncing claims stamps filing onto `db.claims`, then upserts
+the Scheme Claim Register tab. Settings → **Add Scheme Claim Euler columns** (and
+Backfill) append, never rename:
+
+- Chassis Number, Invoice Number
+- In Euler (`oemMatchState`), Euler Status, Euler Stage
+- Claim Reference Number (already on the tab) receives the Coulson debit-note number
+- Claim Status / Submitted / Approved dates follow Euler as above
+
+OEM Extra Support Register also receives chassis / invoice / claim reference and
+the stamped status. Money columns are unchanged.
 
 ## Access
 

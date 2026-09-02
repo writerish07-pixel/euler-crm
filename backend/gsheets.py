@@ -113,7 +113,10 @@ SYNC_MAP = {
                 "totalDiscount", "dealerDiscount", "oemDiscount", "claimRequired",
                 "ageingDays",
                 # Newly sourced on the claim record itself.
-                "source", "dsaApproval", "claimReceivedDate", "claimRemarks"], None),
+                "source", "dsaApproval", "claimReceivedDate", "claimRemarks",
+                # Euler filing, copied from OEM Claim Settlements — not money.
+                "chassisNumber", "invoiceNumber", "oemMatchState", "oemStatus",
+                "oemStageLabel"], None),
     "insurance": (_tab("GSHEET_TAB_INSURANCE", "Insurance Register"), "entryId",
                   ["entryId", "leadId", "customerName", "mobile", "model", "variant",
                    "insuranceCompany", "policyNumber", "insuranceAmount", "payoutRatePct",
@@ -155,6 +158,7 @@ SYNC_MAP = {
     "oem_extra_support": (_tab("GSHEET_TAB_OEM_EXTRA_SUPPORT", "OEM Extra Support Register"), "leadId",
                           ["leadId", "bookingId", "customerName", "model", "variant", "bookingDate",
                            "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
+                           "chassisNumber", "invoiceNumber", "claimReference",
                            "status", "lastUpdated", "remarks"], 1),
 }
 
@@ -301,6 +305,11 @@ HEADER_ALIASES = {
     "leadSource": ["lead source"],
     "claimStatus": ["claim status"],
     "insuranceStatus": ["insurance status"],
+    "chassisNumber": ["chassis number", "chassis"],
+    "invoiceNumber": ["invoice number", "invoice"],
+    "oemMatchState": ["in euler", "oem match", "in coulson"],
+    "oemStatus": ["euler status", "oem status"],
+    "oemStageLabel": ["euler stage", "oem stage"],
 }
 
 MASTERS_TAB = _tab("GSHEET_TAB_MASTERS", "Masters")
@@ -812,6 +821,7 @@ OEM_EXTRA_CANONICAL_HEADERS = (
 OEM_EXTRA_REGISTER_COLS = (
     "Lead ID", "Booking ID", "Customer Name", "Vehicle Model", "Variant", "Booking Date",
     *OEM_EXTRA_CANONICAL_HEADERS,
+    "Chassis Number", "Invoice Number", "Claim Reference Number",
     "Status", "Last Updated", "Remarks",
 )
 
@@ -1006,6 +1016,13 @@ LEAD_COMMERCIAL_HEADERS = [
     "Deal Cancelled",
 ]
 
+# Scheme Claim Register columns so Euler filing (chassis / In Euler / status)
+# actually has a header to land in. Append-only. Claim Reference Number already
+# exists on the tab and is filled with the Coulson debit-note number.
+CLAIM_OEM_HEADERS = [
+    "Chassis Number", "Invoice Number", "In Euler", "Euler Status", "Euler Stage",
+]
+
 
 def _ensure_cancel_columns_sync():
     titles = _sheet_titles()
@@ -1117,12 +1134,46 @@ async def ensure_lead_commercial_columns():
         return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
+def _ensure_scheme_claim_oem_columns_sync():
+    titles = _sheet_titles()
+    tab = SYNC_MAP["claims"][0]
+    if tab not in titles:
+        return {"ok": False, "changed": False,
+                "tabs": [{"tab": tab, "ok": False, "error": "tab not found", "added": []}]}
+    detail = _append_missing_headers(tab, CLAIM_OEM_HEADERS, _header_row_for("claims", tab))
+    return {"ok": True, "changed": bool(detail.get("added")), "tabs": [detail]}
+
+
+async def ensure_scheme_claim_oem_columns():
+    """Append chassis / In Euler / Euler status headers on Scheme Claim Register.
+
+    Append-only. Until these exist, OEM filing fields do not write to the sheet.
+    Claim Reference Number is already on the tab and holds the Coulson claim no.
+    """
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled"), "tabs": []}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
+    try:
+        detail = await asyncio.to_thread(_ensure_scheme_claim_oem_columns_sync)
+        _mark_health(True)
+        return detail
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _mark_health(False, str(e)[:300])
+        return {"ok": False, "reason": str(e)[:300], "tabs": []}
+
+
 async def ensure_pending_columns():
     """Append every waiting header the live workbook still lacks.
 
     Backfill runs this first so one click both creates the columns the app now
-    writes (OEM Extra, Insurance Agent, Cancellation, TCS/RSA/exchange) and
-    then fills rows. Each step is append-only and safe to re-run.
+    writes (OEM Extra, Insurance Agent, Cancellation, TCS/RSA/exchange, Scheme Claim
+    Euler filing) and then fills rows. Each step is append-only and safe to re-run.
     """
     global _service
     if _service is None:
@@ -1138,6 +1189,7 @@ async def ensure_pending_columns():
         ("insuranceAgent", ensure_insurance_agent_columns),
         ("cancellation", ensure_cancel_columns),
         ("leadCommercial", ensure_lead_commercial_columns),
+        ("schemeClaimOem", ensure_scheme_claim_oem_columns),
     ):
         try:
             detail = await fn()

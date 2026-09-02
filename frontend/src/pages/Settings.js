@@ -25,6 +25,7 @@ export default function Settings() {
   const [ensuringIns, setEnsuringIns] = useState(false);
   const [ensuringCancel, setEnsuringCancel] = useState(false);
   const [ensuringCommercial, setEnsuringCommercial] = useState(false);
+  const [ensuringClaimOem, setEnsuringClaimOem] = useState(false);
 
   const loadUsers = useCallback(() => { if (isOwner) get("/auth/users").then(setUsers).catch(() => {}); }, [isOwner]);
   useEffect(() => {
@@ -141,6 +142,25 @@ export default function Settings() {
     } finally { setEnsuringCommercial(false); }
   };
 
+  const ensureSchemeClaimOemColumns = async () => {
+    setEnsuringClaimOem(true);
+    try {
+      const r = await post("/integrations/gsheets/ensure-scheme-claim-oem-columns", {});
+      if (r.ok === false) {
+        toast.error(r.reason || "Could not update the Scheme Claim Register header");
+        return;
+      }
+      const added = (r.tabs || []).flatMap((t) => t.added || []);
+      if (r.changed) {
+        toast.success(`Scheme Claim Register updated — added ${added.join(", ")}`);
+      } else {
+        toast.success("Euler filing columns are already present on Scheme Claim Register");
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to add Scheme Claim Euler columns");
+    } finally { setEnsuringClaimOem(false); }
+  };
+
   const STAFF_ROLE_TO_LOGIN = {
     executive: "executive", TL: "tl", GM: "sales_gm", ASM: "asm", RM: "rm", owner: "owner", accounts: "accounts",
   };
@@ -254,6 +274,15 @@ export default function Settings() {
                   </Button>
                   <span className="text-xs text-ink-faint ml-2">
                     Adds RSA / AMC, TCS, TCS Applicable, TCS Base, Insurance Arranged By, Final Exchange Value, Scheme As Of, Deal Cancelled to the Lead Register. Append-only — Backfill also adds these
+                  </span>
+                </div>
+                <div>
+                  <Button variant="secondary" data-testid="ensure-scheme-claim-oem-cols-btn"
+                    onClick={ensureSchemeClaimOemColumns} disabled={ensuringClaimOem || !gs?.enabled}>
+                    <ListPlus size={14} /> {ensuringClaimOem ? "Adding columns…" : "Add Scheme Claim Euler columns"}
+                  </Button>
+                  <span className="text-xs text-ink-faint ml-2">
+                    Adds Chassis Number, Invoice Number, In Euler, Euler Status, Euler Stage on Scheme Claim Register. Claim Reference Number already exists and holds the Coulson debit-note number. Append-only — Backfill also adds these
                   </span>
                 </div>
                 <div>

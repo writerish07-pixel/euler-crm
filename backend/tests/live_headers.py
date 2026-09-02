@@ -82,4 +82,10 @@ PENDING_SHEET_COLUMNS = {
               "rsaAmc", "tcs", "tcsBase", "tcsApplicable",
               "insuranceArrangedBy", "finalExchangeValue", "schemeAsOf",
               "dealCancelled"],
+    # Settings -> "Add Scheme Claim Euler columns" / Backfill. Claim Reference Number
+    # already exists on the tab and receives the Coulson debit-note number.
+    "claims": ["chassisNumber", "invoiceNumber", "oemMatchState", "oemStatus",
+               "oemStageLabel"],
+    # Appended on OEM Extra Support Register alongside chassis/invoice/claim no.
+    "oem_extra_support": ["chassisNumber", "invoiceNumber", "claimReference"],
 }

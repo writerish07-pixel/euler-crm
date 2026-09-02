@@ -310,3 +310,76 @@ async def test_commercial_ensure_honours_the_write_guard(monkeypatch, sheet):
     monkeypatch.delenv("GSHEET_ALLOW_TEST_WRITES", raising=False)
     res = await gsheets.ensure_lead_commercial_columns()
     assert res["ok"] is False and res.get("writeBlocked") is True
+
+
+def test_sync_map_declares_scheme_claim_oem_fields():
+    fields = gsheets.SYNC_MAP["claims"][2]
+    for f in ("chassisNumber", "invoiceNumber", "oemMatchState", "oemStatus", "oemStageLabel"):
+        assert f in fields, f
+        assert f in PENDING_SHEET_COLUMNS["claims"], f
+    assert gsheets.CLAIM_OEM_HEADERS == [
+        "Chassis Number", "Invoice Number", "In Euler", "Euler Status", "Euler Stage",
+    ]
+
+
+def test_scheme_claim_oem_button_appends_headers_and_is_idempotent(sheet):
+    tabs, values = sheet
+    before = list(tabs["Scheme Claim Register"][0])
+    res = gsheets._ensure_scheme_claim_oem_columns_sync()
+    assert res["ok"] is True and res["changed"] is True, res
+    assert res["tabs"][0]["added"] == gsheets.CLAIM_OEM_HEADERS
+    hdr = tabs["Scheme Claim Register"][0]
+    assert hdr[:len(before)] == before, "existing headers were reordered or renamed"
+    for h in gsheets.CLAIM_OEM_HEADERS:
+        assert h in hdr
+    writes = values.calls["update"]
+    again = gsheets._ensure_scheme_claim_oem_columns_sync()
+    assert again["changed"] is False
+    assert values.calls["update"] == writes
+
+
+def test_appended_scheme_claim_headers_resolve_oem_fields(sheet):
+    tabs, _ = sheet
+    gsheets._ensure_scheme_claim_oem_columns_sync()
+    hdr = tabs["Scheme Claim Register"][0]
+    by_norm = {gsheets._norm(h): i for i, h in enumerate(hdr) if str(h).strip()}
+    for f in ("chassisNumber", "invoiceNumber", "oemMatchState", "oemStatus", "oemStageLabel"):
+        idx = by_norm.get(gsheets._norm(f))
+        if idx is None:
+            for alias in gsheets.HEADER_ALIASES.get(f, []):
+                idx = by_norm.get(gsheets._norm(alias))
+                if idx is not None:
+                    break
+        assert idx is not None, f"{f} still does not resolve after the repair"
+
+
+@pytest.mark.asyncio
+async def test_backfill_adds_scheme_claim_oem_headers_then_writes_filing(sheet):
+    tabs, values = sheet
+    claim = {
+        "claimId": "CLM-LD1-oemExtraSupport", "leadId": "LD1",
+        "customer": "Sita Ram Sharma", "component": "OEM Extra Support",
+        "componentKey": "oemExtraSupport", "eligibleClaim": 7000,
+        "claimAmount": 7000, "receivedAmount": 0, "claimStatus": "Submitted",
+        "claimReference": "AF-122-CL2627077", "chassisNumber": "MD9EMVDL26G217730",
+        "invoiceNumber": "AF-122-I26270117", "oemMatchState": "filed",
+        "oemStatus": "Dealer Development Department Approval Pending",
+        "oemStageLabel": "Dealer Development",
+    }
+    res = await gsheets.backfill({"claims": [claim]})
+    assert res["ok"] is True, res
+    assert res["failed"] == 0, res
+    hdr = tabs["Scheme Claim Register"][0]
+    for h in gsheets.CLAIM_OEM_HEADERS:
+        assert h in hdr, h
+    row = tabs["Scheme Claim Register"][1]
+    assert row[hdr.index("Claim ID")] == "CLM-LD1-oemExtraSupport"
+    assert row[hdr.index("Chassis Number")] == "MD9EMVDL26G217730"
+    assert row[hdr.index("Invoice Number")] == "AF-122-I26270117"
+    assert row[hdr.index("In Euler")] == "filed"
+    assert row[hdr.index("Euler Status")] == "Dealer Development Department Approval Pending"
+    assert row[hdr.index("Euler Stage")] == "Dealer Development"
+    assert row[hdr.index("Claim Status")] == "Submitted"
+    assert row[hdr.index("Claim Reference Number")] == "AF-122-CL2627077"
+    assert row[hdr.index("Eligible Claim")] == 7000
+    assert row[hdr.index("Received Amount")] == 0
