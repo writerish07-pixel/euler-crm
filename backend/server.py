@@ -26,6 +26,7 @@ import oem_catalog as oem_cat
 import oem_sync
 import coulson as coulson_client
 import botspace as wa
+import web_push
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -2340,16 +2341,29 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None, user
     return rows
 
 
-@api.post("/leads")
-async def create_lead(body: LeadIn, _sales=Depends(sales_staff_only)):
-    # Duplicate mobile guard (port of LeadService create: block reused 10-digit mobile)
+class RejectRequestIn(BaseModel):
+    reason: str = ""
+
+
+async def _mobile_taken_by_lead(mobile: str, exclude_lead_id: str = ""):
     import re as _re
-    mob = _re.sub(r"\D", "", body.mobile or "")
-    if len(mob) >= 10:
-        last10 = mob[-10:]
-        existing = await db.leads.find_one({"mobile": {"$regex": last10 + "$"}})
-        if existing:
-            raise HTTPException(409, f"Mobile already used by lead {existing.get('leadId')} ({existing.get('customerName')}).")
+    mob = _re.sub(r"\D", "", mobile or "")
+    if len(mob) < 10:
+        return None
+    last10 = mob[-10:]
+    q = {"mobile": {"$regex": last10 + "$"}}
+    if exclude_lead_id:
+        q["leadId"] = {"$ne": exclude_lead_id}
+    return await db.leads.find_one(q)
+
+
+async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created from CRM"):
+    existing = await _mobile_taken_by_lead(body.mobile)
+    if existing:
+        raise HTTPException(
+            409,
+            f"Mobile already used by lead {existing.get('leadId')} ({existing.get('customerName')}).",
+        )
     lead_id = await next_id("lead", "LD26")
     payload = body.model_dump()
     created_date = str(payload.pop("createdDate", None) or "").strip() or today()
@@ -2370,13 +2384,215 @@ async def create_lead(body: LeadIn, _sales=Depends(sales_staff_only)):
     _act_doc = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": created_date,
         "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Note",
-        "discussion": "Lead created from CRM", "executive": body.executive,
+        "discussion": source_note, "executive": body.executive,
         "customerName": body.customerName, "mobile": body.mobile, "model": body.interestedModel,
     }
     await db.activities.insert_one(dict(_act_doc))
     await sheet_sync("activities", _act_doc)
     await sheet_sync("leads", doc)
     return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
+def _can_approve_leads(user) -> bool:
+    return str((user or {}).get("role") or "") in web_push.LEAD_APPROVER_ROLES
+
+
+@api.post("/leads")
+async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
+    """Owner / GM / TL create a live lead. An executive submits a request until
+    GM or Owner taps Approve — nothing is written to the Lead Register until then."""
+    if str(user.get("role") or "") == "executive":
+        if ce.num(body.budget) <= 0:
+            raise HTTPException(422, "Enter the deal amount before sending for GM / Owner approval.")
+        existing = await _mobile_taken_by_lead(body.mobile)
+        if existing:
+            raise HTTPException(
+                409,
+                f"Mobile already used by lead {existing.get('leadId')} ({existing.get('customerName')}).",
+            )
+        pending_same = None
+        if str(body.mobile or "").strip():
+            last10 = re.sub(r"\D", "", body.mobile)[-10:]
+            if len(last10) == 10:
+                pending_same = await db.lead_requests.find_one({
+                    "status": {"$in": ["pending", "approving"]},
+                    "payload.mobile": {"$regex": last10 + "$"},
+                })
+        if pending_same:
+            raise HTTPException(
+                409,
+                f"This mobile is already waiting for approval ({pending_same.get('requestId')}).",
+            )
+        payload = body.model_dump()
+        if not str(payload.get("executive") or "").strip():
+            payload["executive"] = user.get("name") or ""
+        request_id = await next_id("lead_request", "LR26")
+        req = {
+            "requestId": request_id,
+            "status": "pending",
+            "payload": payload,
+            "submittedBy": user.get("email") or "",
+            "submittedByName": user.get("name") or "",
+            "submittedByUserId": user.get("userId") or user.get("email") or "",
+            "createdAt": now_iso(),
+            "dealAmount": ce.round2(ce.num(body.budget)),
+        }
+        await db.lead_requests.insert_one(req)
+        name = (body.customerName or "Customer").strip()
+        model = " ".join(x for x in (body.interestedModel, body.variant) if x).strip() or "vehicle"
+        amt = f"₹{ce.num(body.budget):,.0f}"
+        try:
+            await web_push.notify_lead_approvers(
+                db,
+                title="Lead waiting for approval",
+                body=f"{name} · {model} · {amt}. Open Approvals in Euler CRM.",
+                url="/approvals",
+            )
+        except Exception:
+            logger.exception("lead-request push notify failed")
+        return {
+            "pending": True,
+            "requestId": request_id,
+            "status": "pending",
+            "dealAmount": req["dealAmount"],
+            "message": "Sent to GM / Owner. The lead is created only after they tap Approve.",
+        }
+    return await _insert_live_lead(body)
+
+
+def _request_out(doc):
+    if not doc:
+        return doc
+    row = clean(dict(doc))
+    payload = row.get("payload") or {}
+    row["customerName"] = payload.get("customerName") or ""
+    row["mobile"] = payload.get("mobile") or ""
+    row["interestedModel"] = payload.get("interestedModel") or ""
+    row["variant"] = payload.get("variant") or ""
+    row["executive"] = payload.get("executive") or ""
+    row["budget"] = payload.get("budget") or row.get("dealAmount") or 0
+    row["remarks"] = payload.get("remarks") or ""
+    return row
+
+
+@api.get("/lead-requests/summary")
+async def lead_request_summary(user=Depends(current_user)):
+    role = str(user.get("role") or "")
+    if role == "executive":
+        n = await db.lead_requests.count_documents({
+            "status": "pending",
+            "$or": [
+                {"submittedByUserId": user.get("userId")},
+                {"submittedBy": user.get("email")},
+            ],
+        })
+        return {"pending": n, "mine": n, "canApprove": False}
+    if _can_approve_leads(user):
+        n = await db.lead_requests.count_documents({"status": "pending"})
+        return {"pending": n, "mine": n, "canApprove": True}
+    return {"pending": 0, "mine": 0, "canApprove": False}
+
+
+@api.get("/lead-requests")
+async def list_lead_requests(status: Optional[str] = None, user=Depends(current_user)):
+    st = (status or "pending").strip().lower()
+    if st not in ("pending", "approved", "rejected", "all"):
+        st = "pending"
+    q = {} if st == "all" else {"status": st}
+    role = str(user.get("role") or "")
+    if role == "executive":
+        q["$or"] = [
+            {"submittedByUserId": user.get("userId")},
+            {"submittedBy": user.get("email")},
+        ]
+    elif not _can_approve_leads(user):
+        raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
+    rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(200)]
+    return [_request_out(r) for r in rows]
+
+
+@api.post("/lead-requests/{request_id}/approve")
+async def approve_lead_request(request_id: str, user=Depends(current_user)):
+    if not _can_approve_leads(user):
+        raise HTTPException(403, "Only the Owner or Sales GM can approve a lead.")
+    req = await db.lead_requests.find_one({"requestId": request_id})
+    if not req:
+        raise HTTPException(404, "Approval request not found")
+    if req.get("status") == "approved" and req.get("leadId"):
+        return {"ok": True, "leadId": req["leadId"], "already": True}
+    claimed = await db.lead_requests.find_one_and_update(
+        {"requestId": request_id, "status": "pending"},
+        {"$set": {
+            "status": "approving",
+            "approvedBy": user.get("email") or "",
+            "approvedByName": user.get("name") or "",
+            "approvedAt": now_iso(),
+        }},
+    )
+    if not claimed:
+        fresh = await db.lead_requests.find_one({"requestId": request_id})
+        if (fresh or {}).get("leadId"):
+            return {"ok": True, "leadId": fresh["leadId"], "already": True}
+        raise HTTPException(409, f"This request is already {(fresh or {}).get('status')}.")
+    payload = claimed.get("payload") or {}
+    try:
+        body = LeadIn(**payload)
+        lead = await _insert_live_lead(body, source_note="Lead created after GM / Owner approval")
+    except HTTPException:
+        await db.lead_requests.update_one(
+            {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
+        raise
+    await db.lead_requests.update_one(
+        {"requestId": request_id},
+        {"$set": {"status": "approved", "leadId": lead["leadId"]}},
+    )
+    return {"ok": True, "leadId": lead["leadId"], "lead": lead}
+
+
+@api.post("/lead-requests/{request_id}/reject")
+async def reject_lead_request(request_id: str, body: RejectRequestIn = RejectRequestIn(),
+                              user=Depends(current_user)):
+    if not _can_approve_leads(user):
+        raise HTTPException(403, "Only the Owner or Sales GM can reject a lead.")
+    req = await db.lead_requests.find_one({"requestId": request_id})
+    if not req:
+        raise HTTPException(404, "Approval request not found")
+    if req.get("status") != "pending":
+        raise HTTPException(409, f"This request is already {req.get('status')}.")
+    await db.lead_requests.update_one({"requestId": request_id}, {"$set": {
+        "status": "rejected",
+        "rejectedBy": user.get("email") or "",
+        "rejectedByName": user.get("name") or "",
+        "rejectedAt": now_iso(),
+        "rejectReason": str(body.reason or "").strip(),
+    }})
+    return {"ok": True, "status": "rejected"}
+
+
+@api.get("/push/vapid-public")
+async def push_vapid_public(_user=Depends(current_user)):
+    doc = await web_push.ensure_vapid(db)
+    return {"publicKey": web_push.public_key_from_doc(doc), "ok": bool(doc.get("publicKey"))}
+
+
+class PushSubIn(BaseModel):
+    endpoint: str
+    keys: dict = {}
+
+
+@api.post("/push/subscribe")
+async def push_subscribe(body: PushSubIn, user=Depends(current_user)):
+    if not _can_approve_leads(user):
+        raise HTTPException(403, "Phone alerts are for Owner / Sales GM.")
+    try:
+        return await web_push.save_subscription(db, user, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@api.post("/push/unsubscribe")
+async def push_unsubscribe(body: PushSubIn, user=Depends(current_user)):
+    return await web_push.drop_subscription(db, user, body.endpoint)
 
 
 @api.get("/leads/{lead_id}")
@@ -4129,8 +4345,14 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
 
 @api.post("/leads/import/commit")
 async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
-                        _sales=Depends(sales_staff_only)):
+                        user=Depends(sales_staff_only)):
     """Insert only the rows that pass validation; report the rest untouched."""
+    if str(user.get("role") or "") == "executive":
+        raise HTTPException(
+            403,
+            "Bulk import creates live leads. Send each enquiry for GM / Owner approval, "
+            "or ask them to import.",
+        )
     import json as _json
     content = await file.read()
     try:
@@ -6377,6 +6599,7 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/executive/dashboard"), ("GET", "/api/field/dashboard"),
     ("GET", "/api/sales-gm/dashboard"),
     ("GET", "/api/leads"), ("POST", "/api/leads"),
+    ("GET", "/api/lead-requests"), ("POST", "/api/lead-requests/{request_id}/approve"),
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
     ("PUT", "/api/leads/{lead_id}/scheme"), ("POST", "/api/leads/{lead_id}/close"),

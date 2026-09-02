@@ -110,10 +110,11 @@ async def _login(c, email):
     c.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
 
 
-async def _lead(c, mobile):
+async def _lead(c, mobile, executive="Amit"):
     r = await c.post("/api/leads", json={
         "customerName": "Step Lock", "mobile": mobile,
-        "interestedModel": MODEL, "variant": VARIANT, "executive": "Amit"})
+        "interestedModel": MODEL, "variant": VARIANT, "executive": executive})
+    assert r.status_code == 200, r.text
     return r.json()["leadId"]
 
 
@@ -122,8 +123,9 @@ async def test_an_executive_cannot_price_or_scheme_at_all(client):
     """Executives were narrowed to feeding leads and booking amounts. Pricing and
     scheme are commercial decisions and moved to the owner outright — this used to
     assert an executive could save each of them ONCE."""
+    await _login(client, "owner@euler.com")
+    lid = await _lead(client, "9777700001", executive="Executive")
     await _login(client, "executive@euler.com")
-    lid = await _lead(client, "9777700001")
     ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
 
     r = await client.put(f"/api/leads/{lid}/price-structure", json=ps)
@@ -198,8 +200,9 @@ async def test_owner_model_change_refreshes_exshowroom_and_realigns_scheme(clien
 
 @pytest.mark.asyncio
 async def test_booking_autofill_does_not_lock_price_for_staff(client):
+    await _login(client, "owner@euler.com")
+    lid = await _lead(client, "9777700003", executive="Executive")
     await _login(client, "executive@euler.com")
-    lid = await _lead(client, "9777700003")
     await client.post(f"/api/leads/{lid}/convert-booking",
                       json={"bookingDate": "2026-08-09", "bookingAmount": 0})
     lead = await server.db.leads.find_one({"leadId": lid})

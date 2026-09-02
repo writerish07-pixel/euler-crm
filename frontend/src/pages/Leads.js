@@ -11,7 +11,7 @@ import { useAuth } from "../context/AuthContext";
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
 export default function Leads() {
-  const { isField } = useAuth();
+  const { isField, isExecutive } = useAuth();
   const [leads, setLeads] = useState([]);
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
@@ -70,8 +70,10 @@ export default function Leads() {
         title="Lead Register"
         subtitle={`${leads.length} leads in pipeline${isField ? " · field view" : ""}`}
         actions={!isField ? <div className="flex gap-2">
-          <Button variant="secondary" data-testid="import-leads-btn" onClick={() => setShowImport(true)}><Upload size={16} /> Import</Button>
-          <Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> New Lead</Button>
+          {!isExecutive && (
+            <Button variant="secondary" data-testid="import-leads-btn" onClick={() => setShowImport(true)}><Upload size={16} /> Import</Button>
+          )}
+          <Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> {isExecutive ? "Request lead" : "New Lead"}</Button>
         </div> : null}
       />
 
@@ -105,7 +107,7 @@ export default function Leads() {
         <LeadDrawer leadId={active} masters={masters} onClose={() => setActive(null)} onChanged={load} />
       )}
       {showNew && (
-        <NewLeadDrawer masters={masters} onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); load(); setActive(id); }} />
+        <NewLeadDrawer masters={masters} onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); load(); if (id) setActive(id); }} />
       )}
       {showImport && (
         <LeadImport onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); load(); }} />
@@ -115,9 +117,10 @@ export default function Leads() {
 }
 
 function NewLeadDrawer({ masters, onClose, onCreated }) {
+  const { isExecutive, user } = useAuth();
   const [form, setForm] = useState({
     customerName: "", mobile: "", city: "", leadSource: "Walk-in", interestedModel: "",
-    variant: "", executive: "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
+    variant: "", executive: isExecutive ? (user?.name || "") : "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
     createdDate: todayISO(), nextFollowupDate: "",
   });
   const [variants, setVariants] = useState([]);
@@ -130,17 +133,26 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const submit = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
+    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter the deal amount for GM / Owner approval");
     try {
       const lead = await post("/leads", { ...form, budget: Number(form.budget) });
+      if (lead.pending) {
+        toast.success("Sent for approval — call GM or Owner. Nothing is on the Lead Register until they Approve.");
+        onCreated(null);
+        return;
+      }
       toast.success(`Lead ${lead.leadId} created`);
       onCreated(lead.leadId);
-    } catch { toast.error("Failed to create lead"); }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to create lead");
+    }
   };
 
   if (!masters) return null;
   return (
-    <Drawer open onClose={onClose} width="max-w-xl" title="New Lead" subtitle="Capture a fresh enquiry"
-      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit}>Create Lead</Button></div>}>
+    <Drawer open onClose={onClose} width="max-w-xl" title={isExecutive ? "Request a lead" : "New Lead"}
+      subtitle={isExecutive ? "GM or Owner must Approve before this becomes a live lead" : "Capture a fresh enquiry"}
+      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit}>{isExecutive ? "Send for approval" : "Create Lead"}</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
         <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
@@ -152,7 +164,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{masters.models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Variant"><Select value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label="Budget (₹)"><Input type="number" value={form.budget} onChange={set("budget")} /></Field>
+        <Field label={isExecutive ? "Deal amount (₹) *" : "Budget (₹)"}><Input type="number" data-testid="lead-budget" value={form.budget} onChange={set("budget")} /></Field>
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
       </div>
     </Drawer>

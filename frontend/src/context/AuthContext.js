@@ -51,6 +51,7 @@ export function AuthProvider({ children }) {
       // ASM/RM / Sales GM may view Finance Register (disbursed vs remaining); writes stay money-desk.
       canViewFinance: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive"
         || role === "accounts" || role === "asm" || role === "rm",
+      canApproveLeads: role === "owner" || role === "sales_gm",
     }}>
       {children}
     </AuthCtx.Provider>

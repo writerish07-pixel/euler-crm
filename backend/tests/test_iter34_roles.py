@@ -97,6 +97,7 @@ async def make_lead(c, name, executive="Amit"):
         "customerName": name, "mobile": next_mobile(), "interestedModel": TURBO[0],
         "variant": TURBO[1], "executive": executive})
     assert r.status_code == 200, r.text
+    assert r.json().get("leadId"), r.text
     return r.json()["leadId"]
 
 
@@ -265,9 +266,23 @@ async def test_staff_roles_cannot_open_the_oem_report(exec_client):
 
 # ============================================== the narrowed executive
 @pytest.mark.asyncio
-async def test_an_executive_still_feeds_leads_and_booking_amount(exec_client):
-    """The whole point of the role after this change."""
-    lid = await make_lead(exec_client, "ITER34 Exec lead", executive="Executive")
+async def test_an_executive_still_feeds_leads_and_booking_amount(client, exec_client):
+    """Enquiry goes to GM/Owner first. After Approve, the executive can still book."""
+    r = await exec_client.post("/api/leads", json={
+        "customerName": "ITER34 Exec lead", "mobile": next_mobile(),
+        "interestedModel": TURBO[0], "variant": TURBO[1],
+        "executive": "Executive", "budget": 185000})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("pending") is True
+    rid = body["requestId"]
+    names = {l["customerName"] for l in (await exec_client.get("/api/leads")).json()}
+    assert "ITER34 Exec lead" not in names
+    assert (await exec_client.post(f"/api/lead-requests/{rid}/approve")).status_code == 403
+    ap = await client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 200, ap.text
+    lid = ap.json()["leadId"]
+    assert lid.startswith("LD26")
     assert (await exec_client.put(f"/api/leads/{lid}",
                                   json={"remarks": "called, interested"})).status_code == 200
     r = await exec_client.post(f"/api/leads/{lid}/convert-booking",
@@ -279,9 +294,9 @@ async def test_an_executive_still_feeds_leads_and_booking_amount(exec_client):
 
 
 @pytest.mark.asyncio
-async def test_the_booking_amount_still_posts_its_receipt(exec_client):
+async def test_the_booking_amount_still_posts_its_receipt(client, exec_client):
     """An executive taking a token must still be recorded as money received."""
-    lid = await make_lead(exec_client, "ITER34 Token", executive="Executive")
+    lid = await make_lead(client, "ITER34 Token", executive="Executive")
     await exec_client.post(f"/api/leads/{lid}/convert-booking",
                            json={"bookingAmount": 5000, "executive": "Executive"})
     pays = await server.db.payments.find({"leadId": lid}).to_list(10)
@@ -375,7 +390,7 @@ async def tl(client):
 
 
 @pytest.mark.asyncio
-async def test_an_executive_hands_over_and_a_tl_completes_it(exec_client, tl):
+async def test_an_executive_hands_over_and_a_tl_completes_it(client, exec_client, tl):
     """The whole point of the role, walked end to end across two people.
 
     The executive takes the enquiry and the booking; the TL prices it, collects
@@ -383,7 +398,7 @@ async def test_an_executive_hands_over_and_a_tl_completes_it(exec_client, tl):
     would stall waiting for the owner to log in — which is exactly what the TL
     exists to prevent, and what this test catches.
     """
-    lid = await make_lead(exec_client, "ITER34 Handover", executive="Executive")
+    lid = await make_lead(client, "ITER34 Handover", executive="Executive")
     assert (await exec_client.post(f"/api/leads/{lid}/convert-booking", json={
         "bookingDate": server.today(), "bookingAmount": 10000,
         "executive": "Executive"})).status_code == 200
