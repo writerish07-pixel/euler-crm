@@ -383,10 +383,12 @@ async def sync_from_coulson(db, *, username=None, password=None):
     dropped = await drop_delivered_from_inventory(db)
     yard_count = await db.oem_inventory.count_documents({})
     sold_count = await replace_sold_inventory(db, sold_vehicles, oem_by_id, by_key)
+    leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(db)
 
     extra = {
         "inventoryCount": yard_count,
         "soldCount": sold_count,
+        "leadsVehicleIds": leads_vehicle_ids,
         "deliveredDropped": dropped,
         "oemModelCount": len(oem_models),
         "pricesUpdated": prices_updated,
@@ -407,6 +409,33 @@ YARD_LIVE_FROM = "2026-09-01"
 
 def _norm_chassis(s):
     return re.sub(r"\s+", "", str(s or "")).strip().upper()
+
+
+def _norm_invoice(s):
+    return str(s or "").strip().upper()
+
+
+def live_occupies_vehicle_id(other):
+    """True if this lead still occupies invoice / chassis / plate uniqueness.
+
+    Cancelled files and deliveries before 1 Sep do not count as conflicts.
+    """
+    if not other:
+        return False
+    if other.get("dealCancelled"):
+        return False
+    acct = str(other.get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return False
+    status = str(other.get("currentStatus") or "").lower()
+    ddate = str(other.get("deliveryDate") or "")[:10]
+    delivered = (
+        str(other.get("deliveryStatus") or "").lower() == "delivered"
+        or status == "delivered"
+    )
+    if delivered and ddate and ddate < YARD_LIVE_FROM:
+        return False
+    return True
 
 
 def _digits10(phone):
@@ -583,17 +612,30 @@ async def match_sold_for_lead(db, lead):
     mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
     if len(mobile) != 10:
         return None
-    candidates = []
+    rows = []
     async for row in db.oem_sold.find({"mobile": mobile}):
+        rows.append(row)
+    if not rows:
+        async for row in db.oem_sold.find({}):
+            rows.append(row)
+    row = match_sold_row(lead, rows)
+    if not row:
+        return None
+    return _sold_match_payload(row, mobile)
+
+
+def match_sold_row(lead, sold_rows):
+    """Pick the unique sold row for this lead, or None if missing/ambiguous."""
+    mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
+    if len(mobile) != 10:
+        return None
+    candidates = []
+    for row in sold_rows or []:
+        if _digits10(row.get("mobile")) != mobile:
+            continue
         score = sold_match_score(row, lead)
         if score:
             candidates.append((score, row))
-    if not candidates:
-        async for row in db.oem_sold.find({}):
-            if _digits10(row.get("mobile")) == mobile:
-                score = sold_match_score(row, lead)
-                if score:
-                    candidates.append((score, row))
     if not candidates:
         return None
     candidates.sort(key=lambda x: -x[0])
@@ -601,7 +643,10 @@ async def match_sold_for_lead(db, lead):
     top = [r for s, r in candidates if s == best_score]
     if len(top) != 1:
         return None
-    row = top[0]
+    return top[0]
+
+
+def _sold_match_payload(row, mobile):
     return {
         "matched": True,
         "chassis": row.get("chassis") or "",
@@ -614,6 +659,145 @@ async def match_sold_for_lead(db, lead):
         "coulsonStatus": row.get("coulsonStatus") or "SOLD",
         "source": "coulson_sold",
     }
+
+
+def _lead_is_cancelled(lead):
+    if (lead or {}).get("dealCancelled"):
+        return True
+    acct = str((lead or {}).get("accountStatus") or "Active").strip().lower()
+    return acct in ("cancelled", "inactive", "archived")
+
+
+def _lead_is_delivered(lead):
+    ds = str((lead or {}).get("deliveryStatus") or "").lower()
+    cs = str((lead or {}).get("currentStatus") or "").lower()
+    return ds == "delivered" or cs == "delivered"
+
+
+def _sold_apply_rank(lead, chassis):
+    """Higher wins when two CRM leads uniquely match the same sold chassis."""
+    already = 1 if _norm_chassis((lead or {}).get("chassisNumber")) == chassis else 0
+    if _lead_is_cancelled(lead):
+        status = 0
+    elif _lead_is_delivered(lead):
+        status = 4
+    elif str((lead or {}).get("currentStatus") or "").lower() in (
+            "booked", "finance process", "financeprocess"):
+        status = 3
+    else:
+        status = 2
+    return (already, status)
+
+
+def _field_taken(leads, field, value, except_id, *, chassis=False):
+    if not value:
+        return False
+    want = _norm_chassis(value) if chassis else _norm_invoice(value)
+    if not want:
+        return False
+    for other in leads:
+        if (other or {}).get("leadId") == except_id:
+            continue
+        if not live_occupies_vehicle_id(other):
+            continue
+        got = other.get(field)
+        got_n = _norm_chassis(got) if chassis else _norm_invoice(got)
+        if got_n and got_n == want:
+            return True
+    return False
+
+
+async def apply_sold_vehicle_ids_to_leads(db):
+    """Write Coulson Sold chassis / invoice / plate onto every uniquely matched lead.
+
+    OEM is the source of truth for those three fields when the customer mobile
+    maps to exactly one sold vehicle. Ambiguous mobiles and live uniqueness
+    conflicts are left unchanged.
+    """
+    stats = {
+        "updated": 0,
+        "unchanged": 0,
+        "skippedNoMatch": 0,
+        "skippedAmbiguous": 0,
+        "skippedConflict": 0,
+    }
+    sold = [r async for r in db.oem_sold.find({})]
+    if not sold:
+        return stats
+    leads = [l async for l in db.leads.find({})]
+    if not leads:
+        return stats
+
+    by_chassis = {}
+    no_match = 0
+    for lead in leads:
+        row = match_sold_row(lead, sold)
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if not row or not ch:
+            no_match += 1
+            continue
+        by_chassis.setdefault(ch, []).append((lead, row))
+    stats["skippedNoMatch"] = no_match
+
+    winners = []
+    for ch, group in by_chassis.items():
+        live = [(l, r) for l, r in group if live_occupies_vehicle_id(l)]
+        pool = live or group
+        ranked = sorted(pool, key=lambda pair: _sold_apply_rank(pair[0], ch), reverse=True)
+        best = _sold_apply_rank(ranked[0][0], ch)
+        top = [p for p in ranked if _sold_apply_rank(p[0], ch) == best]
+        if len(top) != 1:
+            stats["skippedAmbiguous"] += len(group)
+            continue
+        winners.append(top[0])
+        winner_id = (top[0][0] or {}).get("leadId")
+        for l, _r in group:
+            if (l or {}).get("leadId") == winner_id:
+                continue
+            if live_occupies_vehicle_id(l):
+                stats["skippedAmbiguous"] += 1
+
+    for lead, row in winners:
+        lid = (lead or {}).get("leadId")
+        if not lid:
+            continue
+        chassis = _norm_chassis(row.get("chassis"))
+        invoice = str(row.get("invoiceNumber") or "").strip()
+        plate = str(row.get("numberPlate") or "").strip()
+        patch = {}
+        if chassis and _norm_chassis(lead.get("chassisNumber")) != chassis:
+            patch["chassisNumber"] = chassis
+        if invoice and _norm_invoice(lead.get("invoiceNumber")) != _norm_invoice(invoice):
+            patch["invoiceNumber"] = invoice
+        if plate and _norm_invoice(lead.get("numberPlate")) != _norm_invoice(plate):
+            patch["numberPlate"] = plate
+        if not patch:
+            stats["unchanged"] += 1
+            continue
+        conflict = False
+        if "chassisNumber" in patch and _field_taken(
+                leads, "chassisNumber", patch["chassisNumber"], lid, chassis=True):
+            conflict = True
+        if "invoiceNumber" in patch and _field_taken(
+                leads, "invoiceNumber", patch["invoiceNumber"], lid):
+            conflict = True
+        if "numberPlate" in patch and _field_taken(
+                leads, "numberPlate", patch["numberPlate"], lid):
+            conflict = True
+        if conflict:
+            stats["skippedConflict"] += 1
+            continue
+        patch["oemSoldSyncedAt"] = now_iso()
+        await db.leads.update_one({"leadId": lid}, {"$set": patch})
+        await db.deliveries.update_one({"leadId": lid}, {"$set": {
+            k: patch[k] for k in ("chassisNumber", "invoiceNumber", "numberPlate") if k in patch
+        }})
+        if "invoiceNumber" in patch:
+            await db.billing_summaries.update_one(
+                {"leadId": lid}, {"$set": {"invoiceNumber": patch["invoiceNumber"]}})
+        lead.update(patch)
+        stats["updated"] += 1
+    return stats
 
 
 def inventory_family_key(model, variant=""):

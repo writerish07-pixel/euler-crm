@@ -478,22 +478,7 @@ def _vehicle_id_blocks_reuse(other):
     able to reuse invoice / chassis / plate. Closed-won sales from 1 Sep onward
     still occupy the identifier.
     """
-    if not other:
-        return False
-    if other.get("dealCancelled"):
-        return False
-    acct = str(other.get("accountStatus") or "Active").strip().lower()
-    if acct in ("cancelled", "inactive", "archived"):
-        return False
-    status = str(other.get("currentStatus") or "").lower()
-    ddate = str(other.get("deliveryDate") or "")[:10]
-    delivered = (
-        str(other.get("deliveryStatus") or "").lower() == "delivered"
-        or status == "delivered"
-    )
-    if delivered and ddate and ddate < oem_sync.YARD_LIVE_FROM:
-        return False
-    return True
+    return oem_sync.live_occupies_vehicle_id(other)
 
 
 async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chassis_number="",
@@ -5732,7 +5717,8 @@ async def coulson_sync(act=Depends(actor)):
     result.pop("changedPriceIds", None)
     await write_audit(act, "sync", "coulson", new={"ok": result.get("ok"),
                                                    "inventoryCount": result.get("inventoryCount"),
-                                                   "pricesUpdated": result.get("pricesUpdated")})
+                                                   "pricesUpdated": result.get("pricesUpdated"),
+                                                   "leadsVehicleIds": result.get("leadsVehicleIds")})
     return result
 
 
