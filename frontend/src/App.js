@@ -38,6 +38,8 @@ import ClaimExceptions from "./pages/ClaimExceptions";
 import ERPProductionAudit from "./pages/ERPProductionAudit";
 import AuditLog from "./pages/AuditLog";
 import OemFinance from "./pages/OemFinance";
+import OemClaims from "./pages/OemClaims";
+import ClaimReconciliation from "./pages/ClaimReconciliation";
 import Allocation from "./pages/Allocation";
 import SalesGmDashboard from "./pages/SalesGmDashboard";
 import Approvals from "./pages/Approvals";
@@ -128,6 +130,11 @@ function AppRoutes() {
       <Route path="/insurance-agents" element={P(<InsuranceAgents />, { ownerOnly: true })} />
       <Route path="/deliveries" element={P(<Deliveries />)} />
       <Route path="/claims" element={P(<Claims />, { moneyDesk: true })} />
+      {/* Euler's own claim workflow, mirrored read-only. Deliberately a different
+          page from the Scheme Claim Register above — different money, different
+          lifecycle. See backend/oem_claims.py. */}
+      <Route path="/oem-claims" element={P(<OemClaims />, { moneyDesk: true })} />
+      <Route path="/claim-reconciliation" element={P(<ClaimReconciliation />, { ownerOnly: true })} />
       <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />
       <Route path="/incentive-master" element={P(<IncentiveMaster />, { ownerOnly: true })} />
       <Route path="/executive-incentive" element={P(<ExecutiveIncentive />, { gmHome: true })} />

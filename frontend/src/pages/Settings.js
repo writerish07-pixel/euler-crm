@@ -1110,6 +1110,16 @@ function CoulsonCard() {
           {cfg.lastError ? ` · ${cfg.lastError}` : ""}
         </div>
       )}
+      {/* The same session pulls Euler's claim settlements. A mirror that came back
+          short must say so here too — the OEM Claims page is built on it. */}
+      {cfg?.claimsSyncedAt && (
+        <div className={`text-xs mt-1 ${cfg.claimsIncomplete ? "text-rose-600 font-semibold" : "text-ink-faint"}`}
+          data-testid="coulson-claims-status">
+          Claims {cfg.claimsSyncOk === false ? "sync failed" : "mirrored"} · {cfg.claimsMirrored || 0}
+          {cfg.claimsExpected ? ` of ${cfg.claimsExpected}` : ""}
+          {cfg.claimsIncomplete ? " — incomplete, totals are understated" : ""}
+        </div>
+      )}
     </Card>
   );
 }

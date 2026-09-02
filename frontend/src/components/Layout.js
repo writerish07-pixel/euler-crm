@@ -6,6 +6,7 @@ import {
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
   MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse, Bell,
+  FileCheck, Scale,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -40,7 +41,10 @@ const NAV = [
   ]},
   { section: "Fulfilment", items: [{ to: "/deliveries", label: "Delivery Tracker", icon: Truck }] },
   { section: "OEM & Commercial", items: [
-    { to: "/claims", label: "OEM Claims", icon: ReceiptText, moneyDesk: true },
+    // Two different registers, deliberately named apart: the first is the dealer's
+    // own scheme entitlement, the second is Euler's claim workflow mirrored in.
+    { to: "/claims", label: "Scheme Claim Register", icon: ReceiptText, moneyDesk: true },
+    { to: "/oem-claims", label: "OEM Claim Settlements", icon: FileCheck, moneyDesk: true },
     { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },
     { to: "/executive-incentive", label: "Executive Incentive", icon: Trophy, gmHome: true },
@@ -51,6 +55,7 @@ const NAV = [
     { to: "/owner-commercial", label: "Owner Commercial", icon: BarChart3, ownerOnly: true },
     { to: "/oem-claim-dashboard", label: "OEM Claim Dashboard", icon: PieChart, ownerOnly: true },
     { to: "/claim-exceptions", label: "Claim Exceptions", icon: ShieldAlert, ownerOnly: true },
+    { to: "/claim-reconciliation", label: "Claim Reconciliation", icon: Scale, ownerOnly: true },
     { to: "/audit-log", label: "Audit Trail", icon: ScrollText, ownerOnly: true },
     { to: "/erp-audit", label: "ERP Production Audit", icon: ShieldCheck, ownerOnly: true },
   ]},

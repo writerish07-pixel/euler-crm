@@ -372,6 +372,104 @@ def fetch_sold_inventory(token: str, limit=200):
     return rows
 
 
+# ---------------------------------------------------------------- claim settlements
+# Coulson calls a claim a DEBIT NOTE. Their "Claim Settlements List" is one row per
+# debit note; the money detail — chassis, source invoice, claim type — lives only on
+# that note's line items, which arrive from a second call.
+CLAIM_LIST_PATH = "debit-note"
+CLAIM_JOURNEY_PATH = "journey"
+
+# The eleven buckets the Claim Settlements List tabs across, approval order first
+# and terminal states last. Used to sweep per-status when one unfiltered pull comes
+# back short of the true total.
+CLAIM_STATUSES = (
+    "RM Approval Pending",
+    "Dealer Development Department Approval Pending",
+    "Sales Department Approval Pending",
+    "Finance Department Approval Pending",
+    "Credit Note Generation Pending",
+    "Sales Invoice Generation Pending",
+    "Credit Note Generated",
+    "Sales Invoice Generated",
+    "Settled",
+    "Rejected",
+    "Cancelled",
+)
+
+
+def fetch_debit_notes(token: str, *, status: str = "", limit=100, max_rows=5000):
+    """Page through the Claim Settlements List. Returns (rows, total_count).
+
+    Same envelope as vehicle-inventory/transfer — {success, data[], extras.total_count}
+    — so the paging is the same shape as the yard pull.
+
+    `status` is best-effort. Their UI filters by status, but we never saw the parameter
+    name, so an unknown one may simply be ignored and return the unfiltered page. The
+    caller de-duplicates by id, which makes a wrong guess cost a wasted call rather than
+    a wrong mirror.
+    """
+    offset = 0
+    rows, total = [], None
+    while True:
+        params = {"limit": str(limit), "offset": str(offset)}
+        if status:
+            params["status"] = status
+        payload = get_json(token, CLAIM_LIST_PATH, params)
+        chunk = payload.get("data") or []
+        if not isinstance(chunk, list):
+            chunk = []
+        rows.extend(r for r in chunk if isinstance(r, dict))
+        got = (payload.get("extras") or {}).get("total_count")
+        if got is not None:
+            try:
+                total = int(got)
+            except (TypeError, ValueError):
+                pass
+        if not chunk or len(chunk) < limit:
+            break
+        if total is not None and len(rows) >= total:
+            break
+        offset += limit
+        if offset >= max_rows:
+            break
+    return rows, total
+
+
+def fetch_claim_journey(token: str, debit_note_id: str):
+    """One claim in full: {header, line_items[], timeline{}}.
+
+    Chassis and source invoice exist ONLY here — the list row has neither, so a claim
+    cannot be tied to a lead without this call.
+    """
+    note_id = str(debit_note_id or "").strip()
+    if not note_id:
+        raise CoulsonError("A debit note id is required")
+    payload = get_json(token, CLAIM_JOURNEY_PATH, {"debit_note_id": note_id})
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def fetch_allowed_showrooms(token: str):
+    payload = get_json(token, "allowed-showrooms")
+    data = payload.get("data") or []
+    return data if isinstance(data, list) else []
+
+
+def fetch_claim_status_counts(token: str, showroom_id: str = ""):
+    """The eleven tab numbers, already aggregated by Coulson — one call, no paging.
+
+    Their own Claim Settlements List header is built from this, so it is the cheapest
+    honest answer to "how many claims exist", and the yardstick a full sweep is checked
+    against.
+    """
+    params = {}
+    if str(showroom_id or "").strip():
+        params["showroom_id"] = str(showroom_id).strip()
+    payload = get_json(token, "status-counts", params or None)
+    data = payload.get("data")
+    return data if isinstance(data, (dict, list)) else {}
+
+
 def diagnose(username: str, password: str) -> dict:
     """Attempt one login and report exactly what was sent and what came back.
 

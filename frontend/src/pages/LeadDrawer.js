@@ -1091,6 +1091,43 @@ function yardRowsForLead(yard, lead, selectedChassis) {
   return { rows: yard, fallback: yard.length > 0 };
 }
 
+// What Euler's own claim desk is doing with this vehicle. Read-only, and silent
+// when there is nothing filed — an empty strip on every lead would be noise.
+function OemClaimStrip({ leadId }) {
+  const [rows, setRows] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    get(`/leads/${leadId}/oem-claims`)
+      .then((r) => { if (!cancelled) setRows(Array.isArray(r) ? r : []); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [leadId]);
+  if (!rows.length) return null;
+  return (
+    <div className="mb-3 rounded-lg ring-1 ring-line bg-zinc-50 px-3 py-2" data-testid="lead-oem-claims">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint mb-1.5">
+        Claims filed with Euler
+      </div>
+      <div className="space-y-1.5">
+        {rows.map((c) => (
+          <div key={c.claimNumber} className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="font-mono font-semibold text-cobalt">{c.claimNumber}</span>
+            <Badge tone={c.status === "Rejected"
+              ? "bg-rose-50 text-rose-700 ring-rose-600/20"
+              : c.status === "Settled"
+                ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
+                : "bg-amber-50 text-amber-800 ring-amber-600/20"}>{c.status}</Badge>
+            <span className="text-ink-soft">{inr(c.leadClaimedAmount)}</span>
+            {!c.terminal && c.stageLabel && (
+              <span className="text-ink-faint">{c.stageDays}d at {c.stageLabel}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, oemSold = null, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
@@ -1243,6 +1280,7 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
           {yardFallback ? " No exact model match — showing all chassis currently in yard." : ""}
         </p>
       )}
+      <OemClaimStrip leadId={lead.leadId} />
       <div className="grid grid-cols-2 gap-3">
         <Field label="Invoice Number"><Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")} disabled={locked} /></Field>
         <Field label="Chassis">
