@@ -484,7 +484,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
   const staffLocked = !isOwner && !!actions.schemeCompleted;
   const locked = inactive || staffLocked;
   const [rules, setRules] = useState(null);
-  const [schemeDate, setSchemeDate] = useState(lead.bookingDate || todayISO());
+  const [schemeDate, setSchemeDate] = useState(lead.schemeAsOf || lead.bookingDate || todayISO());
   const [form, setForm] = useState(() => ({
     oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
     oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
@@ -507,8 +507,13 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     return inferred;
   });
 
-  useEffect(() => { get(`/leads/${lead.leadId}/scheme-rules`).then(setRules).catch(() => setRules({ rules: {} })); }, [lead.leadId]);
-  useEffect(() => { setSchemeDate(lead.bookingDate || todayISO()); }, [lead.bookingDate]);
+  useEffect(() => { setSchemeDate(lead.schemeAsOf || lead.bookingDate || todayISO()); }, [lead.schemeAsOf, lead.bookingDate]);
+  useEffect(() => {
+    if (!lead.leadId || !schemeDate) return;
+    get(`/leads/${lead.leadId}/scheme-rules`, { on: schemeDate })
+      .then(setRules)
+      .catch(() => setRules({ rules: {} }));
+  }, [lead.leadId, schemeDate]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const r = rules?.rules || {};
@@ -574,6 +579,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     const payload = {
       // Benefit Mode removed from UI — backend stores Partial for compatibility.
       benefitMode: "Partial Benefit",
+      schemeDate,
       oemExtraSupportReceived: +form.oemExtraSupportReceived || 0,
       oemExtraSupportPassed: +form.oemExtraSupportPassed || 0,
       additionalDiscount: +form.additionalDiscount || 0,
