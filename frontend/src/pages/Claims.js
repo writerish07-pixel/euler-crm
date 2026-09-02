@@ -169,12 +169,20 @@ export default function Claims() {
           { key: "oemMatch", label: "In Euler", render: (r) => {
             const m = matchOf(r);
             if (!m.label) return <span className="text-ink-faint text-xs">—</span>;
+            const oemStatus = r.oemMatch?.oemStatus || r.oemStatus || "";
+            const stage = r.oemMatch?.stageLabel || r.oemStageLabel || "";
+            const days = r.oemMatch?.stageDays;
             return (
               <div className="flex flex-col items-start gap-1" title={r.oemMatch?.detail || ""}>
                 <Badge tone={m.tone}>{m.label}</Badge>
                 {(r.oemMatch?.claimNumbers || []).slice(0, 2).map((n) => (
                   <OemClaimLink key={n} claimNumber={n} />
                 ))}
+                {oemStatus ? (
+                  <span className="text-[10px] text-ink-faint max-w-[160px] whitespace-normal leading-tight">
+                    {oemStatus}{stage ? ` · ${days || 0}d ${stage}` : ""}
+                  </span>
+                ) : null}
               </div>
             );
           }},
@@ -192,7 +200,11 @@ export default function Claims() {
           { key: "claimStatus", label: "Status", render: (r) => <Badge tone={
             r.claimStatus === "Cancelled" ? "bg-zinc-100 text-zinc-600 ring-zinc-400/30"
               : r.claimStatus === "Received" ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
-                : undefined
+                : r.claimStatus === "Approved" ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
+                  : r.claimStatus === "Submitted" ? "bg-blue-50 text-blue-700 ring-blue-600/20"
+                    : r.claimStatus === "Rejected" ? "bg-rose-50 text-rose-700 ring-rose-600/20"
+                      : r.claimStatus === "Partial" ? "bg-amber-50 text-amber-700 ring-amber-600/20"
+                        : undefined
           }>{r.claimStatus}</Badge> },
           { key: "submittedDate", label: "Submitted", render: (r) => r.submittedDate ? fmtDate(r.submittedDate) : "—" },
           { key: "approvedDate", label: "Approved", render: (r) => r.approvedDate ? fmtDate(r.approvedDate) : "—" },

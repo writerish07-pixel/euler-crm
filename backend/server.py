@@ -874,6 +874,13 @@ async def recompute_lead(lead_id):
                 "dsaApproval": (_ex or {}).get("approvalStatus", "") if _key == "dsaDiscount" else "",
                 "claimReceivedDate": (_ex or {}).get("claimReceivedDate", ""),
                 "claimRemarks": (_ex or {}).get("claimRemarks", ""),
+                "chassisNumber": merged.get("chassisNumber") or (_ex or {}).get("chassisNumber", ""),
+                "invoiceNumber": merged.get("invoiceNumber") or (_ex or {}).get("invoiceNumber", ""),
+                "submittedDate": (_ex or {}).get("submittedDate", ""),
+                "approvedDate": (_ex or {}).get("approvedDate", ""),
+                "oemMatchState": (_ex or {}).get("oemMatchState", ""),
+                "oemStatus": (_ex or {}).get("oemStatus", ""),
+                "oemStageLabel": (_ex or {}).get("oemStageLabel", ""),
                 "manual": False,
             }
             # Persist so GET /claims still lists the row after Close Won overwrites
@@ -886,6 +893,9 @@ async def recompute_lead(lead_id):
         # OEM Extra Support Register — Received is the claim; Passed/Retained track usage.
         if oem_extra_recv > 0:
             _bk = await _live_booking(lead_id) or {}
+            extra_claim = await db.claims.find_one(
+                {"leadId": lead_id, "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+                 "manual": {"$ne": True}}) or {}
             await sheet_sync("oem_extra_support", {
                 "leadId": lead_id,
                 "bookingId": _bk.get("bookingId", "") or merged.get("bookingId", ""),
@@ -896,7 +906,10 @@ async def recompute_lead(lead_id):
                 "oemExtraSupportReceived": oem_extra_recv,
                 "oemExtraSupportPassed": oem_extra_pass,
                 "oemExtraSupportRetained": oem_extra_retained,
-                "status": "Open",
+                "chassisNumber": merged.get("chassisNumber", ""),
+                "invoiceNumber": merged.get("invoiceNumber", ""),
+                "status": extra_claim.get("claimStatus") or "Open",
+                "claimReference": extra_claim.get("claimReference") or "",
                 "lastUpdated": updates["lastUpdated"],
                 "remarks": "",
             })
@@ -5738,6 +5751,9 @@ async def coulson_sync(act=Depends(actor)):
 async def coulson_sync_claims(act=Depends(actor)):
     try:
         result = await oem_claims.sync_claims(db)
+        patches = result.pop("registerPatches", []) or []
+        for doc in patches:
+            await sheet_sync("claims", doc)
     except coulson_client.CoulsonError as e:
         await db["system"].update_one(
             {"_id": "coulson"},
@@ -7430,7 +7446,17 @@ async def list_claims():
 
     Scheme Claim Register is a permanent ledger: Received / settled claims stay listed
     forever (same rule as the Google Sheet). Persisted claim docs are merged in even when
-    live scheme display drops to zero or the lead leaves the book/deliver/finance filter."""
+    live scheme display drops to zero or the lead leaves the book/deliver/finance filter.
+
+    After the Euler mirror is attached, filing status / dates / claim reference follow
+    the OEM debit note. eligibleClaim / claimAmount / receivedAmount are never taken
+    from Coulson.
+    """
+    oem_index = await oem_claims.register_match_index(db)
+    patches = await oem_claims.apply_oem_filing_to_register(db, oem_index)
+    for doc in patches:
+        await sheet_sync("claims", doc)
+
     leads = await _commercial_leads()
     scheme_rows = await get_scheme_rows()
     result = []
@@ -7544,10 +7570,9 @@ async def list_claims():
         row["chassisNumber"] = lead.get("chassisNumber") or row.get("chassisNumber") or ""
         row["invoiceNumber"] = lead.get("invoiceNumber") or row.get("invoiceNumber") or ""
 
-    # Cross-check every register row against what Euler actually holds. This ADDS a
-    # field; no money, status or date on the register is touched by the OEM mirror —
-    # Owner Commercial, Dealer Earnings and the OEM Claim Dashboard all read those.
-    oem_index = await oem_claims.register_match_index(db)
+    # Cross-check every register row against what Euler actually holds. Filing
+    # status/dates/reference follow the OEM note; money on the register is not
+    # overwritten (Owner Commercial, Dealer Earnings, OEM Claim Dashboard).
     for row in result:
         if row.get("manual"):
             # Manual and executive-incentive claims are not filed as scheme lines in
@@ -7555,10 +7580,14 @@ async def list_claims():
             row["oemMatch"] = {"state": "not_applicable", "claimNumbers": [],
                                "filedAmount": 0.0, "detail": ""}
             continue
-        row["oemMatch"] = oem_claims.match_state(
+        match = oem_claims.match_state(
             oem_index, row.get("leadId") or "", row.get("componentKey") or "",
             chassis=row.get("chassisNumber") or "",
             invoice=row.get("invoiceNumber") or "")
+        row, _ = oem_claims.overlay_register_from_oem(row, match)
+        row["oemMatch"] = match
+        row["ageingDays"] = _claim_ageing_days(
+            row.get("submittedDate", ""), row.get("claimStatus", ""), row.get("approvedDate", ""))
     return result
 
 
@@ -8089,6 +8118,16 @@ async def gsheets_ensure_cancel_columns(act=Depends(actor)):
     return result
 
 
+@api.post("/integrations/gsheets/ensure-scheme-claim-oem-columns", dependencies=[Depends(owner_only)])
+async def gsheets_ensure_scheme_claim_oem_columns(act=Depends(actor)):
+    """Owner-only: append Chassis Number, Invoice Number, In Euler, Euler Status,
+    Euler Stage on Scheme Claim Register (append-only). Backfill also runs this.
+    """
+    result = await gsheets.ensure_scheme_claim_oem_columns()
+    await write_audit(act, "ensure", "gsheets-scheme-claim-oem-columns", new=result)
+    return result
+
+
 @api.post("/integrations/gsheets/ensure-lead-commercial-columns", dependencies=[Depends(owner_only)])
 async def gsheets_ensure_lead_commercial_columns(act=Depends(actor)):
     """Owner-only: append RSA/AMC, TCS, TCS Applicable, TCS Base, Insurance
@@ -8314,11 +8353,16 @@ async def gsheets_backfill():
             "lastPaymentDate": f.get("lastPaymentDate", ""),
             "lastUpdated": f.get("lastUpdated", ""),
         })
+    await oem_claims.apply_oem_filing_to_register(db)
+    extra_by_lead = {}
+    for c in await db.claims.find({"componentKey": "oemExtraSupport"}).to_list(2000):
+        extra_by_lead[c.get("leadId")] = c
     oem_extra = []
     for l in leads:
         extra = ce.compute_oem_extra_support(l)
         if ce.num(extra.get("oemExtraSupportReceived")) <= 0:
             continue
+        claim = extra_by_lead.get(l.get("leadId")) or {}
         oem_extra.append({
             "leadId": l.get("leadId"),
             "bookingId": l.get("bookingId", ""),
@@ -8329,7 +8373,10 @@ async def gsheets_backfill():
             "oemExtraSupportReceived": extra["oemExtraSupportReceived"],
             "oemExtraSupportPassed": extra["oemExtraSupportPassed"],
             "oemExtraSupportRetained": extra["oemExtraSupportRetained"],
-            "status": "Open",
+            "chassisNumber": l.get("chassisNumber") or claim.get("chassisNumber") or "",
+            "invoiceNumber": l.get("invoiceNumber") or claim.get("invoiceNumber") or "",
+            "status": claim.get("claimStatus") or "Open",
+            "claimReference": claim.get("claimReference") or "",
             "lastUpdated": l.get("lastUpdated", ""),
             "remarks": "",
         })

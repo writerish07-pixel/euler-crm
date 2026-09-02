@@ -579,20 +579,26 @@ async def test_sync_does_not_block_the_event_loop(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_claim_sync_never_writes_to_the_scheme_claim_register(client, wired):
-    """The whole reason these live apart: db.claims feeds Owner Commercial,
-    Dealer Earnings and the OEM Claim Dashboard."""
+async def test_claim_sync_never_writes_money_into_the_scheme_claim_register(client, wired):
+    """Coulson amounts must never land on db.claims. Filing status/dates/reference
+    may follow Euler; eligibleClaim / claimAmount / receivedAmount must not."""
     await _delivered_lead(client)
     before = await server.db.claims.count_documents({})
-    snapshot = [d async for d in server.db.claims.find({}, {"_id": 0, "claimId": 1,
-                                                            "claimStatus": 1,
-                                                            "receivedAmount": 1})]
+    money = {}
+    async for d in server.db.claims.find(
+            {}, {"_id": 0, "claimId": 1, "eligibleClaim": 1,
+                 "claimAmount": 1, "receivedAmount": 1}):
+        money[d.get("claimId")] = (d.get("eligibleClaim"), d.get("claimAmount"),
+                                   d.get("receivedAmount"))
     await client.post("/api/integrations/coulson/sync-claims")
     assert await server.db.claims.count_documents({}) == before
-    after = [d async for d in server.db.claims.find({}, {"_id": 0, "claimId": 1,
-                                                         "claimStatus": 1,
-                                                         "receivedAmount": 1})]
-    assert after == snapshot
+    after = {}
+    async for d in server.db.claims.find(
+            {}, {"_id": 0, "claimId": 1, "eligibleClaim": 1,
+                 "claimAmount": 1, "receivedAmount": 1}):
+        after[d.get("claimId")] = (d.get("eligibleClaim"), d.get("claimAmount"),
+                                   d.get("receivedAmount"))
+    assert after == money
 
 
 # ---------------------------------------------------------------- reporting
@@ -701,19 +707,66 @@ def test_a_lead_with_no_claim_at_all_is_a_genuine_gap():
     assert oem_claims.match_state({}, "LD-NONE", "loyaltyBonus")["state"] == "not_filed"
 
 
-def test_not_filed_does_not_wear_another_components_claim_number():
-    """Sita Ram Sharma / AF-122-CL2627077: Euler filed a claim that mapped to a
-    different component. Putting that number under OEM Extra Support + Not claimed
-    looked like a contradiction with OEM Claim Settlements 'In scheme register'.
-    """
+def test_extra_support_files_from_any_euler_claim_on_the_vehicle():
+    """Sita Ram Sharma / AF-122-CL2627077: Euler filed a claim that mapped to
+    insurance (or another component). OEM Extra Support still reads Filed, with
+    that claim number — Extra Support is the vehicle's side ledger."""
     index = {"LD1": {"byComponent": {"insuranceBenefit": [
-        _hit("AF-122-CL2627077", "Dealer Development Department Approval Pending")]},
+        _hit("AF-122-CL2627077", "Dealer Development Department Approval Pending",
+             createdAt="2026-08-15T10:00:00+0530")]},
         "unmapped": [], "claimNumbers": ["AF-122-CL2627077"], "filedTotal": 10000.0,
         "acceptedTotal": 0.0, "rejectedOpen": [], "hasAnyClaim": True}}
     got = oem_claims.match_state(index, "LD1", "oemExtraSupport")
+    assert got["state"] == "filed"
+    assert got["claimNumbers"] == ["AF-122-CL2627077"]
+    assert got["oemStatus"] == "Dealer Development Department Approval Pending"
+
+
+def test_scheme_component_does_not_wear_another_components_claim_number():
+    """Exchange vs referral stay per-component. Extra Support is the exception."""
+    index = {"LD1": {"byComponent": {"referralBonus": [
+        _hit("AF-1", "RM Approval Pending")]},
+        "unmapped": [], "claimNumbers": ["AF-1"], "filedTotal": 5000.0,
+        "acceptedTotal": 0.0, "rejectedOpen": [], "hasAnyClaim": True}}
+    got = oem_claims.match_state(index, "LD1", "exchangeBonus")
     assert got["state"] == "not_filed"
     assert got["claimNumbers"] == []
-    assert "AF-122-CL2627077" not in (got["claimNumbers"] or [])
+
+
+def test_overlay_stamps_status_and_reference_without_touching_money():
+    row = {"claimStatus": "Pending", "eligibleClaim": 7000, "claimAmount": 7000,
+           "receivedAmount": 0, "claimReference": "", "submittedDate": "",
+           "approvedDate": ""}
+    match = {"state": "filed", "claimNumbers": ["AF-122-CL2627077"],
+             "oemStatus": "Dealer Development Department Approval Pending",
+             "stageLabel": "Dealer Development", "createdAt": "2026-08-15"}
+    out, patch = oem_claims.overlay_register_from_oem(row, match)
+    assert out["claimStatus"] == "Submitted"
+    assert out["claimReference"] == "AF-122-CL2627077"
+    assert out["submittedDate"] == "2026-08-15"
+    assert out["eligibleClaim"] == 7000
+    assert out["claimAmount"] == 7000
+    assert out["receivedAmount"] == 0
+    assert "eligibleClaim" not in patch
+    assert "claimAmount" not in patch
+    assert "receivedAmount" not in patch
+    locked, _ = oem_claims.overlay_register_from_oem(
+        {**row, "claimStatus": "Received", "receivedAmount": 7000}, match)
+    assert locked["claimStatus"] == "Received"
+    assert locked["receivedAmount"] == 7000
+
+
+def test_overlay_promotes_generated_notes_to_approved():
+    row = {"claimStatus": "Pending", "submittedDate": "", "approvedDate": ""}
+    match = {"state": "accepted", "claimNumbers": ["AF-1"],
+             "oemStatus": "Credit Note Generated", "createdAt": "2026-08-20"}
+    out, _ = oem_claims.overlay_register_from_oem(row, match)
+    assert out["claimStatus"] == "Approved"
+    assert out["approvedDate"] == "2026-08-20"
+    stayed, _ = oem_claims.overlay_register_from_oem(
+        {"claimStatus": "Approved", "submittedDate": "2026-07-01", "approvedDate": "2026-07-02"},
+        {"state": "filed", "claimNumbers": ["AF-1"], "oemStatus": "RM Approval Pending"})
+    assert stayed["claimStatus"] == "Approved"
 
 
 def _hit(number, status, **kw):
@@ -825,12 +878,13 @@ async def _register_row(lead_id, component_key, amount=5000.0):
 
 @pytest.mark.asyncio
 async def test_register_rows_carry_a_match_state_without_changing_money(client, wired):
-    """The cross-check ADDS a field. Every rupee, status and date stays as it was."""
+    """The cross-check ADDS a field. Every rupee stays as it was; status may
+    follow Euler (Pending → Submitted) when the note is already filed."""
     lead_id = await _delivered_lead(client)
     # The fixture claim reads "Referral Commission for invoice …" → referralBonus.
     await _register_row(lead_id, "referralBonus")
     before = (await client.get("/api/claims")).json()
-    baseline = {r["claimId"]: (r["eligibleClaim"], r["claimStatus"], r["receivedAmount"])
+    baseline = {r["claimId"]: (r["eligibleClaim"], r["receivedAmount"])
                 for r in before}
     assert baseline, "register should not be empty"
 
@@ -842,6 +896,8 @@ async def test_register_rows_carry_a_match_state_without_changing_money(client, 
     assert "AF-999-CL0001" in mine[0]["oemMatch"]["claimNumbers"]
     assert mine[0]["chassisNumber"] == CHASSIS
     assert mine[0]["invoiceNumber"] == INVOICE
+    assert mine[0]["claimStatus"] == "Submitted"
+    assert mine[0]["claimReference"] == "AF-999-CL0001"
 
     for row in after:
         assert "oemMatch" in row
@@ -849,8 +905,7 @@ async def test_register_rows_carry_a_match_state_without_changing_money(client, 
             "filed", "accepted", "rejected", "resubmitted", "unmapped",
             "not_filed", "not_applicable")
         if row["claimId"] in baseline:
-            assert (row["eligibleClaim"], row["claimStatus"],
-                    row["receivedAmount"]) == baseline[row["claimId"]], \
+            assert (row["eligibleClaim"], row["receivedAmount"]) == baseline[row["claimId"]], \
                 f"the OEM mirror changed money on {row['claimId']}"
 
 
@@ -895,9 +950,50 @@ async def test_additional_support_claim_type_files_oem_extra_support(client, mon
                  and r["componentKey"] == "oemExtraSupport")
     assert extra["oemMatch"]["state"] == "filed"
     assert "AF-122-CL2627077" in extra["oemMatch"]["claimNumbers"]
+    assert extra["claimStatus"] == "Submitted"
+    assert extra["claimReference"] == "AF-122-CL2627077"
+    assert extra["eligibleClaim"] == 7000.0
+    assert extra["receivedAmount"] == 0
     oem = (await client.get("/api/oem-claims")).json()
     assert oem[0]["registerMatch"]["state"] == "in_register"
     assert "oemExtraSupport" in oem[0]["registerMatch"]["mappedComponents"]
+
+
+@pytest.mark.asyncio
+async def test_extra_support_files_from_insurance_mapped_euler_claim(client, monkeypatch):
+    """The 17-row Sita Ram set: Coulson typed Scheme Claim + Insurance Benefits
+    prose, so the line maps to insuranceBenefit. Extra Support must still read
+    Filed and pick up Submitted + the Coulson number — without copying ₹10,000."""
+    lead_id = await _delivered_lead(client)
+    await _register_row(lead_id, "oemExtraSupport", 7000.0)
+    inner = journey("n1", "AF-122-CL2627077")
+    inner["line_items"][0]["claim_type"] = "Scheme Claim"
+    inner["line_items"][0]["description"] = (
+        "Insurance Benefits Up to for invoice AF-999-I26279001")
+    inner["line_items"][0]["total_amount"] = 10000.0
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("n1", "AF-122-CL2627077")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/claims")).json()
+    extra = next(r for r in rows if r["leadId"] == lead_id
+                 and r["componentKey"] == "oemExtraSupport")
+    assert extra["oemMatch"]["state"] == "filed"
+    assert "AF-122-CL2627077" in extra["oemMatch"]["claimNumbers"]
+    assert extra["claimStatus"] == "Submitted"
+    assert extra["claimReference"] == "AF-122-CL2627077"
+    assert extra["eligibleClaim"] == 7000.0
+    assert extra["receivedAmount"] == 0
+    stored = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport"})
+    assert stored["claimStatus"] == "Submitted"
+    assert stored["eligibleClaim"] == 7000.0
+    assert stored.get("receivedAmount", 0) == 0
 
 
 @pytest.mark.asyncio

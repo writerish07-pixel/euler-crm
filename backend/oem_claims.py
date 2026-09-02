@@ -596,6 +596,7 @@ async def sync_claims(db, *, detail_budget=250, token=None):
 
     # Rejections only matter once we know whether anyone refiled them.
     needs_resubmission = await annotate_resubmissions(db)
+    register_docs = await apply_oem_filing_to_register(db)
 
     mirrored = await coll.count_documents({"missingFromOem": {"$ne": True}})
     incomplete = bool(expected is not None and mirrored < expected)
@@ -610,11 +611,12 @@ async def sync_claims(db, *, detail_budget=250, token=None):
         "claimDetailFailures": detail_failures,
         "claimsMissingFromOem": stale,
         "claimsNeedsResubmission": needs_resubmission,
+        "claimsRegisterPatched": len(register_docs),
         "claimsSyncedAt": now_iso(),
         "claimsSyncOk": True,
     }
     await db["system"].update_one({"_id": "coulson"}, {"$set": stats}, upsert=True)
-    return {"ok": True, "credentialSource": src, **stats}
+    return {"ok": True, "credentialSource": src, "registerPatches": register_docs, **stats}
 
 
 # ---------------------------------------------------------------- register cross-check
@@ -819,6 +821,68 @@ def _index_packs(index):
     return {"byLead": index or {}, "byChassis": {}, "byInvoice": {}}
 
 
+# OEM Extra Support is a staff-typed side ledger, not a Scheme Master component.
+# Coulson files it as Additional Support / Dealer Incentive / a Scheme Claim whose
+# description still says "Insurance Benefits Up to…". Those lines map to another
+# key, so Extra Support used to stay Not claimed while OEM Claim Settlements said
+# In scheme register (the 17-row Sita Ram Sharma set). Any live Euler note on the
+# same vehicle is the filing for this component.
+VEHICLE_FILED_KEYS = ("oemExtraSupport",)
+
+
+def _live_vehicle_hits(entry):
+    """Live (non-cancelled, non-rejected) Euler lines on this vehicle, any component."""
+    out = []
+    seen = set()
+    for hits in (entry.get("byComponent") or {}).values():
+        for h in hits or []:
+            if h.get("oemStatus") in ("Rejected", "Cancelled"):
+                continue
+            num = h.get("claimNumber") or id(h)
+            if num in seen:
+                continue
+            seen.add(num)
+            out.append(h)
+    for h in entry.get("unmapped") or []:
+        if h.get("oemStatus") in ("Rejected", "Cancelled"):
+            continue
+        num = h.get("claimNumber") or id(h)
+        if num in seen:
+            continue
+        seen.add(num)
+        out.append(h)
+    return out
+
+
+def _state_from_hits(hits):
+    live = [h for h in hits if h.get("oemStatus") not in ("Rejected", "Cancelled")]
+    rejected = [h for h in hits if h.get("oemStatus") == "Rejected"]
+    pick = live[0] if live else (rejected[0] if rejected else hits[0])
+    if live:
+        state = "accepted" if pick.get("oemStatus") in ACCEPTED_STATUSES else "filed"
+    elif rejected:
+        state = "resubmitted" if rejected[0].get("resubmittedBy") else "rejected"
+    else:
+        state = "not_filed"
+    detail = ""
+    if state == "rejected":
+        detail = "Euler rejected this and no replacement claim has been filed."
+    elif state == "resubmitted":
+        detail = f"Rejected, refiled as {rejected[0]['resubmittedBy']}."
+    elif state == "filed" and pick.get("stageLabel"):
+        detail = f"{pick.get('stageDays') or 0}d at {pick['stageLabel']}."
+    return {
+        "state": state,
+        "claimNumbers": [h.get("claimNumber") for h in hits if h.get("claimNumber")],
+        "oemStatus": pick.get("oemStatus") or "",
+        "filedAmount": round2(sum(_num(h.get("amount")) for h in hits)),
+        "stageLabel": pick.get("stageLabel") or "",
+        "stageDays": int(pick.get("stageDays") or 0),
+        "createdAt": str(pick.get("createdAt") or "")[:10],
+        "detail": detail,
+    }
+
+
 def match_state(index, lead_id, component_key, chassis="", invoice=""):
     """How this register row stands against Euler. Never guesses "unclaimed".
 
@@ -849,6 +913,12 @@ def match_state(index, lead_id, component_key, chassis="", invoice=""):
                 "filedAmount": 0.0, "detail": "No claim filed with Euler for this lead."}
     hits = entry["byComponent"].get(component_key) or []
     if not hits:
+        vehicle = _live_vehicle_hits(entry)
+        if component_key in VEHICLE_FILED_KEYS and vehicle:
+            got = _state_from_hits(vehicle)
+            got["detail"] = (got.get("detail") + " " if got.get("detail") else "") + (
+                "OEM Extra Support is filed from the Euler claim on this vehicle.")
+            return got
         if entry["unmapped"]:
             return {
                 "state": "unmapped",
@@ -857,38 +927,116 @@ def match_state(index, lead_id, component_key, chassis="", invoice=""):
                 "detail": "This lead has claims in Euler, but none of them names this "
                           "component. Check before treating it as unclaimed.",
             }
-        # Euler filed something else for this vehicle. That is a per-component gap,
-        # but the other claim's number must NOT appear here — the Scheme Claim
-        # Register was showing AF-122-CL2627077 under OEM Extra Support / Not claimed
-        # while OEM Claim Settlements said that same note was In scheme register.
         return {"state": "not_filed", "claimNumbers": [], "oemStatus": "",
                 "filedAmount": 0.0,
                 "detail": "Euler holds a claim for this vehicle, but it maps to a "
                           "different component than this register row."}
-    live = [h for h in hits if h["oemStatus"] not in ("Rejected", "Cancelled")]
-    rejected = [h for h in hits if h["oemStatus"] == "Rejected"]
-    pick = live[0] if live else (rejected[0] if rejected else hits[0])
-    if live:
-        state = "accepted" if pick["oemStatus"] in ACCEPTED_STATUSES else "filed"
-    elif rejected:
-        state = "resubmitted" if rejected[0]["resubmittedBy"] else "rejected"
+    return _state_from_hits(hits)
+
+
+_LOCK_REGISTER_STATUSES = ("Received", "Partial", "Cancelled")
+_STATUS_RANK = {"Pending": 0, "Submitted": 1, "Approved": 2}
+
+
+def register_status_from_oem(oem_status, current=""):
+    """Map Euler's ladder onto the register's Pending/Submitted/Approved/Received.
+
+    Received / Partial / Cancelled stay put — those are money-desk states this
+    overlay must never invent. Open Euler claims become Submitted; generated /
+    settled notes become Approved. Rejected Euler notes become Rejected.
+    The positive ladder only moves forward (never Approved → Submitted).
+    receivedAmount is never touched.
+    """
+    cur = str(current or "").strip() or "Pending"
+    if cur in _LOCK_REGISTER_STATUSES:
+        return cur
+    oem = str(oem_status or "").strip()
+    if oem == "Rejected":
+        return "Rejected"
+    if oem in ACCEPTED_STATUSES:
+        target = "Approved"
+    elif oem:
+        target = "Submitted"
     else:
-        state = "not_filed"
-    detail = ""
-    if state == "rejected":
-        detail = "Euler rejected this and no replacement claim has been filed."
-    elif state == "resubmitted":
-        detail = f"Rejected, refiled as {rejected[0]['resubmittedBy']}."
-    elif state == "filed" and pick["stageLabel"]:
-        detail = f"{pick['stageDays']}d at {pick['stageLabel']}."
-    return {
-        "state": state,
-        "claimNumbers": [h["claimNumber"] for h in hits if h["claimNumber"]],
-        "oemStatus": pick["oemStatus"],
-        "filedAmount": round2(sum(h["amount"] for h in hits)),
-        "stageLabel": pick["stageLabel"], "stageDays": pick["stageDays"],
-        "detail": detail,
+        return cur
+    if _STATUS_RANK.get(cur, 0) > _STATUS_RANK.get(target, 0):
+        return cur
+    return target
+
+
+def overlay_register_from_oem(row, match):
+    """Copy Euler filing onto a register row. Returns (row, patch).
+
+    Patch never contains eligibleClaim / claimAmount / receivedAmount.
+    """
+    row = dict(row)
+    match = match or {}
+    state = match.get("state") or ""
+    patch = {
+        "oemMatchState": state,
+        "oemStatus": match.get("oemStatus") or "",
+        "oemStageLabel": match.get("stageLabel") or "",
     }
+    row["oemMatchState"] = patch["oemMatchState"]
+    row["oemStatus"] = patch["oemStatus"]
+    row["oemStageLabel"] = patch["oemStageLabel"]
+    if state in ("filed", "accepted", "rejected", "resubmitted", "unmapped"):
+        nums = [n for n in (match.get("claimNumbers") or []) if n]
+        if nums:
+            patch["claimReference"] = nums[0]
+            row["claimReference"] = nums[0]
+        new_status = register_status_from_oem(
+            match.get("oemStatus") or "", row.get("claimStatus") or "Pending")
+        if new_status != (row.get("claimStatus") or ""):
+            patch["claimStatus"] = new_status
+            row["claimStatus"] = new_status
+        created = str(match.get("createdAt") or "")[:10]
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", created):
+            if not str(row.get("submittedDate") or "").strip():
+                patch["submittedDate"] = created
+                row["submittedDate"] = created
+            if row.get("claimStatus") == "Approved" and not str(row.get("approvedDate") or "").strip():
+                patch["approvedDate"] = created
+                row["approvedDate"] = created
+    return row, patch
+
+
+async def apply_oem_filing_to_register(db, index=None):
+    """Stamp Euler claim number / status / dates onto matching register rows.
+
+    Money is untouched. Called after claim sync and when the register is opened.
+    """
+    index = index or await register_match_index(db)
+    patched = []
+    async for c in db.claims.find({"manual": {"$ne": True}}):
+        lead = await db.leads.find_one(
+            {"leadId": c.get("leadId")},
+            {"chassisNumber": 1, "invoiceNumber": 1, "_id": 0}) or {}
+        match = match_state(
+            index, c.get("leadId") or "", c.get("componentKey") or "",
+            chassis=lead.get("chassisNumber") or "",
+            invoice=lead.get("invoiceNumber") or "")
+        row = {
+            "claimStatus": c.get("claimStatus") or "Pending",
+            "claimReference": c.get("claimReference") or "",
+            "submittedDate": c.get("submittedDate") or "",
+            "approvedDate": c.get("approvedDate") or "",
+        }
+        _, patch = overlay_register_from_oem(row, match)
+        chassis = lead.get("chassisNumber") or ""
+        invoice = lead.get("invoiceNumber") or ""
+        if chassis and c.get("chassisNumber") != chassis:
+            patch["chassisNumber"] = chassis
+        if invoice and c.get("invoiceNumber") != invoice:
+            patch["invoiceNumber"] = invoice
+        persist = {k: v for k, v in patch.items() if c.get(k) != v}
+        if not persist:
+            continue
+        await db.claims.update_one({"_id": c["_id"]}, {"$set": persist})
+        c.update(persist)
+        c.pop("_id", None)
+        patched.append(c)
+    return patched
 
 
 async def oem_only_lines(db, register_pairs):
