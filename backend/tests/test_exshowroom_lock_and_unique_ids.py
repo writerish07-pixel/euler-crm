@@ -99,3 +99,44 @@ async def test_duplicate_invoice_chassis_plate_rejected(client):
         "numberPlate": "RJ14-UQ-1",
     })
     assert again.status_code == 200, again.text
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lead_does_not_block_chassis_reuse(client):
+    a = await _lead(client, "9222200010", "Old Cancelled")
+    b = await _lead(client, "9222200011", "Recreated Sept")
+    await server.db.leads.update_one({"leadId": a}, {"$set": {
+        "currentStatus": "Lost", "accountStatus": "Cancelled", "dealCancelled": True,
+        "invoiceNumber": "INV-REUSE-1", "chassisNumber": "CH-REUSE-1",
+        "numberPlate": "RJ14-RE-1",
+    }})
+    await server.db.leads.update_one({"leadId": b}, {"$set": {
+        "currentStatus": "Booked", "accountStatus": "Active", "bookingDate": "2026-09-02",
+        "exShowroom": 435000, "customerPayable": 100000, "customerOutstanding": 0,
+    }})
+    ok = await client.put(f"/api/leads/{b}/delivery", json={
+        "invoiceNumber": "INV-REUSE-1", "chassisNumber": "CH-REUSE-1",
+        "numberPlate": "RJ14-RE-1", "deliveryDate": "2026-09-02",
+    })
+    assert ok.status_code == 200, ok.text
+
+
+@pytest.mark.asyncio
+async def test_august_delivered_does_not_block_sept_chassis_reuse(client):
+    a = await _lead(client, "9222200012", "Aug Delivered")
+    b = await _lead(client, "9222200013", "Sept Recreated")
+    await server.db.leads.update_one({"leadId": a}, {"$set": {
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active", "deliveryDate": "2026-08-18",
+        "invoiceNumber": "INV-AUG-CH", "chassisNumber": "CH-AUG-CH",
+        "numberPlate": "RJ14-AUG-1",
+    }})
+    await server.db.leads.update_one({"leadId": b}, {"$set": {
+        "currentStatus": "Booked", "accountStatus": "Active", "bookingDate": "2026-09-02",
+        "exShowroom": 435000, "customerPayable": 100000, "customerOutstanding": 0,
+    }})
+    ok = await client.put(f"/api/leads/{b}/delivery", json={
+        "invoiceNumber": "INV-AUG-CH", "chassisNumber": "CH-AUG-CH",
+        "numberPlate": "RJ14-AUG-1", "deliveryDate": "2026-09-02",
+    })
+    assert ok.status_code == 200, ok.text

@@ -427,10 +427,36 @@ def _validate_delivery_ready(lead, body):
     return errs
 
 
+def _vehicle_id_blocks_reuse(other):
+    """Cancelled / last-month delivered files do not block a new Sept+ delivery.
+
+    Recreated leads (deleted old file, or cancelled last-month delivery) must be
+    able to reuse invoice / chassis / plate. Closed-won sales from 1 Sep onward
+    still occupy the identifier.
+    """
+    if not other:
+        return False
+    if other.get("dealCancelled"):
+        return False
+    acct = str(other.get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return False
+    status = str(other.get("currentStatus") or "").lower()
+    ddate = str(other.get("deliveryDate") or "")[:10]
+    delivered = (
+        str(other.get("deliveryStatus") or "").lower() == "delivered"
+        or status == "delivered"
+    )
+    if delivered and ddate and ddate < oem_sync.YARD_LIVE_FROM:
+        return False
+    return True
+
+
 async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chassis_number="",
                                              number_plate=""):
-    """Invoice / chassis / number plate must be unique across leads (case-insensitive).
-    Blank values are ignored. The current lead is excluded so re-saves are allowed."""
+    """Invoice / chassis / number plate must be unique across live leads.
+    Blank values are ignored. The current lead is excluded so re-saves are allowed.
+    Cancelled files and deliveries before 1 Sep do not count as conflicts."""
     checks = (
         ("invoiceNumber", invoice_number, "Invoice number"),
         ("chassisNumber", chassis_number, "Chassis number"),
@@ -440,11 +466,13 @@ async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chas
         val = str(raw or "").strip()
         if not val:
             continue
-        existing = await db.leads.find_one({
+        cursor = db.leads.find({
             "leadId": {"$ne": lead_id},
             field: {"$regex": f"^{re.escape(val)}$", "$options": "i"},
         })
-        if existing:
+        async for existing in cursor:
+            if not _vehicle_id_blocks_reuse(existing):
+                continue
             raise HTTPException(
                 409,
                 f"{label} '{val}' is already used on lead {existing.get('leadId')} "
@@ -5297,8 +5325,10 @@ async def coulson_sync(act=Depends(actor)):
 
 
 @api.get("/inventory")
-async def list_oem_inventory(model: Optional[str] = None, _user=Depends(current_user)):
-    rows = await oem_sync.list_inventory(db, model)
+async def list_oem_inventory(model: Optional[str] = None, variant: Optional[str] = None,
+                             family: bool = False, _user=Depends(current_user)):
+    rows = await oem_sync.list_inventory(
+        db, model, variant, family=family or bool(variant))
     return [clean(r) for r in rows]
 
 

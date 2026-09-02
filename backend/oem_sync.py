@@ -390,20 +390,71 @@ async def sync_from_coulson(db, *, username=None, password=None):
     return {"ok": True, "catalog": catalog_result, **extra}
 
 
+# Live yard chassis pick / uniqueness / drop-from-inventory apply from this date.
+# Last-month Euler deliveries (and last-month Coulson PRESENT gaps) must not hide
+# live stock or block a recreated lead delivered on/after 1 Sep.
+YARD_LIVE_FROM = "2026-09-01"
+
+
 def _norm_chassis(s):
     return re.sub(r"\s+", "", str(s or "")).strip().upper()
 
 
+def inventory_family_key(model, variant=""):
+    """Storm / Turbo / HiLoad / HiCity / HiRange — same families as scheme matching."""
+    import commercial as ce
+    return ce.normalize_scheme_model_key(model, variant)
+
+
+def inventory_row_matches_lead(row, model, variant=""):
+    """True when a yard row is in the same model family as the lead.
+
+    Unmatched OEM rows keep names like "Storm LR" while the lead is "Storm" +
+    "Storm LR (PV) …". Exact `row.model == lead.interestedModel` would hide them.
+    """
+    if not (model or "").strip():
+        return True
+    want = inventory_family_key(model, variant)
+    got = inventory_family_key(row.get("model"), row.get("variant"))
+    if want and got == want:
+        return True
+    oem = inventory_family_key(row.get("oemModel") or "", row.get("oemVariant") or "")
+    return bool(want) and oem == want
+
+
+def _lead_holds_live_yard_chassis(lead):
+    """Only active, on/after-1-Sep CRM deliveries occupy a live yard slot."""
+    if not lead:
+        return False
+    if lead.get("dealCancelled"):
+        return False
+    acct = str(lead.get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return False
+    ds = str(lead.get("deliveryStatus") or "").lower()
+    cs = str(lead.get("currentStatus") or "").lower()
+    if ds != "delivered" and cs != "delivered":
+        return False
+    ddate = str(lead.get("deliveryDate") or "")[:10]
+    if ddate and ddate < YARD_LIVE_FROM:
+        return False
+    return True
+
+
 async def drop_delivered_from_inventory(db):
-    """Chassis already delivered in this app is not available yard stock."""
+    """Chassis delivered here on/after 1 Sep is not available yard stock.
+
+    Last-month Euler deliveries do not hide Coulson PRESENT units. Cancelled
+    files do not occupy the yard either — the chassis can be picked on a
+    recreated lead with a delivery date after 1 Sep.
+    """
     gone = set()
     async for l in db.leads.find({"chassisNumber": {"$exists": True, "$nin": ["", None]}}):
-        ds = str(l.get("deliveryStatus") or "").lower()
-        cs = str(l.get("currentStatus") or "").lower()
-        if ds == "delivered" or cs == "delivered":
-            ch = _norm_chassis(l.get("chassisNumber"))
-            if ch:
-                gone.add(ch)
+        if not _lead_holds_live_yard_chassis(l):
+            continue
+        ch = _norm_chassis(l.get("chassisNumber"))
+        if ch:
+            gone.add(ch)
     if not gone:
         return 0
     removed = 0
@@ -435,8 +486,10 @@ async def inventory_counts(db):
     return counts
 
 
-async def list_inventory(db, model=None):
-    q = {}
-    if model:
-        q["model"] = model
-    return [r async for r in db.oem_inventory.find(q).sort("model", 1)]
+async def list_inventory(db, model=None, variant=None, *, family=False):
+    rows = [r async for r in db.oem_inventory.find({}).sort("model", 1)]
+    if not model:
+        return rows
+    if family or variant:
+        return [r for r in rows if inventory_row_matches_lead(r, model, variant or "")]
+    return [r for r in rows if str(r.get("model") or "") == str(model)]
