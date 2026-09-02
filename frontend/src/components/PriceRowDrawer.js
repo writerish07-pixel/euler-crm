@@ -103,7 +103,12 @@ export function PriceRowDrawer({ row, onClose, onSaved }) {
             </Field>
           );
         })}
-        <Field label="TCS Applicable"><Select value={form.tcsApplicable} onChange={(e) => setForm({ ...form, tcsApplicable: e.target.value })}><option>No</option><option>Yes</option></Select></Field>
+        <Field label="TCS">
+          <p className="text-xs text-ink-soft pt-2" data-testid="pm-tcs-auto-note">
+            TCS is mandatory at 1% of the after-discount price when that amount exceeds ₹10,00,000.
+            It is calculated on the lead — this Yes/No flag is not a waiver.
+          </p>
+        </Field>
         <Field label="Status"><Select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}><option>active</option><option>inactive</option></Select></Field>
       </div>
 

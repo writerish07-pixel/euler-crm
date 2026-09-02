@@ -308,18 +308,19 @@ def fetch_sap_models(token: str):
     return data if isinstance(data, list) else []
 
 
-def fetch_present_inventory(token: str, limit=200):
-    """Yard stock currently PRESENT at the logged-in dealer."""
+def fetch_inventory_by_status(token: str, vehicle_status: str, limit=200):
+    """Paginated vehicle-inventory/transfer for one Coulson vehicle_status."""
     offset = 0
     rows = []
     total = None
+    status = str(vehicle_status or "").strip() or "PRESENT"
     while True:
         payload = get_json(token, "vehicle-inventory/transfer", {
             "view_type": "table",
             "sort": json.dumps(["created_at", "DESC"]),
             "limit": str(limit),
             "offset": str(offset),
-            "vehicle_status": "PRESENT",
+            "vehicle_status": status,
         })
         chunk = payload.get("data") or []
         if not isinstance(chunk, list):
@@ -332,6 +333,42 @@ def fetch_present_inventory(token: str, limit=200):
         offset += limit
         if offset > 5000:
             break
+    return rows
+
+
+def fetch_present_inventory(token: str, limit=200):
+    """Yard stock currently PRESENT at the logged-in dealer."""
+    return fetch_inventory_by_status(token, "PRESENT", limit=limit)
+
+
+# Billed vehicles leave PRESENT immediately. The dealer Sold tab is the same
+# inventory API with SOLD (and BILLED on some dealer builds).
+SOLD_INVENTORY_STATUSES = ("SOLD", "BILLED")
+
+
+def fetch_sold_inventory(token: str, limit=200):
+    """Vehicles billed / sold at this dealer — no longer in the yard list."""
+    rows = []
+    seen = set()
+    for status in SOLD_INVENTORY_STATUSES:
+        try:
+            chunk = fetch_inventory_by_status(token, status, limit=limit)
+        except CoulsonError as e:
+            log.info("Coulson %s inventory skipped: %s", status, e)
+            continue
+        for v in chunk or []:
+            if not isinstance(v, dict):
+                continue
+            key = (
+                str(v.get("chassis") or v.get("chassis_number") or "").strip().upper()
+                or str(v.get("id") or v.get("vehicle_id") or "")
+            )
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            row = dict(v)
+            row["_coulsonStatus"] = status
+            rows.append(row)
     return rows
 
 

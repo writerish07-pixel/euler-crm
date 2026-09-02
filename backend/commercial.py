@@ -72,8 +72,13 @@ def round2(n):
 
 
 def calculate_tcs(taxable, rate=TCS_RATE, threshold=TCS_THRESHOLD):
+    """TCS u/s 206C(1F) / 394: 1% of sale consideration when it exceeds ₹10 lakh.
+
+    Charged on the after-discount invoice value (consideration), not on the
+    excess over ₹10 lakh. Exactly ₹10,00,000 does not attract TCS.
+    """
     taxable = max(0.0, num(taxable))
-    if taxable < threshold:
+    if taxable <= threshold:
         return 0.0
     return round2(taxable * rate)
 
@@ -190,8 +195,6 @@ def compute_commercial_totals(s, scheme_rows=None):
         (insurance_charge_for_payable(s) if k == "insurance" else num(s.get(k)))
         for k in CHARGE_KEYS
     ))
-    tcs_applicable = str(s.get("tcsApplicable") or "No").lower() == "yes"
-    tcs = calculate_tcs(gross_vehicle_cost) if tcs_applicable else 0.0
 
     oem_pool = sum_oem_offers(s)
     dealer_pool = sum_dealer_offers(s)
@@ -215,12 +218,20 @@ def compute_commercial_totals(s, scheme_rows=None):
         dealer_retained = round2(max(0.0, oem_pool - passed_oem))
         total_passed = round2(passed_oem + dealer_pool + oem_extra_passed)
 
+    # TCS is mandatory when after-discount consideration exceeds ₹10 lakh.
+    # Price Master Yes/No is not a waiver — it only records whether TCS applied.
+    tcs_base = round2(max(0.0, gross_vehicle_cost - total_passed))
+    tcs = calculate_tcs(tcs_base)
+    tcs_applicable = "Yes" if tcs > 0 else "No"
+
     gross_invoice = round2(gross_vehicle_cost + tcs)
     net_vehicle_cost = round2(gross_invoice - total_passed)
     customer_payable = round2(net_vehicle_cost - num(s.get("finalExchangeValue")))
     return {
         "grossVehicleCost": gross_vehicle_cost,
         "tcs": tcs,
+        "tcsBase": tcs_base,
+        "tcsApplicable": tcs_applicable,
         "totalDiscount": round2(oem_pool + dealer_pool),
         "oemEligible": oem_pool,
         "dealerDiscount": dealer_pool,
@@ -1517,7 +1528,15 @@ def build_delivery_billing_summary(lead, *, gst_rate=None):
         })
 
     benefit_total = round2(sum(-ln["amount"] for ln in discount_lines))
-    tally_total = round2(max(0.0, gross - benefit_total))
+    after_discount = round2(max(0.0, gross - benefit_total))
+    tcs = calculate_tcs(after_discount)
+    if tcs > 0:
+        charge_lines.append({
+            "code": "tcs",
+            "label": "TCS 1% (after discount, when above ₹10,00,000)",
+            "amount": tcs,
+        })
+    tally_total = round2(after_discount + tcs)
     # Prefer live CRM payable when it matches the Tally rule; else use computed tally.
     payable = round2(num(lead.get("customerPayable")))
     if payable <= 0:
@@ -1604,7 +1623,9 @@ def build_delivery_billing_summary(lead, *, gst_rate=None):
         "totals": {
             "grossVehicleCost": gross,
             "customerBenefitPassed": benefit_total,
-            "netAfterBenefits": tally_total,
+            "tcs": tcs,
+            "tcsBase": after_discount,
+            "netAfterBenefits": after_discount,
             "tallyBillTotal": tally_total,
             "customerPayable": payable,
             "totalReceived": received,

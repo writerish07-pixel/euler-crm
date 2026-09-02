@@ -42,7 +42,11 @@ export default function PriceMaster() {
           { key: "inYard", label: "In yard", align: "right", mono: true, render: (r) => r.inYard || 0 },
           { key: "rto", label: "RTO", align: "right", mono: true, render: (r) => inr(r.rto) },
           { key: "insurance", label: "Insurance", align: "right", mono: true, render: (r) => inr(r.insurance) },
-          { key: "tcsApplicable", label: "TCS", render: (r) => <Badge tone={r.tcsApplicable === "Yes" ? "bg-amber-50 text-amber-700 ring-amber-600/20" : "bg-zinc-100 text-zinc-500 ring-zinc-400/20"}>{r.tcsApplicable}</Badge> },
+          { key: "tcsApplicable", label: "TCS", render: (r) => (
+            <Badge tone={r.tcsAuto ? "bg-amber-50 text-amber-700 ring-amber-600/20" : "bg-zinc-100 text-zinc-500 ring-zinc-400/20"}>
+              {r.tcsAuto ? `Auto ${inr(r.sellingTcs)}` : "—"}
+            </Badge>
+          ) },
           { key: "status", label: "Status", render: (r) => <Badge tone={String(r.status).toLowerCase() === "inactive" ? "bg-zinc-100 text-zinc-500 ring-zinc-400/20" : "bg-emerald-50 text-emerald-700 ring-emerald-600/20"}>{r.status}</Badge> },
           { key: "act", label: "", align: "right", render: (r) => (
             <div className="flex justify-end gap-2">

@@ -435,6 +435,26 @@ def _validate_delivery_ready(lead, body):
     return errs
 
 
+async def _fill_delivery_from_sold(lead, body):
+    """When outstanding is cleared, copy chassis/invoice from Coulson Sold by mobile.
+
+    Billing in Coulson drops the unit from yard PRESENT. The Sold tab still has
+    the chassis keyed by the same unique customer mobile as the CRM lead.
+    """
+    if ce.num((lead or {}).get("customerOutstanding")) > 0.01:
+        return body
+    match = await oem_sync.match_sold_for_lead(db, lead)
+    if not match or not match.get("chassis"):
+        return body
+    if not str(getattr(body, "chassisNumber", "") or "").strip():
+        body.chassisNumber = match["chassis"]
+    if not str(getattr(body, "invoiceNumber", "") or "").strip() and match.get("invoiceNumber"):
+        body.invoiceNumber = match["invoiceNumber"]
+    if not str(getattr(body, "numberPlate", "") or "").strip() and match.get("numberPlate"):
+        body.numberPlate = match["numberPlate"]
+    return body
+
+
 def _vehicle_id_blocks_reuse(other):
     """Cancelled / last-month delivered files do not block a new Sept+ delivery.
 
@@ -648,6 +668,9 @@ async def recompute_lead(lead_id):
     _ins_benefit_avail = ce.round2(ce.num(_ins_comp.get("schemeAvailable"))) if _ins_comp else 0.0
     updates = {
         "grossVehicleCost": totals["grossVehicleCost"],
+        "tcs": totals.get("tcs", 0),
+        "tcsBase": totals.get("tcsBase", 0),
+        "tcsApplicable": totals.get("tcsApplicable") or ("Yes" if ce.num(totals.get("tcs")) > 0 else "No"),
         "customerPayable": customer_payable,
         "totalDiscount": totals["totalDiscount"],
         "oemSchemeAmount": totals["oemEligible"],
@@ -2678,6 +2701,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         "activities": activities, "delivery": delivery, "booking": booking,
         "claims": claims, "actions": lead_actions(lead, user),
         "billingSummary": billing_summary or None,
+        "oemSold": await oem_sync.match_sold_for_lead(db, lead),
         "whatsapp": await wa.summary_for_lead(lead_id),
     }
 
@@ -5039,6 +5063,29 @@ async def list_deliveries(user=Depends(current_user)):
     return result
 
 
+@api.get("/leads/{lead_id}/oem-sold")
+async def lead_oem_sold(lead_id: str, refresh: bool = False, user=Depends(current_user)):
+    """Match this lead's unique mobile to a Coulson Sold/Billed vehicle."""
+    lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
+    if refresh:
+        try:
+            await oem_sync.refresh_sold_inventory(db)
+        except Exception:
+            logging.exception("Coulson sold refresh failed for %s", lead_id)
+    match = await oem_sync.match_sold_for_lead(db, lead)
+    outstanding = ce.round2(ce.num(lead.get("customerOutstanding")))
+    if not match:
+        return {
+            "matched": False,
+            "outstandingCleared": outstanding <= 0.01,
+            "customerOutstanding": outstanding,
+        }
+    match["outstandingCleared"] = outstanding <= 0.01
+    match["customerOutstanding"] = outstanding
+    return match
+
+
 @api.put("/leads/{lead_id}/delivery")
 async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
@@ -5063,9 +5110,12 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
     first_delivery = delivered and not _is_delivered(lead)
     if first_delivery:
         _require_action(lead, "canDeliver", "delivery (not booked/active)", act)
+        await _fill_delivery_from_sold(lead, body)
         errs = _validate_delivery_ready(lead, body)
         if errs:
             raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
+    else:
+        await _fill_delivery_from_sold(lead, body)
     await _assert_unique_vehicle_identifiers(
         lead_id,
         invoice_number=body.invoiceNumber,
@@ -5394,6 +5444,12 @@ async def list_price_master(model: Optional[str] = None):
         selling = _turbo_selling_ex(r, as_of)
         r["sellingExShowroom"] = selling
         r["turboUplift"] = ce.round2(selling - ce.num(r.get("exShowroom")))
+        gvc = ce.round2(selling + ce.num(r.get("rto")) + ce.num(r.get("insurance")) +
+                        sum(ce.num(r.get(k)) for k in
+                            ("accessories", "handlingCharges", "trc", "fastag",
+                             "extendedWarranty", "otherCharges")))
+        r["sellingTcs"] = ce.calculate_tcs(gvc)
+        r["tcsAuto"] = r["sellingTcs"] > 0
     return rows
 
 
@@ -5401,11 +5457,10 @@ async def list_price_master(model: Optional[str] = None):
 async def price_list(model: Optional[str] = None, q: str = "", user=Depends(current_user)):
     """Read-only showroom price list — what a salesperson quotes.
 
-    On-road is the same Gross Vehicle Cost the commercial engine computes, and
-    TCS follows the engine exactly: charged only when the Price Master row says
-    Yes AND the total reaches the threshold. A row over the threshold with the
-    flag off is NOT given a TCS line — that would quote a charge the app will
-    never bill — but it is counted in `tcsReview` so the owner can check it.
+    On-road is Gross Vehicle Cost plus TCS. TCS is mandatory at 1% of that
+    consideration when it exceeds ₹10,00,000 (Income-tax 206C(1F) / 394) —
+    the Price Master Yes/No flag is not a waiver. Deal-level scheme discounts
+    are applied on the lead, where TCS is recomputed on the after-discount price.
 
     Scheme shows the TOTAL available for the current month. The company/dealer
     split is deliberately withheld: that is commercial information.
@@ -5415,7 +5470,7 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
     rows = await db.price_master.find({"model": model} if model else {}).to_list(2000)
     counts = await oem_sync.inventory_counts(db)
     needle = (q or "").strip().lower()
-    grouped, review = {}, []
+    grouped = {}
     for r in rows:
         if str(r.get("status") or "active").lower() != "active":
             continue
@@ -5429,12 +5484,8 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
                 ("accessories", "handlingCharges", "trc", "fastag",
                  "extendedWarranty", "otherCharges")))
         gvc = ce.round2(ex + rto + ins + other)
-        applies = str(r.get("tcsApplicable") or "No").strip().lower() == "yes"
-        tcs = ce.calculate_tcs(gvc) if applies else 0.0
-        over = gvc >= ce.TCS_THRESHOLD
-        if over and not applies:
-            review.append({"priceId": r.get("priceId"), "model": mdl,
-                           "variant": variant, "onRoad": ce.round2(gvc)})
+        tcs = ce.calculate_tcs(gvc)
+        applies = tcs > 0
         shares = ce.get_scheme_shares_for_lead(mdl, variant, on, scheme_rows)
         scheme = ce.round2(sum(
             ce.num(v.get("totalBenefit")) or (ce.num(v.get("dealerShare")) + ce.num(v.get("companyShare")))
@@ -5454,9 +5505,6 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
            for m, v in sorted(grouped.items())]
     body = {"schemeMonth": ce.scheme_month_from_date(on), "asOf": on,
             "totalRows": sum(g["count"] for g in out), "models": out}
-    # Only the owner is shown the data-quality flag.
-    if (user or {}).get("role") == "owner":
-        body["tcsReview"] = review
     return body
 
 
@@ -6773,6 +6821,7 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/reports/cancellations"), ("GET", "/api/cancel-reasons"),
     ("POST", "/api/leads/{lead_id}/payments"), ("DELETE", "/api/payments/{receipt_number}"),
     ("PUT", "/api/leads/{lead_id}/delivery"),
+    ("GET", "/api/leads/{lead_id}/oem-sold"),
     ("GET", "/api/leads/{lead_id}/billing-summary"),
     ("GET", "/api/payments"), ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),
@@ -8961,6 +9010,8 @@ async def startup():
         await db.whatsapp_threads.create_index([("lastMessageAt", -1)])
         await db.cancel_reasons.create_index("reasonId", unique=True)
         await db.oem_inventory.create_index("chassis")
+        await db.oem_sold.create_index("chassis")
+        await db.oem_sold.create_index("mobile")
         # The daily revival sweep queries on these two together.
         await db.leads.create_index([("accountStatus", 1), ("reviveOn", 1)])
     except Exception:

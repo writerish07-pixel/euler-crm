@@ -175,6 +175,7 @@ async def test_mocked_coulson_sync(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: vehicles)
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
 
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
@@ -608,6 +609,7 @@ async def test_save_session_does_not_call_euler_login(client, monkeypatch):
 async def test_sync_uses_pasted_session_and_skips_password_login(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
 
     def boom(*a, **k):
         raise AssertionError("login must not run when a live session is stored")
