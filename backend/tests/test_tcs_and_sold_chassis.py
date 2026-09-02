@@ -340,3 +340,105 @@ async def test_sold_id_backfill_does_not_steal_live_chassis(client):
     want = await server.db.leads.find_one({"leadId": "LD-SOLD-WANT"})
     assert not want.get("chassisNumber")
     await server.db.leads.delete_many({"leadId": {"$in": ["LD-SOLD-WANT", "LD-SOLD-HAS"]}})
+
+
+def test_name_match_needs_two_words():
+    assert oem_sync._name_key_usable("sakil ali")
+    assert oem_sync._name_key_usable("prakash chand ranwa")
+    assert not oem_sync._name_key_usable("ali")
+    assert not oem_sync._name_key_usable("")
+    assert oem_sync._norm_person_name("Prakash  chand Ranwa") == "prakash chand ranwa"
+
+
+def test_vehicle_customer_name_reads_nested():
+    assert oem_sync.vehicle_customer_name({"customer_name": "Roshan Sharma"}) == "Roshan Sharma"
+    assert oem_sync.vehicle_customer_name({"customer": {"name": "Sakil Ali"}}) == "Sakil Ali"
+    assert oem_sync.vehicle_customer_name({"chassis": "X"}) == ""
+
+
+@pytest.mark.asyncio
+async def test_blank_or_wrong_mobile_fills_from_unique_sold_name(client):
+    """The four sheet names: unique OEM name → copy mobile then chassis/invoice."""
+    rows = [
+        ("LD-NM-1", "Roshan Sharma", "", "9777099101", "MD9NMROSHAN0001", "INV-NM-1"),
+        ("LD-NM-2", "Prakash chand Ranwa", "9000000002", "9777099102", "MD9NMPRAKASH01", "INV-NM-2"),
+        ("LD-NM-3", "Vivan point", "", "9777099103", "MD9NMVIVAN00001", "INV-NM-3"),
+        ("LD-NM-4", "Sakil Ali", "NA", "9777099104", "MD9NMSAKIL00001", "INV-NM-4"),
+    ]
+    await server.db.leads.delete_many({"leadId": {"$in": [r[0] for r in rows]}})
+    await server.db.oem_sold.delete_many({"chassis": {"$in": [r[4] for r in rows]}})
+    keys = {oem_sync._norm_person_name(r[1]) for r in rows}
+    async for existing in server.db.leads.find({}):
+        if oem_sync._norm_person_name(existing.get("customerName")) in keys:
+            await server.db.leads.delete_one({"leadId": existing["leadId"]})
+    for lid, name, crm_mobile, oem_mobile, chassis, invoice in rows:
+        await server.db.leads.insert_one({
+            "leadId": lid, "customerName": name, "mobile": crm_mobile,
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "accountStatus": "Active", "currentStatus": "Booked",
+        })
+        await server.db.oem_sold.insert_one({
+            "chassis": chassis, "mobile": oem_mobile, "invoiceNumber": invoice,
+            "customerName": name, "model": "Turbo Max", "variant": "Maxx (PV)",
+        })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["updated"] == 4
+    assert stats["mobilesUpdated"] == 4
+    for lid, name, crm_mobile, oem_mobile, chassis, invoice in rows:
+        lead = await server.db.leads.find_one({"leadId": lid})
+        assert lead["mobile"] == oem_mobile, lid
+        assert lead["chassisNumber"] == chassis
+        assert lead["invoiceNumber"] == invoice
+        if crm_mobile == "9000000002":
+            assert lead.get("altMobile") == "9000000002"
+    await server.db.leads.delete_many({"leadId": {"$in": [r[0] for r in rows]}})
+
+
+@pytest.mark.asyncio
+async def test_duplicate_sold_name_does_not_copy_mobile(client):
+    await server.db.leads.delete_many({"leadId": "LD-NM-DUP"})
+    await server.db.oem_sold.delete_many({"customerName": "Roshan Sharma"})
+    await server.db.leads.insert_one({
+        "leadId": "LD-NM-DUP", "customerName": "Roshan Sharma", "mobile": "",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9NMDUPA", "mobile": "9811110091", "invoiceNumber": "A",
+        "customerName": "Roshan Sharma",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9NMDUPB", "mobile": "9811110092", "invoiceNumber": "B",
+        "customerName": "Roshan Sharma",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    lead = await server.db.leads.find_one({"leadId": "LD-NM-DUP"})
+    assert not lead.get("chassisNumber")
+    assert not lead.get("mobile")
+    assert stats["updated"] == 0
+    await server.db.leads.delete_many({"leadId": "LD-NM-DUP"})
+
+
+@pytest.mark.asyncio
+async def test_unique_mobile_still_wins_over_name(client):
+    await server.db.leads.delete_many({"leadId": "LD-NM-MOB"})
+    await server.db.oem_sold.delete_many({"chassis": {"$in": ["MD9NMMOB1", "MD9NMMOB2"]}})
+    await server.db.leads.insert_one({
+        "leadId": "LD-NM-MOB", "customerName": "Roshan Sharma", "mobile": "9811110088",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9NMMOB1", "mobile": "9811110088", "invoiceNumber": "MOB-WIN",
+        "customerName": "Someone Else", "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9NMMOB2", "mobile": "9811110077", "invoiceNumber": "NAME-ROW",
+        "customerName": "Roshan Sharma", "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    lead = await server.db.leads.find_one({"leadId": "LD-NM-MOB"})
+    assert lead["chassisNumber"] == "MD9NMMOB1"
+    assert lead["invoiceNumber"] == "MOB-WIN"
+    assert lead["mobile"] == "9811110088"
+    assert stats["mobilesUpdated"] == 0
+    await server.db.leads.delete_many({"leadId": "LD-NM-MOB"})

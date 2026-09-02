@@ -834,9 +834,12 @@ function realCoulsonUsername(u) {
 }
 
 function coulsonSyncOkToast(r) {
-  const n = (r && r.leadsVehicleIds && r.leadsVehicleIds.updated) || 0;
+  const ids = (r && r.leadsVehicleIds) || {};
+  const n = ids.updated || 0;
+  const m = ids.mobilesUpdated || 0;
+  const extra = m ? ` · ${m} mobiles` : "";
   toast.success(
-    `Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices · ${n} leads chassis/invoice`,
+    `Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices · ${n} leads chassis/invoice${extra}`,
   );
 }
 
@@ -998,7 +1001,7 @@ function CoulsonCard() {
         Euler accepts this password on{" "}
         <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>
         {" "}and still refuses it from this app. That is on their side — a Railway variable will not change it.
-        Sign in on Coulson, then paste the session below. Sync also writes chassis and invoice from Sold onto matching CRM leads. RTO, insurance and other charges stay on Price Master.
+        Sign in on Coulson, then paste the session below. Sync writes chassis, invoice and the OEM mobile onto matching CRM leads (unique mobile, or unique customer name when the number is blank or wrong). RTO, insurance and other charges stay on Price Master.
       </p>
       <ol className="text-sm text-ink-soft mb-3 list-decimal pl-5 space-y-1">
         <li>Open Coulson, sign in with the same Username and Password (a private window is fine).</li>
