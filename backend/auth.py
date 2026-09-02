@@ -2,13 +2,14 @@
 import hashlib
 import os
 import uuid
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 import bcrypt
 import jwt
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 JWT_ALGORITHM = "HS256"
 bearer = HTTPBearer(auto_error=False)
@@ -62,7 +63,7 @@ def verify_password(pw: str, hashed: str) -> bool:
 
 def create_token(user):
     payload = {
-        "sub": user["userId"], "email": user["email"], "role": user["role"],
+        "sub": user["userId"], "email": user.get("email") or "", "role": user["role"],
         "name": user.get("name", ""), "exp": datetime.now(timezone.utc) + timedelta(days=7),
         "type": "access",
     }
@@ -84,7 +85,7 @@ class LoginIn(BaseModel):
 
 
 class UserIn(BaseModel):
-    email: str
+    email: Optional[str] = None
     password: str
     name: str = ""
     role: str = "executive"
@@ -101,6 +102,52 @@ def norm_login_id(v) -> str:
     """Login IDs are compared case- and space-insensitively, so "Amit" and
     "amit " are the same person and cannot both be created."""
     return " ".join(str(v or "").strip().lower().split())
+
+
+# Synthetic inbox used when the owner skips email. Unique so the email index
+# stays happy; never shown as a real address in User Accounts.
+_PLACEHOLDER_EMAIL_DOMAIN = "users.local"
+
+
+def _is_placeholder_email(email) -> bool:
+    e = str(email or "").strip().lower()
+    return (not e) or e.endswith("@" + _PLACEHOLDER_EMAIL_DOMAIN)
+
+
+def _display_email(email) -> str:
+    e = str(email or "").strip()
+    return "" if _is_placeholder_email(e) else e
+
+
+def _stored_email(email, login_id, user_id) -> str:
+    e = str(email or "").strip().lower()
+    if e:
+        return e
+    handle = norm_login_id(login_id) or str(user_id).replace("-", "")[:12]
+    return f"{handle}@{_PLACEHOLDER_EMAIL_DOMAIN}"
+
+
+def _owner_user_row(u) -> dict:
+    """Owner User Accounts row — includes the login password the owner set /
+    the staff member last saved in Change password. Never sent to staff."""
+    return {
+        "userId": u["userId"],
+        "email": _display_email(u.get("email")),
+        "loginId": u.get("loginId") or "",
+        "name": u.get("name") or "",
+        "role": u["role"],
+        "password": u.get("passwordPlain") or "",
+    }
+
+
+def _public_session_user(u) -> dict:
+    return {
+        "email": _display_email(u.get("email")),
+        "loginId": u.get("loginId") or "",
+        "name": u.get("name") or "",
+        "role": u["role"],
+        "userId": u["userId"],
+    }
 
 
 class ChangePasswordIn(BaseModel):
@@ -121,6 +168,7 @@ def build_router(db):
             raise HTTPException(401, "User not found")
         user.pop("_id", None)
         user.pop("passwordHash", None)
+        user.pop("passwordPlain", None)
         # One chokepoint for outside roles. The /api router depends on
         # current_user for every route, so denying here denies everywhere —
         # including the 37 GET endpoints that have no role check of their own.
@@ -202,7 +250,7 @@ def build_router(db):
         if not user or not verify_password(body.password, user["passwordHash"]):
             raise HTTPException(401, "Invalid user ID or password")
         token = create_token(user)
-        return {"token": token, "user": {"email": user["email"], "name": user.get("name", ""), "role": user["role"], "userId": user["userId"]}}
+        return {"token": token, "user": _public_session_user(user)}
 
     @router.get("/me")
     async def me(user=Depends(current_user)):
@@ -223,6 +271,7 @@ def build_router(db):
             {"userId": user["userId"]},
             {"$set": {
                 "passwordHash": hash_password(new_pw),
+                "passwordPlain": new_pw,
                 "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
             }},
         )
@@ -231,15 +280,25 @@ def build_router(db):
     @router.get("/users")
     async def list_users(user=Depends(owner_only)):
         users = await db.users.find().to_list(200)
-        return [{"userId": u["userId"], "email": u["email"], "loginId": u.get("loginId", ""),
-                 "name": u.get("name", ""), "role": u["role"]} for u in users]
+        return [_owner_user_row(u) for u in users]
 
     @router.post("/users")
     async def create_user(body: UserIn, user=Depends(owner_only)):
-        email = body.email.strip().lower()
-        if await db.users.find_one({"email": email}):
-            raise HTTPException(400, "Email already exists")
+        email_in = (body.email or "").strip().lower()
         login_id = (body.loginId or "").strip()
+        pw = (body.password or "").strip()
+        if not pw:
+            raise HTTPException(422, "Password is required")
+        if not email_in and not login_id:
+            raise HTTPException(422, "User ID is required when email is left blank")
+        if email_in and "@" not in email_in:
+            raise HTTPException(422, "Email must look like an email address, or leave it blank")
+        user_id = str(uuid.uuid4())
+        email = _stored_email(email_in, login_id, user_id)
+        if email_in and await db.users.find_one({"email": email_in}):
+            raise HTTPException(400, "Email already exists")
+        if not email_in and await db.users.find_one({"email": email}):
+            raise HTTPException(400, f"User ID '{login_id}' is already taken")
         norm = norm_login_id(login_id)
         if norm:
             if await db.users.find_one({"loginIdNorm": norm}):
@@ -247,13 +306,13 @@ def build_router(db):
             if "@" in login_id:
                 raise HTTPException(422, "A user ID cannot contain '@' — that looks like an email")
         role = body.role if body.role in ALLOWED_ROLES else "executive"
-        doc = {"userId": str(uuid.uuid4()), "email": email,
+        doc = {"userId": user_id, "email": email,
                "loginId": login_id, "loginIdNorm": norm,
-               "passwordHash": hash_password(body.password),
+               "passwordHash": hash_password(pw),
+               "passwordPlain": pw,
                "name": body.name, "role": role, "createdAt": datetime.now(timezone.utc).isoformat()}
         await db.users.insert_one(doc)
-        return {"userId": doc["userId"], "email": email, "loginId": login_id,
-                "name": body.name, "role": role}
+        return _owner_user_row(doc)
 
     @router.put("/users/{user_id}/login-id")
     async def set_login_id(user_id: str, body: LoginIdIn, user=Depends(owner_only)):
@@ -347,6 +406,7 @@ async def seed_users(db):
                     {"userId": existing["userId"]},
                     {"$set": {
                         "passwordHash": hash_password(reset_pw),
+                        "passwordPlain": reset_pw,
                         "passwordResetEnvMarker": marker,
                         "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
                     }},
