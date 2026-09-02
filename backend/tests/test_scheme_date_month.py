@@ -93,12 +93,12 @@ async def client():
         yield c
 
 
-async def _cargoking_lead(c):
+async def _cargoking_lead(c, mobile="9000011266"):
     await server.db.scheme_master.delete_many({"model": MODEL})
     for i, row in enumerate(ROWS):
         await server.db.scheme_master.insert_one({**row, "schemeId": f"SCM-DATE-{i}"})
     r = await c.post("/api/leads", json={
-        "customerName": "Scheme Date Switch", "mobile": "9000011266",
+        "customerName": "Scheme Date Switch", "mobile": mobile,
         "interestedModel": MODEL, "variant": "Standard",
         "executive": "Amit", "leadSource": "Walk-in",
     })
@@ -123,7 +123,7 @@ async def test_scheme_rules_on_query_switches_month(client):
 
 @pytest.mark.asyncio
 async def test_save_scheme_date_does_not_invent_booking(client):
-    lid = await _cargoking_lead(client)
+    lid = await _cargoking_lead(client, mobile="9000011267")
     r = await client.put(f"/api/leads/{lid}/scheme", json={
         "schemeDate": "2026-09-05",
         "benefitMode": "Partial Benefit",
