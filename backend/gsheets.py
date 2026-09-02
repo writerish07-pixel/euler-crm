@@ -308,7 +308,62 @@ MASTERS_HEADER = ["Category", "Value", "Status"]
 
 _service = None
 _status = {"enabled": False, "reason": "not configured", "email": None}
-_health = {"lastWriteOk": None, "lastWriteAt": None, "lastError": None, "writes": 0, "failures": 0}
+_health = {
+    "lastWriteOk": None, "lastWriteAt": None, "lastError": None,
+    "lastErrorClass": None, "hardFailure": False, "writes": 0, "failures": 0,
+}
+
+
+def classify_write_error(msg: str) -> str:
+    """How the top-bar badge should treat a failed sheet write.
+
+    Connection is fine (Settings shows Live) even when an optional tab or a
+    pending header is missing. Those used to flip lastWriteOk=false and the
+    whole app screamed Sync Error.
+    """
+    e = (msg or "").lower()
+    if not e:
+        return "write"
+    if any(x in e for x in ("429", "quota", "rate limit")):
+        return "quota"
+    if any(x in e for x in ("401", "unauth", "invalid_grant", "credential")):
+        return "permission"
+    if "403" in e or "permission" in e:
+        return "permission"
+    if any(x in e for x in ("500", "502", "503", "unavailable", "timeout",
+                            "timed out", "deadline")):
+        return "google"
+    if any(x in e for x in (
+        "unable to parse range", "unable to parse", "no matching headers",
+        "required id header", "stable id", "tab not found", "no such tab",
+        "does not exist", "unable to find", "header",
+    )):
+        return "sheet_shape"
+    return "write"
+
+
+def _mark_health(ok: bool, error: str = ""):
+    """Record a write outcome. Shape misses do not turn the badge red."""
+    now = datetime.now(timezone.utc).isoformat()
+    if ok:
+        _health.update({
+            "lastWriteOk": True, "lastWriteAt": now, "lastError": None,
+            "lastErrorClass": None, "hardFailure": False,
+            "writes": _health["writes"] + 1,
+        })
+        return
+    klass = classify_write_error(error)
+    hard = klass in ("quota", "permission", "google", "write")
+    _health["failures"] = int(_health.get("failures") or 0) + 1
+    _health["lastWriteAt"] = now
+    _health["lastError"] = (error or "")[:300]
+    _health["lastErrorClass"] = klass
+    if hard:
+        _health["lastWriteOk"] = False
+        _health["hardFailure"] = True
+    else:
+        _health["hardFailure"] = False
+        _health["lastWriteOk"] = True
 _header_cache = {}
 _headerrow_cache = {}
 _idrow_cache = {}   # (tab, header_row) -> {id_value: row_number}
@@ -979,13 +1034,11 @@ async def ensure_cancel_columns():
         return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
     try:
         detail = await asyncio.to_thread(_ensure_cancel_columns_sync)
-        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": None, "writes": _health["writes"] + 1})
+        _mark_health(True)
         return detail
     except Exception as e:
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
@@ -1022,13 +1075,11 @@ async def ensure_insurance_agent_columns():
         return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
     try:
         detail = await asyncio.to_thread(_ensure_insurance_agent_columns_sync)
-        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": None, "writes": _health["writes"] + 1})
+        _mark_health(True)
         return detail
     except Exception as e:
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
@@ -1058,13 +1109,11 @@ async def ensure_lead_commercial_columns():
         return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
     try:
         detail = await asyncio.to_thread(_ensure_lead_commercial_columns_sync)
-        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": None, "writes": _health["writes"] + 1})
+        _mark_health(True)
         return detail
     except Exception as e:
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
@@ -1117,13 +1166,11 @@ async def ensure_oem_extra_support_columns():
         return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
     try:
         detail = await asyncio.to_thread(_ensure_oem_extra_support_columns_sync)
-        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": None, "writes": _health["writes"] + 1})
+        _mark_health(True)
         return detail
     except Exception as e:
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
@@ -1393,17 +1440,14 @@ async def sync(entity: str, doc: dict):
     try:
         res = await asyncio.to_thread(_upsert_sync, entity, doc)
         if res.get("ok"):
-            _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                            "lastError": None, "writes": _health["writes"] + 1})
+            _mark_health(True)
         else:
-            _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                            "lastError": str(res.get("error"))[:300], "failures": _health["failures"] + 1})
+            _mark_health(False, str(res.get("error") or ""))
         return res
     except Exception as e:
         invalidate_header_cache()
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "operation": "error", "tab": SYNC_MAP[entity][0], "error": str(e)[:500]}
 
 
@@ -1563,17 +1607,14 @@ async def delete_lead_traces(lead_id: str):
     try:
         res = await asyncio.to_thread(_delete_lead_traces_sync, lead_id)
         if res.get("ok"):
-            _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                            "lastError": None, "writes": _health["writes"] + 1})
+            _mark_health(True)
         else:
-            _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                            "lastError": str(res.get("error"))[:300], "failures": _health["failures"] + 1})
+            _mark_health(False, str(res.get("error") or ""))
         return res
     except Exception as e:
         invalidate_header_cache()
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "operation": "error", "error": str(e)[:500], "rowsDeleted": 0, "tabs": []}
 
 
@@ -1615,18 +1656,14 @@ async def delete_entity_row(entity: str, id_value: str):
     try:
         res = await asyncio.to_thread(_delete_entity_by_id_sync, entity, id_value)
         if res.get("ok"):
-            _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                            "lastError": None, "writes": _health["writes"] + 1})
+            _mark_health(True)
         else:
-            _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                            "lastError": str(res.get("error") or "")[:300],
-                            "failures": _health["failures"] + 1})
+            _mark_health(False, str(res.get("error") or ""))
         return res
     except Exception as e:
         invalidate_header_cache()
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "operation": "error", "error": str(e)[:500], "rowsDeleted": 0,
                 "entity": entity, "entityId": id_value}
 
@@ -1705,13 +1742,11 @@ async def sync_masters(rows):
         return False
     try:
         await asyncio.to_thread(_sync_masters_sync, rows)
-        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": None, "writes": _health["writes"] + 1})
+        _mark_health(True)
         return True
     except Exception as e:
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return False
 
 
@@ -1776,13 +1811,11 @@ async def clear_operational_register_rows():
     try:
         detail = await asyncio.to_thread(_clear_operational_register_rows_sync)
         invalidate_header_cache()
-        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": None, "writes": _health["writes"] + 1})
+        _mark_health(True)
         return {"ok": True, **detail}
     except Exception as e:
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return {"ok": False, "reason": str(e)[:300]}
 
 
@@ -1811,13 +1844,11 @@ async def overwrite_report_tab(tab, values):
         return False
     try:
         await asyncio.to_thread(_overwrite_report_sync, tab, values)
-        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": None, "writes": _health["writes"] + 1})
+        _mark_health(True)
         return True
     except Exception as e:
         _status["lastError"] = str(e)
-        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
-                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        _mark_health(False, str(e)[:300])
         return False
 
 
