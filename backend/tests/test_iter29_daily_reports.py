@@ -671,3 +671,87 @@ async def test_the_sender_passes_exactly_the_documented_variable_count(wired):
         assert count == len(docs[template_id]["vars"]), (
             f"{kind}: app sends {count} variables, {template_id} declares "
             f"{len(docs[template_id]['vars'])}")
+
+
+def test_slots_due_catches_up_after_the_hour():
+    morning = datetime(2026, 9, 2, 10, 0, tzinfo=wa.IST)
+    assert wa.slots_due(morning) == ["morning"]
+    evening = datetime(2026, 9, 2, 21, 15, tzinfo=wa.IST)
+    assert wa.slots_due(evening) == ["morning", "eod"]
+    before = datetime(2026, 9, 2, 7, 0, tzinfo=wa.IST)
+    assert wa.slots_due(before) == []
+
+
+@pytest.mark.asyncio
+async def test_staff_with_no_reports_field_still_gets_role_default(wired):
+    """Older staff rows never stored reports; skipping them is how EOD 'didn't deliver to staff'."""
+    _c, sends = wired
+    await server.db.staff.insert_one({
+        "staffId": "ST-NOREPORTS", "name": "NoReports Exec", "role": "executive",
+        "mobile": "9812345555", "status": "Active", "whatsappOptIn": True,
+    })
+    await server.db.settings.delete_one({"_id": f"report_morning_{wa.today_ist()}"})
+    await wa.run_daily_reports("morning")
+    assert "9812345555" in {s["phone"] for s in sends}
+
+
+@pytest.mark.asyncio
+async def test_unmatched_exec_name_still_gets_a_zero_stats_message(wired):
+    _c, sends = wired
+    await server.db.staff.insert_one({
+        "staffId": "ST-ODDNAME", "name": "Odd  Name", "role": "executive",
+        "mobile": "9812346666", "status": "Active", "whatsappOptIn": True,
+        "reports": ["exec_morning", "exec_eod"],
+    })
+    await server.db.settings.delete_one({"_id": f"report_morning_{wa.today_ist()}"})
+    await wa.run_daily_reports("morning")
+    assert "9812346666" in {s["phone"] for s in sends}
+
+
+@pytest.mark.asyncio
+async def test_tick_after_eod_hour_sends_a_missed_eod(wired):
+    """A host that wakes up at 21:15 IST must still send the 20:00 EOD."""
+    _c, sends = wired
+    when = datetime(2026, 9, 2, 21, 15, tzinfo=wa.IST)
+    await wa.tick_due_reports(when)
+    kinds = {s["kind"] for s in sends}
+    assert "owner_eod" in kinds
+    assert "exec_morning" in kinds
+    assert "exec_eod" in kinds
+
+
+@pytest.mark.asyncio
+async def test_force_resends_after_a_successful_run(wired):
+    _c, sends = wired
+    first = await wa.run_daily_reports("eod")
+    assert first["sent"] > 0
+    n = len(sends)
+    blocked = await wa.run_daily_reports("eod")
+    assert blocked.get("alreadySent") is True
+    assert len(sends) == n
+    again = await wa.run_daily_reports("eod", force=True)
+    assert again.get("alreadySent") is not True
+    assert again["sent"] > 0
+    assert len(sends) > n
+
+
+@pytest.mark.asyncio
+async def test_missing_template_falls_back_to_alias(client, monkeypatch):
+    staff = (await client.get("/api/staff")).json()
+    amit = next(s for s in staff if s["name"] == "Amit")
+    await client.put(f"/api/staff/{amit['staffId']}", json={
+        "name": "Amit", "role": "executive", "mobile": "9812341111"})
+    await server.db.settings.delete_one({"_id": f"report_morning_{wa.today_ist()}"})
+    used = []
+
+    async def fake_enqueue(*, lead, kind, phone, template_id, variables, text, customer_hours):
+        used.append(template_id)
+        if template_id == "exec_morning_statement":
+            return {"ok": False, "error": "BotSpace 400: template not found"}
+        return {"ok": True}
+
+    monkeypatch.setattr(wa, "_enqueue_or_send", fake_enqueue)
+    monkeypatch.setattr(wa, "get_config", lambda: _cfg())
+    res = await wa.run_daily_reports("morning")
+    assert res["sent"] >= 1
+    assert "exec_day_ahead" in used

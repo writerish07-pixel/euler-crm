@@ -46,7 +46,7 @@ export default function Staff() {
   const sendNow = async (slot) => {
     setBusy(slot);
     try {
-      const r = await post(`/integrations/botspace/send-daily-report?slot=${slot}`, {});
+      const r = await post(`/integrations/botspace/send-daily-report?slot=${slot}&force=true`, {});
       if (r.alreadySent) toast.success(`${slot} report already went out today`);
       else if (r.ok) toast.success(`Sent to ${r.sent} recipient${r.sent === 1 ? "" : "s"}${r.failed ? ` · ${r.failed} failed` : ""}`);
       else toast.error(r.reason || "Could not send");
@@ -242,7 +242,8 @@ function ReportHealth({ refreshKey }) {
       </div>
       <p className="text-xs text-ink-soft mb-4">
         Reports are staff messages, so they never appear in the WhatsApp inbox. This is
-        where a failed send shows up.
+        where a failed send shows up. If the server was asleep at 8:00 / 20:00 IST, the next
+        restart still sends today's missed slot. Use Send EOD now to send immediately.
       </p>
 
       <div className="grid sm:grid-cols-2 gap-4">
@@ -287,9 +288,16 @@ function ReportHealth({ refreshKey }) {
         <div className="text-xs text-ink-soft mb-2">Templates in use — each must be approved on Meta under this exact name:</div>
         <div className="grid sm:grid-cols-2 gap-x-6 gap-y-1">
           {Object.entries(d.templates || {}).map(([kind, t]) => (
-            <div key={kind} className="flex items-baseline justify-between text-xs">
-              <span className="font-mono text-ink">{t.templateId}</span>
-              <span className="text-ink-faint">{t.recipients} recipient{t.recipients === 1 ? "" : "s"}</span>
+            <div key={kind} className="flex items-baseline justify-between text-xs gap-2">
+              <span className="font-mono text-ink">
+                {t.templateId}
+                {(t.aliases || []).length ? (
+                  <span className="text-ink-faint"> · fallback {t.aliases.join(", ")}</span>
+                ) : null}
+              </span>
+              <span className={t.recipients ? "text-ink-faint" : "text-amber-700"}>
+                {t.recipients} recipient{t.recipients === 1 ? "" : "s"}
+              </span>
             </div>
           ))}
         </div>

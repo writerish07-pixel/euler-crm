@@ -1168,14 +1168,22 @@ async def _executive_names() -> list:
 
 
 async def _staff_for_report(report: str) -> list:
-    """Active, opted-in staff who should receive `report` and have a mobile."""
+    """Active, opted-in staff who should receive `report` and have a mobile.
+
+    Rows that never stored a `reports` list (created before Staff & Reports)
+    use the role default — otherwise a named executive with a WhatsApp number
+    is silently skipped every morning and EOD.
+    """
     out = []
     for r in await db.staff.find().to_list(500):
         if str(r.get("status") or "Active").lower() != "active":
             continue
         if not r.get("whatsappOptIn", True):
             continue
-        if report not in (r.get("reports") or []):
+        reports = r.get("reports")
+        if reports is None:
+            reports = DEFAULT_REPORTS_BY_ROLE.get(str(r.get("role") or ""), [])
+        if report not in (reports or []):
             continue
         if not wa.digits10(r.get("mobile")):
             continue
@@ -8720,14 +8728,23 @@ async def botspace_cron(request: Request):
 
 
 @api.post("/integrations/botspace/send-daily-report", dependencies=[Depends(owner_only)])
-async def botspace_send_daily_report(slot: str = "eod", act=Depends(actor)):
+async def botspace_send_daily_report(slot: str = "eod", force: bool = True,
+                                    act=Depends(actor)):
     """Owner: send a report slot now, without waiting for the schedule.
 
-    Idempotent per day+slot — use force=1 semantics by clearing the marker if you
-    really need a resend."""
-    res = await wa.run_daily_reports(slot)
-    await write_audit(act, "send", "daily-report", new={"slot": slot, "sent": res.get("sent")})
+    Default force=true — the button means send now, even if a silent ticker
+    already marked the slot as attempted. Cron stays idempotent (force=false).
+    """
+    res = await wa.run_daily_reports(slot, force=force)
+    await write_audit(act, "send", "daily-report",
+                      new={"slot": slot, "sent": res.get("sent"), "force": force})
     return res
+
+
+@api.get("/integrations/botspace/templates", dependencies=[Depends(owner_only)])
+async def botspace_templates():
+    """The morning / EOD template names the app will send, plus aliases to try."""
+    return await wa.configured_report_templates()
 
 
 @api.get("/integrations/botspace/report-status", dependencies=[Depends(owner_only)])
