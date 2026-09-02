@@ -53,7 +53,7 @@ const NAV = [
   ]},
   { section: "Catalogue & Admin", items: [
     { to: "/price-list", label: "Price List", icon: Tag, salesOnly: true },
-    { to: "/inventory", label: "Yard Inventory", icon: Warehouse, salesOnly: true },
+    { to: "/inventory", label: "Yard Inventory", icon: Warehouse },
     { to: "/price-master", label: "Price Master", icon: SlidersHorizontal, ownerOnly: true },
     { to: "/staff", label: "Staff & Reports", icon: UserCog, ownerOnly: true },
     { to: "/settings", label: "Settings", icon: SettingsIcon },

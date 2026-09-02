@@ -373,9 +373,12 @@ async def sync_from_coulson(db, *, username=None, password=None):
     await db.oem_inventory.delete_many({})
     if inv_docs:
         await db.oem_inventory.insert_many(inv_docs)
+    dropped = await drop_delivered_from_inventory(db)
+    yard_count = await db.oem_inventory.count_documents({})
 
     extra = {
-        "inventoryCount": len(inv_docs),
+        "inventoryCount": yard_count,
+        "deliveredDropped": dropped,
         "oemModelCount": len(oem_models),
         "pricesUpdated": prices_updated,
         "unmatchedOemSkus": unmatched_oem,
@@ -385,6 +388,43 @@ async def sync_from_coulson(db, *, username=None, password=None):
     }
     await _record_sync(db, True, "", extra)
     return {"ok": True, "catalog": catalog_result, **extra}
+
+
+def _norm_chassis(s):
+    return re.sub(r"\s+", "", str(s or "")).strip().upper()
+
+
+async def drop_delivered_from_inventory(db):
+    """Chassis already delivered in this app is not available yard stock."""
+    gone = set()
+    async for l in db.leads.find({"chassisNumber": {"$exists": True, "$nin": ["", None]}}):
+        ds = str(l.get("deliveryStatus") or "").lower()
+        cs = str(l.get("currentStatus") or "").lower()
+        if ds == "delivered" or cs == "delivered":
+            ch = _norm_chassis(l.get("chassisNumber"))
+            if ch:
+                gone.add(ch)
+    if not gone:
+        return 0
+    removed = 0
+    async for row in db.oem_inventory.find({}):
+        if _norm_chassis(row.get("chassis")) in gone:
+            await db.oem_inventory.delete_one({"_id": row["_id"]})
+            removed += 1
+    return removed
+
+
+async def take_chassis_from_inventory(db, chassis):
+    """Remove one chassis from yard when it is marked delivered here."""
+    ch = _norm_chassis(chassis)
+    if not ch:
+        return 0
+    removed = 0
+    async for row in db.oem_inventory.find({}):
+        if _norm_chassis(row.get("chassis")) == ch:
+            await db.oem_inventory.delete_one({"_id": row["_id"]})
+            removed += 1
+    return removed
 
 
 async def inventory_counts(db):

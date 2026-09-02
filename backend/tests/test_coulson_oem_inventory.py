@@ -640,3 +640,36 @@ async def test_expired_session_is_not_sent_to_coulson(client, monkeypatch):
     assert "expired" in r.text.lower()
     assert expired not in r.text
 
+
+@pytest.mark.asyncio
+async def test_delivered_chassis_is_dropped_from_yard(client):
+    await server.db.oem_inventory.insert_one({
+        "chassis": "MD9GONE001", "model": "Turbo Max", "variant": "City (PV)", "exShowroom": 650000})
+    await server.db.leads.insert_one({
+        "leadId": "LD-INV-DROP", "chassisNumber": "MD9GONE001",
+        "deliveryStatus": "Delivered", "currentStatus": "Delivered"})
+    n = await oem_sync.drop_delivered_from_inventory(server.db)
+    assert n == 1
+    assert await server.db.oem_inventory.find_one({"chassis": "MD9GONE001"}) is None
+
+
+@pytest.mark.asyncio
+async def test_august_booking_is_not_repriced_for_sept_turbo(client):
+    """Turbo +15k from 1 Sep must not move last month's booked files."""
+    await server.db.leads.insert_one({
+        "leadId": "LD-AUG-TURBO", "customerName": "Aug Book",
+        "interestedModel": "Turbo Max", "variant": "City (PV)",
+        "accountStatus": "Active", "deliveryStatus": "Pending",
+        "currentStatus": "Booked", "bookingDate": "2026-08-20",
+        "exShowroom": 650000, "customerPayable": 650000,
+        "customerOutstanding": 20000, "totalReceived": 0,
+        "priceStructureSaved": True,
+    })
+    row = {"model": "Turbo Max", "variant": "City (PV)", "exShowroom": 665000}
+    out = await server.reprice_leads_for_price_row(row, {"exShowroom"}, None)
+    assert out["repricedCount"] == 0
+    reasons = " ".join(s.get("reason") or "" for s in out["skipped"])
+    assert "1 Sep" in reasons
+    lead = await server.db.leads.find_one({"leadId": "LD-AUG-TURBO"})
+    assert lead["exShowroom"] == 650000
+

@@ -2,12 +2,13 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Wallet, Landmark, ReceiptText, ShieldCheck, Truck, AlertCircle,
-  IndianRupee, Printer, FileText, ExternalLink,
+  IndianRupee, Printer, FileText, ExternalLink, Warehouse,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
 import { inr, compactInr, fmtDate } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Portal } from "../components/ui";
+import YardStockCard from "../components/YardStockCard";
 
 export default function AccountsDashboard() {
   const [d, setD] = useState(null);
@@ -67,7 +68,7 @@ export default function AccountsDashboard() {
         <Link to="/finance"><Button variant="secondary" data-testid="acct-go-finance"><Landmark size={14} /> Finance</Button></Link>
         <Link to="/claims"><Button variant="secondary" data-testid="acct-go-claims"><ReceiptText size={14} /> OEM Claims</Button></Link>
         <Link to="/insurance"><Button variant="secondary" data-testid="acct-go-insurance"><ShieldCheck size={14} /> Insurance</Button></Link>
-        <Link to="/deliveries"><Button variant="secondary" data-testid="acct-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>
+        <Link to="/inventory"><Button variant="secondary" data-testid="acct-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
@@ -194,6 +195,10 @@ export default function AccountsDashboard() {
         </div>
         </Portal>
       )}
+
+      <div className="mt-6">
+        <YardStockCard />
+      </div>
     </div>
   );
 }

@@ -17,7 +17,8 @@ export default function Settings() {
   const { isOwner, user, isOemFinance } = useAuth();
   const [users, setUsers] = useState([]);
   const [gs, setGs] = useState(null);
-  const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive", loginId: "" });
+  const [form, setForm] = useState({ email: "", password: "", name: "", role: "executive", loginId: "", staffId: "" });
+  const [staff, setStaff] = useState([]);
   const [backfilling, setBackfilling] = useState(false);
   const [ensuringOem, setEnsuringOem] = useState(false);
   const [ensuringIns, setEnsuringIns] = useState(false);
@@ -28,9 +29,10 @@ export default function Settings() {
   const loadUsers = useCallback(() => { if (isOwner) get("/auth/users").then(setUsers).catch(() => {}); }, [isOwner]);
   useEffect(() => {
     loadUsers();
+    if (isOwner) get("/staff").then(setStaff).catch(() => setStaff([]));
     // The OEM role is denied every route but its own report, so do not even ask.
     if (!isOemFinance) get("/integrations/gsheets").then(setGs).catch(() => {});
-  }, [loadUsers, isOemFinance]);
+  }, [loadUsers, isOemFinance, isOwner]);
 
   const changePassword = async () => {
     if (!pwForm.currentPassword || !pwForm.newPassword) {
@@ -128,10 +130,24 @@ export default function Settings() {
     } finally { setEnsuringCancel(false); }
   };
 
+  const STAFF_ROLE_TO_LOGIN = {
+    executive: "executive", TL: "tl", ASM: "asm", RM: "rm", owner: "owner", accounts: "accounts",
+  };
+  const pickStaff = (staffId) => {
+    const row = staff.find((s) => s.staffId === staffId);
+    if (!row) return setForm((f) => ({ ...f, staffId: "", name: "" }));
+    const role = STAFF_ROLE_TO_LOGIN[row.role] || "executive";
+    setForm((f) => ({ ...f, staffId, name: row.name, role }));
+  };
   const addUser = async () => {
+    if (!form.name) return toast.error("Pick the person from Staff & Reports so leads match their dashboard");
     if (!form.email || !form.password) return toast.error("Email & password required");
-    try { await post("/auth/users", form); toast.success("User created"); setForm({ email: "", password: "", name: "", role: "executive", loginId: "" }); loadUsers(); }
-    catch (e) { toast.error(e.response?.data?.detail || "Failed"); }
+    try {
+      await post("/auth/users", { email: form.email, password: form.password, name: form.name, role: form.role, loginId: form.loginId });
+      toast.success("User created");
+      setForm({ email: "", password: "", name: "", role: "executive", loginId: "", staffId: "" });
+      loadUsers();
+    } catch (e) { toast.error(e.response?.data?.detail || "Failed"); }
   };
   const removeUser = async (id) => { await del(`/auth/users/${id}`); toast.success("User removed"); loadUsers(); };
 
@@ -270,12 +286,24 @@ export default function Settings() {
         <Card className="p-5" data-testid="user-accounts-card">
           <h3 className="font-heading font-bold text-ink mb-3">User Accounts <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
           <p className="text-sm text-ink-soft mb-3">
-            Staff sign in with the <b>User ID</b> you set here. Email still works, so
-            accounts created before user IDs existed are never locked out — give them
-            one below whenever you like.
+            Pick the person from <b>Staff & Reports</b> so the login name matches the
+            Executive on existing leads — that is what fills their dashboard.
+            Staff sign in with the <b>User ID</b> you set here. Email still works.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end mb-4">
-            <Field label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+            <Field label="Name (from Staff)">
+              {staff.filter((s) => String(s.status || "Active").toLowerCase() === "active").length ? (
+                <Select data-testid="new-user-staff" value={form.staffId} onChange={(e) => pickStaff(e.target.value)}>
+                  <option value="">Select staff…</option>
+                  {staff.filter((s) => String(s.status || "Active").toLowerCase() === "active").map((s) => (
+                    <option key={s.staffId} value={s.staffId}>{s.name} ({s.role})</option>
+                  ))}
+                </Select>
+              ) : (
+                <Input data-testid="new-user-name" value={form.name} placeholder="Add them on Staff & Reports first"
+                  onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              )}
+            </Field>
             <Field label="User ID">
               <Input data-testid="new-user-loginid" value={form.loginId}
                 onChange={(e) => setForm({ ...form, loginId: e.target.value })}
