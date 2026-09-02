@@ -156,22 +156,25 @@ function SyncBadge() {
     return () => { live = false; clearInterval(t); };
   }, []);
   if (!s) return null;
-  const failed = s.enabled && s.health?.lastWriteOk === false;
+  const connected = s.enabled && s.canWrite;
+  const hardFail = connected && s.health?.hardFailure === true;
   let tone, dot, label, title;
   if (s.envSafety?.writeBlocked) {
     tone = "bg-sky-50 text-sky-700 ring-sky-600/20"; dot = "bg-sky-500"; label = "Preview · Writes Blocked";
     title = s.envSafety.blockReason || "Preview is isolated from the production Google Sheet — writes are blocked by design.";
-  } else if (failed) {
+  } else if (hardFail) {
     tone = "bg-red-50 text-red-700 ring-red-600/20"; dot = "bg-red-500"; label = "Sync Error";
     title = `Last sheet write failed: ${s.health?.lastError || "unknown"}`;
-  } else if (s.enabled && s.canWrite) {
+  } else if (connected) {
     tone = "bg-emerald-50 text-emerald-700 ring-emerald-600/20"; dot = "bg-emerald-500 animate-pulse"; label = "Sheet Synced";
-    title = s.health?.lastWriteAt ? `Last write ${new Date(s.health.lastWriteAt).toLocaleString("en-IN")}` : "Connected — writes flow to your Google Sheet";
+    title = s.health?.lastError && s.health?.lastErrorClass === "sheet_shape"
+      ? `Connected. A side tab or pending column was skipped: ${s.health.lastError}`
+      : (s.health?.lastWriteAt ? `Last write ${new Date(s.health.lastWriteAt).toLocaleString("en-IN")}` : "Connected — writes flow to your Google Sheet");
   } else {
     tone = "bg-amber-50 text-amber-700 ring-amber-600/20"; dot = "bg-amber-500"; label = "Sync Off";
     title = s.reason || "Google Sheet sync not enabled";
   }
-  const short = failed ? "Err" : (s.enabled && s.canWrite ? "OK" : "Off");
+  const short = hardFail ? "Err" : (connected ? "OK" : "Off");
   return (
     <div data-testid="sync-badge" title={title} className={cx("flex items-center gap-2 rounded-full ring-1 ring-inset px-2.5 sm:px-3 py-1.5", tone)}>
       <span className={cx("h-1.5 w-1.5 rounded-full shrink-0", dot)} />
