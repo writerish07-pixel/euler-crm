@@ -46,6 +46,7 @@ export default function ExecutiveDashboard() {
         <Link to="/bookings"><Button variant="secondary" data-testid="exec-go-bookings"><ClipboardList size={14} /> Bookings</Button></Link>
         <Link to="/activities"><Button variant="secondary" data-testid="exec-go-activities"><Activity size={14} /> Activities</Button></Link>
         <Link to="/inventory"><Button variant="secondary" data-testid="exec-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
         <Card className="p-5 lg:col-span-2">
