@@ -7904,6 +7904,19 @@ async def gsheets_ensure_cancel_columns(act=Depends(actor)):
     return result
 
 
+@api.post("/integrations/gsheets/ensure-lead-commercial-columns", dependencies=[Depends(owner_only)])
+async def gsheets_ensure_lead_commercial_columns(act=Depends(actor)):
+    """Owner-only: append RSA/AMC, TCS, TCS Applicable, TCS Base, Insurance
+    Arranged By, Final Exchange Value, Scheme As Of, Deal Cancelled to Lead Register.
+
+    These fields already persist on the lead. The sheet skipped them because the
+    headers were missing. Append-only — Backfill also runs this automatically.
+    """
+    result = await gsheets.ensure_lead_commercial_columns()
+    await write_audit(act, "ensure", "gsheets-lead-commercial-columns", new=result)
+    return result
+
+
 @api.get("/integrations/gsheets/verify-lead/{lead_id}", dependencies=[Depends(owner_only)])
 async def gsheets_verify_lead(lead_id: str):
     """Read-only: how many rows the LIVE sheet actually holds for this lead in each
@@ -8070,16 +8083,85 @@ async def gsheets_reconcile():
 
 @api.post("/integrations/gsheets/backfill", dependencies=[Depends(owner_only)])
 async def gsheets_backfill():
+    """Push every mapped register to Euler Master.
+
+    First appends any waiting headers (OEM Extra, Insurance Agent, Cancellation,
+    TCS/RSA/exchange) so new CRM fields have a column to land in. Then upserts
+    all SYNC_MAP entities. Idempotent — existing IDs update in place.
+    """
     leads = [clean(x) for x in await db.leads.find().to_list(5000)]
-    payments = [clean(x) for x in await db.payments.find().to_list(5000)]
     bookings = [clean(x) for x in await db.bookings.find().to_list(5000)]
-    delivered = [clean(x) for x in await db.leads.find({"deliveryStatus": "Delivered"}).to_list(5000)]
-    deliveries = [{"leadId": l.get("leadId"), "customerName": l.get("customerName"),
-                   "deliveryDate": l.get("deliveryDate"), "delivered": "Yes",
-                   "invoiceNumber": l.get("invoiceNumber", ""), "chassisNumber": l.get("chassisNumber", ""),
-                   "numberPlate": l.get("numberPlate", "")} for l in delivered]
-    result = await gsheets.backfill({"leads": leads, "bookings": bookings, "payments": payments, "deliveries": deliveries})
-    # Rebuild derived Finance Pending / Overdue tabs from the now-synced registers.
+    payments = [clean(x) for x in await db.payments.find().to_list(5000)]
+    delivery_docs = [clean(x) for x in await db.deliveries.find().to_list(5000)]
+    by_delivery = {d.get("leadId"): d for d in delivery_docs if d.get("leadId")}
+    for l in leads:
+        lid = l.get("leadId")
+        if not lid or lid in by_delivery:
+            continue
+        if str(l.get("deliveryStatus") or "").lower() != "delivered":
+            continue
+        delivery_docs.append({
+            "leadId": lid, "customerName": l.get("customerName"),
+            "deliveryDate": l.get("deliveryDate"), "delivered": "Yes",
+            "invoiceNumber": l.get("invoiceNumber", ""),
+            "chassisNumber": l.get("chassisNumber", ""),
+            "numberPlate": l.get("numberPlate", ""),
+            "insurerName": l.get("insurerName", ""),
+            "insurance": l.get("insuranceStatus", ""),
+            "registration": l.get("registrationStatus", ""),
+            "invoice": l.get("invoiceStatus", ""),
+            "rc": l.get("rcStatus", ""),
+            "pdi": l.get("pdiStatus", ""),
+        })
+        by_delivery[lid] = delivery_docs[-1]
+    finance_docs = []
+    for f in await db.finance.find().to_list(5000):
+        f = clean(f)
+        finance_docs.append({
+            "financeFileNumber": f.get("financeFileNumber") or f.get("fileNumber"),
+            "leadId": f.get("leadId"),
+            "customerName": f.get("customerName"),
+            "financerName": f.get("financerName") or f.get("financer"),
+            "committedAmount": f.get("committedAmount", f.get("sanctionedAmount")),
+            "disbursedAmount": f.get("disbursedAmount", f.get("receivedAgainstFile")),
+            "financeOutstanding": f.get("financeOutstanding", f.get("fileOutstanding")),
+            "status": f.get("status"),
+            "lastPaymentDate": f.get("lastPaymentDate", ""),
+            "lastUpdated": f.get("lastUpdated", ""),
+        })
+    oem_extra = []
+    for l in leads:
+        extra = ce.compute_oem_extra_support(l)
+        if ce.num(extra.get("oemExtraSupportReceived")) <= 0:
+            continue
+        oem_extra.append({
+            "leadId": l.get("leadId"),
+            "bookingId": l.get("bookingId", ""),
+            "customerName": l.get("customerName", ""),
+            "model": l.get("interestedModel", ""),
+            "variant": l.get("variant", ""),
+            "bookingDate": l.get("bookingDate", ""),
+            "oemExtraSupportReceived": extra["oemExtraSupportReceived"],
+            "oemExtraSupportPassed": extra["oemExtraSupportPassed"],
+            "oemExtraSupportRetained": extra["oemExtraSupportRetained"],
+            "status": "Open",
+            "lastUpdated": l.get("lastUpdated", ""),
+            "remarks": "",
+        })
+    datasets = {
+        "leads": leads,
+        "bookings": bookings,
+        "payments": payments,
+        "deliveries": delivery_docs,
+        "claims": [clean(x) for x in await db.claims.find().to_list(5000)],
+        "finance": finance_docs,
+        "insurance": [_insurance_sheet_row(clean(x)) for x in await db.insurance.find().to_list(5000)],
+        "dealer_earnings": [clean(x) for x in await db.dealer_earnings.find().to_list(5000)],
+        "incentive_register": [clean(x) for x in await db.incentive_register.find().to_list(5000)],
+        "oem_extra_support": oem_extra,
+        "activities": [clean(x) for x in await db.activities.find().to_list(8000)],
+    }
+    result = await gsheets.backfill(datasets)
     fin_views = await rebuild_finance_views()
     if isinstance(result, dict):
         result["financeViews"] = fin_views

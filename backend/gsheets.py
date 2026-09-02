@@ -74,7 +74,13 @@ SYNC_MAP = {
                # because Close = won and Cancel = lost, and a lead can be
                # cancelled several times before it is ever closed.
                "cancelCount", "lastCancelDate", "lastCancelReason", "lastCancelStage",
-               "reviveOn"], 1),
+               "reviveOn",
+               # Price / TCS / exchange fields the app now persists on every lead.
+               # Headers are pending on Euler Master until Settings ensure / Backfill
+               # appends them — sync skips a field until its header exists.
+               "rsaAmc", "tcs", "tcsBase", "tcsApplicable",
+               "insuranceArrangedBy", "finalExchangeValue", "schemeAsOf",
+               "dealCancelled"], 1),
     "activities": (_tab("GSHEET_TAB_ACTIVITIES", "Activity Log"), "activityId",
                    ["activityId", "leadId", "date", "time", "activityType", "discussion",
                     "executive", "customerName", "mobile", "model",
@@ -220,6 +226,14 @@ HEADER_ALIASES = {
     "lastCancelReason": ["last cancel reason", "cancel reason", "cancellation reason"],
     "lastCancelStage": ["last cancel stage", "cancel stage", "cancelled at stage"],
     "reviveOn": ["revive on", "follow-up restarts", "revive date"],
+    "rsaAmc": ["rsa / amc", "rsa amc", "rsa/amc"],
+    "tcs": ["tcs"],
+    "tcsBase": ["tcs base", "tcs base (after discount)", "tcs after discount"],
+    "tcsApplicable": ["tcs applicable"],
+    "insuranceArrangedBy": ["insurance arranged by", "insurance arranged"],
+    "finalExchangeValue": ["final exchange value", "exchange value"],
+    "schemeAsOf": ["scheme as of", "scheme date", "scheme as-of"],
+    "dealCancelled": ["deal cancelled", "cancelled deal"],
     # Booking Register
     "model": ["vehicle model", "model", "interested model"],
     "interestedModel": ["interested model", "vehicle model", "model"],
@@ -330,6 +344,19 @@ def _with_retry(fn, attempts=4):
 
 def _norm(s):
     return re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+
+
+def _sheet_value(v):
+    """Coerce a CRM value into something the sheet can display.
+
+    Bools become Yes/No so Deal Cancelled matches TCS Applicable / Finance Required.
+    None stays blank rather than the literal string 'None'.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "Yes" if v else "No"
+    return v
 
 
 def _col_letter(idx0):
@@ -915,6 +942,15 @@ LEAD_INSURANCE_AGENT_HEADERS = ["Insurance Agent"]
 LEAD_CANCEL_HEADERS = ["Cancel Count", "Last Cancel Date", "Last Cancel Reason",
                        "Last Cancel Stage", "Revive On"]
 
+# Lead Register columns for price / TCS / exchange fields the app now stores.
+# Labels must match HEADER_ALIASES (or camelCase normalisation) or the sync
+# resolves nothing and the columns stay blank. Append-only — never rename.
+LEAD_COMMERCIAL_HEADERS = [
+    "RSA / AMC", "TCS", "TCS Applicable", "TCS Base",
+    "Insurance Arranged By", "Final Exchange Value", "Scheme As Of",
+    "Deal Cancelled",
+]
+
 
 def _ensure_cancel_columns_sync():
     titles = _sheet_titles()
@@ -996,6 +1032,79 @@ async def ensure_insurance_agent_columns():
         return {"ok": False, "reason": str(e)[:300], "tabs": []}
 
 
+def _ensure_lead_commercial_columns_sync():
+    titles = _sheet_titles()
+    tab = SYNC_MAP["leads"][0]
+    if tab not in titles:
+        return {"ok": False, "changed": False,
+                "tabs": [{"tab": tab, "ok": False, "error": "tab not found", "added": []}]}
+    detail = _append_missing_headers(tab, LEAD_COMMERCIAL_HEADERS, _header_row_for("leads", tab))
+    return {"ok": True, "changed": bool(detail.get("added")), "tabs": [detail]}
+
+
+async def ensure_lead_commercial_columns():
+    """Owner helper: append TCS / RSA / exchange / deal-cancelled headers.
+
+    Append-only and idempotent. Until these headers exist the new commercial
+    fields simply do not write, because the sync resolves columns by name.
+    """
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled"), "tabs": []}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True, "tabs": []}
+    try:
+        detail = await asyncio.to_thread(_ensure_lead_commercial_columns_sync)
+        _health.update({"lastWriteOk": True, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": None, "writes": _health["writes"] + 1})
+        return detail
+    except Exception as e:
+        _status["lastError"] = str(e)
+        _health.update({"lastWriteOk": False, "lastWriteAt": datetime.now(timezone.utc).isoformat(),
+                        "lastError": str(e)[:300], "failures": _health["failures"] + 1})
+        return {"ok": False, "reason": str(e)[:300], "tabs": []}
+
+
+async def ensure_pending_columns():
+    """Append every waiting header the live workbook still lacks.
+
+    Backfill runs this first so one click both creates the columns the app now
+    writes (OEM Extra, Insurance Agent, Cancellation, TCS/RSA/exchange) and
+    then fills rows. Each step is append-only and safe to re-run.
+    """
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled"), "steps": []}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True, "steps": []}
+    steps = []
+    for name, fn in (
+        ("oemExtra", ensure_oem_extra_support_columns),
+        ("insuranceAgent", ensure_insurance_agent_columns),
+        ("cancellation", ensure_cancel_columns),
+        ("leadCommercial", ensure_lead_commercial_columns),
+    ):
+        try:
+            detail = await fn()
+        except Exception as e:
+            detail = {"ok": False, "reason": str(e)[:300], "tabs": []}
+        entry = {"step": name}
+        if isinstance(detail, dict):
+            entry.update(detail)
+        else:
+            entry["result"] = detail
+        steps.append(entry)
+    changed = any(s.get("changed") for s in steps)
+    hard_fail = any(s.get("ok") is False for s in steps)
+    return {"ok": not hard_fail, "changed": changed, "steps": steps}
+
+
 async def ensure_oem_extra_support_columns():
     """Owner helper: make OEM Extra Support columns visible on the live workbook."""
     global _service
@@ -1070,6 +1179,125 @@ def _formula_cells(tab, row_num, mapping):
     return protected
 
 
+def _prime_formula_cache(tab, header_row, mapping):
+    """One FORMULA read for the mapped columns so a backfill does not GET every row."""
+    idxs = sorted(mapping.values())
+    if not idxs:
+        return
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    rng = f"'{tab}'!{_col_letter(idxs[0])}{header_row + 1}:{_col_letter(idxs[-1])}"
+    res = _with_retry(lambda: _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=rng, valueRenderOption="FORMULA").execute())
+    base = idxs[0]
+    for i, row in enumerate(res.get("values") or [], start=header_row + 1):
+        protected = set()
+        for col_idx in idxs:
+            off = col_idx - base
+            if off < len(row) and isinstance(row[off], str) and row[off].startswith("="):
+                protected.add(col_idx)
+        _formula_cache[(tab, i)] = protected
+
+
+_BACKFILL_UPDATE_CHUNK = 80
+
+
+def _backfill_entity_sync(entity, docs):
+    """Reconcile one entity in a few Sheets calls instead of two per row.
+
+    Live per-lead sync stays one-row-at-a-time (formula protection + ID cache).
+    Backfill of hundreds of rows that way hits Google write quota and the
+    HTTP proxy times out — which is what Settings showed as 'Backfill failed'.
+    """
+    tab, id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
+    sheet_id = os.environ.get("GSHEET_ID", "")
+    header_row = _header_row_for(entity, tab)
+    mapping, missing = _resolve_columns(tab, fields, header_row=header_row)
+    if id_field in missing:
+        invalidate_header_cache(tab)
+        return {"appended": 0, "updated": 0, "failed": len(docs),
+                "errors": [f"required ID header for '{id_field}' not found in tab '{tab}'"],
+                "missingHeaders": missing}
+    if not mapping:
+        invalidate_header_cache(tab)
+        return {"appended": 0, "updated": 0, "failed": len(docs),
+                "errors": [f"no matching headers found in tab '{tab}'"],
+                "missingHeaders": missing}
+
+    by_id = {}
+    no_id = 0
+    for d in docs or []:
+        ident = str(d.get(id_field, "") or "").strip()
+        if not ident:
+            no_id += 1
+            continue
+        by_id[ident] = d
+
+    try:
+        _prime_formula_cache(tab, header_row, mapping)
+    except Exception:
+        pass
+
+    id_map = _load_id_rows(tab, mapping[id_field], header_row + 1)
+    updates_data = []
+    append_rows = []
+    n_updated = n_appended = 0
+    for ident, doc in by_id.items():
+        row_num = id_map.get(ident)
+        if row_num:
+            n_updated += 1
+            protected = _formula_cache.get((tab, row_num), set())
+            for f, col_idx in mapping.items():
+                if col_idx in protected or f not in doc:
+                    continue
+                updates_data.append({
+                    "range": f"'{tab}'!{_col_letter(col_idx)}{row_num}",
+                    "values": [[_sheet_value(doc.get(f, ""))]],
+                })
+        else:
+            n_appended += 1
+            width = max(mapping.values()) + 1
+            row = [""] * width
+            for f, col_idx in mapping.items():
+                row[col_idx] = _sheet_value(doc.get(f, ""))
+            append_rows.append(row)
+
+    failed = no_id
+    errors = []
+    if no_id:
+        errors.append(f"{no_id} record(s) missing stable ID '{id_field}'")
+
+    for i in range(0, len(updates_data), _BACKFILL_UPDATE_CHUNK):
+        chunk = updates_data[i:i + _BACKFILL_UPDATE_CHUNK]
+        try:
+            _with_retry(lambda c=chunk: _service.spreadsheets().values().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"valueInputOption": "USER_ENTERED", "data": c}).execute())
+        except Exception as e:
+            failed += len(chunk)
+            if len(errors) < 3:
+                errors.append(str(e)[:300])
+
+    if append_rows:
+        first_col = _col_letter(min(mapping.values()))
+        try:
+            _with_retry(lambda: _service.spreadsheets().values().append(
+                spreadsheetId=sheet_id, range=f"'{tab}'!{first_col}{header_row}",
+                valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+                body={"values": append_rows}).execute())
+        except Exception as e:
+            failed += len(append_rows)
+            n_appended = 0
+            if len(errors) < 3:
+                errors.append(str(e)[:300])
+        _idrow_cache.pop((tab, header_row + 1), None)
+
+    out = {"appended": n_appended, "updated": n_updated, "failed": failed,
+           "missingHeaders": missing}
+    if errors:
+        out["errors"] = errors
+    return out
+
+
 def _upsert_sync(entity, doc):
     """Header-mapped, ID-keyed upsert. Returns a structured result dict."""
     tab, id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
@@ -1104,7 +1332,7 @@ def _upsert_sync(entity, doc):
             if f not in doc:
                 continue          # field not supplied on this update: don't blank it
             data.append({"range": f"'{tab}'!{_col_letter(col_idx)}{row_num}",
-                         "values": [[doc.get(f, "")]]})
+                         "values": [[_sheet_value(doc.get(f, ""))]]})
         if data:
             _with_retry(lambda: _service.spreadsheets().values().batchUpdate(
                 spreadsheetId=sheet_id,
@@ -1117,7 +1345,7 @@ def _upsert_sync(entity, doc):
     width = max(mapping.values()) + 1
     row = [""] * width
     for f, col_idx in mapping.items():
-        row[col_idx] = doc.get(f, "")
+        row[col_idx] = _sheet_value(doc.get(f, ""))
     # Anchor the append on the register's header row / first mapped column so
     # Sheets detects the table correctly and INSERT_ROWS lands under the header
     # without shifting it.
@@ -1679,31 +1907,40 @@ async def backfill(datasets):
         _init()
     st = status()
     if not st.get("enabled") or not st.get("canWrite"):
-        return {"ok": False, "reason": st.get("reason", "sync not enabled"), "canWrite": st.get("canWrite", False)}
+        env_blocked = bool((st.get("envSafety") or {}).get("writeBlocked"))
+        return {"ok": False, "reason": st.get("reason", "sync not enabled"),
+                "canWrite": st.get("canWrite", False), "writeBlocked": env_blocked}
     blocked = _write_blocked()
     if blocked:
         return {"ok": False, "reason": blocked, "canWrite": False, "writeBlocked": True}
+    invalidate_header_cache()
+    headers_ensured = await ensure_pending_columns()
     invalidate_header_cache()
     result = {}
     for entity, docs in datasets.items():
         if entity not in SYNC_MAP:
             continue
-        appended = updated = failed = 0
-        errors = []
-        for d in docs:
-            r = await sync(entity, d)
-            if r.get("operation") == "appended":
-                appended += 1
-            elif r.get("operation") == "updated":
-                updated += 1
-            elif not r.get("ok"):
-                failed += 1
-                if len(errors) < 3:
-                    errors.append(r.get("error"))
-        result[entity] = {"appended": appended, "updated": updated, "failed": failed}
-        if errors:
-            result[entity]["errors"] = errors
-    return {"ok": True, "result": result}
+        try:
+            stats = await asyncio.to_thread(_backfill_entity_sync, entity, docs)
+        except Exception as e:
+            appended = updated = failed = 0
+            errors = []
+            for d in docs:
+                r = await sync(entity, d)
+                if r.get("operation") == "appended":
+                    appended += 1
+                elif r.get("operation") == "updated":
+                    updated += 1
+                elif not r.get("ok"):
+                    failed += 1
+                    if len(errors) < 3:
+                        errors.append(r.get("error"))
+            stats = {"appended": appended, "updated": updated, "failed": failed,
+                     "errors": (errors or [str(e)[:300]])}
+        result[entity] = stats
+    failed = sum(int(v.get("failed") or 0) for v in result.values())
+    return {"ok": True, "result": result, "failed": failed,
+            "headersEnsured": headers_ensured}
 
 
 # initialise on import

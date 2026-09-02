@@ -63,17 +63,23 @@ LIVE_HEADERS = {
 #   Insurance Register: "Insurance Agent", "Rate Source", "Last Payout Date"
 #   Lead Register:      "Insurance Agent" (beside the existing "Insurer Name",
 #                       which keeps holding the insurance COMPANY)
+#                       plus Cancel Count / Last Cancel Date / Last Cancel Reason /
+#                       Last Cancel Stage / Revive On
+#                       plus RSA / AMC, TCS, TCS Applicable, TCS Base,
+#                       Insurance Arranged By, Final Exchange Value, Scheme As Of,
+#                       Deal Cancelled
 #
-# Settings -> "Add Insurance Agent columns" appends all of them in one click
-# (POST /api/integrations/gsheets/ensure-insurance-agent-columns).
-#
+# Settings -> ensure buttons, and Backfill, append all of them (append-only).
 # Drop an entry the moment its header appears in LIVE_HEADERS above; the contract
 # test test_pending_columns_are_still_actually_pending fails until you do.
 PENDING_SHEET_COLUMNS = {
     "insurance": ["insuranceAgentName", "payoutRateSource", "lastPayoutDate"],
-    # Added by Settings -> "Add Cancellation columns". Pending for the same reason
-    # as insuranceAgentName above: the header does not exist on Euler Master until
-    # the owner runs that append-only step, and the sync resolves by header name.
+    # Added by Settings -> "Add Cancellation columns" / "Add Insurance Agent columns"
+    # / "Add TCS / RSA / Exchange columns", and automatically by Backfill.
+    # Pending until the header exists on Euler Master; sync resolves by name.
     "leads": ["insuranceAgentName", "cancelCount", "lastCancelDate",
-              "lastCancelReason", "lastCancelStage", "reviveOn"],
+              "lastCancelReason", "lastCancelStage", "reviveOn",
+              "rsaAmc", "tcs", "tcsBase", "tcsApplicable",
+              "insuranceArrangedBy", "finalExchangeValue", "schemeAsOf",
+              "dealCancelled"],
 }

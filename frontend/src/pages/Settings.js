@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, del, put } from "../lib/api";
+import { get, post, del, put, api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, Button, Field, Input, Select, Badge, Table } from "../components/ui";
 
@@ -23,6 +23,7 @@ export default function Settings() {
   const [ensuringOem, setEnsuringOem] = useState(false);
   const [ensuringIns, setEnsuringIns] = useState(false);
   const [ensuringCancel, setEnsuringCancel] = useState(false);
+  const [ensuringCommercial, setEnsuringCommercial] = useState(false);
   const [pwForm, setPwForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [pwBusy, setPwBusy] = useState(false);
 
@@ -62,15 +63,27 @@ export default function Settings() {
   const runBackfill = async () => {
     setBackfilling(true);
     try {
-      const r = await post("/integrations/gsheets/backfill", {});
-      if (r.ok) {
-        const total = Object.values(r.result || {}).reduce((s, x) => s + (x.appended || 0), 0);
-        toast.success(`Backfill done — ${total} new rows added to the sheet`);
-      } else {
+      const r = (await api.post("/integrations/gsheets/backfill", {}, { timeout: 300000 })).data;
+      if (r.ok === false && !r.result) {
         toast.error(r.reason || "Sheet not writable yet — grant Editor access first");
+        return;
       }
-    } catch { toast.error("Backfill failed"); }
-    finally { setBackfilling(false); }
+      const tallies = Object.values(r.result || {});
+      const appended = tallies.reduce((s, x) => s + (x.appended || 0), 0);
+      const updated = tallies.reduce((s, x) => s + (x.updated || 0), 0);
+      const failed = Number(r.failed || 0) || tallies.reduce((s, x) => s + (x.failed || 0), 0);
+      const added = (r.headersEnsured?.steps || []).flatMap((st) =>
+        (st.tabs || []).flatMap((t) => t.added || []));
+      const headerNote = added.length ? ` · added columns: ${added.join(", ")}` : "";
+      if (failed) {
+        const firstErr = tallies.map((x) => (x.errors || [])[0]).filter(Boolean)[0];
+        toast.error(`Backfill finished with ${failed} failed write(s)${firstErr ? ` — ${firstErr}` : ""}`);
+      } else {
+        toast.success(`Backfill done — ${appended} new row(s), ${updated} updated${headerNote}`);
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || e?.message || "Backfill failed");
+    } finally { setBackfilling(false); }
   };
 
   const ensureOemExtraColumns = async () => {
@@ -128,6 +141,25 @@ export default function Settings() {
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to add Cancellation columns");
     } finally { setEnsuringCancel(false); }
+  };
+
+  const ensureLeadCommercialColumns = async () => {
+    setEnsuringCommercial(true);
+    try {
+      const r = await post("/integrations/gsheets/ensure-lead-commercial-columns", {});
+      if (r.ok === false) {
+        toast.error(r.reason || "Could not update the Lead Register header");
+        return;
+      }
+      const added = (r.tabs || []).flatMap((t) => t.added || []);
+      if (r.changed) {
+        toast.success(`Lead Register updated — added ${added.join(", ")}`);
+      } else {
+        toast.success("TCS / RSA / Exchange columns are already present");
+      }
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Failed to add TCS / RSA / Exchange columns");
+    } finally { setEnsuringCommercial(false); }
   };
 
   const STAFF_ROLE_TO_LOGIN = {
@@ -267,10 +299,19 @@ export default function Settings() {
                   </span>
                 </div>
                 <div>
+                  <Button variant="secondary" data-testid="ensure-lead-commercial-cols-btn"
+                    onClick={ensureLeadCommercialColumns} disabled={ensuringCommercial || !gs?.enabled}>
+                    <ListPlus size={14} /> {ensuringCommercial ? "Adding columns…" : "Add TCS / RSA / Exchange columns"}
+                  </Button>
+                  <span className="text-xs text-ink-faint ml-2">
+                    Adds RSA / AMC, TCS, TCS Applicable, TCS Base, Insurance Arranged By, Final Exchange Value, Scheme As Of, Deal Cancelled to the Lead Register. Append-only — Backfill also adds these
+                  </span>
+                </div>
+                <div>
                   <Button variant="secondary" data-testid="backfill-btn" onClick={runBackfill} disabled={backfilling}>
                     <RefreshCcw size={14} /> {backfilling ? "Backfilling…" : "Backfill existing data to sheet"}
                   </Button>
-                  <span className="text-xs text-ink-faint ml-2">Pushes all current leads, bookings & payments (skips rows already in the sheet)</span>
+                  <span className="text-xs text-ink-faint ml-2">Adds any waiting columns, then pushes every register (leads, bookings, payments, deliveries, claims, finance, insurance, earnings, incentives, activities). Existing rows update; new IDs append</span>
                 </div>
               </div>
             )}
