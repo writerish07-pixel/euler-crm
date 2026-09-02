@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Scale, AlertTriangle, XCircle } from "lucide-react";
 import { get } from "../lib/api";
 import { inr } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge } from "../components/ui";
+import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 
 // Three numbers that have never been comparable before:
 //   entitled — what Scheme Master says Euler owes on this lead
@@ -11,10 +12,11 @@ import { Card, PageHeader, StatCard, Table, Badge } from "../components/ui";
 // The gaps between them are the whole point of the page.
 export default function ClaimReconciliation() {
   const [d, setD] = useState(null);
+  const load = useCallback(
+    () => get("/reports/claim-reconciliation").then(setD).catch(() => setD(null)), []);
+  const { openLead, drawer } = useLeadDrawer(load);
 
-  useEffect(() => {
-    get("/reports/claim-reconciliation").then(setD).catch(() => setD(null));
-  }, []);
+  useEffect(() => { load(); }, [load]);
 
   if (!d) return <div className="text-ink-faint text-sm">Loading reconciliation…</div>;
 
@@ -68,7 +70,7 @@ export default function ClaimReconciliation() {
         rowKey="leadId"
         columns={[
           { key: "leadId", label: "Lead", mono: true,
-            render: (r) => <span className="font-semibold text-cobalt">{r.leadId}</span> },
+            render: (r) => <LeadLink leadId={r.leadId} onOpen={openLead} /> },
           { key: "customer", label: "Customer", render: (r) => (
             <div>
               <div className="font-semibold text-ink">{r.customer || "—"}</div>
@@ -105,6 +107,7 @@ export default function ClaimReconciliation() {
       />
 
       <p className="text-xs text-ink-faint mt-4">{d.note}</p>
+      {drawer}
     </div>
   );
 }

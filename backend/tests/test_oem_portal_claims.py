@@ -30,6 +30,7 @@ import server  # noqa: E402
 
 CHASSIS = "MD9TESTDL26G900001"
 INVOICE = "AF-999-I26279001"
+SEED_TAG = "oem_portal_claims_test"
 BASE_MOBILE = 9331000000
 _seq = {"n": 0}
 
@@ -97,9 +98,12 @@ async def isolate_claims():
     fixture chassis, or the link would land on a leftover from an earlier test.
     """
     await server.db[oem_claims.CLAIMS_COLLECTION].delete_many({})
+    await server.db.claims.delete_many({"_testSeed": SEED_TAG})
     await server.db.leads.update_many(
         {"chassisNumber": CHASSIS}, {"$set": {"chassisNumber": "", "invoiceNumber": ""}})
     yield
+    await server.db[oem_claims.CLAIMS_COLLECTION].delete_many({})
+    await server.db.claims.delete_many({"_testSeed": SEED_TAG})
 
 
 @pytest_asyncio.fixture
@@ -523,6 +527,253 @@ async def test_reconciliation_shows_the_three_way_gap(client, wired):
     body = r.json()
     assert "entitled" in body["totals"] and "filed" in body["totals"]
     assert body["totals"]["filed"] >= 0
+
+
+# ---------------------------------------------------------------- register cross-check
+def test_component_mapping_reads_eulers_prose():
+    m = oem_claims.map_claim_type_to_component
+    assert m("Scheme Claim", "Referral Commission for invoice AF-122-I1") == "referralBonus"
+    assert m("Scheme Claim", "Loyalty Bonus payout") == "loyaltyBonus"
+    assert m("Scheme Claim", "Exchange Benefit") == "exchangeBonus"
+    assert m("Scheme Claim", "Insurance Benefit passed to customer") == "insuranceBenefit"
+    assert m("Scheme Claim", "OEM Extra Support") == "oemExtraSupport"
+
+
+def test_rto_plus_insurance_beats_either_alone():
+    """Most specific phrase wins, or a combined benefit would book as RTO only."""
+    m = oem_claims.map_claim_type_to_component
+    assert m("Scheme Claim", "Free RTO + Free Insurance") == "rtoInsuranceBenefit"
+    assert m("Scheme Claim", "Free RTO") == "rtoBenefit"
+
+
+def test_an_unrecognised_description_maps_to_nothing():
+    assert oem_claims.map_claim_type_to_component("Scheme Claim", "Diwali special") == ""
+
+
+def test_unmapped_is_never_reported_as_unclaimed():
+    """The states differ in what they ask the desk to DO. Calling a filed claim
+    'not claimed' would send them chasing money already in Euler's queue."""
+    index = {"LD1": {"byComponent": {}, "unmapped": [{"claimNumber": "AF-1", "amount": 5000.0,
+                                                      "oemStatus": "RM Approval Pending"}],
+                     "claimNumbers": ["AF-1"], "filedTotal": 5000.0, "acceptedTotal": 0.0,
+                     "rejectedOpen": [], "hasAnyClaim": True}}
+    got = oem_claims.match_state(index, "LD1", "loyaltyBonus")
+    assert got["state"] == "unmapped"
+    assert got["claimNumbers"] == ["AF-1"]
+
+
+def test_a_lead_with_no_claim_at_all_is_a_genuine_gap():
+    assert oem_claims.match_state({}, "LD-NONE", "loyaltyBonus")["state"] == "not_filed"
+
+
+def _hit(number, status, **kw):
+    base = {"claimNumber": number, "oemStatus": status, "amount": 5000.0, "stageLabel": "",
+            "stageDays": 0, "createdAt": "", "needsResubmission": False,
+            "resubmittedBy": "", "description": ""}
+    base.update(kw)
+    return base
+
+
+def test_match_states_across_the_ladder():
+    def idx(hit):
+        return {"LD1": {"byComponent": {"loyaltyBonus": [hit]}, "unmapped": [],
+                        "claimNumbers": [hit["claimNumber"]], "filedTotal": 5000.0,
+                        "acceptedTotal": 0.0, "rejectedOpen": [], "hasAnyClaim": True}}
+    assert oem_claims.match_state(idx(_hit("A", "RM Approval Pending")), "LD1",
+                                  "loyaltyBonus")["state"] == "filed"
+    assert oem_claims.match_state(idx(_hit("A", "Settled")), "LD1",
+                                  "loyaltyBonus")["state"] == "accepted"
+    assert oem_claims.match_state(idx(_hit("A", "Credit Note Generated")), "LD1",
+                                  "loyaltyBonus")["state"] == "accepted"
+    assert oem_claims.match_state(idx(_hit("A", "Rejected", needsResubmission=True)), "LD1",
+                                  "loyaltyBonus")["state"] == "rejected"
+    assert oem_claims.match_state(idx(_hit("A", "Rejected", resubmittedBy="B")), "LD1",
+                                  "loyaltyBonus")["state"] == "resubmitted"
+
+
+def test_a_live_claim_outranks_an_older_rejection():
+    """Refiling leaves the rejection in place. The register must read the live one."""
+    index = {"LD1": {"byComponent": {"loyaltyBonus": [
+        _hit("A", "Rejected", resubmittedBy="B"), _hit("B", "RM Approval Pending")]},
+        "unmapped": [], "claimNumbers": ["A", "B"], "filedTotal": 10000.0,
+        "acceptedTotal": 0.0, "rejectedOpen": [], "hasAnyClaim": True}}
+    got = oem_claims.match_state(index, "LD1", "loyaltyBonus")
+    assert got["state"] == "filed"
+    assert got["oemStatus"] == "RM Approval Pending"
+
+
+@pytest.mark.asyncio
+async def test_rejection_with_a_later_claim_counts_as_refiled(client, monkeypatch):
+    """Euler never reopens a rejected note — a resubmission is a new note on the same
+    chassis. Only a rejection with no successor is money that stopped being chased."""
+    ch = "MD9RESUB26G901111"
+    await _delivered_lead(client, chassis=ch, invoice="AF-999-I26271111")
+    rows = [
+        list_row("old", "AF-999-CLOLD", status="Rejected", created="1 Aug 2026 10:00:00"),
+        list_row("new", "AF-999-CLNEW", created="5 Aug 2026 10:00:00"),
+        list_row("lone", "AF-999-CLLONE", status="Rejected", created="6 Aug 2026 10:00:00"),
+    ]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000: (rows, 3))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 3})
+
+    def detail(token, note_id):
+        # The lone rejection is on a different vehicle, so nothing replaced it.
+        chassis = "MD9OTHER26G902222" if note_id == "lone" else ch
+        return journey(note_id, f"AF-999-CL{note_id}", chassis=chassis,
+                       invoice="AF-999-I26271111")
+
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", detail)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+
+    old = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "old"})
+    lone = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "lone"})
+    assert old["resubmittedBy"] == "AF-999-CLNEW"
+    assert old["needsResubmission"] is False
+    assert lone["needsResubmission"] is True, "an unreplaced rejection must be flagged"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_note_does_not_count_as_a_resubmission(client, monkeypatch):
+    ch = "MD9CANC26G903333"
+    await _delivered_lead(client, chassis=ch, invoice="AF-999-I26273333")
+    rows = [
+        list_row("rej", "AF-999-CLREJ", status="Rejected", created="1 Aug 2026 10:00:00"),
+        list_row("can", "AF-999-CLCAN", status="Cancelled", created="5 Aug 2026 10:00:00"),
+    ]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000: (rows, 2))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 2})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey",
+                        lambda t, n: journey(n, f"AF-999-CL{n}", chassis=ch,
+                                             invoice="AF-999-I26273333"))
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rej = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "rej"})
+    assert rej["needsResubmission"] is True
+
+
+async def _register_row(lead_id, component_key, amount=5000.0):
+    """A persisted Scheme Claim Register row, the way a settled component leaves one."""
+    doc = {
+        "claimId": f"CLM-{lead_id}-{component_key}", "leadId": lead_id,
+        "componentKey": component_key, "claimAmount": amount, "eligibleClaim": amount,
+        "claimStatus": "Pending", "receivedAmount": 0.0, "submittedDate": "2026-09-01",
+        # Tagged so the fixture can take it back out — every module in this suite
+        # shares one database and other modules count rows in db.claims.
+        "_testSeed": SEED_TAG,
+    }
+    await server.db.claims.update_one(
+        {"leadId": lead_id, "componentKey": component_key}, {"$set": doc}, upsert=True)
+    return doc
+
+
+@pytest.mark.asyncio
+async def test_register_rows_carry_a_match_state_without_changing_money(client, wired):
+    """The cross-check ADDS a field. Every rupee, status and date stays as it was."""
+    lead_id = await _delivered_lead(client)
+    # The fixture claim reads "Referral Commission for invoice …" → referralBonus.
+    await _register_row(lead_id, "referralBonus")
+    before = (await client.get("/api/claims")).json()
+    baseline = {r["claimId"]: (r["eligibleClaim"], r["claimStatus"], r["receivedAmount"])
+                for r in before}
+    assert baseline, "register should not be empty"
+
+    await client.post("/api/integrations/coulson/sync-claims")
+    after = (await client.get("/api/claims")).json()
+    mine = [r for r in after if r["leadId"] == lead_id and r["componentKey"] == "referralBonus"]
+    assert mine, "the seeded register row disappeared"
+    assert mine[0]["oemMatch"]["state"] == "filed"
+    assert "AF-999-CL0001" in mine[0]["oemMatch"]["claimNumbers"]
+
+    for row in after:
+        assert "oemMatch" in row
+        assert row["oemMatch"]["state"] in (
+            "filed", "accepted", "rejected", "resubmitted", "unmapped",
+            "not_filed", "not_applicable")
+        if row["claimId"] in baseline:
+            assert (row["eligibleClaim"], row["claimStatus"],
+                    row["receivedAmount"]) == baseline[row["claimId"]], \
+                f"the OEM mirror changed money on {row['claimId']}"
+
+
+@pytest.mark.asyncio
+async def test_a_component_euler_never_saw_reads_as_unclaimed(client, wired):
+    """The finding the whole feature exists for: eligible here, never filed there."""
+    lead_id = await _delivered_lead(client)
+    await _register_row(lead_id, "referralBonus")
+    await _register_row(lead_id, "exchangeBonus", 7000.0)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/claims")).json()
+    by_key = {r["componentKey"]: r for r in rows if r["leadId"] == lead_id}
+    assert by_key["referralBonus"]["oemMatch"]["state"] == "filed"
+    assert by_key["exchangeBonus"]["oemMatch"]["state"] == "not_filed"
+    assert by_key["exchangeBonus"]["oemMatch"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_manual_claims_are_not_judged_against_euler(client, wired):
+    """Manual and incentive claims are not filed as scheme lines in Coulson, so
+    'not claimed there' would be noise, not a finding."""
+    r = await client.post("/api/claims/manual", json={
+        "claimType": "OEM Incentive", "claimAmount": 4000, "customer": "Manual Co"})
+    assert r.status_code == 200, r.text
+    rows = (await client.get("/api/claims")).json()
+    manual = [x for x in rows if x.get("manual")]
+    assert manual, "manual claim missing from register"
+    assert all(m["oemMatch"]["state"] == "not_applicable" for m in manual)
+
+
+@pytest.mark.asyncio
+async def test_oem_only_lists_claims_the_register_never_raised(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("only", "AF-999-CLONLY")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey",
+                        lambda t, n: journey(n, "AF-999-CLONLY", chassis="MD9GHOST26G904444",
+                                             invoice="AF-999-I26274444"))
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    body = (await client.get("/api/claims/oem-only")).json()
+    hit = [r for r in body["rows"] if r["claimNumber"] == "AF-999-CLONLY"]
+    assert hit, "a claim with no register row must show on the reverse side"
+    assert hit[0]["reason"] == "unknown_lead"
+    assert body["total"] >= 5000.0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_oem_claims_are_not_chased_on_the_reverse_side(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("can2", "AF-999-CLCAN2", status="Cancelled")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey",
+                        lambda t, n: journey(n, "AF-999-CLCAN2", chassis="MD9GONE26G905555",
+                                             invoice="AF-999-I26275555"))
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    body = (await client.get("/api/claims/oem-only")).json()
+    assert not [r for r in body["rows"] if r["claimNumber"] == "AF-999-CLCAN2"]
+
+
+@pytest.mark.asyncio
+async def test_executive_cannot_read_the_reverse_cross_check(client):
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post("/api/auth/login",
+                         json={"email": "executive@euler.com", "password": "euler@123"})
+        c.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
+        assert (await c.get("/api/claims/oem-only")).status_code == 403
 
 
 # ---------------------------------------------------------------- access

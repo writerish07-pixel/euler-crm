@@ -516,6 +516,9 @@ async def sync_claims(db, *, detail_budget=250, token=None):
                                   {"$set": {"missingFromOem": True, "syncedAt": now_iso()}})
             stale += 1
 
+    # Rejections only matter once we know whether anyone refiled them.
+    needs_resubmission = await annotate_resubmissions(db)
+
     mirrored = await coll.count_documents({"missingFromOem": {"$ne": True}})
     incomplete = bool(expected is not None and mirrored < expected)
     stats = {
@@ -527,11 +530,223 @@ async def sync_claims(db, *, detail_budget=250, token=None):
         "claimDetailCalls": detail_calls,
         "claimDetailFailures": detail_failures,
         "claimsMissingFromOem": stale,
+        "claimsNeedsResubmission": needs_resubmission,
         "claimsSyncedAt": now_iso(),
         "claimsSyncOk": True,
     }
     await db["system"].update_one({"_id": "coulson"}, {"$set": stats}, upsert=True)
     return {"ok": True, "credentialSource": src, **stats}
+
+
+# ---------------------------------------------------------------- register cross-check
+# Coulson describes a claim line in prose ("Referral Commission for invoice AF-122-…")
+# and types it only as "Scheme Claim". The Scheme Claim Register speaks component keys.
+# Nothing in either system maps one to the other, so this table does — on the words that
+# actually appear in their descriptions, most specific first.
+#
+# A miss is NOT read as "never claimed". It resolves to `lead_filed_unmapped`, which asks
+# for a human eye instead of sending the money desk chasing a claim that already exists.
+COMPONENT_PHRASES = (
+    ("rtoInsuranceBenefit", ("free rto + free insurance", "rto + insurance", "rto and insurance")),
+    ("insuranceBenefit", ("insurance benefit", "free insurance", "insurance")),
+    ("rtoBenefit", ("rto benefit", "free rto", "rto")),
+    ("referralBonus", ("referral commission", "referral bonus", "referral")),
+    ("loyaltyBonus", ("loyalty bonus", "loyalty")),
+    ("exchangeBonus", ("exchange bonus", "exchange benefit", "exchange")),
+    ("consumerDiscount", ("consumer scheme", "consumer discount", "consumer offer", "consumer")),
+    ("dsaDiscount", ("dsa commission", "dsa payout", "dsa")),
+    ("oemExtraSupport", ("extra support", "special support", "additional support")),
+    ("additionalDiscount", ("additional discount", "special discount")),
+)
+
+# Euler has agreed the money (or paid it). Anything else open is still in the ladder.
+ACCEPTED_STATUSES = GENERATED_STATUSES + ("Settled",)
+
+
+def map_claim_type_to_component(claim_type, description=""):
+    """Best-effort componentKey for a Coulson line. Empty when nothing matches."""
+    hay = f"{description or ''} {claim_type or ''}".lower()
+    for key, phrases in COMPONENT_PHRASES:
+        if any(p in hay for p in phrases):
+            return key
+    return ""
+
+
+async def annotate_resubmissions(db):
+    """A rejected claim is only a problem if nobody filed it again.
+
+    Euler does not reopen a rejected debit note — a resubmission is a NEW note for the
+    same chassis. So a rejection with a later claim on that chassis has been handled,
+    and one without is money that quietly stopped being chased. Only the second is an
+    alert.
+    """
+    by_chassis = {}
+    async for row in db[CLAIMS_COLLECTION].find({}):
+        for line in row.get("lineItems") or []:
+            ch = oem_sync._norm_chassis(line.get("chassis"))
+            if ch:
+                by_chassis.setdefault(ch, []).append(row)
+    for ch, rows in by_chassis.items():
+        rows.sort(key=lambda r: str(r.get("createdAt") or ""))
+    flagged = 0
+    async for row in db[CLAIMS_COLLECTION].find({"status": "Rejected"}):
+        created = str(row.get("createdAt") or "")
+        successor = ""
+        for line in row.get("lineItems") or []:
+            ch = oem_sync._norm_chassis(line.get("chassis"))
+            for other in by_chassis.get(ch) or []:
+                if other.get("debitNoteId") == row.get("debitNoteId"):
+                    continue
+                if str(other.get("createdAt") or "") <= created:
+                    continue
+                if str(other.get("status") or "") == "Cancelled":
+                    continue
+                successor = other.get("claimNumber") or ""
+                break
+            if successor:
+                break
+        patch = {"resubmittedBy": successor, "needsResubmission": not successor}
+        if not successor:
+            flagged += 1
+        await db[CLAIMS_COLLECTION].update_one({"_id": row["_id"]}, {"$set": patch})
+    return flagged
+
+
+async def register_match_index(db):
+    """Per lead, what Euler actually holds — indexed the way the register asks for it."""
+    index = {}
+    async for row in db[CLAIMS_COLLECTION].find({}):
+        status = str(row.get("status") or "")
+        for line in row.get("lineItems") or []:
+            lead_id = line.get("leadId")
+            if not lead_id:
+                continue
+            entry = index.setdefault(lead_id, {
+                "byComponent": {}, "unmapped": [], "claimNumbers": [],
+                "filedTotal": 0.0, "acceptedTotal": 0.0,
+                "rejectedOpen": [], "hasAnyClaim": False,
+            })
+            entry["hasAnyClaim"] = True
+            amount = round2(line.get("totalAmount"))
+            if str(row.get("status")) != "Cancelled":
+                entry["filedTotal"] = round2(entry["filedTotal"] + amount)
+            if status in ACCEPTED_STATUSES:
+                entry["acceptedTotal"] = round2(entry["acceptedTotal"] + amount)
+            if row.get("claimNumber") and row["claimNumber"] not in entry["claimNumbers"]:
+                entry["claimNumbers"].append(row["claimNumber"])
+            hit = {
+                "claimNumber": row.get("claimNumber") or "",
+                "oemStatus": status,
+                "amount": amount,
+                "stageLabel": row.get("stageLabel") or "",
+                "stageDays": int(row.get("stageDays") or 0),
+                "createdAt": row.get("createdAt") or "",
+                "needsResubmission": bool(row.get("needsResubmission")),
+                "resubmittedBy": row.get("resubmittedBy") or "",
+                "description": line.get("description") or "",
+            }
+            if status == "Rejected" and row.get("needsResubmission"):
+                entry["rejectedOpen"].append(hit)
+            key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
+            if key:
+                entry["byComponent"].setdefault(key, []).append(hit)
+            else:
+                entry["unmapped"].append(hit)
+    return index
+
+
+def match_state(index, lead_id, component_key):
+    """How this register row stands against Euler. Never guesses "unclaimed".
+
+    filed / accepted  — Euler has it, and has agreed it where `accepted`
+    rejected          — refused and nobody filed it again: act
+    resubmitted       — refused, but a newer claim exists: informational
+    unmapped          — the lead has claims, none of them reads as this component:
+                        needs a human, NOT a gap
+    not_filed         — nothing at all was filed for this lead: a genuine gap
+    """
+    entry = (index or {}).get(lead_id)
+    if not entry:
+        return {"state": "not_filed", "claimNumbers": [], "oemStatus": "",
+                "filedAmount": 0.0, "detail": "No claim filed with Euler for this lead."}
+    hits = entry["byComponent"].get(component_key) or []
+    if not hits:
+        if entry["unmapped"]:
+            return {
+                "state": "unmapped",
+                "claimNumbers": [h["claimNumber"] for h in entry["unmapped"]],
+                "oemStatus": "", "filedAmount": round2(entry["filedTotal"]),
+                "detail": "This lead has claims in Euler, but none of them names this "
+                          "component. Check before treating it as unclaimed.",
+            }
+        return {"state": "not_filed", "claimNumbers": entry["claimNumbers"], "oemStatus": "",
+                "filedAmount": round2(entry["filedTotal"]),
+                "detail": "Euler holds claims for this lead, but not this component."}
+    live = [h for h in hits if h["oemStatus"] not in ("Rejected", "Cancelled")]
+    rejected = [h for h in hits if h["oemStatus"] == "Rejected"]
+    pick = live[0] if live else (rejected[0] if rejected else hits[0])
+    if live:
+        state = "accepted" if pick["oemStatus"] in ACCEPTED_STATUSES else "filed"
+    elif rejected:
+        state = "resubmitted" if rejected[0]["resubmittedBy"] else "rejected"
+    else:
+        state = "not_filed"
+    detail = ""
+    if state == "rejected":
+        detail = "Euler rejected this and no replacement claim has been filed."
+    elif state == "resubmitted":
+        detail = f"Rejected, refiled as {rejected[0]['resubmittedBy']}."
+    elif state == "filed" and pick["stageLabel"]:
+        detail = f"{pick['stageDays']}d at {pick['stageLabel']}."
+    return {
+        "state": state,
+        "claimNumbers": [h["claimNumber"] for h in hits if h["claimNumber"]],
+        "oemStatus": pick["oemStatus"],
+        "filedAmount": round2(sum(h["amount"] for h in hits)),
+        "stageLabel": pick["stageLabel"], "stageDays": pick["stageDays"],
+        "detail": detail,
+    }
+
+
+async def oem_only_lines(db, register_pairs):
+    """Euler's side of the cross-check: claim lines the register has no row for.
+
+    `register_pairs` is the set of (leadId, componentKey) the register actually renders.
+    A line whose lead is unknown, or whose component the register never raised, is money
+    Euler is processing that this app does not know it is owed.
+    """
+    out = []
+    async for row in db[CLAIMS_COLLECTION].find({}):
+        if str(row.get("status") or "") == "Cancelled":
+            continue
+        for line in row.get("lineItems") or []:
+            lead_id = line.get("leadId") or ""
+            key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
+            if lead_id and key and (lead_id, key) in register_pairs:
+                continue
+            if lead_id and not key and any(p[0] == lead_id for p in register_pairs):
+                # The lead is in the register; the phrase just did not map. That is the
+                # `unmapped` amber on the register side, not a missing row here.
+                continue
+            out.append({
+                "claimNumber": row.get("claimNumber") or "",
+                "oemStatus": row.get("status") or "",
+                "stageLabel": row.get("stageLabel") or "",
+                "stageDays": int(row.get("stageDays") or 0),
+                "createdDate": row.get("createdDate") or "",
+                "leadId": lead_id,
+                "customer": line.get("leadCustomer") or "",
+                "chassis": line.get("chassis") or "",
+                "sourceInvoiceNumber": line.get("sourceInvoiceNumber") or "",
+                "description": line.get("description") or "",
+                "claimType": line.get("claimType") or "",
+                "mappedComponent": key,
+                "amount": round2(line.get("totalAmount")),
+                "reason": "unknown_lead" if not lead_id else (
+                    "unmapped_component" if not key else "missing_register_row"),
+            })
+    out.sort(key=lambda r: -r["amount"])
+    return out
 
 
 # ---------------------------------------------------------------- reporting

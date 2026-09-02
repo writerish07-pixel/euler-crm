@@ -7532,7 +7532,38 @@ async def list_claims():
             "permanent": True,
         })
         seen_ids.add(claim_id)
+
+    # Cross-check every register row against what Euler actually holds. This ADDS a
+    # field; no money, status or date on the register is touched by the OEM mirror —
+    # Owner Commercial, Dealer Earnings and the OEM Claim Dashboard all read those.
+    oem_index = await oem_claims.register_match_index(db)
+    for row in result:
+        if row.get("manual"):
+            # Manual and executive-incentive claims are not filed as scheme lines in
+            # Coulson, so "not filed there" would be noise rather than a finding.
+            row["oemMatch"] = {"state": "not_applicable", "claimNumbers": [],
+                               "filedAmount": 0.0, "detail": ""}
+            continue
+        row["oemMatch"] = oem_claims.match_state(
+            oem_index, row.get("leadId") or "", row.get("componentKey") or "")
     return result
+
+
+@api.get("/claims/oem-only", dependencies=[Depends(money_desk_only)])
+async def claims_only_in_oem():
+    """The reverse direction: claims Euler is processing that this register has no row for.
+
+    Together with the oemMatch state on each register row, this closes the loop in both
+    directions — nothing filed here goes unclaimed there, and nothing claimed there is
+    missing from the books here.
+    """
+    register = await list_claims()
+    pairs = {(r.get("leadId") or "", r.get("componentKey") or "")
+             for r in register if not r.get("manual")}
+    rows = await oem_claims.oem_only_lines(db, pairs)
+    return {"rows": rows,
+            "total": ce.round2(sum(ce.num(r["amount"]) for r in rows)),
+            "count": len(rows)}
 
 
 class ManualClaimIn(BaseModel):

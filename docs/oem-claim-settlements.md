@@ -18,7 +18,53 @@ register's component keys. Writing Coulson statuses into `db.claims.claimStatus`
 corrupt every report that sums `eligibleClaim - receivedAmount`. A test pins this
 (`test_claim_sync_never_writes_to_the_scheme_claim_register`).
 
-The two are compared on **Claim Reconciliation** (`/claim-reconciliation`, owner-only).
+The two are compared in three places: an **In Euler** column on every Scheme Claim
+Register row, an **In Euler but not in this register** section below it, and the
+lead-level **Claim Reconciliation** report (`/claim-reconciliation`, owner-only).
+
+## The two-way cross-check
+
+Each register row carries an `oemMatch` state. **It is an added field — the mirror never
+writes money, status or dates into `db.claims`.**
+
+| State | Colour | Means | Do |
+|---|---|---|---|
+| `accepted` | green | Euler generated a credit note / sales invoice, or settled | nothing |
+| `filed` | blue | In Euler's ladder | wait, or chase on stage-days |
+| `resubmitted` | sky | Was rejected, a newer claim exists for that chassis | nothing |
+| `unmapped` | amber | The lead has claims, none reads as this component | **look** — not a gap |
+| `rejected` | rose | Rejected and nothing refiled | **refile** |
+| `not_filed` | red | Nothing filed for this lead | **raise the claim** |
+| `not_applicable` | — | Manual / executive-incentive claim, not filed as a scheme line | nothing |
+
+`unmapped` exists because Euler describes a claim in prose ("Referral Commission for
+invoice AF-122-…") and types every one of them `"Scheme Claim"`, while the register
+speaks component keys. `COMPONENT_PHRASES` maps the words they actually use, most
+specific first. **A mapping miss must never render as "not claimed"** — that would send
+the money desk chasing money already sitting in Euler's queue. A test pins it.
+
+The reverse direction is `GET /claims/oem-only`: claim lines with no register row, each
+tagged `unknown_lead` (chassis never matched a lead), `unmapped_component`, or
+`missing_register_row`. Cancelled claims are excluded — nobody should chase those.
+
+## Rejections and resubmission
+
+Euler does not reopen a rejected debit note. A resubmission is a **new note for the same
+chassis**, so `annotate_resubmissions` looks for a later, non-cancelled claim on that
+chassis after each rejection:
+
+- found → `resubmittedBy` is set, and the register reads `resubmitted`
+- not found → `needsResubmission`, surfaced on both pages as money that quietly stopped
+  being chased
+
+A live claim always outranks an older rejection on the same component, so refiling makes
+the register read `filed` again rather than staying red.
+
+## Backlinks
+
+Every lead id on the three claim pages opens the same lead 360 drawer the Lead Register
+opens (`components/LeadLink.js`), so the claim desk never has to go and search for the
+file by hand.
 
 ## Endpoints used on Euler's side
 

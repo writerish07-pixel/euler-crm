@@ -105,7 +105,10 @@ export function Badge({ children, tone, className, ...rest }) {
   );
 }
 
-export function Table({ columns, rows, onRowClick, empty = "No records", rowKey }) {
+// rowClassName is optional and tints a row from its own data — used where a row's
+// state matters more than any single cell (a claim nobody filed with the OEM).
+// Callers that don't pass it get exactly the old markup.
+export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName }) {
   return (
     <Card className="overflow-hidden">
       <div className="overflow-x-auto">
@@ -130,7 +133,7 @@ export function Table({ columns, rows, onRowClick, empty = "No records", rowKey 
                 key={rowKey ? row[rowKey] : i}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
                 data-testid={rowKey ? `row-${row[rowKey]}` : undefined}
-                className={cx("border-b border-zinc-100 last:border-0 transition-colors", onRowClick && "cursor-pointer hover:bg-cobalt-tint/50")}
+                className={cx("border-b border-zinc-100 last:border-0 transition-colors", onRowClick && "cursor-pointer hover:bg-cobalt-tint/50", rowClassName && rowClassName(row))}
               >
                 {columns.map((c) => (
                   <td key={c.key} className={cx("px-4 py-2.5 text-sm text-ink align-middle whitespace-nowrap", c.align === "right" && "text-right tabular", c.mono && "font-mono text-[13px]")}>
