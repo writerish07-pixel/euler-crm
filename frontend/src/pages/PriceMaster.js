@@ -31,7 +31,13 @@ export default function PriceMaster() {
           { key: "model", label: "Model", render: (r) => <span className="font-semibold">{r.model}</span> },
           { key: "variant", label: "Variant" },
           { key: "exShowroom", label: "Ex-Showroom", align: "right", mono: true, render: (r) => (
-            <span>{inr(r.exShowroom)}{r.priceSource === "oem" ? <span className="ml-1 text-[10px] text-cobalt font-semibold">OEM</span> : null}</span>
+            <span>
+              {inr(r.exShowroom)}
+              {r.priceSource === "oem" ? <span className="ml-1 text-[10px] text-cobalt font-semibold">OEM</span> : null}
+              {Number(r.turboUplift) > 0 ? (
+                <span className="block text-[10px] text-amber-700 font-semibold">From 1 Sep {inr(r.sellingExShowroom)}</span>
+              ) : null}
+            </span>
           ) },
           { key: "inYard", label: "In yard", align: "right", mono: true, render: (r) => r.inYard || 0 },
           { key: "rto", label: "RTO", align: "right", mono: true, render: (r) => inr(r.rto) },

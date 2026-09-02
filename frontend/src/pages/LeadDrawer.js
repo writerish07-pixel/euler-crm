@@ -19,7 +19,7 @@ const SCHEME_FIELDS = [
 ];
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner, isField } = useAuth();
+  const { isOwner, isField, isExecutive } = useAuth();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
@@ -62,6 +62,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const c = data.commercials;
   const actions = data.actions || {};
   const fieldView = isField || !!data.fieldView || !!actions.fieldView;
+  const execHandover = isExecutive || !!actions.execPipelineOnly;
   const leadLocked = !!actions.isLocked || !actions.isActive;
 
   const tabs = fieldView
@@ -70,16 +71,22 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         { key: "delivery", label: "Delivery" },
         { key: "activity", label: `Activity (${(data.activities || []).length})` },
       ]
-    : [
-        { key: "overview", label: "Overview" },
-        { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
-        { key: "price", label: "Price Structure" },
-        { key: "scheme", label: "Scheme" },
-        { key: "payments", label: `Payments (${data.payments.length})` },
-        { key: "delivery", label: "Delivery" },
-        ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
-        { key: "activity", label: `Activity (${data.activities.length})` },
-      ];
+    : execHandover
+      ? [
+          { key: "overview", label: "Overview" },
+          { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
+          { key: "activity", label: `Activity (${(data.activities || []).length})` },
+        ]
+      : [
+          { key: "overview", label: "Overview" },
+          { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
+          { key: "price", label: "Price Structure" },
+          { key: "scheme", label: "Scheme" },
+          { key: "payments", label: `Payments (${data.payments.length})` },
+          { key: "delivery", label: "Delivery" },
+          ...(isOwner ? [{ key: "insurance", label: "Insurance" }] : []),
+          { key: "activity", label: `Activity (${data.activities.length})` },
+        ];
 
   return (
     <Drawer open onClose={onClose} width="max-w-3xl"
@@ -97,13 +104,13 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
               )}
             <span className="ml-auto text-xs">Field view · pipeline only</span>
           </div>
-        : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => advance("price")} />}
+        : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => (execHandover ? refresh() : advance("price"))} />}
     >
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
         {leadLocked && <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="lead-locked-badge">Locked</Badge>}
-        {!fieldView && !leadLocked && (
+        {!fieldView && !leadLocked && actions.canEditLead && (
           <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
         )}
         {!fieldView && isOwner && (
@@ -146,11 +153,18 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         <StepLock text="ASM / RM field view — pipeline status only. Commercial amounts, payments and claims are hidden." />
       )}
 
+      {execHandover && !fieldView && !actions.isBooked && (
+        <StepLock text="You can convert this lead to a booking. After that, the Team Leader completes Price, Scheme, Payments and Delivery." />
+      )}
+      {execHandover && !fieldView && actions.isBooked && (
+        <StepLock text="Booked. Remaining steps are with the Team Leader — Price, Scheme, Payments and Delivery." />
+      )}
+
       {!fieldView && leadLocked && (
         <StepLock text="This lead is Closed — commercial steps are locked. Active leads (including Delivered) can still be edited by the owner." />
       )}
 
-      <Tabs tabs={tabs} active={tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={execHandover && !["overview", "whatsapp", "activity"].includes(tab) ? "overview" : tab} onChange={setTab} />
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />

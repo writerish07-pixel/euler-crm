@@ -329,6 +329,9 @@ def lead_actions(lead, act=None):
     Cancelled / Archived (accountStatus != Active).
     Close remains available on Active (including Delivered) so the lifecycle can exit.
     Finance / claim receipts stay allowed after close (not Archived).
+
+    Executives stop at Convert Booking. Price, scheme, payments, delivery, close
+    and cancel are Team Leader (or Owner / Sales GM) steps.
     """
     role = ((act or {}).get("role") or "").strip().lower()
     active = _acct(lead) == "Active"
@@ -339,27 +342,30 @@ def lead_actions(lead, act=None):
     mutable = active if role == "owner" else (active and not delivered)
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
+    is_exec = role == "executive"
     return {
         "canBook": mutable and not booked,
-        "canPrice": mutable,
-        "canScheme": mutable,
-        "canPayment": mutable,                             # customer payment
-        "canFinanceReceipt": not_archived,               # finance receipt allowed after close
-        "canDeliver": active and booked and not delivered,
-        "canClose": active,                               # close exit path (incl. delivered)
+        "canPrice": mutable and not is_exec,
+        "canScheme": mutable and not is_exec,
+        "canPayment": mutable and not is_exec,             # customer payment
+        "canFinanceReceipt": not_archived and not is_exec,  # finance receipt allowed after close
+        "canDeliver": active and booked and not delivered and not is_exec,
+        "canClose": active and not is_exec,                # close exit path (incl. delivered)
         # Cancel is the LOST exit. A delivered vehicle is not a cancellation — that
         # is a buyback, which this app has no ledger for — so it stops at delivery.
-        "canCancel": active and not delivered,
+        "canCancel": active and not delivered and not is_exec,
         # Owner-only once the customer has paid: cancelling a funded booking is a
         # refund decision, not a sales-desk one.
         "cancelNeedsOwner": _cancel_money(lead)["hasMoney"],
-        "canEditLead": mutable,                           # Edit Lead modal / PUT /leads
+        # After Convert Booking the executive hands the file to the Team Leader.
+        "canEditLead": mutable and not (is_exec and booked),
         "isBooked": booked, "isDelivered": delivered, "isActive": active,
         "isLocked": not mutable,
         # Step completion — staff may complete a step once; only owner re-edits (while mutable).
         "priceCompleted": priced,
         "schemeCompleted": schemed,
         "deliveryCompleted": delivered,
+        "execPipelineOnly": is_exec,
     }
 
 
@@ -2754,6 +2760,12 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
     part of this model) is left exactly as it was. See LEAD_SYSTEM_FIELDS."""
     lead = await get_lead_or_404(lead_id)
     _require_mutable_lead(lead, "lead edits", act)
+    if str((act or {}).get("role") or "").strip().lower() == "executive" and _is_booked(lead):
+        raise HTTPException(
+            403,
+            "After Convert Booking, the Team Leader completes Price, Scheme, Payments and Delivery.",
+        )
+    _require_action(lead, "canEditLead", "lead edits", act)
     payload = body.model_dump(exclude_unset=True)
     payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
 
@@ -2883,10 +2895,47 @@ async def _price_master_row(model, variant):
     return active[0] if len(active) == 1 else None
 
 
-def _price_structure_from_master(row):
+# Dealer Turbo list-price overlay. OEM/Coulson keeps the stored ex-showroom;
+# quoting, booking autofill and Price List add this from 1 Sep 2026.
+TURBO_EXSHOWROOM_UPLIFT = 15000
+TURBO_EXSHOWROOM_UPLIFT_FROM = "2026-09-01"
+
+
+def _is_turbo_vehicle(model, variant=""):
+    sku = oem_cat.resolve_sku(model, variant)
+    if sku and str(sku.oem_model or "").strip().lower() == "turbo":
+        return True
+    return ce.normalize_scheme_model_key(model, variant) == "turbo"
+
+
+def _lead_price_as_of(lead=None, on=None):
+    """Booking date locks the list price; unbooked quotes use today."""
+    if on:
+        return str(on)[:10]
+    if lead:
+        booked = str(lead.get("bookingDate") or "")[:10]
+        if booked:
+            return booked
+    return today()
+
+
+def _turbo_selling_ex(row, as_of=None):
+    """Stored OEM ex-showroom, plus the Sept-2026 Turbo overlay when in force."""
+    base = ce.round2(ce.num((row or {}).get("exShowroom")))
+    as_of = str(as_of or today())[:10]
+    if as_of < TURBO_EXSHOWROOM_UPLIFT_FROM:
+        return base
+    model = (row or {}).get("model") or (row or {}).get("oemModel") or ""
+    variant = (row or {}).get("variant") or ""
+    if not _is_turbo_vehicle(model, variant):
+        return base
+    return ce.round2(base + TURBO_EXSHOWROOM_UPLIFT)
+
+
+def _price_structure_from_master(row, as_of=None):
     """Map a Price Master row onto the lead's price-structure fields."""
     return {
-        "exShowroom": ce.num(row.get("exShowroom")),
+        "exShowroom": _turbo_selling_ex(row, as_of),
         "rto": ce.num(row.get("rto")),
         "insuranceAmount": ce.num(row.get("insurance")),
         "accessoriesAmount": ce.num(row.get("accessories")),
@@ -2916,7 +2965,7 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
         row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
         if row:
             # Full Price Master structure for the new model/variant.
-            patch.update(_price_structure_from_master(row))
+            patch.update(_price_structure_from_master(row, _lead_price_as_of(lead)))
 
     if realign_scheme and _has_persisted_scheme(lead):
         import json as _json
@@ -2991,8 +3040,10 @@ async def price_preview(lead_id: str):
         return {"found": False, "model": model, "variant": variant,
                 "message": f"Price Master entry not found for: Model = {model or '(none)'}, "
                            f"Variant = {variant or '(none)'}"}
+    as_of = _lead_price_as_of(lead)
     return {"found": True, "model": model, "variant": variant,
-            "priceId": row.get("priceId"), "priceStructure": _price_structure_from_master(row)}
+            "priceId": row.get("priceId"), "asOf": as_of,
+            "priceStructure": _price_structure_from_master(row, as_of)}
 
 
 @api.post("/leads/{lead_id}/convert-booking")
@@ -3014,7 +3065,9 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
             f"Price Master entry not found for: Model = {lead.get('interestedModel') or '(none)'}, "
             f"Variant = {lead.get('variant') or '(none)'}. Add the vehicle to Price Master, or "
             f"correct the model/variant on the lead, then book again.")
-    if ce.num(_price_structure_from_master(row).get("exShowroom")) <= 0:
+    bdate = body.bookingDate or today()
+    master_ps = _price_structure_from_master(row, bdate)
+    if ce.num(master_ps.get("exShowroom")) <= 0:
         raise HTTPException(422,
             f"Price Master row {row.get('priceId')} for {lead.get('interestedModel')}/"
             f"{lead.get('variant')} has a zero ex-showroom price. Correct the Price Master entry "
@@ -3023,7 +3076,7 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
         # Unpriced lead: adopt the authoritative structure for booking maths, but do
         # NOT mark priceStructureSaved — staff must still complete the Price step.
         await db.leads.update_one({"leadId": lead_id},
-                                  {"$set": {**_price_structure_from_master(row),
+                                  {"$set": {**master_ps,
                                             "priceStructureSaved": False,
                                             "lastUpdated": now_iso()}})
         await recompute_lead(lead_id)
@@ -3037,7 +3090,6 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
             f"before booking.")
     booking_id = await next_id("booking", "BK26")
     snapshot_id = await next_id("snapshot", "SN26")
-    bdate = body.bookingDate or today()
     requested = ce.round2(max(0.0, ce.num(body.bookingAmount)))
     held = await _net_received(lead_id)
     extra = ce.round2(max(0.0, requested - held))
@@ -3154,7 +3206,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     # value only when no master row exists (so a saved structure is not wiped).
     row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
     if row:
-        master_ex = ce.num(_price_structure_from_master(row).get("exShowroom"))
+        master_ex = ce.num(_price_structure_from_master(row, _lead_price_as_of(lead)).get("exShowroom"))
         if master_ex <= 0:
             raise HTTPException(422,
                 f"Price Master row for {lead.get('interestedModel')}/{lead.get('variant')} "
@@ -5335,9 +5387,13 @@ async def list_price_master(model: Optional[str] = None):
     q = {"model": model} if model else {}
     rows = [clean(p) for p in await db.price_master.find(q).to_list(2000)]
     counts = await oem_sync.inventory_counts(db)
+    as_of = today()
     for r in rows:
         r["inYard"] = counts.get((r.get("model") or "", r.get("variant") or ""), 0)
         r["priceSource"] = r.get("priceSource") or "manual"
+        selling = _turbo_selling_ex(r, as_of)
+        r["sellingExShowroom"] = selling
+        r["turboUplift"] = ce.round2(selling - ce.num(r.get("exShowroom")))
     return rows
 
 
@@ -5366,7 +5422,7 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
         mdl, variant = str(r.get("model") or ""), str(r.get("variant") or "")
         if needle and needle not in f"{mdl} {variant}".lower():
             continue
-        ex = ce.num(r.get("exShowroom"))
+        ex = _turbo_selling_ex(r, on)
         rto = ce.num(r.get("rto"))
         ins = ce.num(r.get("insurance"))
         other = ce.round2(sum(ce.num(r.get(k)) for k in
@@ -5763,7 +5819,12 @@ async def list_activities(lead_id: Optional[str] = None, user=Depends(current_us
 @api.post("/leads/{lead_id}/activities")
 async def add_activity(lead_id: str, body: ActivityIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
-    _require_action(lead, "canScheme", "logging activity (only Active leads)", act)
+    if _acct(lead) != "Active":
+        raise HTTPException(
+            409,
+            f"This lead is not eligible for logging activity "
+            f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}).",
+        )
     payload = body.model_dump()
     act_date = str(payload.pop("date", None) or "").strip() or today()
     doc = {
@@ -8957,6 +9018,11 @@ async def startup():
         await _backfill_booking_advances()
     except Exception:
         pass
+    try:
+        if os.environ.get("ENVIRONMENT", "").lower() != "test":
+            await _apply_turbo_sept_uplift_to_open_leads()
+    except Exception:
+        logging.exception("TURBO_SEPT_UPLIFT_ERROR")
     # Finance files that recorded one disbursement twice before the dedupe guard.
     try:
         await _repair_duplicate_finance_receipts()
@@ -9069,6 +9135,45 @@ async def _backfill_booking_advances():
         await recompute_lead(lid)
         healed += 1
     return healed
+
+
+async def _apply_turbo_sept_uplift_to_open_leads():
+    """Lift Active Turbo leads still sitting on the OEM base once the 1 Sep overlay is live.
+
+    Bookings before 1 Sep keep the old list price. Delivered / closed files are
+    never touched. A lead whose saved ex-showroom is not the OEM base is left
+    alone (a manual figure).
+    """
+    if today() < TURBO_EXSHOWROOM_UPLIFT_FROM:
+        return 0
+    lifted = 0
+    for lead in await db.leads.find({"deliveryStatus": {"$ne": "Delivered"}}).to_list(5000):
+        if _is_delivered(lead) or _acct(lead) != "Active":
+            continue
+        as_of = _lead_price_as_of(lead)
+        if as_of < TURBO_EXSHOWROOM_UPLIFT_FROM:
+            continue
+        if not _is_turbo_vehicle(lead.get("interestedModel"), lead.get("variant")):
+            continue
+        current = ce.num(lead.get("exShowroom"))
+        if current <= 0:
+            continue
+        row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
+        if not row:
+            continue
+        base = ce.round2(ce.num(row.get("exShowroom")))
+        selling = _turbo_selling_ex(row, as_of)
+        if abs(current - base) > 0.5 or abs(current - selling) < 0.5:
+            continue
+        lid = lead.get("leadId")
+        await db.leads.update_one({"leadId": lid},
+                                  {"$set": {"exShowroom": selling, "lastUpdated": now_iso()}})
+        await recompute_lead(lid)
+        lifted += 1
+    if lifted:
+        logging.info("TURBO_SEPT_UPLIFT: applied ₹%s to %s open Turbo lead(s)",
+                     TURBO_EXSHOWROOM_UPLIFT, lifted)
+    return lifted
 
 
 @app.on_event("shutdown")

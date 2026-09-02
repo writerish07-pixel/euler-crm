@@ -157,7 +157,7 @@ async def test_delivered_lead_locked_for_staff_editable_for_owner(client):
     assert staff["canPrice"] is False
     assert staff["canScheme"] is False
     assert staff["canPayment"] is False
-    assert staff["canClose"] is True
+    assert staff["canClose"] is False
 
     # Owner: editable until closed
     owner = server.lead_actions(lead, {"role": "owner"})
