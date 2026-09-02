@@ -98,7 +98,7 @@ session the yard sync uses. No second login is ever made.
 | Call | Purpose |
 |---|---|
 | `GET debit-note?limit=&offset=` | The claim list. `{success, data[], extras.total_count}` — same envelope as `vehicle-inventory/transfer` |
-| `GET journey?debit_note_id=<uuid>` | `{header, line_items[], timeline{}}`. **Chassis and source invoice exist only here** |
+| `GET journey?debit_note_id=<uuid>` | `{header, line_items[], timeline{}}`. **Chassis and source invoice exist only here** (also tried as `?id=` and `GET debit-note/{id}`). Live envelopes vary (`data.data`, `data` as the line list, `debit_note.line_items`); an empty unwrap used to leave OEM Claim Settlements with a blank Chassis / Invoice column. |
 | `GET status-counts?showroom_id=` | The eleven bucket totals, pre-aggregated |
 | `GET allowed-showrooms` | Showroom scoping |
 
