@@ -5790,6 +5790,8 @@ async def exec_incentive_board():
 
     for n in await _executive_names():
         remember(n, prefer=True)
+    for u in await db.users.find({"role": "executive"}).to_list(200):
+        remember(u.get("name") or "")
     for d in await db.executive_incentive.find({"_id": {"$regex": r"^exec:"}}).to_list(500):
         remember(d.get("executive") or "")
     for l in leads:

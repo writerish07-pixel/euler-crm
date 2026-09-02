@@ -98,6 +98,16 @@ async def test_company_incentive_master_is_owner_only(client):
 
 
 @pytest.mark.asyncio
+async def test_board_lists_login_executives_before_any_deliveries(client):
+    board = (await client.get("/api/executive-incentive/board")).json()
+    names = {x["executive"] for x in board["executives"]}
+    assert "Executive" in names
+    row = next(x for x in board["executives"] if x["executive"] == "Executive")
+    assert row["units"] == 0
+    assert row["hasOwnPlan"] is False
+
+
+@pytest.mark.asyncio
 async def test_put_without_executive_is_rejected(client):
     r = await client.put("/api/executive-incentive/plan", json=PLAN)
     assert r.status_code == 422
