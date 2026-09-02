@@ -24,7 +24,11 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    if (err.response?.status === 401 && !window.location.pathname.startsWith("/login") && !window.location.pathname.startsWith("/share")) {
+    const url = String(err.config?.url || "");
+    const path = window.location.pathname || "";
+    const isFormAuth = url.includes("/auth/login") || url.includes("/auth/change-password");
+    if (err.response?.status === 401 && !isFormAuth
+        && !path.startsWith("/login") && !path.startsWith("/share")) {
       localStorage.removeItem(TOKEN_KEY);
       window.location.href = "/login";
     }

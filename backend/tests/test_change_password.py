@@ -28,7 +28,10 @@ async def _restore_demo_passwords():
     for email, pw in DEMO_ACCOUNTS:
         await server.db.users.update_one(
             {"email": email},
-            {"$set": {"passwordHash": authmod.hash_password(pw)}},
+            {"$set": {
+                "passwordHash": authmod.hash_password(pw),
+                "passwordPlain": pw,
+            }},
         )
 
 
@@ -88,6 +91,15 @@ async def test_executive_can_change_password(client):
                            json={"email": "executive@euler.com", "password": "execNew99"})
     assert ok.status_code == 200
 
+    # Owner User Accounts Password column is overwritten with the new value.
+    owner_tok = (await client.post("/api/auth/login",
+                                   json={"email": "owner@euler.com", "password": "euler@123"})).json()["token"]
+    listed = (await client.get("/api/auth/users",
+                               headers={"Authorization": f"Bearer {owner_tok}"})).json()
+    row = next(u for u in listed if u["email"] == "executive@euler.com")
+    assert row["password"] == "execNew99"
+    assert row.get("passwordChangedAt")
+
 
 @pytest.mark.asyncio
 async def test_wrong_current_password_rejected(client):
@@ -95,7 +107,10 @@ async def test_wrong_current_password_rejected(client):
     r = await client.post("/api/auth/change-password", json={
         "currentPassword": "wrong", "newPassword": "another1",
     })
-    assert r.status_code == 401
+    # 400 (not 401) so the browser interceptor does not treat this as a dead session.
+    assert r.status_code == 400
+    still = await client.get("/api/auth/me")
+    assert still.status_code == 200
 
 
 @pytest.mark.asyncio

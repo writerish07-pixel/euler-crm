@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { get, post, del, put, api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, Button, Field, Input, Select, Badge, Table } from "../components/ui";
+import ChangePasswordCard from "../components/ChangePasswordCard";
 
 const MASTER_LIST_CATEGORIES = [
   ["executives", "Executives"],
@@ -24,8 +25,6 @@ export default function Settings() {
   const [ensuringIns, setEnsuringIns] = useState(false);
   const [ensuringCancel, setEnsuringCancel] = useState(false);
   const [ensuringCommercial, setEnsuringCommercial] = useState(false);
-  const [pwForm, setPwForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
-  const [pwBusy, setPwBusy] = useState(false);
 
   const loadUsers = useCallback(() => { if (isOwner) get("/auth/users").then(setUsers).catch(() => {}); }, [isOwner]);
   useEffect(() => {
@@ -33,32 +32,12 @@ export default function Settings() {
     if (isOwner) get("/staff").then(setStaff).catch(() => setStaff([]));
     if (isOwner) get("/integrations/gsheets").then(setGs).catch(() => {});
   }, [loadUsers, isOemFinance, isOwner]);
-
-  const changePassword = async () => {
-    if (!pwForm.currentPassword || !pwForm.newPassword) {
-      return toast.error("Enter current and new password");
-    }
-    if (pwForm.newPassword.length < 6) {
-      return toast.error("New password must be at least 6 characters");
-    }
-    if (pwForm.newPassword !== pwForm.confirmPassword) {
-      return toast.error("New password and confirmation do not match");
-    }
-    setPwBusy(true);
-    try {
-      await post("/auth/change-password", {
-        currentPassword: pwForm.currentPassword,
-        newPassword: pwForm.newPassword,
-      });
-      toast.success("Password updated — use it next time you sign in");
-      setPwForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
-      if (isOwner) loadUsers();
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not change password");
-    } finally {
-      setPwBusy(false);
-    }
-  };
+  useEffect(() => {
+    if (!isOwner) return undefined;
+    const onFocus = () => loadUsers();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [isOwner, loadUsers]);
 
   const runBackfill = async () => {
     setBackfilling(true);
@@ -196,37 +175,7 @@ export default function Settings() {
     <div>
       <PageHeader title="Settings" subtitle="Users, integrations & sharing" />
 
-      <Card className="p-5 mb-6" data-testid="change-password-card">
-        <div className="flex items-center gap-2 mb-1">
-          <KeyRound size={16} className="text-ink-soft" />
-          <h3 className="font-heading font-bold text-ink">Change password</h3>
-        </div>
-        <p className="text-sm text-ink-soft mb-3">
-          Signed in as <span className="font-mono text-ink">{user?.loginId || user?.email}</span>
-          {user?.role ? ` (${user.role})` : ""}. After the first login, every staff member can
-          change this password here. The owner sees the new password on User Accounts.
-        </p>
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
-          <Field label="Current password">
-            <Input data-testid="current-password" type="password" autoComplete="current-password"
-              value={pwForm.currentPassword}
-              onChange={(e) => setPwForm({ ...pwForm, currentPassword: e.target.value })} />
-          </Field>
-          <Field label="New password">
-            <Input data-testid="new-password" type="password" autoComplete="new-password"
-              value={pwForm.newPassword}
-              onChange={(e) => setPwForm({ ...pwForm, newPassword: e.target.value })} />
-          </Field>
-          <Field label="Confirm new password">
-            <Input data-testid="confirm-password" type="password" autoComplete="new-password"
-              value={pwForm.confirmPassword}
-              onChange={(e) => setPwForm({ ...pwForm, confirmPassword: e.target.value })} />
-          </Field>
-          <Button data-testid="change-password-btn" onClick={changePassword} disabled={pwBusy}>
-            <KeyRound size={15} /> {pwBusy ? "Saving…" : "Update password"}
-          </Button>
-        </div>
-      </Card>
+      <ChangePasswordCard onSaved={isOwner ? loadUsers : undefined} />
 
       {/* Outside party: password only. Everything below is dealership business. */}
       {isOemFinance && (
@@ -337,7 +286,12 @@ export default function Settings() {
 
       {isOwner && (
         <Card className="p-5" data-testid="user-accounts-card">
-          <h3 className="font-heading font-bold text-ink mb-3">User Accounts <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <h3 className="font-heading font-bold text-ink">User Accounts <span className="text-xs font-normal text-ink-faint">(Owner only)</span></h3>
+            <Button variant="secondary" data-testid="refresh-users-btn" onClick={loadUsers}>
+              <RefreshCcw size={14} /> Refresh
+            </Button>
+          </div>
           <p className="text-sm text-ink-soft mb-3">
             Pick the person from <b>Staff & Reports</b> so the login name matches the
             Executive on existing leads — that is what fills their dashboard.
@@ -386,7 +340,16 @@ export default function Settings() {
               { key: "email", label: "Email", mono: true, render: (r) => r.email || <span className="text-ink-faint">—</span> },
               { key: "password", label: "Password", render: (r) => (
                 r.password
-                  ? <span className="font-mono text-sm" data-testid={`user-password-${r.userId}`}>{r.password}</span>
+                  ? (
+                    <span>
+                      <span className="font-mono text-sm" data-testid={`user-password-${r.userId}`}>{r.password}</span>
+                      {r.passwordChangedAt ? (
+                        <span className="block text-[10px] text-ink-faint">
+                          updated {new Date(r.passwordChangedAt).toLocaleString("en-IN")}
+                        </span>
+                      ) : null}
+                    </span>
+                  )
                   : <span className="text-ink-faint">—</span>
               ) },
               { key: "role", label: "Role", render: (r) => {
