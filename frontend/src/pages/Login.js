@@ -28,6 +28,7 @@ export default function Login() {
       const role = u?.role;
       if (role === "accounts") nav("/accounts");
       else if (role === "asm" || role === "rm") nav("/field");
+      else if (role === "sales_gm") nav("/");
       else nav("/");
     } catch (err) {
       toast.error(fmtErr(err.response?.data?.detail) || "Login failed");

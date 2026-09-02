@@ -35,6 +35,7 @@ export function AuthProvider({ children }) {
       isOwner: role === "owner",
       isAccounts: role === "accounts",
       isExecutive: role === "executive",
+      isSalesGm: role === "sales_gm",
       isAsm: role === "asm",
       isRm: role === "rm",
       isField: role === "asm" || role === "rm",
@@ -42,13 +43,13 @@ export function AuthProvider({ children }) {
       // nothing else; the API denies every other route to this role.
       isOemFinance: role === "oem_finance",
       isTl: role === "tl",
-      isSalesStaff: role === "owner" || role === "tl" || role === "executive",
+      isSalesStaff: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive",
       isMoneyDesk: role === "owner" || role === "tl" || role === "accounts",
       // Price, scheme, delivery, close and cancel — the steps an executive hands
       // over. Mirrors DEAL_DESK_ROLES on the API.
-      canEditCommercials: role === "owner" || role === "tl",
-      // ASM/RM may view Finance Register (disbursed vs remaining); writes stay money-desk.
-      canViewFinance: role === "owner" || role === "tl" || role === "executive"
+      canEditCommercials: role === "owner" || role === "sales_gm" || role === "tl",
+      // ASM/RM / Sales GM may view Finance Register (disbursed vs remaining); writes stay money-desk.
+      canViewFinance: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive"
         || role === "accounts" || role === "asm" || role === "rm",
     }}>
       {children}

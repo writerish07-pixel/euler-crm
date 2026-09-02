@@ -1,4 +1,4 @@
-"""JWT email+password auth — Owner / TL / Executive / Accounts / ASM / RM / OEM (Bearer)."""
+"""JWT email+password auth — Owner / Sales GM / TL / Executive / Accounts / ASM / RM / OEM (Bearer)."""
 import hashlib
 import os
 import uuid
@@ -15,20 +15,22 @@ JWT_ALGORITHM = "HS256"
 bearer = HTTPBearer(auto_error=False)
 
 # Dealership staff + company field managers + money desk + the OEM's finance desk
-ALLOWED_ROLES = ("owner", "tl", "executive", "accounts", "asm", "rm", "oem_finance")
+ALLOWED_ROLES = ("owner", "sales_gm", "tl", "executive", "accounts", "asm", "rm", "oem_finance")
 # Executives feed the funnel: leads, booking + booking amount, activities,
 # quotations. A TEAM LEADER then finishes the deal — pricing, scheme, collection
 # and delivery — so a handover never waits for the owner to log in. A TL can do
 # everything an executive can, and so covers for one.
-SALES_ROLES = ("owner", "tl", "executive")
-LEAD_INTAKE_ROLES = ("owner", "tl", "executive")
+# Sales GM runs the whole showroom: same funnel as an executive, same close-the-deal
+# steps as a TL, all leads (not self-scoped). They do not post money or edit Price Master.
+SALES_ROLES = ("owner", "sales_gm", "tl", "executive")
+LEAD_INTAKE_ROLES = ("owner", "sales_gm", "tl", "executive")
 MONEY_ROLES = ("owner", "tl", "accounts")
 # Closing the deal: price, scheme, extra income, delivery, close, cancel, revive.
 # The commercial decisions an executive does not make.
-DEAL_DESK_ROLES = ("owner", "tl")
+DEAL_DESK_ROLES = ("owner", "sales_gm", "tl")
 FIELD_ROLES = ("asm", "rm")
-# Money desk can write; ASM/RM may view Finance Register (disbursed vs remaining).
-FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", *FIELD_ROLES)
+# Money desk can write; ASM/RM / Sales GM may view Finance Register (disbursed vs remaining).
+FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", "sales_gm", *FIELD_ROLES)
 
 # Roles belonging to people OUTSIDE the dealership. 37 of 43 GET endpoints carry
 # no role check of their own — the /api router only requires a valid token — so an
@@ -188,29 +190,29 @@ def build_router(db):
         return user
 
     async def sales_staff_only(user=Depends(current_user)):
-        """Owner + Executive — feeding the funnel.
+        """Owner + Sales GM + TL + Executive — feeding the funnel.
 
         Leads, booking (with the booking amount), activities, bulk import and
-        quotations. Pricing, scheme, delivery, close/cancel and money movements
-        are NOT here — they are owner or money-desk decisions.
+        quotations. Pricing, scheme, delivery, close/cancel sit on the deal desk;
+        money movements stay on the money desk.
         """
         if user.get("role") not in SALES_ROLES:
             raise HTTPException(
                 403,
-                "Only Owner / Executive can add or update leads and bookings.",
+                "Only Owner / Sales GM / Team Leader / Executive can add or update leads and bookings.",
             )
         return user
 
     async def deal_desk_only(user=Depends(current_user)):
-        """Owner + Team Leader — the commercial steps that close a deal.
+        """Owner + Sales GM + Team Leader — the commercial steps that close a deal.
 
         Executives hand over here: pricing, scheme, extra income, delivery,
-        close and cancel. A TL exists so those never queue behind the owner.
+        close and cancel. Sales GM and TL exist so those never queue behind the owner.
         """
         if user.get("role") not in DEAL_DESK_ROLES:
             raise HTTPException(
                 403,
-                "Only the Owner or a Team Leader can price, scheme, deliver, "
+                "Only the Owner, Sales GM or a Team Leader can price, scheme, deliver, "
                 "close or cancel a lead.",
             )
         return user
@@ -225,15 +227,21 @@ def build_router(db):
         return user
 
     async def finance_viewer_only(user=Depends(current_user)):
-        """Money desk + ASM/RM — read Finance Register (committed / disbursed / outstanding)."""
+        """Money desk + Sales GM + ASM/RM — read Finance Register (committed / disbursed / outstanding)."""
         if user.get("role") not in FINANCE_VIEW_ROLES:
-            raise HTTPException(403, "Finance Register is for money desk and ASM / RM.")
+            raise HTTPException(403, "Finance Register is for money desk, Sales GM and ASM / RM.")
         return user
 
     async def field_viewer_only(user=Depends(current_user)):
         """ASM / RM (shared field board) + Owner shortcut."""
         if user.get("role") not in (*FIELD_ROLES, "owner"):
             raise HTTPException(403, "Field dashboard is for ASM / RM (and Owner).")
+        return user
+
+    async def sales_gm_only(user=Depends(current_user)):
+        """Sales GM showroom board + Owner shortcut."""
+        if user.get("role") not in ("sales_gm", "owner"):
+            raise HTTPException(403, "Sales GM dashboard is for Sales GM (and Owner).")
         return user
 
     @router.post("/login")
@@ -355,6 +363,7 @@ def build_router(db):
     router.money_desk_only = money_desk_only
     router.finance_viewer_only = finance_viewer_only
     router.field_viewer_only = field_viewer_only
+    router.sales_gm_only = sales_gm_only
     return router
 
 
@@ -417,6 +426,7 @@ async def seed_users(db):
         ("accounts@euler.com", "Accounts", "accounts", "accounts"),
         ("asm@euler.com", "ASM", "asm", "asm"),
         ("rm@euler.com", "RM", "rm", "rm"),
+        ("salesgm@euler.com", "Sales GM", "sales_gm", "salesgm"),
     ]
     for email, name, role, login_id in demos:
         if not await db.users.find_one({"email": email}):

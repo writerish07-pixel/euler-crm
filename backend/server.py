@@ -52,6 +52,7 @@ deal_desk_only = auth_router.deal_desk_only
 money_desk_only = auth_router.money_desk_only
 field_viewer_only = auth_router.field_viewer_only
 finance_viewer_only = auth_router.finance_viewer_only
+sales_gm_only = auth_router.sales_gm_only
 
 api = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
 public = APIRouter(prefix="/api")
@@ -1099,12 +1100,13 @@ async def _masters_list_values(category):
     return [r["value"] for r in rows]
 
 
-STAFF_ROLES = ["executive", "TL", "ASM", "RM", "owner", "accounts"]
+STAFF_ROLES = ["executive", "TL", "GM", "ASM", "RM", "owner", "accounts"]
 # Which daily reports a staff member can receive.
 STAFF_REPORTS = ["exec_morning", "exec_eod", "manager_eod", "owner_eod"]
 DEFAULT_REPORTS_BY_ROLE = {
     "executive": ["exec_morning", "exec_eod"],
     "TL": ["manager_eod"],
+    "GM": ["manager_eod"],
     "ASM": ["manager_eod"],
     "RM": ["manager_eod"],
     "owner": ["owner_eod"],
@@ -2101,9 +2103,8 @@ async def oem_finance_report(view: str = "all", financer: str = "", month: str =
     }
 
 
-@api.get("/field/dashboard")
-async def field_dashboard(_field=Depends(field_viewer_only)):
-    """Shared ASM / RM company field board — retail + pipeline hygiene (read-only)."""
+async def _ops_pipeline_dashboard():
+    """Showroom-wide retail snapshot shared by ASM/RM field board and Sales GM."""
     leads = await db.leads.find().to_list(5000)
     ym = this_month()
     td = today()
@@ -2130,8 +2131,10 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
         b = _status_bucket(l)
         funnel[b] = funnel.get(b, 0) + 1
 
-    followup_overdue = len([l for l in active if followup_date(l) and followup_date(l) < td])
-    followup_due = len([l for l in active if followup_date(l) == td])
+    followup_overdue_leads = [l for l in active if followup_date(l) and followup_date(l) < td]
+    followup_due_leads = [l for l in active if followup_date(l) == td]
+    followup_overdue = len(followup_overdue_leads)
+    followup_due = len(followup_due_leads)
 
     finance_pending = 0
     finance_overdue_amt = 0.0
@@ -2214,6 +2217,35 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
     book_conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
     deliver_conv = round((len(monthly_deliveries) / len(monthly_bookings) * 100), 1) if monthly_bookings else 0.0
 
+    worklist = []
+    for l in followup_overdue_leads[:15]:
+        worklist.append({
+            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
+            "kind": "Follow-up overdue", "date": followup_date(l),
+            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
+        })
+    for l in followup_due_leads[:10]:
+        worklist.append({
+            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
+            "kind": "Follow-up today", "date": followup_date(l),
+            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
+        })
+    for l in active_booked[:10]:
+        worklist.append({
+            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
+            "kind": "Pending delivery", "date": str(l.get("bookingDate") or "")[:10],
+            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
+        })
+
+    cancel_mtd = len([
+        e for e in _cancel_events(leads)
+        if in_month(e.get("date"))
+    ])
+    cust_os = ce.round2(sum(ce.num(l.get("customerOutstanding")) for l in leads))
+
     return {
         "kpis": {
             "leadsMtd": len(monthly_leads),
@@ -2233,13 +2265,32 @@ async def field_dashboard(_field=Depends(field_viewer_only)):
             "oemClaimsOpenCount": oem_claim_count,
             "activeBookings": len(active_booked),
             "totalLeads": len(leads),
+            "cancellationsMtd": cancel_mtd,
+            "customerOutstanding": cust_os,
         },
         "funnel": [{"status": k, "count": funnel.get(k, 0)} for k in funnel_order],
         "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
         "executiveScoreboard": scoreboard,
+        "worklist": worklist[:25],
         "lastUpdated": now_iso(),
     }
+
+
+@api.get("/field/dashboard")
+async def field_dashboard(_field=Depends(field_viewer_only)):
+    """Shared ASM / RM company field board — retail + pipeline hygiene (read-only)."""
+    return await _ops_pipeline_dashboard()
+
+
+@api.get("/sales-gm/dashboard")
+async def sales_gm_dashboard(_gm=Depends(sales_gm_only)):
+    """Sales GM showroom board — all executives, deal-desk access, no money posting."""
+    body = await _ops_pipeline_dashboard()
+    body["scope"] = {
+        "note": "Showroom-wide. Price, scheme, deliver and close — not payments or Price Master.",
+    }
+    return body
 
 
 # ---------------------------------------------------------------- leads
@@ -2280,7 +2331,7 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None, user
             {"leadId": {"$regex": q, "$options": "i"}},
         ]
     leads = await db.leads.find(query).sort("leadId", -1).to_list(3000)
-    # An executive works their own leads only. Owner, TL and Accounts see all.
+    # An executive works their own leads only. Owner, Sales GM, TL and Accounts see all.
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
     rows = [clean(l) for l in leads]
@@ -6324,6 +6375,7 @@ async def oem_claim_dashboard():
 CRITICAL_ENDPOINTS = [
     ("GET", "/api/dashboard"), ("GET", "/api/accounts/dashboard"),
     ("GET", "/api/executive/dashboard"), ("GET", "/api/field/dashboard"),
+    ("GET", "/api/sales-gm/dashboard"),
     ("GET", "/api/leads"), ("POST", "/api/leads"),
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
