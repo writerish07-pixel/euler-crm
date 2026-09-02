@@ -1047,12 +1047,14 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   // Insurance agent is chosen here; it decides the payout slab on the entry
   // that Mark Delivered opens.
   const [agents, setAgents] = useState([]);
+  const [yard, setYard] = useState([]);
   // Customer-arranged insurance earns no payout, so no agent is required there.
   const selfArranged = String(lead.insuranceArrangedBy || "dealer").toLowerCase() === "self";
 
   useEffect(() => { setSummary(billingSummary || null); }, [billingSummary]);
 
   useEffect(() => { get("/insurance-agents").then(setAgents).catch(() => setAgents([])); }, []);
+  useEffect(() => { get("/inventory").then(setYard).catch(() => setYard([])); }, []);
 
   useEffect(() => {
     if (!alreadyDelivered) return;
@@ -1101,7 +1103,23 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
       <p className="text-xs text-ink-soft mb-3">Invoice number, chassis number, and number plate must be unique across all leads.</p>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Invoice Number"><Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")} disabled={locked} /></Field>
-        <Field label="Chassis Number"><Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked} /></Field>
+        <Field label="Chassis (from yard)">
+          {yard.length ? (
+            <Select data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked}>
+              <option value="">Select chassis in yard…</option>
+              {yard
+                .filter((r) => !lead.interestedModel || r.model === lead.interestedModel || r.chassis === form.chassisNumber)
+                .map((r) => (
+                  <option key={r.chassis} value={r.chassis}>{r.chassis} · {r.model} {r.variant || ""}</option>
+                ))}
+              {form.chassisNumber && !yard.some((r) => r.chassis === form.chassisNumber) ? (
+                <option value={form.chassisNumber}>{form.chassisNumber}</option>
+              ) : null}
+            </Select>
+          ) : (
+            <Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked} placeholder="No yard stock — type chassis" />
+          )}
+        </Field>
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>
         <Field label="Insurance Agent *">

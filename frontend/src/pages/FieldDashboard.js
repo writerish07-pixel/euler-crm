@@ -2,12 +2,13 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  ReceiptText, Percent, Map,
+  ReceiptText, Percent, Map, Warehouse,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
 import { compactInr, num } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import YardStockCard from "../components/YardStockCard";
 
 /** Shared home for company ASM and RM — retail + pipeline hygiene. */
 export default function FieldDashboard() {
@@ -48,6 +49,7 @@ export default function FieldDashboard() {
         <Link to="/bookings"><Button variant="secondary" data-testid="field-go-bookings"><ClipboardCheck size={14} /> Bookings</Button></Link>
         <Link to="/deliveries"><Button variant="secondary" data-testid="field-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>
         <Link to="/finance"><Button variant="secondary" data-testid="field-go-finance"><Landmark size={14} /> Finance Register</Button></Link>
+        <Link to="/inventory"><Button variant="secondary" data-testid="field-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
@@ -118,6 +120,10 @@ export default function FieldDashboard() {
           rows={d.executiveScoreboard || []}
         />
       </Card>
+
+      <div className="mt-6">
+        <YardStockCard />
+      </div>
     </div>
   );
 }

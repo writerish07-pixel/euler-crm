@@ -2,12 +2,13 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  IndianRupee, Activity, ClipboardList,
+  IndianRupee, Activity, ClipboardList, Warehouse,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
 import { inr, compactInr, num } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import YardStockCard from "../components/YardStockCard";
 
 export default function ExecutiveDashboard() {
   const [d, setD] = useState(null);
@@ -44,8 +45,7 @@ export default function ExecutiveDashboard() {
         <Link to="/leads"><Button variant="secondary" data-testid="exec-go-leads"><Users size={14} /> Leads</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="exec-go-bookings"><ClipboardList size={14} /> Bookings</Button></Link>
         <Link to="/activities"><Button variant="secondary" data-testid="exec-go-activities"><Activity size={14} /> Activities</Button></Link>
-        <Link to="/deliveries"><Button variant="secondary" data-testid="exec-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>
-      </div>
+        <Link to="/inventory"><Button variant="secondary" data-testid="exec-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
         <Card className="p-5 lg:col-span-2">
@@ -110,6 +110,10 @@ export default function ExecutiveDashboard() {
             rows={d.modelMix || []}
           />
         </Card>
+      </div>
+
+      <div className="mt-6">
+        <YardStockCard />
       </div>
     </div>
   );

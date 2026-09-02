@@ -4687,6 +4687,10 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         if first_delivery:
             # WhatsApp delivery + review is fire-and-forget — must never fail this save.
             wa.schedule(wa.notify_delivery(lead_id))
+            try:
+                await oem_sync.take_chassis_from_inventory(db, body.chassisNumber)
+            except Exception:
+                logging.exception("Could not drop delivered chassis from yard inventory")
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -5122,6 +5126,7 @@ async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
         })
         st = await _coulson_status_payload(act)
         st["loginOk"] = True
+        _ensure_coulson_sync_loop()
         return st
 
     typed_user = (body.username or "").strip()
@@ -5166,6 +5171,7 @@ async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
     )
     st = await _coulson_status_payload(act)
     st["loginOk"] = True
+    _ensure_coulson_sync_loop()
     return st
 
 
@@ -5232,13 +5238,13 @@ async def coulson_sync(act=Depends(actor)):
 
 
 @api.get("/inventory")
-async def list_oem_inventory(model: Optional[str] = None):
+async def list_oem_inventory(model: Optional[str] = None, _user=Depends(current_user)):
     rows = await oem_sync.list_inventory(db, model)
     return [clean(r) for r in rows]
 
 
 @api.get("/inventory/summary")
-async def inventory_summary():
+async def inventory_summary(_user=Depends(current_user)):
     counts = await oem_sync.inventory_counts(db)
     out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
     return {"total": sum(c["count"] for c in out), "rows": out}
@@ -6950,6 +6956,14 @@ async def reprice_leads_for_price_row(row: dict, changed_fields=None, act=None) 
             skipped.append({"leadId": lead_id, "customerName": lead.get("customerName"),
                             "reason": "no price structure saved yet"})
             continue
+        booked_on = str(lead.get("bookingDate") or "")[:10]
+        if booked_on and booked_on < "2026-09-01":
+            skipped.append({
+                "leadId": lead_id, "customerName": lead.get("customerName"),
+                "reason": "booked before 1 Sep 2026 — old price honoured",
+                "exShowroom": ce.num(lead.get("exShowroom")),
+            })
+            continue
         received = ce.num(lead.get("totalReceived"))
         outstanding = ce.num(lead.get("customerOutstanding"))
         if received > 0 and outstanding <= 0.01:
@@ -8310,6 +8324,23 @@ async def _backfill_close_won_status():
     return fixed
 
 
+_coulson_loop_task = None
+
+
+def _ensure_coulson_sync_loop():
+    """Start the 15-minute yard pull if it is not already running.
+
+    The loop used to start only at process boot. A session pasted after boot
+    never started auto-pull until the next Railway restart.
+    """
+    global _coulson_loop_task
+    if os.environ.get("ENVIRONMENT", "").lower() == "test":
+        return
+    if _coulson_loop_task is not None and not _coulson_loop_task.done():
+        return
+    _coulson_loop_task = asyncio.create_task(_coulson_sync_loop())
+
+
 async def _coulson_sync_loop():
     """Periodic Coulson pull. Never raises into the event loop."""
     while True:
@@ -8346,7 +8377,7 @@ async def _oem_catalog_boot():
             user, pw, _src = await oem_sync.resolve_credentials(db)
             doc = await db["system"].find_one({"_id": "coulson"}) or {}
             if oem_sync.credentials_configured(user, pw) or oem_sync.session_from_doc(doc):
-                asyncio.create_task(_coulson_sync_loop())
+                _ensure_coulson_sync_loop()
     except Exception:
         logging.exception("COULSON_SYNC_LOOP_START_ERROR")
 

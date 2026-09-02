@@ -131,7 +131,7 @@ function AppRoutes() {
       <Route path="/erp-audit" element={P(<ERPProductionAudit />, { ownerOnly: true })} />
       <Route path="/audit-log" element={P(<AuditLog />, { ownerOnly: true })} />
       <Route path="/price-list" element={P(<PriceList />, { salesOnly: true, fieldOk: true })} />
-      <Route path="/inventory" element={P(<Inventory />, { salesOnly: true, fieldOk: true })} />
+      <Route path="/inventory" element={P(<Inventory />)} />
       <Route path="/price-master" element={P(<PriceMaster />, { ownerOnly: true })} />
       <Route path="/staff" element={P(<Staff />, { ownerOnly: true })} />
       <Route path="/settings" element={P(<Settings />)} />

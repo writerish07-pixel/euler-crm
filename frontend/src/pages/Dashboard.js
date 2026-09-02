@@ -8,6 +8,7 @@ import { get } from "../lib/api";
 import { inr, compactInr, num } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge } from "../components/ui";
 import OwnerPriceEditor from "../components/OwnerPriceEditor";
+import YardStockCard from "../components/YardStockCard";
 
 export default function Dashboard() {
   const [d, setD] = useState(null);
@@ -37,6 +38,10 @@ export default function Dashboard() {
       </div>
 
       <OwnerPriceEditor />
+
+      <div className="mt-6">
+        <YardStockCard />
+      </div>
 
       {!d ? <div className="text-ink-faint text-sm mt-6">Loading dashboard…</div> : (
       <>
