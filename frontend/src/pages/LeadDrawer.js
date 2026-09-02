@@ -1037,6 +1037,36 @@ function GoogleReviewSend({ leadId, already, onSent }) {
 }
 
 const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
+/** Live yard chassis pick applies to deliveries on/after this date (ISO). */
+const YARD_LIVE_FROM = "2026-09-01";
+
+function modelFamily(model, variant) {
+  const s = String(model || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const v = String(variant || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (s.includes("storm") || s.includes("strom")) return "storm";
+  if (s.includes("turbo") || s.includes("tyrbo")) return "turbo";
+  if (s.includes("hirange") || s.includes("highrange") || s.includes("neohirange")) return "hirange";
+  if (s.includes("hicity")) return "hicity";
+  if (s.includes("hiload")) return (v === "xr" || v.includes("hicity")) ? "hicity" : "hiload";
+  return s;
+}
+
+function isLiveYardDelivery(iso) {
+  return String(iso || "").slice(0, 10) >= YARD_LIVE_FROM;
+}
+
+function yardRowsForLead(yard, lead, selectedChassis) {
+  const fam = modelFamily(lead.interestedModel, lead.variant);
+  const selected = String(selectedChassis || "");
+  const familyRows = yard.filter((r) => (
+    r.chassis === selected
+    || !fam
+    || modelFamily(r.model, r.variant) === fam
+  ));
+  if (familyRows.length) return { rows: familyRows, fallback: false };
+  return { rows: yard, fallback: yard.length > 0 };
+}
+
 function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
@@ -1060,7 +1090,25 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   useEffect(() => { setSummary(billingSummary || null); }, [billingSummary]);
 
   useEffect(() => { get("/insurance-agents").then(setAgents).catch(() => setAgents([])); }, []);
-  useEffect(() => { get("/inventory").then(setYard).catch(() => setYard([])); }, []);
+  useEffect(() => {
+    const params = { family: true };
+    if (lead.interestedModel) params.model = lead.interestedModel;
+    if (lead.variant) params.variant = lead.variant;
+    let cancelled = false;
+    get("/inventory", params)
+      .then((rows) => {
+        if (cancelled) return;
+        const list = Array.isArray(rows) ? rows : [];
+        if (list.length) {
+          setYard(list);
+          return;
+        }
+        get("/inventory").then((all) => { if (!cancelled) setYard(Array.isArray(all) ? all : []); })
+          .catch(() => { if (!cancelled) setYard([]); });
+      })
+      .catch(() => { if (!cancelled) setYard([]); });
+    return () => { cancelled = true; };
+  }, [lead.interestedModel, lead.variant, form.deliveryDate]);
 
   useEffect(() => {
     if (!alreadyDelivered) return;
@@ -1074,6 +1122,9 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
     return () => { cancelled = true; };
   }, [alreadyDelivered, lead.leadId, billingSummary]);
 
+  const liveYard = isLiveYardDelivery(form.deliveryDate || todayISO());
+  const { rows: yardChoices, fallback: yardFallback } = yardRowsForLead(yard, lead, form.chassisNumber);
+  const showYardSelect = liveYard && yard.length > 0;
   const toggle = (k) => { if (!locked) setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" })); };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
@@ -1106,24 +1157,32 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
           </button>
         ))}
       </div>
-      <p className="text-xs text-ink-soft mb-3">Invoice number, chassis number, and number plate must be unique across all leads.</p>
+      <p className="text-xs text-ink-soft mb-3">
+        Invoice, chassis, and number plate must be unique on live leads from 1 Sep.
+        Last-month or cancelled files do not block a recreated delivery.
+      </p>
+      {liveYard && (
+        <p className="text-xs text-ink-soft mb-3" data-testid="delivery-yard-live-hint">
+          Delivery on/after 1 Sep uses live yard stock. Last-month Coulson deliveries will not appear.
+          {yardFallback ? " No exact model match — showing all chassis currently in yard." : ""}
+        </p>
+      )}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Invoice Number"><Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")} disabled={locked} /></Field>
         <Field label="Chassis (from yard)">
-          {yard.length ? (
+          {showYardSelect ? (
             <Select data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked}>
               <option value="">Select chassis in yard…</option>
-              {yard
-                .filter((r) => !lead.interestedModel || r.model === lead.interestedModel || r.chassis === form.chassisNumber)
-                .map((r) => (
-                  <option key={r.chassis} value={r.chassis}>{r.chassis} · {r.model} {r.variant || ""}</option>
-                ))}
+              {yardChoices.map((r) => (
+                <option key={r.chassis} value={r.chassis}>{r.chassis} · {r.model} {r.variant || ""}</option>
+              ))}
               {form.chassisNumber && !yard.some((r) => r.chassis === form.chassisNumber) ? (
                 <option value={form.chassisNumber}>{form.chassisNumber}</option>
               ) : null}
             </Select>
           ) : (
-            <Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked} placeholder="No yard stock — type chassis" />
+            <Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked}
+              placeholder={liveYard ? "No live yard stock — type chassis" : "Last-month delivery — type chassis"} />
           )}
         </Field>
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>

@@ -647,7 +647,8 @@ async def test_delivered_chassis_is_dropped_from_yard(client):
         "chassis": "MD9GONE001", "model": "Turbo Max", "variant": "City (PV)", "exShowroom": 650000})
     await server.db.leads.insert_one({
         "leadId": "LD-INV-DROP", "chassisNumber": "MD9GONE001",
-        "deliveryStatus": "Delivered", "currentStatus": "Delivered"})
+        "deliveryStatus": "Delivered", "currentStatus": "Delivered",
+        "accountStatus": "Active", "deliveryDate": "2026-09-02"})
     n = await oem_sync.drop_delivered_from_inventory(server.db)
     assert n == 1
     assert await server.db.oem_inventory.find_one({"chassis": "MD9GONE001"}) is None
@@ -672,4 +673,58 @@ async def test_august_booking_is_not_repriced_for_sept_turbo(client):
     assert "1 Sep" in reasons
     lead = await server.db.leads.find_one({"leadId": "LD-AUG-TURBO"})
     assert lead["exShowroom"] == 650000
+
+
+def test_storm_lr_yard_row_matches_storm_lead():
+    row = {"model": "Storm LR", "variant": "Storm LR200", "chassis": "MD9STORMYARD1"}
+    assert oem_sync.inventory_row_matches_lead(row, "Storm", "Storm LR (PV) Reg C7 6.6kWh")
+    turbo = {"model": "Turbo Max", "variant": "City (PV)", "chassis": "MD9TURBO1"}
+    assert not oem_sync.inventory_row_matches_lead(turbo, "Storm", "Storm LR (PV) Reg C7 6.6kWh")
+    canonical = {"model": "Storm", "variant": "Storm LR (PV) Reg C7 6.6kWh"}
+    assert oem_sync.inventory_row_matches_lead(canonical, "Storm", "Storm LR (PV) Reg C7 6.6kWh")
+
+
+@pytest.mark.asyncio
+async def test_inventory_family_filter_returns_unmatched_storm_lr(client):
+    await server.db.oem_inventory.delete_many({})
+    await server.db.oem_inventory.insert_many([
+        {"chassis": "MD9STORMFAM01", "model": "Storm LR", "variant": "Storm LR200"},
+        {"chassis": "MD9TURBOFAM01", "model": "Turbo Max", "variant": "City (PV)"},
+    ])
+    fam = (await client.get("/api/inventory", params={
+        "model": "Storm", "variant": "Storm LR (PV) Reg C7 6.6kWh", "family": True,
+    })).json()
+    chassis = [r["chassis"] for r in fam]
+    assert "MD9STORMFAM01" in chassis
+    assert "MD9TURBOFAM01" not in chassis
+
+    exact = (await client.get("/api/inventory", params={"model": "Storm"})).json()
+    assert all(r.get("model") == "Storm" for r in exact)
+
+
+@pytest.mark.asyncio
+async def test_august_delivered_does_not_drop_live_yard(client):
+    await server.db.oem_inventory.insert_one({
+        "chassis": "MD9AUGSTILL", "model": "Storm LR", "variant": "Storm LR200"})
+    await server.db.leads.insert_one({
+        "leadId": "LD-AUG-DEL", "chassisNumber": "MD9AUGSTILL",
+        "deliveryStatus": "Delivered", "currentStatus": "Delivered",
+        "accountStatus": "Active", "deliveryDate": "2026-08-20"})
+    n = await oem_sync.drop_delivered_from_inventory(server.db)
+    assert n == 0
+    assert await server.db.oem_inventory.find_one({"chassis": "MD9AUGSTILL"}) is not None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_sept_delivery_does_not_drop_yard(client):
+    await server.db.oem_inventory.insert_one({
+        "chassis": "MD9CANCELLED", "model": "Storm", "variant": "Storm LR (PV) Reg C7 6.6kWh"})
+    await server.db.leads.insert_one({
+        "leadId": "LD-SEP-CANCEL", "chassisNumber": "MD9CANCELLED",
+        "deliveryStatus": "Delivered", "currentStatus": "Lost",
+        "accountStatus": "Cancelled", "dealCancelled": True,
+        "deliveryDate": "2026-09-02"})
+    n = await oem_sync.drop_delivered_from_inventory(server.db)
+    assert n == 0
+    assert await server.db.oem_inventory.find_one({"chassis": "MD9CANCELLED"}) is not None
 
