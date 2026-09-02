@@ -99,7 +99,7 @@ export default function ExecutiveIncentive() {
     <div data-testid="executive-incentive-page">
       <PageHeader
         title="Executive Incentive"
-        subtitle="Each executive has their own min units, levels and ₹ per unit. Pick a person, set their ladder, then Save. They see only theirs on the dashboard — not the company Incentive Master."
+        subtitle="Owner and Sales GM set each executive’s min units, levels and ₹ per unit. Pick a person, set their ladder, then Save. Executives see only theirs on their dashboard — not the company Incentive Master."
         actions={<Button data-testid="save-exec-incentive" onClick={save} disabled={busy || !executive}>{busy ? "Saving…" : "Save"}</Button>}
       />
 

@@ -1,4 +1,4 @@
-"""Owner-set executive incentive ladder — one plan per executive."""
+"""Owner / Sales GM set executive incentive ladder — one plan per executive."""
 import os
 import sys
 
@@ -94,7 +94,39 @@ async def test_company_incentive_master_is_owner_only(client):
         assert (await exec_c.get("/api/incentive-register")).status_code == 403
         assert (await exec_c.put("/api/executive-incentive/plan",
                                 json={**PLAN, "executive": "Executive"})).status_code == 403
+        assert (await exec_c.get("/api/executive-incentive/board")).status_code == 403
         assert (await exec_c.get("/api/integrations/gsheets")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_sales_gm_can_assign_and_see_executive_incentive(client):
+    """Sales GM assigns the same per-person ladder as Owner; company Incentive Master stays owner-only."""
+    async for gm in _as("salesgm@euler.com"):
+        assert (await gm.get("/api/incentive-master")).status_code == 403
+        r = await gm.put("/api/executive-incentive/plan", json={**PLAN, "executive": "Executive"})
+        assert r.status_code == 200, r.text
+        assert r.json()["minUnits"] == 5
+        assert r.json()["source"] == "personal"
+        loaded = (await gm.get("/api/executive-incentive/plan",
+                               params={"executive": "Executive"})).json()
+        assert loaded["minUnits"] == 5
+        await _deliveries("Executive", 7)
+        board = (await gm.get("/api/executive-incentive/board")).json()
+        row = next(x for x in board["executives"] if x["executive"] == "Executive")
+        assert row["units"] == 7
+        assert row["total"] == 3500
+        assert row["hasOwnPlan"] is True
+        dash = await gm.get("/api/sales-gm/dashboard")
+        assert dash.status_code == 200, dash.text
+        inc = dash.json()["executiveIncentive"]
+        dash_row = next(x for x in inc["executives"] if x["executive"] == "Executive")
+        assert dash_row["total"] == 3500
+    async for acc in _as("accounts@euler.com"):
+        assert (await acc.get("/api/executive-incentive/board")).status_code == 403
+        assert (await acc.put("/api/executive-incentive/plan",
+                              json={**PLAN, "executive": "Executive"})).status_code == 403
+        assert (await acc.get("/api/executive-incentive/plan",
+                              params={"executive": "Executive"})).status_code == 403
 
 
 @pytest.mark.asyncio

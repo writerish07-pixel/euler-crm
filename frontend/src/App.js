@@ -130,7 +130,7 @@ function AppRoutes() {
       <Route path="/claims" element={P(<Claims />, { moneyDesk: true })} />
       <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />
       <Route path="/incentive-master" element={P(<IncentiveMaster />, { ownerOnly: true })} />
-      <Route path="/executive-incentive" element={P(<ExecutiveIncentive />, { ownerOnly: true })} />
+      <Route path="/executive-incentive" element={P(<ExecutiveIncentive />, { gmHome: true })} />
       <Route path="/dealer-earnings" element={P(<DealerEarnings />, { ownerOnly: true })} />
       <Route path="/insurance-report" element={P(<InsurancePayoutReport />, { ownerOnly: true })} />
       <Route path="/earnings-report" element={P(<EarningsReport />, { ownerOnly: true })} />

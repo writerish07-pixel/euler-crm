@@ -2350,6 +2350,8 @@ async def sales_gm_dashboard(_gm=Depends(sales_gm_only)):
     body["scope"] = {
         "note": "Showroom-wide. Price, scheme, deliver and close — not payments or Price Master.",
     }
+    # Same this-month ladder as /executive-incentive/board — GM assigns those targets.
+    body["executiveIncentive"] = await _exec_incentive_board()
     return body
 
 
@@ -5867,8 +5869,8 @@ def _validate_exec_incentive_plan(body: ExecIncentivePlanIn):
 @api.get("/executive-incentive/plan")
 async def get_exec_incentive_plan(executive: Optional[str] = None, user=Depends(current_user)):
     role = str(user.get("role") or "")
-    if role not in ("owner", "executive"):
-        raise HTTPException(403, "Executive incentive is for Owner and executives.")
+    if role not in ("owner", "sales_gm", "executive"):
+        raise HTTPException(403, "Executive incentive is for Owner, Sales GM and executives.")
     if role == "executive":
         name = (user.get("name") or "").strip()
         if not name:
@@ -5880,7 +5882,7 @@ async def get_exec_incentive_plan(executive: Optional[str] = None, user=Depends(
     return await _load_exec_incentive_plan_for(name)
 
 
-@api.put("/executive-incentive/plan", dependencies=[Depends(owner_only)])
+@api.put("/executive-incentive/plan", dependencies=[Depends(sales_gm_only)])
 async def save_exec_incentive_plan(body: ExecIncentivePlanIn, act=Depends(actor)):
     name = (body.executive or "").strip()
     if not name:
@@ -5899,8 +5901,7 @@ async def save_exec_incentive_plan(body: ExecIncentivePlanIn, act=Depends(actor)
     return await _load_exec_incentive_plan_for(name)
 
 
-@api.get("/executive-incentive/board", dependencies=[Depends(owner_only)])
-async def exec_incentive_board():
+async def _exec_incentive_board():
     ym = this_month()
     leads = await db.leads.find().to_list(8000)
     units_by_key = {}
@@ -5946,6 +5947,11 @@ async def exec_incentive_board():
         board.append(row)
     board.sort(key=lambda x: (-int(x.get("units") or 0), str(x.get("executive") or "").lower()))
     return {"month": ym, "executives": board}
+
+
+@api.get("/executive-incentive/board", dependencies=[Depends(sales_gm_only)])
+async def exec_incentive_board():
+    return await _exec_incentive_board()
 
 
 @api.get("/bookings")
