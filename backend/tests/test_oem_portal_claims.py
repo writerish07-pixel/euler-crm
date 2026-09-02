@@ -512,10 +512,15 @@ async def test_rejected_claims_are_surfaced_for_the_money_desk(client, monkeypat
 async def test_lead_endpoint_returns_only_that_leads_lines(client, wired):
     lead_id = await _delivered_lead(client)
     await client.post("/api/integrations/coulson/sync-claims")
-    rows = (await client.get(f"/api/leads/{lead_id}/oem-claims")).json()
+    body = (await client.get(f"/api/leads/{lead_id}/oem-claims")).json()
+    assert body["leadId"] == lead_id
+    assert body["chassisNumber"] == CHASSIS
+    assert body["invoiceNumber"] == INVOICE
+    rows = body["claims"]
     assert len(rows) == 1
     assert rows[0]["leadClaimedAmount"] == 5000.0
     assert all(li["leadId"] == lead_id for li in rows[0]["lineItems"])
+    assert "schemeRegister" in body
 
 
 @pytest.mark.asyncio
@@ -690,6 +695,8 @@ async def test_register_rows_carry_a_match_state_without_changing_money(client, 
     assert mine, "the seeded register row disappeared"
     assert mine[0]["oemMatch"]["state"] == "filed"
     assert "AF-999-CL0001" in mine[0]["oemMatch"]["claimNumbers"]
+    assert mine[0]["chassisNumber"] == CHASSIS
+    assert mine[0]["invoiceNumber"] == INVOICE
 
     for row in after:
         assert "oemMatch" in row
@@ -801,3 +808,53 @@ async def test_oem_finance_desk_cannot_reach_claims(client):
         r = await c.post("/api/auth/login", json={"email": email, "password": pw})
         c.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
         assert (await c.get("/api/oem-claims")).status_code == 403
+
+
+# ---------------------------------------------------------------- join + reverse colour
+@pytest.mark.asyncio
+async def test_oem_claim_is_in_register_when_chassis_matches_a_row(client, wired):
+    """The join the desk asked for: lead chassis/invoice → scheme row → Euler debit note."""
+    lead_id = await _delivered_lead(client)
+    await _register_row(lead_id, "referralBonus")
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims")).json()
+    hit = [r for r in rows if r["claimNumber"] == "AF-999-CL0001"]
+    assert hit and hit[0]["registerMatch"]["state"] == "in_register"
+    assert "referralBonus" in hit[0]["registerMatch"]["mappedComponents"]
+
+
+@pytest.mark.asyncio
+async def test_oem_claim_is_missing_from_register_when_no_row_exists(client, wired):
+    lead_id = await _delivered_lead(client)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims")).json()
+    hit = [r for r in rows if lead_id in (r.get("leadIds") or [])]
+    assert hit, "the synced claim should be linked to the lead"
+    assert hit[0]["registerMatch"]["state"] == "missing_register"
+
+
+@pytest.mark.asyncio
+async def test_oem_claims_filter_by_chassis_and_invoice_and_claim_number(client, wired):
+    lead_id = await _delivered_lead(client)
+    await client.post("/api/integrations/coulson/sync-claims")
+    by_ch = (await client.get("/api/oem-claims", params={"chassis": CHASSIS})).json()
+    assert any(r["claimNumber"] == "AF-999-CL0001" for r in by_ch)
+    by_inv = (await client.get("/api/oem-claims", params={"invoice": INVOICE})).json()
+    assert any(r["claimNumber"] == "AF-999-CL0001" for r in by_inv)
+    by_q = (await client.get("/api/oem-claims", params={"q": "AF-999-CL0001"})).json()
+    assert len(by_q) == 1 and by_q[0]["leadIds"] == [lead_id]
+    miss = (await client.get("/api/oem-claims", params={"chassis": "MD9NOPE"})).json()
+    assert miss == []
+
+
+@pytest.mark.asyncio
+async def test_lead_crosscheck_lists_scheme_rows_with_match_state(client, wired):
+    lead_id = await _delivered_lead(client)
+    await _register_row(lead_id, "referralBonus")
+    await _register_row(lead_id, "exchangeBonus", 7000.0)
+    await client.post("/api/integrations/coulson/sync-claims")
+    body = (await client.get(f"/api/leads/{lead_id}/oem-claims")).json()
+    by_key = {r["componentKey"]: r for r in body["schemeRegister"]}
+    assert by_key["referralBonus"]["oemMatch"]["state"] == "filed"
+    assert by_key["exchangeBonus"]["oemMatch"]["state"] == "not_filed"
+    assert body["claims"][0]["registerMatch"]["state"] == "in_register"

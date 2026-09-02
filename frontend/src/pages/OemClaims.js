@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalLink, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { Card, PageHeader, StatCard, Table, Badge, Button, Select } from "../components/ui";
+import { REGISTER_MATCH, registerMatchOf, claimsHref } from "../lib/claimMatch";
+import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
 
@@ -29,22 +31,53 @@ function stageTone(days) {
 
 export default function OemClaims() {
   const { isOwner } = useAuth();
+  const [params, setParams] = useSearchParams();
   const [summary, setSummary] = useState(null);
   const [rows, setRows] = useState([]);
   const [status, setStatus] = useState("");
   const [unlinked, setUnlinked] = useState(false);
+  const [matchFilter, setMatchFilter] = useState("");
+  const [q, setQ] = useState(params.get("q") || "");
   const [syncing, setSyncing] = useState(false);
+
+  const chassis = params.get("chassis") || "";
+  const invoice = params.get("invoice") || "";
+  const leadId = params.get("leadId") || "";
+  const qParam = params.get("q") || "";
 
   const load = useCallback(() => {
     get("/oem-claims/summary").then(setSummary).catch(() => setSummary(null));
     get("/oem-claims", {
       ...(status ? { status } : {}),
       ...(unlinked ? { unlinked: true } : {}),
+      ...(qParam ? { q: qParam } : {}),
+      ...(chassis ? { chassis } : {}),
+      ...(invoice ? { invoice } : {}),
+      ...(leadId ? { leadId } : {}),
     }).then((r) => setRows(Array.isArray(r) ? r : [])).catch(() => setRows([]));
-  }, [status, unlinked]);
+  }, [status, unlinked, qParam, chassis, invoice, leadId]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { setQ(qParam); }, [qParam]);
   const { openLead, drawer } = useLeadDrawer(load);
+
+  const applySearch = (e) => {
+    e?.preventDefault?.();
+    const next = new URLSearchParams(params);
+    if (q.trim()) next.set("q", q.trim());
+    else next.delete("q");
+    setParams(next, { replace: true });
+  };
+
+  const clearJoin = () => {
+    const next = new URLSearchParams(params);
+    next.delete("chassis");
+    next.delete("invoice");
+    next.delete("leadId");
+    next.delete("q");
+    setQ("");
+    setParams(next, { replace: true });
+  };
 
   const sync = async () => {
     setSyncing(true);
@@ -69,6 +102,16 @@ export default function OemClaims() {
     .filter((b) => !TERMINAL.includes(b.status))
     .reduce((s, b) => s + b.count, 0);
   const worst = summary.stuck[0];
+  const joinActive = Boolean(chassis || invoice || leadId || qParam);
+
+  const visibleRows = matchFilter
+    ? rows.filter((r) => (r.registerMatch?.state || "") === matchFilter)
+    : rows;
+  const matchCounts = rows.reduce((acc, r) => {
+    const s = r.registerMatch?.state;
+    if (s) acc[s] = (acc[s] || 0) + 1;
+    return acc;
+  }, {});
 
   return (
     <div>
@@ -77,12 +120,18 @@ export default function OemClaims() {
         subtitle={`${summary.total} claims filed with Euler${
           mirror.syncedAt ? ` · synced ${fmtDate(String(mirror.syncedAt).slice(0, 10))}` : ""
         }`}
-        actions={isOwner ? (
-          <Button data-testid="sync-oem-claims" onClick={sync} disabled={syncing}>
-            <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
-            {syncing ? "Syncing…" : "Sync from Euler"}
-          </Button>
-        ) : null}
+        actions={<div className="flex items-center gap-2">
+          <Link to="/claims" data-testid="open-scheme-register"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
+            Scheme Claim Register <ExternalLink size={14} />
+          </Link>
+          {isOwner ? (
+            <Button data-testid="sync-oem-claims" onClick={sync} disabled={syncing}>
+              <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+              {syncing ? "Syncing…" : "Sync from Euler"}
+            </Button>
+          ) : null}
+        </div>}
       />
 
       {/* A mirror holding a fraction of the register is worse than none at all —
@@ -98,6 +147,17 @@ export default function OemClaims() {
         </Card>
       )}
 
+      {joinActive && (
+        <Card className="mb-4 p-3 flex flex-wrap items-center gap-2 text-sm" data-testid="oem-join-filter">
+          <span className="text-ink-soft">Showing claims matching</span>
+          {qParam && <Badge tone="bg-cobalt/10 text-cobalt ring-cobalt/20">claim {qParam}</Badge>}
+          {chassis && <Badge tone="bg-cobalt/10 text-cobalt ring-cobalt/20">chassis {chassis}</Badge>}
+          {invoice && <Badge tone="bg-cobalt/10 text-cobalt ring-cobalt/20">invoice {invoice}</Badge>}
+          {leadId && <Badge tone="bg-cobalt/10 text-cobalt ring-cobalt/20">lead {leadId}</Badge>}
+          <button className="text-xs text-cobalt hover:underline" onClick={clearJoin}>Clear</button>
+        </Card>
+      )}
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6" data-testid="oem-claim-totals">
         <StatCard label="Open with Euler" value={openCount} sub={inr(totals.openClaimed)}
           icon={Clock} tone="text-amber-600" />
@@ -110,6 +170,39 @@ export default function OemClaims() {
           tone={worst && worst.stageDays >= 14 ? "text-rose-600" : "text-ink"} />
       </div>
 
+      {/* Reverse of the Scheme Claim Register colours: Euler has it, this app may not. */}
+      <Card className="mb-6 p-4" data-testid="register-crosscheck">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div className="text-xs font-semibold text-ink-faint uppercase tracking-wide">
+            Cross-check with Scheme Claim Register
+          </div>
+          {matchFilter && (
+            <button className="text-xs text-cobalt hover:underline" onClick={() => setMatchFilter("")}>
+              Clear filter
+            </button>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {["in_register", "missing_register", "unmapped", "unknown_lead"].map((s) => (
+            matchCounts[s] ? (
+              <button key={s} onClick={() => setMatchFilter(matchFilter === s ? "" : s)}
+                data-testid={`register-filter-${s}`}
+                className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                  matchFilter === s ? "border-cobalt bg-cobalt/5" : "border-line hover:bg-zinc-50"}`}>
+                <Badge tone={REGISTER_MATCH[s].tone}>{REGISTER_MATCH[s].label}</Badge>
+                <div className="text-lg font-semibold text-ink mt-1">{matchCounts[s]}</div>
+              </button>
+            ) : null
+          ))}
+        </div>
+        {(matchCounts.missing_register || matchCounts.unknown_lead) ? (
+          <p className="mt-3 text-sm text-violet-800">
+            Violet rows are filed in Euler but missing from the Scheme Claim Register.
+            Grey rows never matched a lead chassis or invoice.
+          </p>
+        ) : null}
+      </Card>
+
       {/* Money the books may still be carrying as receivable that Euler has refused. */}
       {summary.rejected.length > 0 && (
         <Card className="mb-6 p-4 border-rose-200">
@@ -117,15 +210,32 @@ export default function OemClaims() {
             <XCircle size={16} /> {summary.rejected.length} rejected by Euler
           </div>
           <p className="text-xs text-ink-faint mb-3">
-            Check the Scheme Claim Register — if these are still listed as eligible there,
-            the books are carrying money that is not coming.
+            Euler does not reopen a rejected debit note — a resubmission is a new claim
+            on the same chassis. Check the Scheme Claim Register if these are still listed
+            as eligible.
           </p>
           <div className="flex flex-wrap gap-2">
             {summary.rejected.map((r) => (
-              <Badge key={r.claimNumber} tone="bg-rose-50 text-rose-700 ring-rose-600/20">
-                {r.claimNumber} · {inr(r.claimedAmount)}
-                {r.leadIds.length ? ` · ${r.leadIds.join(", ")}` : " · not linked"}
-              </Badge>
+              <div key={r.claimNumber} className="rounded-lg border border-rose-200 bg-rose-50/60 px-3 py-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-semibold text-rose-800">{r.claimNumber}</span>
+                  <span className="text-ink-soft">{inr(r.claimedAmount)}</span>
+                  {r.resubmittedBy
+                    ? <Badge tone="bg-sky-50 text-sky-700 ring-sky-600/20">Refiled as {r.resubmittedBy}</Badge>
+                    : r.needsResubmission
+                      ? <Badge tone="bg-rose-100 text-rose-800 ring-rose-600/30">
+                          <RotateCcw size={11} className="inline mr-0.5" /> Needs refile
+                        </Badge>
+                      : null}
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  {(r.leadIds || []).length
+                    ? r.leadIds.map((id) => (
+                      <LeadLink key={id} leadId={id} onOpen={openLead} />
+                    ))
+                    : <span className="text-ink-faint">not linked</span>}
+                </div>
+              </div>
             ))}
           </div>
         </Card>
@@ -161,18 +271,27 @@ export default function OemClaims() {
         </div>
       </Card>
 
-      <div className="flex flex-wrap items-center gap-2 mb-4">
+      <form onSubmit={applySearch} className="flex flex-wrap items-center gap-2 mb-4">
+        <Input
+          data-testid="oem-claim-search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Claim no. / chassis / invoice / lead"
+          className="max-w-xs"
+        />
+        <Button type="submit" variant="secondary">Search</Button>
         <Select value={status} onChange={(e) => setStatus(e.target.value)} className="max-w-xs">
           <option value="">All statuses</option>
           {summary.buckets.map((b) => <option key={b.status}>{b.status}</option>)}
         </Select>
-        <Button variant={unlinked ? "primary" : "secondary"} onClick={() => setUnlinked((v) => !v)}>
+        <Button type="button" variant={unlinked ? "primary" : "secondary"} onClick={() => setUnlinked((v) => !v)}>
           <Link2Off size={16} /> Not linked to a lead
         </Button>
-      </div>
+      </form>
 
       <Table
         rowKey="claimNumber"
+        rowClassName={(r) => registerMatchOf(r).row}
         columns={[
           { key: "claimNumber", label: "Claim", mono: true, render: (r) => (
             <div>
@@ -180,6 +299,19 @@ export default function OemClaims() {
               <div className="text-xs text-ink-faint">{r.settlementType}</div>
             </div>
           )},
+          { key: "registerMatch", label: "In this app", render: (r) => {
+            const m = registerMatchOf(r);
+            return (
+              <div className="flex flex-col items-start gap-1" title={r.registerMatch?.detail || ""}>
+                <Badge tone={m.tone}>{m.label}</Badge>
+                {r.registerMatch?.resubmittedBy
+                  ? <span className="text-[10px] text-sky-700">Refiled as {r.registerMatch.resubmittedBy}</span>
+                  : r.registerMatch?.needsResubmission
+                    ? <span className="text-[10px] text-rose-700">Needs refile</span>
+                    : null}
+              </div>
+            );
+          }},
           { key: "status", label: "Status", render: (r) => (
             <div className="flex flex-col gap-1 items-start">
               <Badge tone={tone(r.status)}>{r.status}</Badge>
@@ -197,15 +329,21 @@ export default function OemClaims() {
                   <LeadLink key={id} leadId={id} onOpen={openLead}
                     subtitle={(r.lineItems || []).find((li) => li.leadId === id)?.leadCustomer} />
                 ))}
+                <Link to={claimsHref({ leadId: r.leadIds[0] })}
+                  onClick={(e) => e.stopPropagation()}
+                  className="text-[10px] text-cobalt hover:underline">Scheme register</Link>
               </div>
             ) : <Badge tone="bg-zinc-100 text-zinc-600 ring-zinc-500/20">Not linked</Badge>
           )},
-          { key: "vehicle", label: "Vehicle / Chassis", render: (r) => (
+          { key: "vehicle", label: "Chassis / Invoice", render: (r) => (
             <div className="text-xs">
               {(r.lineItems || []).map((li, i) => (
-                <div key={i}>
+                <div key={i} className="mb-1">
                   <div>{[li.model, li.variant].filter(Boolean).join(" ") || "—"}</div>
                   <div className="font-mono text-ink-faint">{li.chassis || "—"}</div>
+                  {li.sourceInvoiceNumber
+                    ? <div className="font-mono text-ink-faint">{li.sourceInvoiceNumber}</div>
+                    : null}
                 </div>
               ))}
             </div>
@@ -228,7 +366,7 @@ export default function OemClaims() {
             ) : null
           )},
         ]}
-        rows={rows}
+        rows={visibleRows}
         empty={mirror.syncedAt ? "No claims match this filter" : "Not synced from Euler yet"}
       />
       {drawer}

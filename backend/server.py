@@ -5760,8 +5760,11 @@ async def coulson_sync_claims(act=Depends(actor)):
 
 
 @api.get("/oem-claims", dependencies=[Depends(money_desk_only)])
-async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False):
-    return await oem_claims.list_claims(db, status=status, lead_id=leadId, unlinked=unlinked)
+async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False,
+                                 q: str = "", chassis: str = "", invoice: str = ""):
+    return await oem_claims.list_claims(
+        db, status=status, lead_id=leadId, unlinked=unlinked,
+        q=q, chassis=chassis, invoice=invoice)
 
 
 @api.get("/oem-claims/summary", dependencies=[Depends(money_desk_only)])
@@ -5771,10 +5774,11 @@ async def oem_portal_claims_summary():
 
 @api.get("/leads/{lead_id}/oem-claims")
 async def lead_oem_portal_claims(lead_id: str, user=Depends(current_user)):
-    """Claims Euler holds against this lead's vehicle. Scoped like any other lead read."""
+    """Claims Euler holds against this lead's vehicle, plus the scheme-register rows
+    they should line up with. Scoped like any other lead read."""
     lead = await get_lead_or_404(lead_id)
     _require_own_lead(lead, user)
-    return await oem_claims.claims_for_lead(db, lead_id)
+    return await oem_claims.lead_claim_crosscheck(db, lead_id, lead)
 
 
 @api.get("/reports/claim-reconciliation", dependencies=[Depends(owner_only)])
@@ -7538,6 +7542,20 @@ async def list_claims():
             continue
         row["oemMatch"] = oem_claims.match_state(
             oem_index, row.get("leadId") or "", row.get("componentKey") or "")
+    # Chassis and invoice live on the lead, not the register row. Copy them on so the
+    # desk can join this page to OEM Claim Settlements the same way the sync does.
+    lead_ids = list({r.get("leadId") for r in result if r.get("leadId")})
+    by_id = {}
+    if lead_ids:
+        async for lead in db.leads.find(
+            {"leadId": {"$in": lead_ids}},
+            {"leadId": 1, "chassisNumber": 1, "invoiceNumber": 1, "_id": 0},
+        ):
+            by_id[lead.get("leadId")] = lead
+    for row in result:
+        lead = by_id.get(row.get("leadId") or "") or {}
+        row["chassisNumber"] = lead.get("chassisNumber") or row.get("chassisNumber") or ""
+        row["invoiceNumber"] = lead.get("invoiceNumber") or row.get("invoiceNumber") or ""
     return result
 
 
