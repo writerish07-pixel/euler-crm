@@ -16,6 +16,7 @@ import Inventory from "./pages/Inventory";
 import Cancellations from "./pages/Cancellations";
 import SchemeMaster from "./pages/SchemeMaster";
 import IncentiveMaster from "./pages/IncentiveMaster";
+import ExecutiveIncentive from "./pages/ExecutiveIncentive";
 import Payments from "./pages/Payments";
 import Deliveries from "./pages/Deliveries";
 import Finance from "./pages/Finance";
@@ -128,7 +129,8 @@ function AppRoutes() {
       <Route path="/deliveries" element={P(<Deliveries />)} />
       <Route path="/claims" element={P(<Claims />, { moneyDesk: true })} />
       <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />
-      <Route path="/incentive-master" element={P(<IncentiveMaster />, { salesOnly: true })} />
+      <Route path="/incentive-master" element={P(<IncentiveMaster />, { ownerOnly: true })} />
+      <Route path="/executive-incentive" element={P(<ExecutiveIncentive />, { ownerOnly: true })} />
       <Route path="/dealer-earnings" element={P(<DealerEarnings />, { ownerOnly: true })} />
       <Route path="/insurance-report" element={P(<InsurancePayoutReport />, { ownerOnly: true })} />
       <Route path="/earnings-report" element={P(<EarningsReport />, { ownerOnly: true })} />

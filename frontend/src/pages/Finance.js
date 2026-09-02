@@ -29,7 +29,7 @@ function financerRollup(rows) {
 }
 
 export default function Finance() {
-  const { isMoneyDesk, isField } = useAuth();
+  const { isMoneyDesk, isField, isExecutive } = useAuth();
   const [rows, setRows] = useState([]);
   const [view, setView] = useState("all");
   const [receipt, setReceipt] = useState(false);
@@ -49,7 +49,9 @@ export default function Finance() {
     <div data-testid="finance-register">
       <PageHeader
         title="Finance Register"
-        subtitle={isField && !isMoneyDesk
+        subtitle={isExecutive
+          ? "Your finance files only — disbursed vs still outstanding"
+          : isField && !isMoneyDesk
           ? "Read-only · which financer has paid vs still outstanding"
           : "Financer files — committed vs disbursed"}
         actions={

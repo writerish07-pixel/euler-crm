@@ -1660,6 +1660,10 @@ async def executive_dashboard(user=Depends(current_user)):
 
     conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
 
+    plan = await _load_exec_incentive_plan()
+    incentive = ce.evaluate_executive_incentive(len(monthly_deliveries), plan)
+    incentive["month"] = ym
+
     return {
         "scope": {
             "executiveName": user.get("name") or "",
@@ -1685,6 +1689,7 @@ async def executive_dashboard(user=Depends(current_user)):
         "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
         "worklist": worklist[:25],
+        "incentive": incentive,
         "lastUpdated": now_iso(),
     }
 
@@ -4827,8 +4832,11 @@ async def _enrich_finance_with_delivery(files):
 
 
 @api.get("/finance")
-async def list_finance(view: str = "all", _viewer=Depends(finance_viewer_only)):
+async def list_finance(view: str = "all", user=Depends(finance_viewer_only)):
     files = [clean(f) for f in await db.finance.find().to_list(1000)]
+    if user.get("role") == "executive":
+        mine = await _own_lead_ids(user)
+        files = [f for f in files if f.get("leadId") in mine]
     pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
     if view == "pending":
         return pending
@@ -5208,7 +5216,7 @@ async def _upsert_incentive_register_on_delivery(lead_id, delivery_date):
 
 
 @api.get("/incentive-register")
-async def list_incentive_register():
+async def list_incentive_register(_owner=Depends(owner_only)):
     return [clean(r) for r in await db.incentive_register.find().to_list(2000)]
 
 
@@ -5623,8 +5631,104 @@ async def list_scheme_master(on: Optional[str] = None):
 
 
 @api.get("/incentive-master")
-async def list_incentive_master():
+async def list_incentive_master(_owner=Depends(owner_only)):
     return [clean(s) for s in await db.incentive_master.find().to_list(1000)]
+
+
+class ExecIncentiveLevelIn(BaseModel):
+    fromUnits: int
+    toUnits: Optional[int] = None
+    amount: float = 0
+
+
+class ExecIncentivePlanIn(BaseModel):
+    minUnits: int = 0
+    levels: List[ExecIncentiveLevelIn] = []
+
+
+async def _load_exec_incentive_plan():
+    doc = await db.executive_incentive.find_one({"_id": "plan"}) or {}
+    levels = []
+    for raw in doc.get("levels") or []:
+        hi = raw.get("toUnits")
+        levels.append({
+            "fromUnits": int(ce.num(raw.get("fromUnits"))),
+            "toUnits": None if hi in (None, "") else int(ce.num(hi)),
+            "amount": ce.round2(ce.num(raw.get("amount"))),
+        })
+    return {
+        "minUnits": int(ce.num(doc.get("minUnits"))),
+        "levels": levels,
+        "updatedAt": doc.get("updatedAt") or "",
+        "updatedBy": doc.get("updatedBy") or "",
+    }
+
+
+def _validate_exec_incentive_plan(body: ExecIncentivePlanIn):
+    if body.minUnits < 0:
+        raise HTTPException(422, "Min units cannot be negative.")
+    seen = []
+    for i, L in enumerate(body.levels):
+        if L.fromUnits < 1:
+            raise HTTPException(422, f"Level {i + 1}: from-units must be at least 1.")
+        if L.toUnits is not None and L.toUnits < L.fromUnits:
+            raise HTTPException(422, f"Level {i + 1}: to-units must be ≥ from-units.")
+        if ce.num(L.amount) < 0:
+            raise HTTPException(422, f"Level {i + 1}: amount cannot be negative.")
+        seen.append((L.fromUnits, L.toUnits, ce.round2(ce.num(L.amount))))
+    seen.sort(key=lambda x: (x[0], x[1] if x[1] is not None else 10**9))
+    for i in range(1, len(seen)):
+        prev_hi = seen[i - 1][1]
+        lo = seen[i][0]
+        if prev_hi is None:
+            raise HTTPException(422, "A level with no upper bound must be last.")
+        if lo <= prev_hi:
+            raise HTTPException(422, "Incentive levels overlap. Fix the unit ranges.")
+    return seen
+
+
+@api.get("/executive-incentive/plan")
+async def get_exec_incentive_plan(user=Depends(current_user)):
+    role = str(user.get("role") or "")
+    if role not in ("owner", "executive"):
+        raise HTTPException(403, "Executive incentive is for Owner and executives.")
+    return await _load_exec_incentive_plan()
+
+
+@api.put("/executive-incentive/plan", dependencies=[Depends(owner_only)])
+async def save_exec_incentive_plan(body: ExecIncentivePlanIn, act=Depends(actor)):
+    rows = _validate_exec_incentive_plan(body)
+    levels = [{"fromUnits": lo, "toUnits": hi, "amount": amt} for lo, hi, amt in rows]
+    doc = {
+        "_id": "plan",
+        "minUnits": int(body.minUnits),
+        "levels": levels,
+        "updatedAt": now_iso(),
+        "updatedBy": (act or {}).get("email") or "",
+    }
+    await db.executive_incentive.replace_one({"_id": "plan"}, doc, upsert=True)
+    return await _load_exec_incentive_plan()
+
+
+@api.get("/executive-incentive/board", dependencies=[Depends(owner_only)])
+async def exec_incentive_board():
+    plan = await _load_exec_incentive_plan()
+    ym = this_month()
+    leads = await db.leads.find().to_list(8000)
+    by_exec = {}
+    for l in leads:
+        if not _is_delivered_lead(l):
+            continue
+        if not str(_retail_date(l) or "").startswith(ym):
+            continue
+        name = (l.get("executive") or "").strip() or "—"
+        by_exec[name] = by_exec.get(name, 0) + 1
+    board = []
+    for name, units in sorted(by_exec.items(), key=lambda x: (-x[1], x[0].lower())):
+        row = ce.evaluate_executive_incentive(units, plan)
+        row["executive"] = name
+        board.append(row)
+    return {"month": ym, "plan": plan, "executives": board}
 
 
 @api.get("/bookings")
@@ -6616,6 +6720,8 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/claims"), ("POST", "/api/claims/settle"), ("POST", "/api/claims/receipt"),
     ("GET", "/api/deliveries"), ("GET", "/api/bookings"), ("GET", "/api/activities"),
     ("GET", "/api/price-master"), ("GET", "/api/scheme-master"), ("GET", "/api/incentive-master"),
+    ("GET", "/api/executive-incentive/plan"), ("PUT", "/api/executive-incentive/plan"),
+    ("GET", "/api/executive-incentive/board"),
     ("GET", "/api/inventory"), ("GET", "/api/integrations/coulson"),
     ("GET", "/api/dealer-earnings"), ("GET", "/api/reports/owner-commercial"),
     ("GET", "/api/reports/oem-claim-dashboard"), ("GET", "/api/reports/claim-exceptions"),
@@ -7543,7 +7649,7 @@ async def list_dealer_earnings():
 
 
 # ---------------------------------------------------------------- integrations status
-@api.get("/integrations/gsheets")
+@api.get("/integrations/gsheets", dependencies=[Depends(owner_only)])
 async def gsheets_status():
     return gsheets.status()
 

@@ -10,7 +10,7 @@ export default function IncentiveMaster() {
   useEffect(() => { get("/incentive-master").then(setRows); }, []);
   return (
     <div>
-      <PageHeader title="Incentive Master" subtitle="Executive retail incentive slabs" />
+      <PageHeader title="Incentive Master" subtitle="Company / OEM circular — owner only. Executive pay is on Executive Incentive." />
       <Table
         rowKey="incentiveId"
         columns={[

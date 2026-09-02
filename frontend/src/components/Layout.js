@@ -42,7 +42,8 @@ const NAV = [
   { section: "OEM & Commercial", items: [
     { to: "/claims", label: "OEM Claims", icon: ReceiptText, moneyDesk: true },
     { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
-    { to: "/incentive-master", label: "Incentive Master", icon: Trophy, salesOnly: true },
+    { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },
+    { to: "/executive-incentive", label: "Executive Incentive", icon: Trophy, ownerOnly: true },
     { to: "/dealer-earnings", label: "Dealer Earnings", icon: Coins, ownerOnly: true },
     { to: "/earnings-report", label: "Earnings Report", icon: TrendingUp, ownerOnly: true },
   ]},

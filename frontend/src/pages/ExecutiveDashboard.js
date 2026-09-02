@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  IndianRupee, Activity, ClipboardList, Warehouse,
+  IndianRupee, Activity, ClipboardList, Warehouse, Trophy,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
@@ -112,6 +112,44 @@ export default function ExecutiveDashboard() {
           />
         </Card>
       </div>
+
+      {d.incentive && (
+        <Card className="p-5 mt-6" data-testid="exec-incentive-card">
+          <div className="flex items-center gap-2 mb-3">
+            <Trophy size={16} className="text-amber-500" />
+            <h3 className="font-heading font-bold text-ink">My incentive</h3>
+          </div>
+          <p className="text-xs text-ink-soft mb-3">Your deliveries this month · set by Owner. Not the company Incentive Master.</p>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-ink-faint">Units this month</div>
+              <div className="font-mono font-semibold tabular text-lg">{d.incentive.units || 0}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-ink-faint">Min to start</div>
+              <div className="font-mono font-semibold tabular text-lg">{d.incentive.minUnits || 0}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-ink-faint">₹ / unit now</div>
+              <div className="font-mono font-semibold tabular text-lg">{inr(d.incentive.amountPerUnit || 0)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-widest text-ink-faint">This month</div>
+              <div className="font-mono font-semibold tabular text-lg text-emerald-600">{inr(d.incentive.total || 0)}</div>
+            </div>
+          </div>
+          {d.incentive.next && (
+            <p className="text-sm text-ink-soft mt-3">
+              {d.incentive.next.unitsNeeded > 0
+                ? `${d.incentive.next.unitsNeeded} more deliver${d.incentive.next.unitsNeeded === 1 ? "y" : "ies"} to ₹${Number(d.incentive.next.amount).toLocaleString("en-IN")}/unit`
+                : `Next level from ${d.incentive.next.fromUnits} units at ${inr(d.incentive.next.amount)}/unit`}
+            </p>
+          )}
+          {!d.incentive.next && (d.incentive.units || 0) < (d.incentive.minUnits || 0) && (
+            <p className="text-sm text-ink-soft mt-3">Need {(d.incentive.minUnits || 0) - (d.incentive.units || 0)} more deliveries to start.</p>
+          )}
+        </Card>
+      )}
 
       <div className="mt-6">
         <YardStockCard />
