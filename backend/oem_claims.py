@@ -15,6 +15,7 @@ Read-only. Claims are raised in Coulson, never from here.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -468,7 +469,11 @@ async def sync_claims(db, *, detail_budget=250, token=None):
         return {"ok": False, "reason": "not_configured"}
 
     doc = await db["system"].find_one({"_id": "coulson"}) or {}
-    rows, mode, expected = fetch_all_claims(token, showroom_id=doc.get("showroomId") or "")
+    # coulson.py speaks blocking urllib. The first sync walks every claim — well over a
+    # hundred sequential requests — and doing that on the event loop would freeze the
+    # API long enough for a Railway healthcheck to kill the deploy and start again.
+    rows, mode, expected = await asyncio.to_thread(
+        fetch_all_claims, token, showroom_id=doc.get("showroomId") or "")
 
     lead_index = await build_lead_index(db)
     seen_ids = []
@@ -486,7 +491,8 @@ async def sync_claims(db, *, detail_budget=250, token=None):
         merged = {**existing, **row_doc}
         if needs_detail(existing, row_doc) and detail_calls < detail_budget:
             try:
-                detail = coulson_client.fetch_claim_journey(token, note_id)
+                detail = await asyncio.to_thread(
+                    coulson_client.fetch_claim_journey, token, note_id)
                 detail_calls += 1
                 merged = merge_detail(merged, detail)
             except coulson_client.CoulsonError as e:

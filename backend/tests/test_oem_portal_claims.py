@@ -3,8 +3,10 @@
 Payload shapes are copied from a live capture of Euler's Claim Settlements List;
 identifiers are synthetic so no real dealership record lands in the repo.
 """
+import asyncio
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -413,6 +415,44 @@ async def test_a_claim_that_leaves_coulson_is_flagged_never_deleted(client, wire
     held = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "n1"})
     assert held is not None, "a claim was deleted from the ledger"
     assert held["missingFromOem"] is True
+
+
+@pytest.mark.asyncio
+async def test_sync_does_not_block_the_event_loop(client, monkeypatch):
+    """coulson.py speaks blocking urllib, and the first sync walks every claim.
+
+    Run on the event loop that is 100+ sequential requests with the API frozen behind
+    them — long enough for a Railway healthcheck to fail and restart the deploy, which
+    would then sync and freeze again.
+    """
+    rows = [list_row(f"b{i}", f"AF-999-CLB{i:03d}") for i in range(5)]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000: (rows, 5))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 5})
+
+    def slow_journey(token, note_id):
+        time.sleep(0.05)
+        return journey(note_id, "AF-999-CLB")
+
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", slow_journey)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+
+    ticks = {"n": 0}
+
+    async def ticker():
+        while True:
+            ticks["n"] += 1
+            await asyncio.sleep(0.01)
+
+    beat = asyncio.create_task(ticker())
+    try:
+        result = await oem_claims.sync_claims(server.db)
+    finally:
+        beat.cancel()
+    assert result["claimDetailCalls"] == 5
+    assert ticks["n"] > 5, "the event loop was blocked for the whole claim sync"
 
 
 @pytest.mark.asyncio
