@@ -7,6 +7,8 @@ import { inr, fmtDate, todayISO } from "../lib/format";
 import { OEM_MATCH, oemMatchOf, oemClaimsHref } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 const MATCH = OEM_MATCH;
 const matchOf = oemMatchOf;
@@ -35,10 +37,11 @@ export default function Claims() {
   const [leads, setLeads] = useState([]);
   const [oemOnly, setOemOnly] = useState(null);
   const [matchFilter, setMatchFilter] = useState("");
+  const period = usePeriodState();
   const load = useCallback(() => {
-    get("/claims").then(setRows);
+    get("/claims", period.params).then(setRows);
     get("/claims/oem-only").then(setOemOnly).catch(() => setOemOnly(null));
-  }, []);
+  }, [period.params]);
   useEffect(() => { load(); get("/leads").then(setLeads); }, [load]);
   const { openLead, drawer } = useLeadDrawer(load);
 
@@ -81,6 +84,7 @@ export default function Claims() {
           <Button variant="secondary" data-testid="add-manual-claim-btn" onClick={() => setManual(true)}><Plus size={16} /> Add Manual Claim</Button>
           <Button data-testid="record-claim-receipt-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Claim Received</Button>
         </div>} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6" data-testid="claim-totals">
         <StatCard label="Scheme Eligible" value={inr(schemeEligible)} tone="text-cobalt" />
         <StatCard label="Executive Incentive" value={inr(incentiveEligible)} tone="text-violet-600" />

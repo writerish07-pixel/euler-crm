@@ -9,8 +9,10 @@ import { inr, compactInr, num } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge } from "../components/ui";
 import OwnerPriceEditor from "../components/OwnerPriceEditor";
 import YardStockCard from "../components/YardStockCard";
+import { useAuth } from "../context/AuthContext";
 
 export default function Dashboard() {
+  const { isOwner } = useAuth();
   const [d, setD] = useState(null);
 
   useEffect(() => {
@@ -37,7 +39,7 @@ export default function Dashboard() {
         <StatCard label="Revenue (MTD)" value={d ? compactInr(k.revenue) : "—"} sub="payments this month" icon={IndianRupee} tone="text-cobalt" />
       </div>
 
-      <OwnerPriceEditor />
+      {isOwner && <OwnerPriceEditor />}
 
       <div className="mt-6">
         <YardStockCard />

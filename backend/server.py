@@ -25,6 +25,7 @@ import gsheets
 import oem_catalog as oem_cat
 import oem_sync
 import oem_claims
+import period as periodmod
 import coulson as coulson_client
 import botspace as wa
 import web_push
@@ -126,6 +127,19 @@ def today():
 
 def this_month():
     return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def _parse_period(month: Optional[str] = None, year: Optional[str] = None):
+    try:
+        return periodmod.parse_period(month or "", year or "")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+def _rows_in_period(rows, period, getter):
+    if period.is_all:
+        return list(rows)
+    return [r for r in rows if periodmod.in_period(getter(r), period)]
 
 
 def _scheme_as_of(lead=None, on=None):
@@ -2044,6 +2058,9 @@ async def cancellations_report(period: str = "month", executive: str = "",
 # Who may open the OEM board. The owner is included so you can see exactly what
 # the OEM's finance manager sees before handing out the login.
 OEM_FINANCE_ROLES = ("owner", "oem_finance")
+# Month-wise MTD/YTD register — dealership desks that already see pipeline or money.
+MONTHLY_REGISTER_ROLES = ("owner", "sales_gm", "tl", "accounts")
+EXPORT_ROLES = ("owner", "sales_gm", "tl")
 # Ageing buckets, in days since delivery. The finance receipt SLA is 2 days, so
 # the first bucket is "inside SLA" and everything after it is late.
 OEM_AGEING_BUCKETS = [(0, 2, "0-2 days"), (3, 7, "3-7 days"),
@@ -2052,7 +2069,7 @@ OEM_AGEING_BUCKETS = [(0, 2, "0-2 days"), (3, 7, "3-7 days"),
 
 @api.get("/reports/oem-finance")
 async def oem_finance_report(view: str = "all", financer: str = "", month: str = "",
-                             user=Depends(current_user)):
+                             year: str = "", user=Depends(current_user)):
     """Read-only finance position for the OEM's finance manager.
 
     Every retail finance file — pending AND received — with how long it has been
@@ -2101,8 +2118,9 @@ async def oem_finance_report(view: str = "all", financer: str = "", month: str =
 
     if financer:
         rows = [r for r in rows if r["financer"].lower() == financer.strip().lower()]
-    if month:
-        rows = [r for r in rows if str(r["deliveryDate"]).startswith(month.strip())]
+    period = _parse_period(month, year)
+    if not period.is_all:
+        rows = [r for r in rows if periodmod.in_period(r.get("deliveryDate"), period)]
     if view == "pending":
         rows = [r for r in rows if r["pending"] > 0.01]
     elif view == "overdue":
@@ -2159,7 +2177,183 @@ async def oem_finance_report(view: str = "all", financer: str = "", month: str =
         "ageing": ageing,
         "financers": sorted({r["financer"] for r in rows}),
         "files": rows,
+        "period": periodmod.as_dict(period),
     }
+
+
+def _empty_period_metrics():
+    return {
+        "leads": {"count": 0, "booked": 0, "lost": 0, "active": 0},
+        "bookings": {"count": 0, "amount": 0.0},
+        "deliveries": {"count": 0},
+        "payments": {"count": 0, "total": 0.0},
+        "finance": {"files": 0, "sanctioned": 0.0, "received": 0.0, "pending": 0.0},
+        "scheme": {"rows": 0, "eligible": 0.0, "received": 0.0, "pending": 0.0},
+        "insurance": {"rows": 0, "expected": 0.0, "received": 0.0, "pending": 0.0},
+        "extraIncome": {"total": 0.0},
+        "earnings": {"total": 0.0},
+        "cancellations": {"count": 0},
+    }
+
+
+def _round_period_metrics(m):
+    for section, keys in (
+        ("bookings", ("amount",)),
+        ("payments", ("total",)),
+        ("finance", ("sanctioned", "received", "pending")),
+        ("scheme", ("eligible", "received", "pending")),
+        ("insurance", ("expected", "received", "pending")),
+        ("extraIncome", ("total",)),
+        ("earnings", ("total",)),
+    ):
+        for k in keys:
+            m[section][k] = ce.round2(m[section][k])
+    return m
+
+
+def _oem_period_metrics(m):
+    """Volume + finance only. No dealer commercials, no contacts."""
+    return {
+        "leads": {"count": m["leads"]["count"]},
+        "bookings": {"count": m["bookings"]["count"]},
+        "deliveries": {"count": m["deliveries"]["count"]},
+        "finance": m["finance"],
+    }
+
+
+def _lead_earnings_total(lead):
+    oem = ce.compute_oem_extra_support(lead)
+    margin = ce.num(lead.get("dealerMarginNetExGst"))
+    scheme = ce.num(lead.get("dealerSchemeRetained"))
+    ins = ce.num(lead.get("dealerInsuranceIncome"))
+    extra = ce.num(lead.get("extraDealerIncomeTotal"))
+    funded = ce.num(lead.get("dealerFundedBenefit"))
+    return ce.round2(margin + scheme + oem["oemExtraSupportRetained"] + ins + extra - funded)
+
+
+def _period_metrics_from(src, period):
+    leads = src["leads"]
+    leads_by_id = {str(l.get("leadId") or ""): l for l in leads if l.get("leadId")}
+    m = _empty_period_metrics()
+
+    created = _rows_in_period(leads, period, lambda l: l.get("createdDate"))
+    m["leads"]["count"] = len(created)
+    m["leads"]["booked"] = sum(1 for l in created if _is_booked_lead(l))
+    m["leads"]["lost"] = sum(1 for l in created if "lost" in (l.get("currentStatus") or "").lower())
+    m["leads"]["active"] = sum(
+        1 for l in created if (l.get("accountStatus") or "Active") == "Active")
+
+    booked = [l for l in leads if _is_booked_lead(l)
+              and periodmod.in_period(l.get("bookingDate"), period)]
+    m["bookings"]["count"] = len(booked)
+    m["bookings"]["amount"] = sum(ce.num(l.get("bookingAmount")) for l in booked)
+
+    delivered = [l for l in leads if _is_delivered_lead(l)
+                 and periodmod.in_period(_retail_date(l), period)]
+    m["deliveries"]["count"] = len(delivered)
+
+    pays = _rows_in_period(src["payments"], period, lambda p: p.get("date"))
+    m["payments"]["count"] = len(pays)
+    m["payments"]["total"] = sum(ce.num(p.get("amount")) for p in pays)
+
+    for f in src["finance"]:
+        d = str(f.get("deliveryDate") or "")[:10]
+        if not d:
+            lead = leads_by_id.get(str(f.get("leadId") or "")) or {}
+            d = str(lead.get("deliveryDate") or lead.get("closedDate") or "")[:10]
+        if not periodmod.in_period(d, period):
+            continue
+        m["finance"]["files"] += 1
+        m["finance"]["sanctioned"] += ce.num(f.get("sanctionedAmount"))
+        m["finance"]["received"] += ce.num(f.get("receivedAgainstFile"))
+        m["finance"]["pending"] += ce.num(f.get("fileOutstanding"))
+
+    for l in booked:
+        m["scheme"]["eligible"] += ce.num(
+            l.get("totalSchemeBenefit") or l.get("schemeBenefit"))
+        m["extraIncome"]["total"] += ce.num(l.get("extraDealerIncomeTotal"))
+        m["earnings"]["total"] += _lead_earnings_total(l)
+
+    for c in src["claims"]:
+        d = str(c.get("bookingDate") or "")[:10]
+        if not d:
+            lead = leads_by_id.get(str(c.get("leadId") or "")) or {}
+            d = str(lead.get("bookingDate") or "")[:10]
+        if not periodmod.in_period(d, period):
+            continue
+        m["scheme"]["rows"] += 1
+        m["scheme"]["received"] += ce.num(c.get("receivedAmount"))
+    m["scheme"]["pending"] = max(0.0, m["scheme"]["eligible"] - m["scheme"]["received"])
+
+    for e in src["insurance"]:
+        d = str(e.get("policyDate") or e.get("deliveryDate") or "")[:10]
+        if not periodmod.in_period(d, period):
+            continue
+        m["insurance"]["rows"] += 1
+        m["insurance"]["expected"] += ce.num(e.get("expectedPayout"))
+        m["insurance"]["received"] += ce.num(e.get("receivedPayout"))
+        m["insurance"]["pending"] += ce.num(e.get("payoutOutstanding"))
+
+    events = _cancel_events(leads)
+    m["cancellations"]["count"] = sum(
+        1 for ev in events if periodmod.in_period(ev.get("date"), period))
+    return _round_period_metrics(m)
+
+
+async def _period_source():
+    return {
+        "leads": await db.leads.find().to_list(5000),
+        "payments": await db.payments.find().to_list(5000),
+        "finance": await db.finance.find().to_list(5000),
+        "insurance": await db.insurance.find().to_list(5000),
+        "claims": await db.claims.find().to_list(5000),
+    }
+
+
+async def _monthly_payload(period, *, oem=False):
+    src = await _period_source()
+    focus = periodmod.focus_year(period)
+    selected = _period_metrics_from(src, period)
+    mtd_p = periodmod.this_month_period()
+    ytd_p = periodmod.ytd_period(focus)
+    mtd = _period_metrics_from(src, mtd_p)
+    ytd = _period_metrics_from(src, ytd_p)
+    by_month = []
+    for ym in periodmod.year_months(focus):
+        row = _period_metrics_from(src, periodmod.parse_period(month=ym))
+        packed = _oem_period_metrics(row) if oem else row
+        packed["month"] = ym
+        by_month.append(packed)
+    wrap = _oem_period_metrics if oem else (lambda x: x)
+    return {
+        "period": periodmod.as_dict(period),
+        "focusYear": focus,
+        "generatedAt": now_iso(),
+        "selected": wrap(selected),
+        "mtd": {**wrap(mtd), "period": periodmod.as_dict(mtd_p)},
+        "ytd": {**wrap(ytd), "period": periodmod.as_dict(ytd_p)},
+        "byMonth": by_month,
+    }
+
+
+@api.get("/reports/monthly")
+async def monthly_register(month: str = "", year: str = "", user=Depends(current_user)):
+    """MTD / YTD / any month-year snapshot for leads, bookings, money, scheme, earnings."""
+    if (user or {}).get("role") not in MONTHLY_REGISTER_ROLES:
+        raise HTTPException(403, "Monthly register is for Owner, Sales GM, Team Leader and Accounts.")
+    return await _monthly_payload(_parse_period(month, year), oem=False)
+
+
+@api.get("/reports/oem-monthly")
+async def oem_monthly_register(month: str = "", year: str = "", user=Depends(current_user)):
+    """Read-only retail volume + finance totals for the OEM finance desk.
+
+    Counts only. No mobiles, no customer outstanding, no dealer margin / scheme /
+    extra income. Month and year pickers match the dealership monthly register.
+    """
+    if (user or {}).get("role") not in OEM_FINANCE_ROLES:
+        raise HTTPException(403, "This report is for the Owner and the OEM finance desk.")
+    return await _monthly_payload(_parse_period(month, year), oem=True)
 
 
 async def _ops_pipeline_dashboard():
@@ -2381,7 +2575,9 @@ def _require_own_lead(lead, user):
 
 
 @api.get("/leads")
-async def list_leads(status: Optional[str] = None, q: Optional[str] = None, user=Depends(current_user)):
+async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
+                     month: Optional[str] = None, year: Optional[str] = None,
+                     user=Depends(current_user)):
     query = {}
     if status and status != "all":
         query["currentStatus"] = status
@@ -2395,6 +2591,8 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None, user
     # An executive works their own leads only. Owner, Sales GM, TL and Accounts see all.
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
+    period = _parse_period(month, year)
+    leads = _rows_in_period(leads, period, lambda l: l.get("createdDate"))
     rows = [clean(l) for l in leads]
     if user.get("role") in authmod.FIELD_ROLES:
         return [_field_safe_lead(l) for l in rows]
@@ -4570,9 +4768,11 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
 
 
 @api.get("/payments")
-async def list_payments(lead_id: Optional[str] = None):
+async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = None,
+                        year: Optional[str] = None):
     q = {"leadId": lead_id} if lead_id else {}
-    return [clean(p) for p in await db.payments.find(q).sort("date", -1).to_list(2000)]
+    rows = [clean(p) for p in await db.payments.find(q).sort("date", -1).to_list(2000)]
+    return _rows_in_period(rows, _parse_period(month, year), lambda p: p.get("date"))
 
 
 @api.post("/leads/{lead_id}/payments")
@@ -4934,11 +5134,25 @@ async def _enrich_finance_with_delivery(files):
 
 
 @api.get("/finance")
-async def list_finance(view: str = "all", user=Depends(finance_viewer_only)):
+async def list_finance(view: str = "all", month: Optional[str] = None, year: Optional[str] = None,
+                       user=Depends(finance_viewer_only)):
     files = [clean(f) for f in await db.finance.find().to_list(1000)]
     if user.get("role") == "executive":
         mine = await _own_lead_ids(user)
         files = [f for f in files if f.get("leadId") in mine]
+    period = _parse_period(month, year)
+    if not period.is_all:
+        leads_by = {str(l.get("leadId") or ""): l
+                    for l in await db.leads.find().to_list(5000) if l.get("leadId")}
+
+        def _fdate(f):
+            d = str(f.get("deliveryDate") or "")[:10]
+            if d:
+                return d
+            lead = leads_by.get(str(f.get("leadId") or "")) or {}
+            return str(lead.get("deliveryDate") or lead.get("closedDate") or "")[:10]
+
+        files = _rows_in_period(files, period, _fdate)
     pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
     if view == "pending":
         return pending
@@ -5069,7 +5283,8 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
 
 # ---------------------------------------------------------------- deliveries
 @api.get("/deliveries")
-async def list_deliveries(user=Depends(current_user)):
+async def list_deliveries(month: Optional[str] = None, year: Optional[str] = None,
+                          user=Depends(current_user)):
     # active-booked leads that are not delivered = pending deliveries; plus delivered ones
     leads = await db.leads.find({"currentStatus": {"$in": ["Booked", "Finance Process", "Delivered"]}}).to_list(2000)
     if user.get("role") == "executive":
@@ -5086,7 +5301,11 @@ async def list_deliveries(user=Depends(current_user)):
             "deliveryDate": d.get("deliveryDate") or l.get("deliveryDate"),
             "chassisNumber": d.get("chassisNumber", ""), "numberPlate": d.get("numberPlate", ""),
         })
-    return result
+    period = _parse_period(month, year)
+    if period.is_all:
+        return result
+    # Pending (no delivery date) only belong in the all-time tracker.
+    return _rows_in_period(result, period, lambda r: r.get("deliveryDate"))
 
 
 @api.get("/leads/{lead_id}/oem-sold")
@@ -6078,11 +6297,13 @@ async def exec_incentive_board():
 
 
 @api.get("/bookings")
-async def list_bookings(user=Depends(current_user)):
+async def list_bookings(month: Optional[str] = None, year: Optional[str] = None,
+                        user=Depends(current_user)):
     rows = [clean(b) for b in await db.bookings.find().sort("bookingId", -1).to_list(1000)]
     if user.get("role") == "executive":
         mine = await _own_lead_ids(user)
         rows = [b for b in rows if b.get("leadId") in mine]
+    rows = _rows_in_period(rows, _parse_period(month, year), lambda b: b.get("bookingDate"))
     if user.get("role") in authmod.FIELD_ROLES:
         safe = []
         for b in rows:
@@ -6525,7 +6746,8 @@ async def delete_insurance_agent(agent_id: str, act=Depends(actor)):
 
 @api.get("/insurance")
 async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
-                         agent_id: Optional[str] = None, act=Depends(actor)):
+                         agent_id: Optional[str] = None, month: Optional[str] = None,
+                         year: Optional[str] = None, act=Depends(actor)):
     """Insurance Register, shaped like the Finance Register.
 
     view=pending  -> payout still owed
@@ -6543,6 +6765,9 @@ async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
         rows = [r for r in rows if r.get("pending")]
     elif view == "overdue":
         rows = [r for r in rows if r.get("overdue")]
+    rows = _rows_in_period(
+        rows, _parse_period(month, year),
+        lambda r: r.get("policyDate") or r.get("deliveryDate"))
     return [_strip_payout_for_staff(r, is_owner) for r in rows]
 
 
@@ -7434,7 +7659,7 @@ def _claim_ageing_days(submitted_date, claim_status, end_date=""):
 
 
 @api.get("/claims")
-async def list_claims():
+async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads.
 
     Status filter matches _owner_booking_metrics (shared by the Owner Commercial Report
@@ -7589,7 +7814,7 @@ async def list_claims():
         row["ageingDays"] = _claim_ageing_days(
             row.get("submittedDate", ""), row.get("claimStatus", ""), row.get("approvedDate", ""))
         result[i] = row
-    return result
+    return _rows_in_period(result, _parse_period(month, year), lambda r: r.get("bookingDate"))
 
 
 @api.get("/claims/oem-only", dependencies=[Depends(money_desk_only)])
@@ -8014,7 +8239,7 @@ async def delete_scheme_row(scheme_id: str):
 
 # ---------------------------------------------------------------- dealer earnings (owner-only)
 @api.get("/dealer-earnings", dependencies=[Depends(owner_only)])
-async def list_dealer_earnings():
+async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] = None):
     """Owner Dealer Earnings grid — live from leads so OEM Extra Retained is always in total.
 
     total = margin + scheme retained + OEM Extra Retained + insurance income + extras
@@ -8056,8 +8281,12 @@ async def list_dealer_earnings():
             "oemExtraSupportRetained": oem["oemExtraSupportRetained"],
             "totalDealerEarnings": total,
             "dealerTotalEarnings": total,
+            "bookingDate": l.get("bookingDate") or de.get("bookingDate") or "",
+            "deliveryDate": l.get("deliveryDate") or de.get("deliveryDate") or "",
         })
     rows.sort(key=lambda r: (r.get("customerName") or "").lower())
+    rows = _rows_in_period(rows, _parse_period(month, year),
+                          lambda r: r.get("bookingDate") or r.get("deliveryDate"))
     total = ce.round2(sum(ce.num(r.get("totalDealerEarnings")) for r in rows))
     return {"rows": rows, "total": total}
 
@@ -8607,7 +8836,9 @@ async def dealer_earnings_report():
 
 # ---------------------------------------------------------------- excel export
 @api.get("/export")
-async def export_xlsx():
+async def export_xlsx(user=Depends(current_user)):
+    if (user or {}).get("role") not in EXPORT_ROLES:
+        raise HTTPException(403, "Export is for the Owner, Sales GM and Team Leader.")
     import openpyxl
     wb = openpyxl.Workbook()
     wb.remove(wb.active)

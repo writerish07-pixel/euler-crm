@@ -7,6 +7,8 @@ import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select } from "
 import LeadDrawer from "./LeadDrawer";
 import LeadImport from "./LeadImport";
 import { useAuth } from "../context/AuthContext";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
@@ -19,10 +21,11 @@ export default function Leads() {
   const [showNew, setShowNew] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [masters, setMasters] = useState(null);
+  const period = usePeriodState();
 
   const load = useCallback(() => {
-    get("/leads", { status, q: q || undefined }).then(setLeads);
-  }, [status, q]);
+    get("/leads", { status, q: q || undefined, ...period.params }).then(setLeads);
+  }, [status, q, period.params]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters); }, []);
@@ -76,6 +79,8 @@ export default function Leads() {
           <Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> {isExecutive ? "Request lead" : "New Lead"}</Button>
         </div> : null}
       />
+
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
 
       <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="flex gap-1 overflow-x-auto bg-white rounded-lg p-1 border border-line shadow-card scrollbar-thin -mx-1 px-1 sm:mx-0 sm:flex-wrap">

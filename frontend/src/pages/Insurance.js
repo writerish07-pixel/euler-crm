@@ -5,6 +5,8 @@ import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 const VIEWS = [["all", "All Entries"], ["pending", "Pending"], ["overdue", "Overdue"]];
 
@@ -20,12 +22,13 @@ export default function Insurance() {
   const [masters, setMasters] = useState(null);
   const [delivered, setDelivered] = useState([]);
   const [receipt, setReceipt] = useState(false);
+  const period = usePeriodState();
 
   const load = useCallback(() => {
-    const q = { view, ...(agentFilter ? { agent_id: agentFilter } : {}) };
+    const q = { view, ...(agentFilter ? { agent_id: agentFilter } : {}), ...period.params };
     get("/insurance", q).then(setRows).catch(() => {});
     get("/insurance/agents-rollup", { view }).then(setRollup).catch(() => {});
-  }, [view, agentFilter]);
+  }, [view, agentFilter, period.params]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -98,6 +101,8 @@ export default function Insurance() {
           <Button variant="secondary" data-testid="record-payout-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record {isOwner ? "Payout" : "Received"}</Button>
           <Button data-testid="add-insurance-btn" onClick={() => setEdit({})}><Plus size={16} /> Add Entry</Button>
         </div>} />
+
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
 
       {tab === "receipts" ? (
         <PayoutReceiptLedger agents={agents} />

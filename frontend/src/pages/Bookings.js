@@ -3,14 +3,18 @@ import { get } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 export default function Bookings() {
   const { isField } = useAuth();
   const [rows, setRows] = useState([]);
-  useEffect(() => { get("/bookings").then(setRows); }, []);
+  const period = usePeriodState();
+  useEffect(() => { get("/bookings", period.params).then(setRows); }, [period.params]);
   return (
     <div>
       <PageHeader title="Booking Register" subtitle={`${rows.length} bookings${isField ? " · field view" : ""}`} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
         rowKey="bookingId"
         columns={[

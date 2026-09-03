@@ -6,7 +6,7 @@ import {
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
   MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse, Bell,
-  FileCheck, Scale,
+  FileCheck, Scale, CalendarDays,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cx, Button } from "./ui";
@@ -17,6 +17,7 @@ import { downloadFile, get } from "../lib/api";
 const NAV = [
   { section: "Overview", items: [
     { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, salesOnly: true },
+    { to: "/monthly", label: "Monthly Register", icon: CalendarDays, monthly: true },
     { to: "/gm", label: "Sales GM Dashboard", icon: BarChart3, ownerOnly: true },
     { to: "/field", label: "Field Dashboard", icon: Map, fieldHome: true },
     { to: "/accounts", label: "Accounts Dashboard", icon: Calculator, accountsHome: true },
@@ -78,7 +79,7 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, pendingApprovals, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, pendingApprovals, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
     : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk" : "EV Dealership";
   const nav = isOemFinance ? OEM_NAV : NAV;
@@ -120,6 +121,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             if (i.accountsHome && !isAccounts && !isOwner) return false;
             if (i.fieldHome && !isField && !isOwner) return false;
             if (i.gmHome && !isSalesGm && !isOwner) return false;
+            if (i.monthly && !canViewMonthly) return false;
             if (i.approvals && !canApproveLeads && !isExecutive) return false;
             return true;
           });
@@ -190,7 +192,7 @@ function SyncBadge() {
 }
 
 function Topbar({ onMenuOpen }) {
-  const { user, logout, isAccounts, isField } = useAuth();
+  const { user, logout, canExport } = useAuth();
   const [menu, setMenu] = useState(false);
   const [dl, setDl] = useState(false);
   const exportXlsx = async () => {
@@ -218,7 +220,7 @@ function Topbar({ onMenuOpen }) {
         />
       </div>
       <div className="ml-auto flex items-center gap-1.5 sm:gap-3 shrink-0">
-        {!isAccounts && !isField && (
+        {canExport && (
           <Button
             variant="secondary"
             data-testid="export-btn"
@@ -254,7 +256,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const location = useLocation();
@@ -306,6 +308,7 @@ export default function Layout({ children }) {
         isSalesGm={isSalesGm}
         canApproveLeads={canApproveLeads}
         isExecutive={isExecutive}
+        canViewMonthly={canViewMonthly}
         pendingApprovals={pendingApprovals}
         open={navOpen}
         onClose={() => setNavOpen(false)}

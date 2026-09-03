@@ -5,6 +5,9 @@ import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import { useLeadDrawer, LeadLink } from "../components/LeadLink";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 function financerRollup(rows) {
   const map = new Map();
@@ -33,17 +36,29 @@ export default function Finance() {
   const [rows, setRows] = useState([]);
   const [view, setView] = useState("all");
   const [receipt, setReceipt] = useState(false);
-  const load = useCallback(() => get("/finance", { view }).then(setRows), [view]);
+  const period = usePeriodState();
+  const load = useCallback(() => get("/finance", { view, ...period.params }).then(setRows), [view, period.params]);
   useEffect(() => { load(); }, [load]);
   const views = [["all", "All Files"], ["pending", "Pending"], ["overdue", "Overdue"]];
   const [allFiles, setAllFiles] = useState([]);
+  const [financerFilter, setFinancerFilter] = useState("");
   useEffect(() => {
     if (!isMoneyDesk) return undefined;
     get("/finance", { view: "pending" }).then(setAllFiles);
     return undefined;
   }, [receipt, isMoneyDesk]);
 
+  const { openLead, drawer } = useLeadDrawer(load);
   const byFinancer = useMemo(() => financerRollup(rows), [rows]);
+  const visible = useMemo(() => {
+    if (!financerFilter) return rows;
+    const key = financerFilter.toLowerCase();
+    return rows.filter((r) => (r.financer || "").trim().toLowerCase() === key);
+  }, [rows, financerFilter]);
+  const pickFinancer = (name) => {
+    const next = (name || "").trim();
+    setFinancerFilter((cur) => (cur === next ? "" : next));
+  };
 
   return (
     <div data-testid="finance-register">
@@ -70,12 +85,18 @@ export default function Finance() {
         }
       />
 
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+
       {byFinancer.length > 0 && (
         <Card className="p-5 mb-6" data-testid="finance-by-financer">
           <h3 className="font-heading font-bold text-ink mb-1">By financer</h3>
-          <p className="text-xs text-ink-soft mb-3">Disbursed vs remaining for the current view</p>
+          <p className="text-xs text-ink-soft mb-3">
+            Click remaining (or the row) to list that financer’s files and leads below
+          </p>
           <Table
             rowKey="financer"
+            onRowClick={(r) => pickFinancer(r.financer)}
+            rowClassName={(r) => (financerFilter === r.financer ? "bg-cobalt-tint" : undefined)}
             columns={[
               { key: "financer", label: "Financer", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge> },
               { key: "files", label: "Files", align: "right" },
@@ -85,7 +106,15 @@ export default function Finance() {
               { key: "sanctionedAmount", label: "Committed", align: "right", mono: true, render: (r) => inr(r.sanctionedAmount) },
               { key: "receivedAgainstFile", label: "Received", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedAgainstFile)}</span> },
               { key: "fileOutstanding", label: "Remaining", align: "right", mono: true, render: (r) => (
-                <span className={r.fileOutstanding > 0 ? "text-red-600 font-semibold" : ""}>{inr(r.fileOutstanding)}</span>
+                <button
+                  type="button"
+                  data-testid={`finance-remaining-${r.financer}`}
+                  onClick={(e) => { e.stopPropagation(); pickFinancer(r.financer); }}
+                  className={`hover:underline ${r.fileOutstanding > 0 ? "text-red-600 font-semibold" : "text-ink"}`}
+                  title={`Show ${r.financer} files`}
+                >
+                  {inr(r.fileOutstanding)}
+                </button>
               ) },
             ]}
             rows={byFinancer}
@@ -93,11 +122,34 @@ export default function Finance() {
         </Card>
       )}
 
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3" data-testid="finance-file-heading">
+        <div>
+          <h3 className="font-heading font-bold text-ink">
+            {financerFilter ? `${financerFilter} files` : "Files"}
+          </h3>
+          <p className="text-xs text-ink-soft">
+            {financerFilter
+              ? `${visible.length} file${visible.length === 1 ? "" : "s"} for this financer — click a lead to open it`
+              : `${rows.length} files · click a financer remaining total above to split the list`}
+          </p>
+        </div>
+        {financerFilter && (
+          <Button variant="secondary" data-testid="finance-clear-financer" onClick={() => setFinancerFilter("")}>
+            Show all financers
+          </Button>
+        )}
+      </div>
+
       <Table
         rowKey="fileNumber"
         columns={[
           { key: "fileNumber", label: "File #", mono: true, render: (r) => <span className="font-semibold text-cobalt">{r.fileNumber}</span> },
-          { key: "customerName", label: "Customer" },
+          { key: "leadId", label: "Lead", render: (r) => <LeadLink leadId={r.leadId} onOpen={openLead} /> },
+          { key: "customerName", label: "Customer", render: (r) => (
+            r.leadId
+              ? <button type="button" className="font-semibold text-left hover:underline" onClick={() => openLead(r.leadId)}>{r.customerName}</button>
+              : r.customerName
+          ) },
           { key: "financer", label: "Financer", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge> },
           { key: "sanctionedAmount", label: "Committed", align: "right", mono: true, render: (r) => inr(r.sanctionedAmount) },
           { key: "receivedAgainstFile", label: "Disbursed", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedAgainstFile)}</span> },
@@ -105,9 +157,12 @@ export default function Finance() {
           { key: "status", label: "Status", render: (r) => <Badge>{r.status}</Badge> },
           { key: "lastPaymentDate", label: "Last Receipt", render: (r) => fmtDate(r.lastPaymentDate) },
         ]}
-        rows={rows}
-        empty="No finance files — created automatically when a Finance-mode payment is recorded on a lead"
+        rows={visible}
+        empty={financerFilter
+          ? `No files for ${financerFilter} in this view`
+          : "No finance files — created automatically when a Finance-mode payment is recorded on a lead"}
       />
+      {drawer}
       {receipt && isMoneyDesk && (
         <FinanceReceiptModal files={allFiles} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />
       )}

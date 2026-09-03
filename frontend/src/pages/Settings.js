@@ -171,7 +171,9 @@ export default function Settings() {
     setForm((f) => ({ ...f, staffId, name: row.name, role }));
   };
   const addUser = async () => {
-    if (!form.name) return toast.error("Pick the person from Staff & Reports so leads match their dashboard");
+    const oem = form.role === "oem_finance";
+    if (!oem && !form.name) return toast.error("Pick the person from Staff & Reports so leads match their dashboard");
+    if (oem && !form.name) return toast.error("Name is required for the OEM finance login");
     if (!form.password) return toast.error("Password is required");
     if (!form.loginId && !form.email) return toast.error("User ID is required when email is left blank");
     try {
@@ -200,7 +202,7 @@ export default function Settings() {
       {/* Outside party: password only. Everything below is dealership business. */}
       {isOemFinance && (
         <p className="text-sm text-ink-faint">
-          This account can open the Retail Finance report and change its own password.
+          This account can open the Retail Finance report, a monthly volume snapshot, and change its own password.
         </p>
       )}
       {!isOemFinance && (
@@ -327,10 +329,14 @@ export default function Settings() {
             Staff sign in with the <b>User ID</b>. Email is optional.
             After they log in they can change their password; the Password column
             here updates to whatever they saved.
+            {" "}For an <b>OEM Finance</b> login type the name — they are not on Staff & Reports.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end mb-4">
-            <Field label="Name (from Staff)">
-              {staff.filter((s) => String(s.status || "Active").toLowerCase() === "active").length ? (
+            <Field label={form.role === "oem_finance" ? "Name" : "Name (from Staff)"}>
+              {form.role === "oem_finance" ? (
+                <Input data-testid="new-user-name" value={form.name} placeholder="OEM finance contact"
+                  onChange={(e) => setForm({ ...form, name: e.target.value, staffId: "" })} />
+              ) : staff.filter((s) => String(s.status || "Active").toLowerCase() === "active").length ? (
                 <Select data-testid="new-user-staff" value={form.staffId} onChange={(e) => pickStaff(e.target.value)}>
                   <option value="">Select staff…</option>
                   {staff.filter((s) => String(s.status || "Active").toLowerCase() === "active").map((s) => (
@@ -349,7 +355,10 @@ export default function Settings() {
             </Field>
             <Field label="Email (optional)"><Input data-testid="new-user-email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="optional" /></Field>
             <Field label="Password"><Input data-testid="new-user-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
-            <Field label="Role"><Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+            <Field label="Role"><Select data-testid="new-user-role" value={form.role} onChange={(e) => {
+              const role = e.target.value;
+              setForm((f) => ({ ...f, role, ...(role === "oem_finance" ? { staffId: "" } : {}) }));
+            }}>
               <option value="executive">Executive</option>
               <option value="tl">Team Leader (completes the deal)</option>
               <option value="sales_gm">Sales GM (showroom sales, no money desk)</option>
@@ -388,6 +397,8 @@ export default function Settings() {
                     ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
                     : r.role === "sales_gm"
                       ? "bg-violet-50 text-violet-700 ring-violet-600/20"
+                    : r.role === "oem_finance"
+                      ? "bg-zinc-100 text-zinc-700 ring-zinc-500/20"
                     : r.role === "asm" || r.role === "rm"
                       ? "bg-sky-50 text-sky-700 ring-sky-600/20"
                       : "bg-blue-50 text-blue-700 ring-blue-600/20";
