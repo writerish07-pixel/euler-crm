@@ -44,6 +44,8 @@ EXTERNAL_ROLE_PATHS = {
         "/api/auth/me",
         "/api/auth/change-password",
         "/api/reports/oem-finance",
+        # Counts + finance totals for a month/year. No contacts, no dealer commercials.
+        "/api/reports/oem-monthly",
     ),
 }
 
@@ -322,11 +324,15 @@ def build_router(db):
             if "@" in login_id:
                 raise HTTPException(422, "A user ID cannot contain '@' — that looks like an email")
         role = body.role if body.role in ALLOWED_ROLES else "executive"
+        name = (body.name or "").strip()
+        # OEM finance is an outside login — there is no Staff & Reports row to pick.
+        if role == "oem_finance" and not name:
+            name = login_id or "OEM Finance"
         doc = {"userId": user_id, "email": email,
                "loginId": login_id, "loginIdNorm": norm,
                "passwordHash": hash_password(pw),
                "passwordPlain": pw,
-               "name": body.name, "role": role, "createdAt": datetime.now(timezone.utc).isoformat()}
+               "name": name, "role": role, "createdAt": datetime.now(timezone.utc).isoformat()}
         await db.users.insert_one(doc)
         return _owner_user_row(doc)
 
@@ -451,6 +457,7 @@ async def seed_users(db):
         ("asm@euler.com", "ASM", "asm", "asm"),
         ("rm@euler.com", "RM", "rm", "rm"),
         ("salesgm@euler.com", "Sales GM", "sales_gm", "salesgm"),
+        ("oemfinance@euler.com", "OEM Finance", "oem_finance", "oemfinance"),
     ]
     for email, name, role, login_id in demos:
         if not await db.users.find_one({"email": email}):

@@ -5,11 +5,14 @@ import { del, get } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Table, Badge } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 export default function Payments() {
   const { isOwner } = useAuth();
   const [rows, setRows] = useState([]);
-  const load = useCallback(() => { get("/payments").then(setRows); }, []);
+  const period = usePeriodState();
+  const load = useCallback(() => { get("/payments", period.params).then(setRows); }, [period.params]);
   useEffect(() => { load(); }, [load]);
 
   const remove = async (r) => {
@@ -52,6 +55,7 @@ export default function Payments() {
   return (
     <div>
       <PageHeader title="Payment Ledger" subtitle={`${rows.length} receipts · ${inr(total)} collected`} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table rowKey="receiptNumber" columns={columns} rows={rows} />
     </div>
   );

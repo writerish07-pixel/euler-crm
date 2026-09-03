@@ -43,6 +43,7 @@ import ClaimReconciliation from "./pages/ClaimReconciliation";
 import Allocation from "./pages/Allocation";
 import SalesGmDashboard from "./pages/SalesGmDashboard";
 import Approvals from "./pages/Approvals";
+import MonthlyRegister from "./pages/MonthlyRegister";
 
 function homePath(auth) {
   // The OEM finance desk has exactly one page. Sending it anywhere else would
@@ -53,9 +54,9 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, gmHome }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, gmHome, monthlyOk }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canViewMonthly } = auth;
   const loc = useLocation();
   if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
@@ -66,6 +67,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   if (dealDesk && !canEditCommercials) return <Navigate to={homePath(auth)} replace />;
   if (fieldOnly && !isField && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (gmHome && !isSalesGm && !isOwner) return <Navigate to={homePath(auth)} replace />;
+  if (monthlyOk && !canViewMonthly) return <Navigate to={homePath(auth)} replace />;
   if (accountsHome && !isAccounts && !isOwner && !isSalesStaff) {
     return <Navigate to={homePath(auth)} replace />;
   }
@@ -100,6 +102,7 @@ function AppRoutes() {
       oemOk={opts.oemOk}
       dealDesk={opts.dealDesk}
       gmHome={opts.gmHome}
+      monthlyOk={opts.monthlyOk}
     >
       {el}
     </Protected>
@@ -109,6 +112,7 @@ function AppRoutes() {
       <Route path="/login" element={<Login />} />
       <Route path="/share" element={<Share />} />
       <Route path="/" element={P(<HomeRedirect />)} />
+      <Route path="/monthly" element={P(<MonthlyRegister />, { monthlyOk: true })} />
       <Route path="/accounts" element={P(<AccountsDashboard />, { accountsHome: true })} />
       <Route path="/field" element={P(<FieldDashboard />, { fieldOnly: true })} />
       <Route path="/gm" element={P(<SalesGmDashboard />, { gmHome: true })} />

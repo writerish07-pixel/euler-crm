@@ -128,6 +128,7 @@ async def test_the_role_exists_and_can_sign_in(oem):
     "/api/reports/daily/manager",
     "/api/dealer-earnings",
     "/api/export",
+    "/api/reports/monthly",
 ])
 @pytest.mark.asyncio
 async def test_every_other_endpoint_is_denied(oem, path):
@@ -156,7 +157,8 @@ async def test_the_allowlist_is_the_whole_permission(oem):
     """If this list grows, it should be a deliberate act with a test to match."""
     allowed = authmod.EXTERNAL_ROLE_PATHS["oem_finance"]
     assert set(allowed) == {
-        "/api/auth/me", "/api/auth/change-password", "/api/reports/oem-finance"}
+        "/api/auth/me", "/api/auth/change-password",
+        "/api/reports/oem-finance", "/api/reports/oem-monthly"}
 
 
 @pytest.mark.asyncio

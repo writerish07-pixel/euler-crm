@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { get } from "../lib/api";
 import { fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 const Chip = ({ ok, label }) => (
   <span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset mr-1 ${ok ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-zinc-50 text-ink-faint ring-line"}`}>
@@ -11,11 +13,13 @@ const Chip = ({ ok, label }) => (
 
 export default function Deliveries() {
   const [rows, setRows] = useState([]);
-  useEffect(() => { get("/deliveries").then(setRows); }, []);
+  const period = usePeriodState();
+  useEffect(() => { get("/deliveries", period.params).then(setRows); }, [period.params]);
   const isOk = (v) => ["done", "yes", "true", "completed"].includes(String(v || "").toLowerCase());
   return (
     <div>
       <PageHeader title="Delivery Tracker" subtitle={`${rows.length} bookings in fulfilment`} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
         rowKey="leadId"
         columns={[

@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Landmark, AlertTriangle, IndianRupee, Clock, RefreshCcw } from "lucide-react";
+import { Landmark, AlertTriangle, IndianRupee, Clock, RefreshCcw, Users, ClipboardList, Truck } from "lucide-react";
 import { get } from "../lib/api";
-import { inr, compactInr, fmtDate } from "../lib/format";
+import { inr, compactInr, fmtDate, num } from "../lib/format";
 import { PageHeader, Card, StatCard, Table, Badge, Select, Button } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState, periodParams } from "../lib/period";
 
 const VIEWS = [
   ["all", "All files"],
@@ -20,15 +22,21 @@ const VIEWS = [
  */
 export default function OemFinance() {
   const [d, setD] = useState(null);
+  const [vol, setVol] = useState(null);
   const [view, setView] = useState("all");
   const [financer, setFinancer] = useState("");
   const [err, setErr] = useState("");
+  const period = usePeriodState();
 
   const load = useCallback(() => {
-    get("/reports/oem-finance", { view, ...(financer ? { financer } : {}) })
+    const p = periodParams(period);
+    get("/reports/oem-finance", { view, ...(financer ? { financer } : {}), ...p })
       .then((r) => { setD(r); setErr(""); })
       .catch((e) => setErr(e?.response?.data?.detail || "Could not load the report"));
-  }, [view, financer]);
+    get("/reports/oem-monthly", p)
+      .then(setVol)
+      .catch(() => setVol(null));
+  }, [view, financer, period.month, period.year]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -41,7 +49,7 @@ export default function OemFinance() {
     <div data-testid="oem-finance">
       <PageHeader
         title="Retail Finance Position"
-        subtitle={`Every finance file, and how long each has been waiting · receipt SLA ${d.slaDays} days`}
+        subtitle={`Every finance file, and how long each has been waiting · receipt SLA ${d.slaDays} days. Volume cards are counts only — no contacts.`}
         actions={
           <div className="flex gap-2">
             <Select data-testid="oem-view" value={view} onChange={(e) => setView(e.target.value)}
@@ -56,6 +64,17 @@ export default function OemFinance() {
             <Button variant="secondary" onClick={load}><RefreshCcw size={15} /> Refresh</Button>
           </div>
         } />
+
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+
+      {vol && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4" data-testid="oem-volume">
+          <StatCard label="Leads (selected)" value={num(vol.selected?.leads?.count)} sub={`MTD ${num(vol.mtd?.leads?.count)} · YTD ${num(vol.ytd?.leads?.count)}`} icon={Users} />
+          <StatCard label="Bookings (selected)" value={num(vol.selected?.bookings?.count)} sub={`MTD ${num(vol.mtd?.bookings?.count)} · YTD ${num(vol.ytd?.bookings?.count)}`} icon={ClipboardList} tone="text-emerald-600" />
+          <StatCard label="Deliveries (selected)" value={num(vol.selected?.deliveries?.count)} sub={`MTD ${num(vol.mtd?.deliveries?.count)} · YTD ${num(vol.ytd?.deliveries?.count)}`} icon={Truck} tone="text-teal-600" />
+          <StatCard label="Finance received (selected)" value={compactInr(vol.selected?.finance?.received)} sub={`YTD ${compactInr(vol.ytd?.finance?.received)}`} icon={IndianRupee} />
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard label="Files" value={t.files} icon={Landmark} />
@@ -114,6 +133,27 @@ export default function OemFinance() {
             ]} />
         </section>
       </div>
+
+      {vol?.byMonth?.length > 0 && (
+        <section className="mb-6" data-testid="oem-by-month">
+          <h3 className="font-heading font-bold text-ink mb-1">Month-wise volume · {vol.focusYear}</h3>
+          <p className="text-xs text-ink-soft mb-3">Counts only. Click a month to filter the files below.</p>
+          <Table rowKey="month" rows={vol.byMonth}
+            columns={[
+              { key: "month", label: "Month", mono: true,
+                render: (r) => (
+                  <button type="button" className={`font-mono text-sm ${r.month === period.month ? "text-cobalt font-semibold" : "text-ink"}`}
+                    onClick={() => period.onChange({ month: r.month, year: "" })}>{r.month}</button>
+                ) },
+              { key: "leads", label: "Leads", align: "right", render: (r) => num(r.leads?.count) },
+              { key: "bookings", label: "Bookings", align: "right", render: (r) => num(r.bookings?.count) },
+              { key: "deliveries", label: "Delivered", align: "right", render: (r) => num(r.deliveries?.count) },
+              { key: "financeFiles", label: "Finance files", align: "right", render: (r) => num(r.finance?.files) },
+              { key: "received", label: "Received", align: "right", mono: true, render: (r) => inr(r.finance?.received) },
+              { key: "pending", label: "To receive", align: "right", mono: true, render: (r) => inr(r.finance?.pending) },
+            ]} />
+        </section>
+      )}
 
       <section data-testid="oem-files">
         <h3 className="font-heading font-bold text-ink mb-1">Files</h3>

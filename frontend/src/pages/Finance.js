@@ -5,6 +5,8 @@ import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import PeriodBar from "../components/PeriodBar";
+import { usePeriodState } from "../lib/period";
 
 function financerRollup(rows) {
   const map = new Map();
@@ -33,7 +35,8 @@ export default function Finance() {
   const [rows, setRows] = useState([]);
   const [view, setView] = useState("all");
   const [receipt, setReceipt] = useState(false);
-  const load = useCallback(() => get("/finance", { view }).then(setRows), [view]);
+  const period = usePeriodState();
+  const load = useCallback(() => get("/finance", { view, ...period.params }).then(setRows), [view, period.params]);
   useEffect(() => { load(); }, [load]);
   const views = [["all", "All Files"], ["pending", "Pending"], ["overdue", "Overdue"]];
   const [allFiles, setAllFiles] = useState([]);
@@ -69,6 +72,8 @@ export default function Finance() {
           </div>
         }
       />
+
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
 
       {byFinancer.length > 0 && (
         <Card className="p-5 mb-6" data-testid="finance-by-financer">

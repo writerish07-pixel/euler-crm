@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select } from "../components/ui";
+import { useAuth } from "../context/AuthContext";
 
 const COMPONENTS = [
   ["Consumer Discount", "consumerDiscount"], ["Exchange Bonus", "exchangeBonus"],
@@ -33,6 +34,7 @@ function rowMatchesMonth(r, asOf) {
 }
 
 export default function SchemeMaster() {
+  const { isOwner } = useAuth();
   const [rows, setRows] = useState([]);
   const [edit, setEdit] = useState(null);
   const [models, setModels] = useState([]);
@@ -51,7 +53,7 @@ export default function SchemeMaster() {
   return (
     <div>
       <PageHeader title="Scheme Master" subtitle="Monthly OEM consumer scheme matrix — dealer vs company share"
-        actions={<Button data-testid="add-scheme-btn" onClick={() => setEdit({ schemeMonth: monthOf(asOf), effectiveFrom: asOf ? `${monthOf(asOf)}-01` : "", effectiveTo: lastDayOfMonth(monthOf(asOf)) })}><Plus size={16} /> Add Scheme</Button>} />
+        actions={isOwner ? <Button data-testid="add-scheme-btn" onClick={() => setEdit({ schemeMonth: monthOf(asOf), effectiveFrom: asOf ? `${monthOf(asOf)}-01` : "", effectiveTo: lastDayOfMonth(monthOf(asOf)) })}><Plus size={16} /> Add Scheme</Button> : null} />
       <div className="flex flex-wrap items-end gap-3 mb-4">
         <Field label="Show schemes for">
           <Input data-testid="scheme-master-date" type="date" value={asOf} onChange={(e) => { setAsOf(e.target.value); setShowAll(false); }} />
@@ -77,10 +79,12 @@ export default function SchemeMaster() {
           { key: "effectiveTo", label: "Valid To", render: (r) => fmtDate(r.effectiveTo) },
           { key: "status", label: "Status", render: (r) => <Badge>{r.status}</Badge> },
           { key: "act", label: "", align: "right", render: (r) => (
+            isOwner ? (
             <div className="flex justify-end gap-2">
               <button data-testid={`edit-scheme-${r.schemeId}`} onClick={(e) => { e.stopPropagation(); setEdit(r); }} className="text-ink-faint hover:text-cobalt"><Pencil size={15} /></button>
               <button onClick={(e) => { e.stopPropagation(); remove(r); }} className="text-ink-faint hover:text-red-600"><Trash2 size={15} /></button>
             </div>
+            ) : null
           )},
         ]}
         rows={visible}
