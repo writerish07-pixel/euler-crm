@@ -41,6 +41,15 @@ export const post = (url, body) => api.post(url, body).then((r) => r.data);
 export const put = (url, body) => api.put(url, body).then((r) => r.data);
 export const del = (url) => api.delete(url).then((r) => r.data);
 
+export const uploadFile = (url, file, fields = {}) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  Object.entries(fields).forEach(([k, v]) => {
+    if (v != null && v !== "") fd.append(k, String(v));
+  });
+  return api.post(url, fd).then((r) => r.data);
+};
+
 export async function downloadFile(url, filename) {
   const res = await api.get(url, { responseType: "blob" });
   const blob = new Blob([res.data]);

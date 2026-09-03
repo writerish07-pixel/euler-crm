@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from "react";
-import { NavLink, Link, useLocation } from "react-router-dom";
+import React, { useState, useEffect, useRef } from "react";
+import { NavLink, Link, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
@@ -13,6 +13,7 @@ import { cx, Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
 import ConnectionBar from "./ConnectionBar";
 import { downloadFile, get } from "../lib/api";
+import LeadDrawer from "../pages/LeadDrawer";
 
 const NAV = [
   { section: "Overview", items: [
@@ -191,6 +192,90 @@ function SyncBadge() {
   );
 }
 
+function GlobalLeadSearch() {
+  const { isOemFinance, isSalesStaff, isField } = useAuth();
+  const navigate = useNavigate();
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState([]);
+  const [open, setOpen] = useState(false);
+  const [drawerLead, setDrawerLead] = useState(null);
+  const [masters, setMasters] = useState(null);
+  const box = useRef(null);
+
+  useEffect(() => {
+    if (isOemFinance) return undefined;
+    get("/masters").then(setMasters).catch(() => {});
+    return undefined;
+  }, [isOemFinance]);
+
+  useEffect(() => {
+    if (isOemFinance) return undefined;
+    const t = setTimeout(() => {
+      const term = q.trim();
+      if (term.length < 2) { setHits([]); return; }
+      get("/leads", { q: term, limit: 8 }).then((rows) => {
+        setHits(Array.isArray(rows) ? rows.slice(0, 8) : []);
+        setOpen(true);
+      }).catch(() => setHits([]));
+    }, 220);
+    return () => clearTimeout(t);
+  }, [q, isOemFinance]);
+
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (box.current && !box.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const pick = (id) => {
+    setOpen(false);
+    setQ("");
+    setHits([]);
+    if (isSalesStaff || isField) {
+      navigate(`/leads?open=${encodeURIComponent(id)}`);
+      return;
+    }
+    setDrawerLead(id);
+  };
+
+  if (isOemFinance) return null;
+
+  return (
+    <div className="relative flex-1 min-w-0 max-w-md" ref={box} data-testid="global-lead-search">
+      <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
+      <input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onFocus={() => hits.length && setOpen(true)}
+        placeholder="Search name / mobile / lead ID…"
+        data-testid="header-search"
+        className="w-full rounded-lg bg-zinc-100 border-0 py-2 pl-9 pr-3 text-sm text-ink placeholder:text-ink-faint focus:ring-2 focus:ring-cobalt focus:bg-white transition-all"
+      />
+      {open && hits.length > 0 && (
+        <div className="absolute left-0 right-0 mt-1 bg-white rounded-xl border border-line shadow-drawer py-1 z-50 max-h-80 overflow-y-auto">
+          {hits.map((r) => (
+            <button
+              key={r.leadId}
+              type="button"
+              data-testid={`search-hit-${r.leadId}`}
+              onClick={() => pick(r.leadId)}
+              className="w-full text-left px-3 py-2 hover:bg-zinc-50"
+            >
+              <div className="text-sm font-semibold text-ink">{r.customerName}</div>
+              <div className="text-[11px] text-ink-faint font-mono">{r.leadId} · {r.mobile || "—"} · {r.interestedModel || ""}</div>
+            </button>
+          ))}
+        </div>
+      )}
+      {drawerLead && (
+        <LeadDrawer leadId={drawerLead} masters={masters} onClose={() => setDrawerLead(null)} onChanged={() => {}} />
+      )}
+    </div>
+  );
+}
+
 function Topbar({ onMenuOpen }) {
   const { user, logout, canExport } = useAuth();
   const [menu, setMenu] = useState(false);
@@ -212,13 +297,7 @@ function Topbar({ onMenuOpen }) {
       >
         <Menu size={20} />
       </button>
-      <div className="relative flex-1 min-w-0 max-w-md">
-        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-faint pointer-events-none" />
-        <input
-          placeholder="Search…"
-          className="w-full rounded-lg bg-zinc-100 border-0 py-2 pl-9 pr-3 text-sm text-ink placeholder:text-ink-faint focus:ring-2 focus:ring-cobalt focus:bg-white transition-all"
-        />
-      </div>
+      <GlobalLeadSearch />
       <div className="ml-auto flex items-center gap-1.5 sm:gap-3 shrink-0">
         {canExport && (
           <Button
