@@ -8,6 +8,7 @@ import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
+import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
 
 const CHARGE_FIELDS = [
   ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
@@ -21,7 +22,7 @@ const SCHEME_FIELDS = [
 ];
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner, isField, isExecutive } = useAuth();
+  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials } = useAuth();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
@@ -170,7 +171,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
-        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} />)}
+        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
@@ -182,9 +183,12 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
               lead={lead}
               actions={actions}
               isOwner={isOwner}
+              canEditCommercials={canEditCommercials}
+              isAccounts={isAccounts}
               delivery={data.delivery}
               billingSummary={data.billingSummary}
               oemSold={data.oemSold}
+              documents={data.documents}
               onSaved={refresh}
             />
           )
@@ -311,8 +315,14 @@ function KV({ label, value, tone }) {
   );
 }
 
-function Overview({ lead, c, actions = {}, onSaved }) {
+function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
+  const { isOwner, isSalesGm, isAccounts, isExecutive } = useAuth();
   const booked = !!actions.isBooked;
+  const kycKinds = lead.customerType === "B2B"
+    ? ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst"]
+    : ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"];
+  const canUploadKyc = isOwner || isSalesGm || isExecutive;
+  const canSeeKyc = canUploadKyc || isAccounts;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
       <Card className="p-4">
@@ -349,9 +359,23 @@ function Overview({ lead, c, actions = {}, onSaved }) {
           <KV label="Booking Date" value={fmtDate(lead.bookingDate)} />
           <KV label="Finance" value={lead.financeRequired} />
           <KV label="Exchange" value={lead.exchangeRequired} />
+          <KV label="Customer type" value={lead.customerType || "Individual"} />
+          {lead.gstin ? <KV label="GSTIN" value={lead.gstin} /> : null}
         </div>
         {lead.remarks && <div className="mt-2 text-sm text-ink-soft bg-zinc-50 rounded-lg p-3">{lead.remarks}</div>}
       </Card>
+      {canSeeKyc && (
+        <div className="sm:col-span-2">
+          <LeadDocsStrip
+            leadId={lead.leadId}
+            kinds={kycKinds}
+            canUploadKinds={canUploadKyc ? kycKinds : []}
+            title="KYC"
+            documents={documents}
+            onChanged={onSaved}
+          />
+        </div>
+      )}
       {booked && (
         <div className="sm:col-span-2">
           <BookingConfirmSend leadId={lead.leadId} already={!!lead.whatsappBookingSentAt} onSent={onSaved} />
@@ -965,37 +989,47 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
 function RefundForm({ lead, excess, dealCancelled = false, onSaved }) {
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", date: todayISO(), reference: "", narration: "" });
   const [busy, setBusy] = useState(false);
+  const [chequeId, setChequeId] = useState("");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid refund amount");
     if (+form.amount > excess + 0.01) return toast.error(`Only ${inr(excess)} is available to refund`);
     if (!form.date) return toast.error("Refund date is required");
+    if (form.paymentMode === "Cheque" && !chequeId) return toast.error("Photograph the refund cheque first");
     setBusy(true);
     try {
-      await post(`/leads/${lead.leadId}/refund`, { ...form, amount: +form.amount });
+      await post(`/leads/${lead.leadId}/refund`, { ...form, amount: +form.amount, documentId: chequeId });
       toast.success(`Refund recorded · ${inr(+form.amount)}`);
       setForm({ amount: "", paymentMode: "Cash", date: todayISO(), reference: "", narration: "" });
+      setChequeId("");
       onSaved();
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Refund failed");
     } finally { setBusy(false); }
   };
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 items-end mt-4 pt-4 border-t border-amber-200">
-      <Field label="Refund (₹)">
-        <Input data-testid="refund-amount" type="number" value={form.amount} onChange={set("amount")} placeholder={String(excess)} />
-      </Field>
-      <Field label="Date"><Input data-testid="refund-date" type="date" value={form.date} onChange={set("date")} /></Field>
-      <Field label="Mode">
-        <Select data-testid="refund-mode" value={form.paymentMode} onChange={set("paymentMode")}>
-          {["Cash", "UPI", "Cheque", "NEFT"].map((m) => <option key={m}>{m}</option>)}
-        </Select>
-      </Field>
-      <Field label="Reference / UTR"><Input value={form.reference} onChange={set("reference")} /></Field>
-      <Button data-testid="refund-btn" onClick={submit} disabled={busy}>
-        <ArrowRightLeft size={15} />
-        {busy ? "Refunding…" : dealCancelled ? "Refund Customer" : "Refund Excess"}
-      </Button>
+    <div className="mt-4 pt-4 border-t border-amber-200">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 items-end">
+        <Field label="Refund (₹)">
+          <Input data-testid="refund-amount" type="number" value={form.amount} onChange={set("amount")} placeholder={String(excess)} />
+        </Field>
+        <Field label="Date"><Input data-testid="refund-date" type="date" value={form.date} onChange={set("date")} /></Field>
+        <Field label="Mode">
+          <Select data-testid="refund-mode" value={form.paymentMode} onChange={set("paymentMode")}>
+            {["Cash", "UPI", "Cheque", "NEFT"].map((m) => <option key={m}>{m}</option>)}
+          </Select>
+        </Field>
+        <Field label="Reference / UTR"><Input value={form.reference} onChange={set("reference")} /></Field>
+        <Button data-testid="refund-btn" onClick={submit} disabled={busy}>
+          <ArrowRightLeft size={15} />
+          {busy ? "Refunding…" : dealCancelled ? "Refund Customer" : "Refund Excess"}
+        </Button>
+      </div>
+      {form.paymentMode === "Cheque" && (
+        <div className="mt-3">
+          <RefundChequePick leadId={lead.leadId} documentId={chequeId} onUploaded={setChequeId} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1180,7 +1214,7 @@ function OemClaimStrip({ leadId }) {
   );
 }
 
-function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSummary, oemSold = null, onSaved }) {
+function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
   // Staff freeze after Mark Delivered; owner may edit delivery paperwork until closed.
@@ -1313,6 +1347,16 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
           </button>
         ))}
       </div>
+      {(canEditCommercials || isOwner) && (
+        <LeadDocsStrip
+          leadId={lead.leadId}
+          kinds={["delivery_insurance", "delivery_rto"]}
+          canUploadKinds={(!locked || isOwner) ? ["delivery_insurance", "delivery_rto"] : []}
+          title="Insurance & RTO copies"
+          documents={documents}
+          onChanged={onSaved}
+        />
+      )}
       <p className="text-xs text-ink-soft mb-3">
         Invoice, chassis, and number plate must be unique on live leads from 1 Sep.
         Last-month or cancelled files do not block a recreated delivery.
@@ -1379,7 +1423,7 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
       {alreadyDelivered && (
         <div className="mt-6" data-testid="billing-summary-section">
           {summaryLoading && <div className="text-sm text-ink-faint">Loading billing summary…</div>}
-          {!summaryLoading && summary && <BillingSummaryPanel summary={summary} />}
+          {!summaryLoading && summary && <BillingSummaryPanel summary={summary} leadId={lead.leadId} documents={documents} canUploadTally={isOwner || isAccounts} onDocsChanged={onSaved} />}
           {!summaryLoading && !summary && (
             <div className="text-sm text-ink-soft border border-line rounded-lg px-3 py-3">
               Billing summary not found. Open again after refresh, or call billing-summary API.
@@ -1391,7 +1435,7 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, delivery, billingSum
   );
 }
 
-function BillingSummaryPanel({ summary }) {
+function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = false, onDocsChanged }) {
   const printSummary = () => {
     const el = document.getElementById("billing-summary-print");
     if (!el) return;
@@ -1534,6 +1578,16 @@ function BillingSummaryPanel({ summary }) {
           </>
         )}
       </div>
+      {leadId && (
+        <LeadDocsStrip
+          leadId={leadId}
+          kinds={["tally_invoice"]}
+          canUploadKinds={canUploadTally ? ["tally_invoice"] : []}
+          title="Tally GST invoice (print into the physical file)"
+          documents={documents}
+          onChanged={onDocsChanged}
+        />
+      )}
     </Card>
   );
 }

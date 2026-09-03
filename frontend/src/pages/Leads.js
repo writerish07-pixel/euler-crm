@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Plus, Phone, ChevronRight, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put } from "../lib/api";
@@ -9,6 +10,7 @@ import LeadImport from "./LeadImport";
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
+import { LocalKycBlock, kycReady, uploadKycFiles } from "../components/LeadDocuments";
 
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
@@ -18,6 +20,7 @@ export default function Leads() {
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
   const [active, setActive] = useState(null);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [masters, setMasters] = useState(null);
@@ -29,6 +32,15 @@ export default function Leads() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters); }, []);
+  useEffect(() => {
+    const open = searchParams.get("open");
+    if (!open) return undefined;
+    setActive(open);
+    const next = new URLSearchParams(searchParams);
+    next.delete("open");
+    setSearchParams(next, { replace: true });
+    return undefined;
+  }, [searchParams, setSearchParams]);
 
   const columns = [
     { key: "leadId", label: "Lead ID", mono: true, render: (r) => <span className="font-semibold text-cobalt">{r.leadId}</span> },
@@ -126,8 +138,10 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const [form, setForm] = useState({
     customerName: "", mobile: "", city: "", leadSource: "Walk-in", interestedModel: "",
     variant: "", executive: isExecutive ? (user?.name || "") : "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
-    createdDate: todayISO(), nextFollowupDate: "",
+    createdDate: todayISO(), nextFollowupDate: "", customerType: "Individual", gstin: "",
   });
+  const [kyc, setKyc] = useState({});
+  const [busy, setBusy] = useState(false);
   const [variants, setVariants] = useState([]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -139,8 +153,20 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
     if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter the deal amount for GM / Owner approval");
+    const kycErr = kycReady(form.customerType, kyc, form.gstin);
+    if (kycErr) return toast.error(kycErr);
+    setBusy(true);
     try {
       const lead = await post("/leads", { ...form, budget: Number(form.budget) });
+      try {
+        if (lead.pending && lead.requestId) {
+          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, kyc);
+        } else if (lead.leadId) {
+          await uploadKycFiles(`/leads/${lead.leadId}/documents`, kyc);
+        }
+      } catch (ue) {
+        toast.error(ue?.response?.data?.detail || "Lead saved but a KYC file failed — attach it again.");
+      }
       if (lead.pending) {
         toast.success("Sent for approval — call GM or Owner. Nothing is on the Lead Register until they Approve.");
         onCreated(null);
@@ -150,7 +176,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
       onCreated(lead.leadId);
     } catch (e) {
       toast.error(e?.response?.data?.detail || "Failed to create lead");
-    }
+    } finally { setBusy(false); }
   };
 
   if (!masters) return null;
@@ -159,13 +185,19 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   return (
     <Drawer open onClose={onClose} width="max-w-xl" title={isExecutive ? "Request a lead" : "New Lead"}
       subtitle={isExecutive ? "GM or Owner must Approve before this becomes a live lead" : "Capture a fresh enquiry"}
-      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit}>{isExecutive ? "Send for approval" : "Create Lead"}</Button></div>}>
+      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : (isExecutive ? "Send for approval" : "Create Lead")}</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
         <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
         <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
         <Field label="Mobile"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
         <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>
+        <Field label="Customer type">
+          <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>
+            <option>Individual</option>
+            <option value="B2B">B2B</option>
+          </Select>
+        </Field>
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{execOptions.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{masters.models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
@@ -173,6 +205,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label={isExecutive ? "Deal amount (₹) *" : "Budget (₹)"}><Input type="number" data-testid="lead-budget" value={form.budget} onChange={set("budget")} /></Field>
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
+        <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} />
       </div>
     </Drawer>
   );
