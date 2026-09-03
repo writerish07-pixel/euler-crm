@@ -1,4 +1,5 @@
 """Executive enquiries wait for GM / Owner Approve. No live lead until then."""
+import io
 import os
 import sys
 
@@ -81,6 +82,19 @@ def _enquiry(name="Wait Approve", **over):
     return body
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"kyc-scan" * 8
+
+
+async def attach_kyc(client, request_id, extra=()):
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", *extra):
+        r = await client.post(
+            f"/api/lead-requests/{request_id}/documents",
+            files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},
+            data={"kind": kind},
+        )
+        assert r.status_code == 200, r.text
+
+
 @pytest.mark.asyncio
 async def test_executive_without_deal_amount_is_rejected(exec_client):
     r = await exec_client.post("/api/leads", json=_enquiry(budget=0))
@@ -115,6 +129,7 @@ async def test_executive_submit_is_pending_not_a_live_lead(exec_client, client):
 async def test_owner_approve_creates_the_live_lead(exec_client, client):
     r = await exec_client.post("/api/leads", json=_enquiry("Approved Cust"))
     rid = r.json()["requestId"]
+    await attach_kyc(exec_client, rid)
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     lid = ap.json()["leadId"]
@@ -136,6 +151,7 @@ async def test_owner_approve_creates_the_live_lead(exec_client, client):
 async def test_sales_gm_can_approve(exec_client, gm_client, client):
     r = await exec_client.post("/api/leads", json=_enquiry("GM Approves"))
     rid = r.json()["requestId"]
+    await attach_kyc(exec_client, rid)
     ap = await gm_client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     lid = ap.json()["leadId"]

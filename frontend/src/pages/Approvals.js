@@ -6,6 +6,7 @@ import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Card, Table, Badge, Button, Field, Input } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
+import { RequestKycPreview } from "../components/LeadDocuments";
 
 export default function Approvals() {
   const { canApproveLeads, isExecutive } = useAuth();
@@ -111,6 +112,15 @@ export default function Approvals() {
             ) },
             { key: "executive", label: "Executive" },
             { key: "budget", label: "Deal amount", align: "right", mono: true, render: (r) => inr(r.budget || r.dealAmount) },
+            { key: "kyc", label: "KYC", render: (r) => (
+              <div>
+                <RequestKycPreview documents={r.documents || []} />
+                {r.kycComplete === false && (
+                  <div className="text-[10px] text-rose-700 mt-1">Missing {(r.kycMissing || []).join(", ")}</div>
+                )}
+                {r.customerType === "B2B" && r.gstin ? <div className="text-[10px] text-ink-faint">{r.gstin}</div> : null}
+              </div>
+            ) },
             { key: "createdAt", label: "Submitted", render: (r) => fmtDate(r.createdAt) },
             { key: "status", label: "Status", render: (r) => (
               <Badge>{r.status}{r.leadId ? ` · ${r.leadId}` : ""}</Badge>
@@ -118,7 +128,7 @@ export default function Approvals() {
             ...(canApproveLeads && status === "pending" ? [{
               key: "act", label: "", align: "right", render: (r) => (
                 <div className="flex gap-2 justify-end">
-                  <Button data-testid={`approve-${r.requestId}`} disabled={!!busy}
+                  <Button data-testid={`approve-${r.requestId}`} disabled={!!busy || r.kycComplete === false}
                     onClick={() => act(r.requestId, "approve")}>
                     <Check size={14} /> Approve
                   </Button>

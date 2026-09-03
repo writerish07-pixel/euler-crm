@@ -29,6 +29,7 @@ import period as periodmod
 import coulson as coulson_client
 import botspace as wa
 import web_push
+import lead_docs
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -957,6 +958,8 @@ class LeadIn(BaseModel):
     exchangeRequired: str = "No"
     nextFollowupDate: Optional[str] = None
     createdDate: Optional[str] = None
+    customerType: str = "Individual"
+    gstin: str = ""
 
 
 class LeadUpdateIn(BaseModel):
@@ -987,6 +990,8 @@ class LeadUpdateIn(BaseModel):
     bookingDate: Optional[str] = None
     # Editable so staff can correct a mistaken default booking advance (e.g. 5000 → 0).
     bookingAmount: Optional[float] = None
+    customerType: Optional[str] = None
+    gstin: Optional[str] = None
 
 
 class BookingIn(BaseModel):
@@ -1055,6 +1060,8 @@ class RefundIn(BaseModel):
     date: Optional[str] = None
     narration: str = ""
     reference: str = ""
+    # Cheque refunds must attach a scan (documentId of kind refund_cheque).
+    documentId: str = ""
 
 
 class DeliveryIn(BaseModel):
@@ -1615,6 +1622,26 @@ async def accounts_dashboard():
             "hasSummary": True,
         })
 
+    cancelled_due = []
+    for l in leads:
+        if not l.get("dealCancelled"):
+            continue
+        held = ce.num(l.get("excessReceived"))
+        if held <= 0.01:
+            continue
+        cancelled_due.append({
+            "leadId": l["leadId"],
+            "customerName": l.get("customerName") or "",
+            "model": l.get("interestedModel") or "",
+            "variant": l.get("variant") or "",
+            "cancelDate": l.get("lastCancelDate") or l.get("cancelDate") or "",
+            "cancelReason": l.get("lastCancelReason") or "",
+            "totalReceived": ce.num(l.get("totalReceived")),
+            "refundedAmount": ce.num(l.get("refundedAmount")),
+            "excessReceived": held,
+        })
+    cancelled_due.sort(key=lambda r: str(r.get("cancelDate") or ""), reverse=True)
+
     return {
         "kpis": {
             "customerOutstanding": cust_os,
@@ -1626,8 +1653,11 @@ async def accounts_dashboard():
             "insuranceOpenCount": insurance_open,
             "companyOutstanding": company_os,
             "deliveredForTally": len(delivered),
+            "cancelledRefundDue": len(cancelled_due),
+            "cancelledRefundHeld": ce.round2(sum(r["excessReceived"] for r in cancelled_due)),
         },
         "tallyQueue": tally_rows,
+        "cancelledRefundQueue": cancelled_due[:40],
         "doNotPost": {
             "oemClaimsOutstanding": do_not_post_claims,
             "schemeOrOemExtraRetained": ce.round2(do_not_post_total_retained),
@@ -2577,6 +2607,7 @@ def _require_own_lead(lead, user):
 @api.get("/leads")
 async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      month: Optional[str] = None, year: Optional[str] = None,
+                     limit: Optional[int] = None,
                      user=Depends(current_user)):
     query = {}
     if status and status != "all":
@@ -2587,7 +2618,13 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
             {"mobile": {"$regex": q, "$options": "i"}},
             {"leadId": {"$regex": q, "$options": "i"}},
         ]
-    leads = await db.leads.find(query).sort("leadId", -1).to_list(3000)
+    cap = 3000
+    if limit is not None:
+        try:
+            cap = max(1, min(int(limit), 3000))
+        except (TypeError, ValueError):
+            cap = 3000
+    leads = await db.leads.find(query).sort("leadId", -1).to_list(cap)
     # An executive works their own leads only. Owner, Sales GM, TL and Accounts see all.
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
@@ -2625,6 +2662,10 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     lead_id = await next_id("lead", "LD26")
     payload = body.model_dump()
     created_date = str(payload.pop("createdDate", None) or "").strip() or today()
+    payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+    payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
+    if payload["customerType"] != "B2B":
+        payload["gstin"] = ""
     doc = {
         "leadId": lead_id,
         **payload,
@@ -2682,6 +2723,10 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
                 f"This mobile is already waiting for approval ({pending_same.get('requestId')}).",
             )
         payload = body.model_dump()
+        payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+        payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
+        if payload["customerType"] != "B2B":
+            payload["gstin"] = ""
         if not str(payload.get("executive") or "").strip():
             payload["executive"] = user.get("name") or ""
         request_id = await next_id("lead_request", "LR26")
@@ -2730,6 +2775,8 @@ def _request_out(doc):
     row["executive"] = payload.get("executive") or ""
     row["budget"] = payload.get("budget") or row.get("dealAmount") or 0
     row["remarks"] = payload.get("remarks") or ""
+    row["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+    row["gstin"] = payload.get("gstin") or ""
     return row
 
 
@@ -2766,7 +2813,26 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
     elif not _can_approve_leads(user):
         raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
     rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(200)]
-    return [_request_out(r) for r in rows]
+    req_ids = [r.get("requestId") for r in rows if r.get("requestId")]
+    docs_by_req = {}
+    if req_ids:
+        for d in await db[lead_docs.COLLECTION].find(
+                {"requestId": {"$in": req_ids}}, {"data": 0}).to_list(1000):
+            docs_by_req.setdefault(d.get("requestId"), []).append(d)
+    out = []
+    for r in rows:
+        row = _request_out(r)
+        own = lead_docs._own_request(r, user) or _can_approve_leads(user)
+        docs = [lead_docs.public_row(d) for d in docs_by_req.get(r.get("requestId"), [])
+                if lead_docs.can_read_kind(user, d.get("kind") or "", own=own)]
+        row["documents"] = docs
+        missing = await lead_docs.missing_kyc(
+            db, request_id=r.get("requestId") or "",
+            customer_type=row.get("customerType"), gstin=row.get("gstin"))
+        row["kycMissing"] = missing
+        row["kycComplete"] = not missing
+        out.append(row)
+    return out
 
 
 @api.post("/lead-requests/{request_id}/approve")
@@ -2793,6 +2859,14 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             return {"ok": True, "leadId": fresh["leadId"], "already": True}
         raise HTTPException(409, f"This request is already {(fresh or {}).get('status')}.")
     payload = claimed.get("payload") or {}
+    missing = await lead_docs.missing_kyc(
+        db, request_id=request_id,
+        customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
+    if missing:
+        await db.lead_requests.update_one(
+            {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
+        labels = [lead_docs.KINDS.get(k, {}).get("label") or k for k in missing]
+        raise HTTPException(422, "KYC is incomplete — " + ", ".join(labels) + ".")
     try:
         body = LeadIn(**payload)
         lead = await _insert_live_lead(body, source_note="Lead created after GM / Owner approval")
@@ -2800,6 +2874,7 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
         raise
+    await lead_docs.attach_request_docs_to_lead(db, request_id, lead["leadId"])
     await db.lead_requests.update_one(
         {"requestId": request_id},
         {"$set": {"status": "approved", "leadId": lead["leadId"]}},
@@ -2897,6 +2972,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
                 "fieldView": True,
             },
             "billingSummary": None,
+            "documents": [],
             "fieldView": True,
             "whatsapp": {"count": 0, "lastAt": None, "optOut": False, "sessionOpen": False},
         }
@@ -2925,9 +3001,110 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         "activities": activities, "delivery": delivery, "booking": booking,
         "claims": claims, "actions": lead_actions(lead, user),
         "billingSummary": billing_summary or None,
+        "documents": await lead_docs.list_docs(
+            db, user, lead_id=lead_id, own=_is_own_lead(lead, user)),
         "oemSold": await oem_sync.match_sold_for_lead(db, lead),
         "whatsapp": await wa.summary_for_lead(lead_id),
     }
+
+
+async def _document_own(doc, user) -> bool:
+    if doc.get("leadId"):
+        lead = await db.leads.find_one({"leadId": doc["leadId"]}) or {}
+        return _is_own_lead(lead, user)
+    if doc.get("requestId"):
+        req = await db.lead_requests.find_one({"requestId": doc["requestId"]}) or {}
+        return lead_docs._own_request(req, user)
+    return False
+
+
+@api.get("/leads/{lead_id}/documents")
+async def list_lead_documents(lead_id: str, user=Depends(current_user)):
+    lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
+    if user.get("role") in authmod.FIELD_ROLES:
+        raise HTTPException(403, "Field logins cannot open customer documents.")
+    return await lead_docs.list_docs(db, user, lead_id=lead_id, own=_is_own_lead(lead, user))
+
+
+@api.post("/leads/{lead_id}/documents")
+async def upload_lead_document(lead_id: str, kind: str = Form(...),
+                               file: UploadFile = File(...),
+                               user=Depends(current_user), act=Depends(actor)):
+    lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
+    kind = lead_docs.require_kind(kind)
+    own = _is_own_lead(lead, user)
+    if not lead_docs.can_upload_kind(user, kind, own=own):
+        raise HTTPException(403, "You cannot upload this kind of document.")
+    data, ctype, filename = await lead_docs.read_upload(file)
+    row = await lead_docs.save_doc(
+        db, next_id=next_id, user=user, kind=kind, data=data,
+        content_type=ctype, filename=filename, lead_id=lead_id)
+    await write_audit(act, "upload", "document", leadId=lead_id,
+                      new={"kind": kind, "documentId": row.get("documentId")})
+    return row
+
+
+@api.post("/lead-requests/{request_id}/documents")
+async def upload_request_document(request_id: str, kind: str = Form(...),
+                                  file: UploadFile = File(...),
+                                  user=Depends(current_user)):
+    req = await db.lead_requests.find_one({"requestId": request_id})
+    if not req:
+        raise HTTPException(404, "Approval request not found")
+    if req.get("status") not in ("pending", "approving"):
+        raise HTTPException(409, "KYC can only be added while the request is waiting.")
+    own = lead_docs._own_request(req, user)
+    if not own and not _can_approve_leads(user):
+        raise HTTPException(403, "You can only attach KYC to your own request.")
+    kind = lead_docs.require_kind(kind)
+    if lead_docs.KINDS[kind]["group"] != "kyc":
+        raise HTTPException(422, "Only KYC files can be attached to a lead request.")
+    if not lead_docs.can_upload_kind(user, kind, own=own or _can_approve_leads(user)):
+        raise HTTPException(403, "You cannot upload this kind of document.")
+    data, ctype, filename = await lead_docs.read_upload(file)
+    return await lead_docs.save_doc(
+        db, next_id=next_id, user=user, kind=kind, data=data,
+        content_type=ctype, filename=filename, request_id=request_id)
+
+
+@api.get("/lead-requests/{request_id}/documents")
+async def list_request_documents(request_id: str, user=Depends(current_user)):
+    req = await db.lead_requests.find_one({"requestId": request_id})
+    if not req:
+        raise HTTPException(404, "Approval request not found")
+    own = lead_docs._own_request(req, user)
+    if not own and not _can_approve_leads(user):
+        raise HTTPException(403, "You can only view KYC on your own request.")
+    return await lead_docs.list_docs(db, user, request_id=request_id, own=own or _can_approve_leads(user))
+
+
+@api.get("/documents/{document_id}/file")
+async def download_document(document_id: str, user=Depends(current_user)):
+    meta = await lead_docs.get_meta(db, document_id)
+    if not meta:
+        raise HTTPException(404, "Document not found")
+    if meta.get("leadId"):
+        lead = await db.leads.find_one({"leadId": meta["leadId"]}) or {}
+        _require_own_lead(lead, user)
+    own = await _document_own(meta, user)
+    return await lead_docs.file_response(db, document_id, user, own=own)
+
+
+@api.delete("/documents/{document_id}")
+async def delete_document(document_id: str, user=Depends(current_user), act=Depends(actor)):
+    meta = await lead_docs.get_meta(db, document_id)
+    if not meta:
+        raise HTTPException(404, "Document not found")
+    if meta.get("leadId"):
+        lead = await db.leads.find_one({"leadId": meta["leadId"]}) or {}
+        _require_own_lead(lead, user)
+    own = await _document_own(meta, user)
+    result = await lead_docs.delete_doc(db, document_id, user, own=own)
+    await write_audit(act, "delete", "document", leadId=meta.get("leadId") or "",
+                      old={"kind": meta.get("kind"), "documentId": document_id})
+    return result
 
 
 # System/calculated fields a lead document carries that must never be settable
@@ -4956,6 +5133,13 @@ async def refund_excess_payment(lead_id: str, body: RefundIn, act=Depends(actor)
     if amount > pos["excessReceived"] + 0.01:
         raise HTTPException(422, f"Refund ₹{amount} is more than the excess held on this lead "
                                  f"(₹{pos['excessReceived']}).")
+    cheque_id = str(body.documentId or "").strip()
+    if str(body.paymentMode or "").strip().lower() == "cheque":
+        if not cheque_id:
+            raise HTTPException(422, "Attach a photo of the refund cheque before recording a Cheque refund.")
+        cheque = await lead_docs.get_meta(db, cheque_id)
+        if not cheque or cheque.get("kind") != "refund_cheque" or cheque.get("leadId") != lead_id:
+            raise HTTPException(422, "Upload the refund cheque against this lead first, then record the refund.")
     refund_date = body.date or today()
     recent = await db.payments.find_one(
         {"leadId": lead_id, "entryType": "Refund", "amount": ce.round2(-amount)}, sort=[("_id", -1)])
@@ -4982,6 +5166,8 @@ async def refund_excess_payment(lead_id: str, body: RefundIn, act=Depends(actor)
     }
     await db.payments.insert_one(doc)
     await sheet_sync("payments", doc)
+    if cheque_id and str(body.paymentMode or "").strip().lower() == "cheque":
+        await lead_docs.bind_refund_cheque(db, cheque_id, lead_id, entry_id)
     await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "refund", "payment", leadId=lead_id, paymentId=entry_id,
