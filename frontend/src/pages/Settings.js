@@ -397,6 +397,8 @@ export default function Settings() {
                     ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
                     : r.role === "sales_gm"
                       ? "bg-violet-50 text-violet-700 ring-violet-600/20"
+                    : r.role === "oem_finance"
+                      ? "bg-zinc-100 text-zinc-700 ring-zinc-500/20"
                     : r.role === "asm" || r.role === "rm"
                       ? "bg-sky-50 text-sky-700 ring-sky-600/20"
                       : "bg-blue-50 text-blue-700 ring-blue-600/20";
