@@ -8,7 +8,7 @@ charge columns had to be added up in front of the customer.
 The price list gives them the number they actually quote, and nothing they should
 not see:
   * on-road = the engine's Gross Vehicle Cost, plus TCS only where it is billed
-  * scheme = the TOTAL available this month; the company/dealer split is withheld
+  * no scheme amounts — those belong on the lead for the current month
   * no write path at all
 """
 import os
@@ -88,30 +88,22 @@ async def test_rows_are_cheapest_first_within_a_model(client):
 
 
 @pytest.mark.asyncio
-async def test_scheme_month_is_stated(client):
-    """Scheme is monthly — quoting August's benefit in September is the risk."""
+async def test_scheme_is_not_on_the_price_list(client):
+    """Scheme lives on the lead for that month — not next to the on-road quote."""
     body = (await client.get("/api/price-list")).json()
-    assert body["schemeMonth"] == ce.scheme_month_from_date(server.today())
-    assert body["asOf"] == server.today()
-
-
-@pytest.mark.asyncio
-async def test_scheme_shows_total_only_never_the_split(client):
-    """Company vs dealer share is commercial information staff must not see."""
-    body = (await client.get("/api/price-list")).json()
+    assert "schemeMonth" not in body
     for r in all_rows(body):
-        assert "schemeAvailable" in r
+        assert "schemeAvailable" not in r
         for banned in ("companyShare", "dealerShare", "oemShare",
                        "dealerFundedShare", "dealerRetained", "components"):
             assert banned not in r, f"{banned} leaked into the price list"
 
 
 @pytest.mark.asyncio
-async def test_a_turbo_row_carries_this_months_scheme(client):
+async def test_a_turbo_row_still_has_on_road(client):
     body = (await client.get("/api/price-list", params={"model": "Turbo Max"})).json()
     rows = all_rows(body)
-    assert rows and all(r["schemeAvailable"] > 0 for r in rows), \
-        "Turbo has an active Aug-2026 scheme"
+    assert rows and all(r["onRoad"] > 0 for r in rows)
 
 
 # ======================================================================= TCS

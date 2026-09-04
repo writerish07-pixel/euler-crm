@@ -5986,16 +5986,15 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
 
     On-road is Gross Vehicle Cost plus TCS. TCS is mandatory at 1% of that
     consideration when it exceeds ₹10,00,000 (Income-tax 206C(1F) / 394) —
-    the Price Master Yes/No flag is not a waiver. Deal-level scheme discounts
-    are applied on the lead, where TCS is recomputed on the after-discount price.
+    the Price Master Yes/No flag is not a waiver.
 
-    Scheme shows the TOTAL available for the current month. The company/dealer
-    split is deliberately withheld: that is commercial information.
+    Ex-showroom is the OEM (Coulson) list price on Price Master. Scheme is
+    applied on the lead for that month — it is not shown here.
     """
-    scheme_rows = await get_scheme_rows()
     on = today()
     rows = await db.price_master.find({"model": model} if model else {}).to_list(2000)
     counts = await oem_sync.inventory_counts(db)
+    coulson = await db["system"].find_one({"_id": "coulson"}) or {}
     needle = (q or "").strip().lower()
     grouped = {}
     for r in rows:
@@ -6013,10 +6012,6 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
         gvc = ce.round2(ex + rto + ins + other)
         tcs = ce.calculate_tcs(gvc)
         applies = tcs > 0
-        shares = ce.get_scheme_shares_for_lead(mdl, variant, on, scheme_rows)
-        scheme = ce.round2(sum(
-            ce.num(v.get("totalBenefit")) or (ce.num(v.get("dealerShare")) + ce.num(v.get("companyShare")))
-            for v in shares.values()))
         grouped.setdefault(mdl, []).append({
             "priceId": r.get("priceId"), "model": mdl, "variant": variant,
             "bodyType": r.get("bodyType") or "",
@@ -6024,15 +6019,18 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
             "otherCharges": other,
             "tcs": tcs, "tcsApplies": applies and tcs > 0,
             "onRoad": ce.round2(gvc + tcs),
-            "schemeAvailable": scheme,
             "inYard": counts.get((mdl, variant), 0),
         })
     out = [{"model": m, "count": len(v),
             "rows": sorted(v, key=lambda x: x["onRoad"])}
            for m, v in sorted(grouped.items())]
-    body = {"schemeMonth": ce.scheme_month_from_date(on), "asOf": on,
-            "totalRows": sum(g["count"] for g in out), "models": out}
-    return body
+    return {
+        "asOf": on,
+        "totalRows": sum(g["count"] for g in out),
+        "models": out,
+        "oemSyncedAt": coulson.get("lastSyncAt") or "",
+        "oemSyncOk": coulson.get("lastSyncOk"),
+    }
 
 
 @api.get("/price-master/variants")

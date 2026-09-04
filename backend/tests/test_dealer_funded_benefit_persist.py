@@ -167,7 +167,8 @@ async def turbo_booked(c, mobile, allocation=None, deliver=False, insurance_payo
     await c.post(f"/api/leads/{lid}/convert-booking",
                  json={"bookingDate": "2026-08-09", "bookingAmount": 0})
     await c.put(f"/api/leads/{lid}/scheme",
-                json={"loyaltyBonus": 10000, "benefitMode": "No Benefit"})
+                json={"loyaltyBonus": 10000, "benefitMode": "No Benefit",
+                      "schemeDate": "2026-08-09"})
     if allocation is not None:
         r = await c.put(f"/api/leads/{lid}/scheme-allocation",
                         json={"allocation": allocation})

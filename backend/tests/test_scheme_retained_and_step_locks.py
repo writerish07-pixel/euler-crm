@@ -155,6 +155,7 @@ async def test_the_owner_prices_schemes_and_re_edits_freely(client):
     assert (await client.put(f"/api/leads/{lid}/price-structure", json=ps)).status_code == 200
 
     scheme = {
+        "schemeDate": "2026-08-15",
         "loyaltyBonus": 10000, "benefitMode": "Partial Benefit",
         "benefitPassedBreakup": json.dumps({"loyaltyBonus": 10000, "insuranceBenefit": 0}),
         "schemeComponentsUsed": json.dumps({"loyaltyBonus": True, "insuranceBenefit": True}),
@@ -172,6 +173,7 @@ async def test_owner_model_change_refreshes_exshowroom_and_realigns_scheme(clien
     ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
     await client.put(f"/api/leads/{lid}/price-structure", json=ps)
     await client.put(f"/api/leads/{lid}/scheme", json={
+        "schemeDate": "2026-08-15",
         "loyaltyBonus": 10000, "benefitMode": "Partial Benefit",
         "benefitPassedBreakup": json.dumps({"loyaltyBonus": 10000, "insuranceBenefit": 0}),
         "schemeComponentsUsed": json.dumps({"loyaltyBonus": True, "insuranceBenefit": True}),

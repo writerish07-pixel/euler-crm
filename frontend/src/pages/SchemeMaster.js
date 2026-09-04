@@ -52,7 +52,7 @@ export default function SchemeMaster() {
 
   return (
     <div>
-      <PageHeader title="Scheme Master" subtitle="Monthly OEM consumer scheme matrix — dealer vs company share"
+      <PageHeader title="Scheme Master" subtitle="Enter each month's OEM circular here. Last month does not carry forward. Coulson invoice schemes cannot be pulled — that dropdown is not on their price API."
         actions={isOwner ? <Button data-testid="add-scheme-btn" onClick={() => setEdit({ schemeMonth: monthOf(asOf), effectiveFrom: asOf ? `${monthOf(asOf)}-01` : "", effectiveTo: lastDayOfMonth(monthOf(asOf)) })}><Plus size={16} /> Add Scheme</Button> : null} />
       <div className="flex flex-wrap items-end gap-3 mb-4">
         <Field label="Show schemes for">
