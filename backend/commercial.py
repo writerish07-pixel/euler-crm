@@ -1183,6 +1183,22 @@ def insurance_payout_due_by(basis_date, due_day=INSURANCE_PAYOUT_DUE_DAY,
     return date(year, month, dd).isoformat()
 
 
+def insurance_dealer_income(entry):
+    """Dealer earnings from the insurer payout on one register row.
+
+    Pending: expected entitlement (premium × rate). After the owner accepts the
+    agent's MIS — or the line is otherwise Received — income is the cash booked,
+    including a short or over settlement.
+    """
+    if not entry:
+        return 0.0
+    if str(entry.get("status") or "").startswith("N/A"):
+        return 0.0
+    if entry.get("misApproved") or str(entry.get("status") or "") == "Received":
+        return round2(max(0.0, num(entry.get("receivedPayout"))))
+    return round2(max(0.0, num(entry.get("expectedPayout"))))
+
+
 def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows):
     """Which scheme offer fields are allowed for Model+Variant on a booking date (port of getSchemeOfferRulesForVehicle_)."""
     master = get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows)

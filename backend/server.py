@@ -30,6 +30,7 @@ import coulson as coulson_client
 import botspace as wa
 import web_push
 import lead_docs
+import insurance_mis as ins_mis
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -664,10 +665,10 @@ async def recompute_lead(lead_id):
         ce.num(lead.get("financeIncentive")) + ce.num(lead.get("accessoriesMargin")) +
         ce.num(lead.get("exchangeMargin")) + ce.num(lead.get("campaignIncentive")))
     # Insurance PAYOUT income (premium × rate) — SEPARATE from Insurance Scheme Benefit.
-    # Dealer Insurance Income = expected insurer payout. Do NOT subtract scheme
-    # customerInsuranceBenefitPassed (that is customer discount, not payout share).
+    # Pending: expected entitlement. After MIS approve / Received: cash booked.
+    # Do NOT subtract scheme customerInsuranceBenefitPassed (customer discount).
     _ins = await db.insurance.find_one({"leadId": lead_id}) or {}
-    _ins_payout = ce.num(_ins.get("expectedPayout"))
+    _ins_payout = ce.insurance_dealer_income(_ins)
     _dealer_ins_income = ce.round2(max(0.0, _ins_payout))
     # Dealer-funded benefit is a REAL cost. Only apply when an authoritative
     # allocation decision exists (schemeAllocationV2 / explicit) — never invent
@@ -5754,7 +5755,8 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
     No new business rule: the premium is the lead's own insuranceAmount, the insurer is
     the one captured at delivery, and the rate/expected/outstanding/status come from the
     existing _insurance_derive + suggested_insurance_payout_rate (49% Storm/Turbo,
-    36.5% others). Idempotent — one entry per lead, refreshed rather than duplicated."""
+    36.5% others). Idempotent — one entry per lead, refreshed rather than duplicated.
+    An accepted agent MIS (misApproved / received cash) survives re-delivery."""
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
     # Customer-arranged insurance: dealer does not earn a payout.
     if ce.normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) == "self":
@@ -5795,6 +5797,10 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
         "payoutRate": ce.num((existing or {}).get("payoutRate")),
         "receivedPayout": ce.num((existing or {}).get("receivedPayout")),
         "status": (existing or {}).get("status", "Pending"),
+        "misApproved": bool((existing or {}).get("misApproved")),
+        "misAmount": ce.num((existing or {}).get("misAmount")),
+        "misDifference": ce.num((existing or {}).get("misDifference")),
+        "misReference": (existing or {}).get("misReference") or "",
         "deliveryDate": delivery_date,
         "insuranceExecutive": lead.get("executive", ""),
         "remarks": (existing or {}).get("remarks", ""),
@@ -6648,7 +6654,7 @@ def _strip_payout_for_staff(entry: dict, is_owner: bool):
     if is_owner:
         return entry
     e = dict(entry)
-    for k in ("payoutRate", "expectedPayout", "payoutOutstanding"):
+    for k in ("payoutRate", "expectedPayout", "payoutOutstanding", "misDifference"):
         e.pop(k, None)
     return e
 
@@ -7166,7 +7172,7 @@ def _insurance_enrich(entry: dict, terms: Optional[dict] = None) -> dict:
     e = dict(entry)
     outstanding = ce.num(e.get("payoutOutstanding"))
     status = str(e.get("status") or "")
-    pending = outstanding > 0.01 and status != "Received" and not status.startswith("N/A")
+    pending = outstanding > 0.01 and status != "Received" and not status.startswith("N/A") and not e.get("misApproved")
     basis = e.get("policyDate") or e.get("deliveryDate") or ""
     due_by = ce.insurance_payout_due_by(basis, t["dueDayOfMonth"], t["monthsAfter"])
     e["pending"] = pending
@@ -7190,9 +7196,13 @@ def _insurance_derive(body: dict, agent: Optional[dict] = None):
     rate = resolved["rate"]
     expected = ce.round2(premium * rate)
     received = ce.num(body.get("receivedPayout"))
+    approved = bool(body.get("misApproved"))
     outstanding = ce.round2(max(0.0, expected - received))
     status = body.get("status") or "Pending"
-    if expected > 0 and received >= expected:
+    if approved:
+        status = "Received"
+        outstanding = 0.0
+    elif expected > 0 and received >= expected - 0.01:
         status = "Received"
     elif received > 0:
         status = "Partial"
@@ -7238,6 +7248,10 @@ async def update_insurance(entry_id: str, body: InsuranceIn, act=Depends(actor))
     existing = await db.insurance.find_one({"entryId": entry_id}) or {}
     data = body.model_dump()
     data.setdefault("deliveryDate", existing.get("deliveryDate"))
+    data["misApproved"] = existing.get("misApproved")
+    data["misAmount"] = existing.get("misAmount")
+    data["misDifference"] = existing.get("misDifference")
+    data["misReference"] = existing.get("misReference") or ""
     agent = await _get_insurance_agent(data.get("insuranceAgentId") or existing.get("insuranceAgentId"))
     data.update(_insurance_derive(data, agent))
     res = await db.insurance.update_one({"entryId": entry_id}, {"$set": data})
@@ -7308,7 +7322,194 @@ async def record_insurer_payout(entry_id: str, body: ReceiptIn, act=Depends(acto
                       old={"receivedPayout": already},
                       new={"receivedPayout": received, "payoutOutstanding": outstanding,
                            "amount": amount, "agent": e.get("insuranceAgentName", "")})
+    if e.get("leadId"):
+        await recompute_lead(e["leadId"])
     return _strip_payout_for_staff(_insurance_enrich(clean(updated)), act.get("role") == "owner")
+
+
+class MisFillIn(BaseModel):
+    items: List[dict] = []
+
+
+class MisApproveIn(BaseModel):
+    entryIds: List[str] = []
+    items: List[dict] = []
+    date: Optional[str] = None
+
+
+def _mis_template_bytes():
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Agent MIS"
+    headers = [lbl for lbl, _fld in ins_mis.MIS_COLUMNS]
+    ws.append(headers)
+    ws.append(["POL123", "Sample Customer", "9876543210", "", "", 19000, 8500,
+               "ICICI Lombard", "UTR123", "2026-08-15"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+@api.get("/insurance/mis/template")
+async def insurance_mis_template(_money=Depends(money_desk_only)):
+    data = _mis_template_bytes()
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=insurance_agent_mis_template.xlsx"},
+    )
+
+
+@api.post("/insurance/mis/preview")
+async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
+                                act=Depends(actor), _money=Depends(money_desk_only)):
+    """Parse the agent's MIS and match rows to Insurance Payout entries. No writes."""
+    content = await file.read()
+    try:
+        raw = _read_rows(file.filename, content)
+        headers = [str(h).strip() if h is not None else "" for h in (raw or [[]])[0]]
+        mp = json.loads(mapping) if mapping else ins_mis.suggest_mapping(headers)
+        _hdrs, rows = ins_mis.parse_rows(raw, mp)
+    except Exception as e:
+        raise HTTPException(400, f"Could not parse file: {e}")
+    entries = await db.insurance.find().to_list(8000)
+    matched = ins_mis.match_file(rows, entries)
+    is_owner = act.get("role") == "owner"
+    if not is_owner:
+        for r in matched["matched"]:
+            r.pop("expectedPayout", None)
+            r.pop("difference", None)
+        matched["totals"].pop("expected", None)
+        matched["totals"].pop("difference", None)
+        for r in matched["unmatchedEntries"]:
+            r.pop("expectedPayout", None)
+    return {
+        "detectedHeaders": [h for h in headers if h],
+        "targetFields": [{"label": lbl, "field": fld} for lbl, fld in ins_mis.MIS_COLUMNS],
+        "suggestedMapping": mp,
+        "requiredFields": ["misAmount"],
+        **matched,
+    }
+
+
+async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
+    amount = ce.round2(ce.num(mis_amount))
+    expected = ce.round2(ce.num(entry.get("expectedPayout")))
+    patch = {
+        "misAmount": amount,
+        "misDifference": ce.round2(amount - expected),
+        "misReference": reference or entry.get("misReference") or "",
+        "lastUpdated": now_iso(),
+    }
+    if policy_number and not (entry.get("policyNumber") or "").strip():
+        patch["policyNumber"] = policy_number
+    await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
+    return patch
+
+
+async def _approve_insurance_payout(entry, *, amount, reference="", payout_date=None, act=None):
+    """Book the agent's figure as received and close the line, even if it differs."""
+    received = ce.round2(ce.num(amount))
+    expected = ce.round2(ce.num(entry.get("expectedPayout")))
+    payout_date = payout_date or today()
+    already = ce.round2(ce.num(entry.get("receivedPayout")))
+    delta = ce.round2(received - already)
+    receipt = {
+        "amount": delta,
+        "date": payout_date,
+        "reference": reference or "MIS approve",
+        "recordedAt": now_iso(),
+        "source": "mis",
+    }
+    patch = {
+        "receivedPayout": received,
+        "payoutOutstanding": 0.0,
+        "status": "Received",
+        "misApproved": True,
+        "misAmount": received,
+        "misDifference": ce.round2(received - expected),
+        "misApprovedAt": now_iso(),
+        "lastPayoutDate": payout_date,
+        "lastUpdated": now_iso(),
+    }
+    if reference:
+        patch["misReference"] = reference
+    ops = {"$set": patch}
+    if abs(delta) > 0.005:
+        ops["$push"] = {"receipts": receipt}
+    await db.insurance.update_one({"entryId": entry["entryId"]}, ops)
+    updated = await db.insurance.find_one({"entryId": entry["entryId"]})
+    await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
+    if act:
+        await write_audit(act, "mis-approve", "insurance", leadId=entry.get("leadId") or "",
+                          old={"receivedPayout": already, "expectedPayout": expected},
+                          new={"receivedPayout": received, "misDifference": patch["misDifference"]})
+    if entry.get("leadId"):
+        await recompute_lead(entry["leadId"])
+    return updated
+
+
+@api.post("/insurance/mis/apply")
+async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depends(money_desk_only)):
+    """Stamp MIS amount + difference onto matched entries. Does not book received."""
+    filled, errors = 0, []
+    for item in body.items or []:
+        eid = str(item.get("entryId") or "").strip()
+        entry = await db.insurance.find_one({"entryId": eid}) if eid else None
+        if not entry:
+            errors.append({"entryId": eid, "error": "not_found"})
+            continue
+        await _fill_mis_item(entry, item.get("misAmount"),
+                             item.get("reference") or "", item.get("policyNumber") or "")
+        filled += 1
+    await write_audit(act, "mis-apply", "insurance", new={"filled": filled, "errors": len(errors)})
+    return {"ok": True, "filled": filled, "errors": errors}
+
+
+@api.post("/insurance/mis/approve")
+async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=Depends(money_desk_only)):
+    """Mark ticked payouts received at the MIS (or expected) amount, then recast earnings."""
+    approved, errors = [], []
+    by_id = {str(it.get("entryId") or ""): it for it in (body.items or []) if it.get("entryId")}
+    ids = list(body.entryIds or []) + [k for k in by_id if k not in (body.entryIds or [])]
+    # de-dupe while preserving order
+    seen = set()
+    ordered = []
+    for eid in ids:
+        if eid and eid not in seen:
+            seen.add(eid)
+            ordered.append(eid)
+    for eid in ordered:
+        entry = await db.insurance.find_one({"entryId": eid})
+        if not entry:
+            errors.append({"entryId": eid, "error": "not_found"})
+            continue
+        if str(entry.get("status") or "").startswith("N/A"):
+            errors.append({"entryId": eid, "error": "not_applicable"})
+            continue
+        item = by_id.get(eid) or {}
+        amount = item.get("misAmount")
+        if amount in (None, ""):
+            amount = entry.get("misAmount")
+        if ce.num(amount) <= 0:
+            amount = entry.get("expectedPayout")
+        if ce.num(amount) <= 0:
+            errors.append({"entryId": eid, "error": "no_amount"})
+            continue
+        updated = await _approve_insurance_payout(
+            entry, amount=amount,
+            reference=item.get("reference") or entry.get("misReference") or "",
+            payout_date=body.date, act=act)
+        approved.append({
+            "entryId": eid,
+            "receivedPayout": ce.num(updated.get("receivedPayout")),
+            "expectedPayout": ce.num(updated.get("expectedPayout")),
+            "difference": ce.num(updated.get("misDifference")),
+            "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
+        })
+    return {"ok": True, "approved": len(approved), "rows": approved, "errors": errors}
 
 
 # ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)
@@ -9040,7 +9241,7 @@ async def dealer_earnings_report():
     for e in await db.insurance.find().to_list(5000):
         lid = e.get("leadId")
         if lid:
-            ins_by_lead[lid] = ce.round2(ins_by_lead.get(lid, 0) + ce.num(e.get("expectedPayout")))
+            ins_by_lead[lid] = ce.round2(ins_by_lead.get(lid, 0) + ce.insurance_dealer_income(e))
     by_month = {}
     components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0,
                   "OEM Extra Support": 0.0, "Documentation": 0.0, "Warranty": 0.0,
