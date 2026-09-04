@@ -15,6 +15,14 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
   const [step, setStep] = useState("upload");
   const [picked, setPicked] = useState({});
 
+  const downloadTemplate = async () => {
+    try {
+      await downloadFile("/insurance/mis/template", "insurance_agent_mis_template.xlsx");
+    } catch {
+      toast.error("Could not download template");
+    }
+  };
+
   const runPreview = async (f, mp) => {
     const fd = new FormData();
     fd.append("file", f);
@@ -106,8 +114,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
     <Drawer open onClose={onClose} width="max-w-5xl" title="Upload agent MIS"
       subtitle="Match the agent's payout file to Insurance Payouts, then tick and approve received"
       footer={<div className="flex justify-between items-center gap-2">
-        <Button variant="ghost" data-testid="mis-template-btn"
-          onClick={() => downloadFile("/insurance/mis/template", "insurance_agent_mis_template.xlsx")}>
+        <Button variant="ghost" data-testid="mis-template-btn" onClick={downloadTemplate}>
           <Download size={15} /> Download template
         </Button>
         <div className="flex gap-2">
