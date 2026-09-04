@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink, Link2 } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag } from "../lib/claimMatch";
+import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import PeriodBar from "../components/PeriodBar";
@@ -435,6 +435,7 @@ function SettleModal({ claim, onClose, onDone }) {
 function MatchOemModal({ claim, onClose, onDone }) {
   const [oemRows, setOemRows] = useState([]);
   const [claimNumber, setClaimNumber] = useState(claim.manualOemClaimNumber || claim.oemMatch?.claimNumbers?.[0] || "");
+  const [lineId, setLineId] = useState(claim.manualOemLineId || claim.oemMatch?.lineId || "");
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -445,17 +446,21 @@ function MatchOemModal({ claim, onClose, onDone }) {
   const needle = q.trim().toLowerCase();
   const shown = oemRows.filter((r) => {
     if (!needle) return true;
-    const blob = `${r.claimNumber || ""} ${(r.leadIds || []).join(" ")} ${(r.lineItems || []).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""}`).join(" ")}`.toLowerCase();
+    const blob = `${r.claimNumber || ""} ${(r.leadIds || []).join(" ")} ${(r.lineItems || []).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""} ${li.description || ""} ${li.customerName || ""}`).join(" ")}`.toLowerCase();
     return blob.includes(needle);
   }).slice(0, 40);
+  const picked = shown.find((r) => r.claimNumber === claimNumber) || oemRows.find((r) => r.claimNumber === claimNumber);
+  const lines = picked?.lineItems || [];
 
   const save = async () => {
     if (!claimNumber.trim()) return toast.error("Enter or pick an OEM claim number");
+    if (lines.length > 1 && !lineId) return toast.error("This OEM claim has several items — pick which one to match");
     setBusy(true);
     try {
       await post("/claims/oem-match", {
         leadId: claim.leadId, componentKey: claim.componentKey,
         claimNumber: claimNumber.trim(),
+        lineId: lineId || (lines.length === 1 ? (lines[0].lineId || "") : ""),
       });
       toast.success(`Matched ${claim.component} to ${claimNumber.trim()}`);
       onDone();
@@ -487,7 +492,8 @@ function MatchOemModal({ claim, onClose, onDone }) {
       </div>
       <div className="p-5 space-y-3 overflow-y-auto">
         <p className="text-sm text-ink-soft">
-          Pick the debit note that belongs to this register row. Use this when In Euler is Not claimed or Check match but you already raised it in the OEM app.
+          Pick the debit note — and the item, when Euler bundled several Extra Support
+          rows under one claim id. Money on this register is never taken from Coulson.
         </p>
         <Field label="OEM claim number">
           <Input data-testid="manual-oem-claim-number" value={claimNumber}
@@ -499,12 +505,14 @@ function MatchOemModal({ claim, onClose, onDone }) {
         <div className="max-h-48 overflow-y-auto border border-line rounded-lg divide-y divide-zinc-100">
           {shown.map((r) => (
             <button type="button" key={r.claimNumber}
-              onClick={() => setClaimNumber(r.claimNumber)}
+              onClick={() => { setClaimNumber(r.claimNumber); setLineId((r.lineItems || []).length === 1 ? ((r.lineItems || [])[0].lineId || "") : ""); }}
               className={`w-full text-left px-3 py-2 text-xs hover:bg-zinc-50 ${
                 claimNumber === r.claimNumber ? "bg-cobalt/5" : ""}`}>
               <div className="font-mono font-semibold text-cobalt">{r.claimNumber}</div>
-              <div className="text-ink-faint">
-                {r.status} · {(r.lineItems || []).map((li) => li.chassis).filter(Boolean).join(", ") || "no chassis"}
+              <div className="text-ink-faint whitespace-normal">
+                {r.status} · {(r.lineItems || []).length > 1
+                  ? `${(r.lineItems || []).length} items`
+                  : oemLineText((r.lineItems || [])[0]) || ((r.lineItems || []).map((li) => li.chassis).filter(Boolean).join(", ") || "no chassis")}
               </div>
             </button>
           ))}
@@ -512,6 +520,18 @@ function MatchOemModal({ claim, onClose, onDone }) {
             <div className="px-3 py-4 text-ink-faint text-xs">No OEM claims. Sync from Euler first.</div>
           )}
         </div>
+        {lines.length > 1 && (
+          <Field label="Claim item">
+            <Select data-testid="manual-oem-line-id" value={lineId} onChange={(e) => setLineId(e.target.value)}>
+              <option value="">— pick item —</option>
+              {lines.map((li, i) => (
+                <option key={li.lineId || i} value={li.lineId || ""}>
+                  {oemLineText(li).slice(0, 80)}{li.totalAmount ? ` · ${li.totalAmount}` : ""}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
       </div>
       <div className="p-4 border-t border-line flex justify-between gap-2">
         <Button variant="ghost" onClick={clear} disabled={busy || !claim.manualOemClaimNumber}>Clear match</Button>

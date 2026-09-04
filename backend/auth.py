@@ -31,6 +31,12 @@ MONEY_ROLES = ("owner", "tl", "accounts")
 # Closing the deal: price, scheme, extra income, delivery, close, cancel, revive.
 # The commercial decisions an executive does not make.
 DEAL_DESK_ROLES = ("owner", "sales_gm", "tl")
+# Match OEM debit notes to the scheme register. Sales GM chases files but does
+# not post cash, so this is wider than MONEY_ROLES and does not include payments.
+OEM_CLAIM_ROLES = (*MONEY_ROLES, "sales_gm")
+# Pull the Coulson claim mirror. TL and Sales GM need this when a multi-item
+# debit note is missing lines or descriptions; Accounts does not.
+OEM_CLAIM_SYNC_ROLES = ("owner", "tl", "sales_gm")
 FIELD_ROLES = ("asm", "rm")
 # Money desk can write; ASM/RM / Sales GM may view Finance Register (disbursed vs remaining).
 FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", "sales_gm", *FIELD_ROLES)
@@ -320,6 +326,28 @@ def build_router(db):
             raise HTTPException(403, "Sales GM dashboard is for Sales GM (and Owner).")
         return user
 
+    async def oem_claim_desk_only(user=Depends(current_user)):
+        """Owner / TL / Accounts / Sales GM — view and match OEM claims.
+
+        Matching a debit note to the scheme register is a filing join, not a
+        money movement. Sales GM needs it for multi-item Extra Support claims.
+        """
+        if user.get("role") not in OEM_CLAIM_ROLES:
+            raise HTTPException(
+                403,
+                "OEM claims are for the Owner, Sales GM, a Team Leader or Accounts.",
+            )
+        return user
+
+    async def oem_claim_sync_only(user=Depends(current_user)):
+        """Owner / TL / Sales GM — pull the Euler claim mirror on demand."""
+        if user.get("role") not in OEM_CLAIM_SYNC_ROLES:
+            raise HTTPException(
+                403,
+                "Only the Owner, Sales GM or a Team Leader can sync claims from Euler.",
+            )
+        return user
+
     @router.post("/login")
     async def login(body: LoginIn):
         # The field is still called `email` so existing clients keep working, but
@@ -488,6 +516,8 @@ def build_router(db):
     router.finance_viewer_only = finance_viewer_only
     router.field_viewer_only = field_viewer_only
     router.sales_gm_only = sales_gm_only
+    router.oem_claim_desk_only = oem_claim_desk_only
+    router.oem_claim_sync_only = oem_claim_sync_only
     return router
 
 

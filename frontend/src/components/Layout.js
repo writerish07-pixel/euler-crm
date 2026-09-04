@@ -45,8 +45,8 @@ const NAV = [
   { section: "OEM & Commercial", items: [
     // Two different registers, deliberately named apart: the first is the dealer's
     // own scheme entitlement, the second is Euler's claim workflow mirrored in.
-    { to: "/claims", label: "Scheme Claim Register", icon: ReceiptText, moneyDesk: true },
-    { to: "/oem-claims", label: "OEM Claim Settlements", icon: FileCheck, moneyDesk: true },
+    { to: "/claims", label: "Scheme Claim Register", icon: ReceiptText, oemClaimDesk: true },
+    { to: "/oem-claims", label: "OEM Claim Settlements", icon: FileCheck, oemClaimDesk: true },
     { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },
     { to: "/executive-incentive", label: "Executive Incentive", icon: Trophy, gmHome: true },
@@ -80,7 +80,7 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, pendingApprovals, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
     : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk" : "EV Dealership";
   const nav = isOemFinance ? OEM_NAV : NAV;
@@ -117,6 +117,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             if (i.ownerOnly && !isOwner) return false;
             if (i.salesOnly && !isSalesStaff) return false;
             if (i.moneyDesk && !isMoneyDesk) return false;
+            if (i.oemClaimDesk && !canMatchOemClaims) return false;
             if (i.financeView && !canViewFinance) return false;
             if (i.dealDesk && !canEditCommercials) return false;
             if (i.accountsHome && !isAccounts && !isOwner) return false;
@@ -335,7 +336,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, canMatchOemClaims } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const location = useLocation();
@@ -388,6 +389,7 @@ export default function Layout({ children }) {
         canApproveLeads={canApproveLeads}
         isExecutive={isExecutive}
         canViewMonthly={canViewMonthly}
+        canMatchOemClaims={canMatchOemClaims}
         pendingApprovals={pendingApprovals}
         open={navOpen}
         onClose={() => setNavOpen(false)}

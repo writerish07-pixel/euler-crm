@@ -54,9 +54,9 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, gmHome, monthlyOk }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, gmHome, monthlyOk, oemClaimDesk }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canViewMonthly } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canViewMonthly, canMatchOemClaims } = auth;
   const loc = useLocation();
   if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
@@ -73,6 +73,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   }
   if (financeView && !canViewFinance) return <Navigate to={homePath(auth)} replace />;
   if (moneyDesk && !isMoneyDesk) return <Navigate to={homePath(auth)} replace />;
+  if (oemClaimDesk && !canMatchOemClaims) return <Navigate to={homePath(auth)} replace />;
   if (salesOnly && !isSalesStaff && !(fieldOk && isField)) {
     return <Navigate to={homePath(auth)} replace />;
   }
@@ -103,6 +104,7 @@ function AppRoutes() {
       dealDesk={opts.dealDesk}
       gmHome={opts.gmHome}
       monthlyOk={opts.monthlyOk}
+      oemClaimDesk={opts.oemClaimDesk}
     >
       {el}
     </Protected>
@@ -133,11 +135,11 @@ function AppRoutes() {
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
       <Route path="/insurance-agents" element={P(<InsuranceAgents />, { ownerOnly: true })} />
       <Route path="/deliveries" element={P(<Deliveries />)} />
-      <Route path="/claims" element={P(<Claims />, { moneyDesk: true })} />
+      <Route path="/claims" element={P(<Claims />, { oemClaimDesk: true })} />
       {/* Euler's own claim workflow, mirrored read-only. Deliberately a different
           page from the Scheme Claim Register above — different money, different
           lifecycle. See backend/oem_claims.py. */}
-      <Route path="/oem-claims" element={P(<OemClaims />, { moneyDesk: true })} />
+      <Route path="/oem-claims" element={P(<OemClaims />, { oemClaimDesk: true })} />
       <Route path="/claim-reconciliation" element={P(<ClaimReconciliation />, { ownerOnly: true })} />
       <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />
       <Route path="/incentive-master" element={P(<IncentiveMaster />, { ownerOnly: true })} />

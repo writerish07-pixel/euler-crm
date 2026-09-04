@@ -17,6 +17,7 @@ export const OEM_MATCH = {
 
 export const REGISTER_MATCH = {
   in_register:      { label: "In scheme register",      tone: "bg-emerald-50 text-emerald-700 ring-emerald-600/20", row: "" },
+  partial:          { label: "Part matched",            tone: "bg-amber-50 text-amber-800 ring-amber-600/20",      row: "bg-amber-50/40" },
   missing_register: { label: "Not in scheme register",  tone: "bg-violet-50 text-violet-800 ring-violet-600/20",   row: "bg-violet-50/50" },
   unmapped:         { label: "Check match",             tone: "bg-amber-50 text-amber-800 ring-amber-600/20",      row: "bg-amber-50/40" },
   unknown_lead:     { label: "No lead matched",         tone: "bg-zinc-100 text-zinc-600 ring-zinc-500/20",        row: "bg-zinc-50/80" },
@@ -40,6 +41,15 @@ const COMPONENT_LABEL = {
 
 export function componentLabel(key) {
   return COMPONENT_LABEL[key] || key || "";
+}
+
+/** Euler's own wording for a debit-note line (customer, claim type, approver). */
+export function oemLineText(li) {
+  const desc = String(li?.description || "").trim();
+  if (desc) return desc;
+  const bits = [li?.claimType, li?.customerName, li?.approvedBy && `Approved By :- ${li.approvedBy}`]
+    .filter(Boolean);
+  return bits.join(" · ") || componentLabel(li?.componentKey) || "Claim item";
 }
 
 export function oemClaimsHref({ q, chassis, invoice, leadId } = {}) {

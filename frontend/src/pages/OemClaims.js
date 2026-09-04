@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
@@ -30,7 +30,7 @@ function stageTone(days) {
 }
 
 export default function OemClaims() {
-  const { isOwner } = useAuth();
+  const { canSyncOemClaims } = useAuth();
   const [params, setParams] = useSearchParams();
   const [summary, setSummary] = useState(null);
   const [rows, setRows] = useState([]);
@@ -132,7 +132,7 @@ export default function OemClaims() {
             className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
             Scheme Claim Register <ExternalLink size={14} />
           </Link>
-          {isOwner ? (
+          {canSyncOemClaims ? (
             <Button data-testid="sync-oem-claims" onClick={sync} disabled={syncing}>
               <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
               {syncing ? "Syncing…" : "Sync from Euler"}
@@ -364,24 +364,42 @@ export default function OemClaims() {
               </div>
             ) : <Badge tone="bg-zinc-100 text-zinc-600 ring-zinc-500/20">Not linked</Badge>
           )},
-          { key: "vehicle", label: "Chassis / Invoice", render: (r) => (
+          { key: "vehicle", label: "Claim items", render: (r) => (
             (r.lineItems || []).length ? (
-            <div className="text-xs">
+            <div className="text-xs space-y-2">
               {(r.lineItems || []).map((li, i) => (
-                <div key={i} className="mb-1">
-                  <div className="font-medium">
-                    {componentLabel(li.componentKey) || li.claimType || "Claim item"}
+                <div key={li.lineId || i} className="mb-1 pb-1 border-b border-zinc-100 last:border-0 last:mb-0 last:pb-0"
+                  data-testid={`oem-line-${r.claimNumber}-${li.lineId || i}`}>
+                  <div className="font-medium text-ink whitespace-normal leading-snug">
+                    {oemLineText(li)}
                   </div>
-                  <div>{[li.model, li.variant].filter(Boolean).join(" ") || "—"}</div>
-                  <div className="font-mono text-ink-faint">{li.chassis || "—"}</div>
+                  {li.claimType && oemLineText(li) !== li.claimType ? (
+                    <div className="text-[10px] text-ink-faint">{li.claimType}</div>
+                  ) : null}
+                  <div className="text-ink-faint">
+                    {[li.model, li.variant].filter(Boolean).join(" ")
+                      || li.chassis
+                      || li.sourceInvoiceNumber
+                      || ""}
+                  </div>
+                  {li.chassis ? <div className="font-mono text-ink-faint">{li.chassis}</div> : null}
                   {li.sourceInvoiceNumber
                     ? <div className="font-mono text-ink-faint">{li.sourceInvoiceNumber}</div>
                     : null}
+                  {li.totalAmount ? (
+                    <div className="font-mono text-ink-soft">{inr(li.totalAmount)}</div>
+                  ) : null}
                   <div className={(li.documentCount || 0) > 0 ? "text-emerald-700" : "text-rose-600"}>
                     {(li.documentCount || 0) > 0
                       ? `${li.documentCount} doc${li.documentCount === 1 ? "" : "s"}`
                       : "No docs"}
                   </div>
+                  <button type="button"
+                    data-testid={`oem-manual-match-${r.claimNumber}-${li.lineId || i}`}
+                    onClick={(e) => { e.stopPropagation(); setMatchRow({ ...r, matchLine: li }); }}
+                    className="text-xs text-cobalt hover:underline inline-flex items-center gap-1 mt-0.5">
+                    <Link2 size={12} /> {li.leadId ? "Rematch" : "Match"}
+                  </button>
                 </div>
               ))}
             </div>
@@ -402,11 +420,15 @@ export default function OemClaims() {
               lines={r.lineItemCount} documented={r.documentedLineCount} />
           )},
           { key: "match", label: "", render: (r) => (
+            (r.lineItems || []).length > 1 ? (
+              <span className="text-[10px] text-ink-faint">Match each item</span>
+            ) : (
             <button type="button" data-testid={`oem-manual-match-${r.claimNumber}`}
-              onClick={(e) => { e.stopPropagation(); setMatchRow(r); }}
+              onClick={(e) => { e.stopPropagation(); setMatchRow({ ...r, matchLine: (r.lineItems || [])[0] }); }}
               className="text-xs text-cobalt hover:underline inline-flex items-center gap-1">
               <Link2 size={12} /> {r.registerMatch?.manual ? "Rematch" : "Match"}
             </button>
+            )
           )},
         ]}
         rows={visibleRows}
@@ -422,10 +444,11 @@ export default function OemClaims() {
 }
 
 function MatchRegisterModal({ row, onClose, onDone }) {
+  const line = row.matchLine || {};
   const [register, setRegister] = useState([]);
-  const [leadId, setLeadId] = useState((row.leadIds || [])[0] || "");
+  const [leadId, setLeadId] = useState(line.leadId || (row.leadIds || [])[0] || "");
   const [componentKey, setComponentKey] = useState(
-    (row.registerMatch?.mappedComponents || [])[0] || "");
+    line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -442,6 +465,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
     try {
       await post("/claims/oem-match", {
         leadId, componentKey, claimNumber: row.claimNumber,
+        lineId: line.lineId || "",
       });
       toast.success(`Matched ${row.claimNumber} to the scheme register`);
       onDone();
@@ -467,10 +491,15 @@ function MatchRegisterModal({ row, onClose, onDone }) {
       <div className="p-5 border-b border-line">
         <div className="font-heading font-bold text-ink">Match to Scheme Claim Register</div>
         <div className="text-xs text-ink-faint mt-1 font-mono">{row.claimNumber}</div>
+        {oemLineText(line) ? (
+          <div className="text-xs text-ink-soft mt-2 whitespace-normal leading-snug">{oemLineText(line)}</div>
+        ) : null}
       </div>
       <div className="p-5 space-y-3 overflow-y-auto">
         <p className="text-sm text-ink-soft">
-          Use this when chassis or claim wording did not join automatically. Money stays on the register; this only links the OEM claim number.
+          Use this when chassis or claim wording did not join automatically. A debit
+          note with several Extra Support items is matched one item at a time. Money
+          stays on the register; this only links the OEM claim.
         </p>
         <Field label="Lead">
           <Select value={leadId} onChange={(e) => { setLeadId(e.target.value); setComponentKey(""); }}>

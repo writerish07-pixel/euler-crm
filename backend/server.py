@@ -74,6 +74,8 @@ money_desk_only = auth_router.money_desk_only
 field_viewer_only = auth_router.field_viewer_only
 finance_viewer_only = auth_router.finance_viewer_only
 sales_gm_only = auth_router.sales_gm_only
+oem_claim_desk_only = auth_router.oem_claim_desk_only
+oem_claim_sync_only = auth_router.oem_claim_sync_only
 
 api = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
 public = APIRouter(prefix="/api")
@@ -6261,7 +6263,7 @@ async def coulson_sync(act=Depends(actor)):
 # Euler's own claim-settlement workflow, mirrored read-only. Deliberately separate
 # from the Scheme Claim Register at /claims: see backend/oem_claims.py for why folding
 # the two together would corrupt the commercial reports.
-@api.post("/integrations/coulson/sync-claims", dependencies=[Depends(owner_only)])
+@api.post("/integrations/coulson/sync-claims", dependencies=[Depends(oem_claim_sync_only)])
 async def coulson_sync_claims(act=Depends(actor)):
     try:
         result = await oem_claims.sync_claims(db)
@@ -6289,7 +6291,7 @@ async def coulson_sync_claims(act=Depends(actor)):
     return result
 
 
-@api.get("/oem-claims", dependencies=[Depends(money_desk_only)])
+@api.get("/oem-claims", dependencies=[Depends(oem_claim_desk_only)])
 async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False,
                                  q: str = "", chassis: str = "", invoice: str = "",
                                  missingDoc: bool = False):
@@ -6298,7 +6300,7 @@ async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: b
         q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc)
 
 
-@api.get("/oem-claims/summary", dependencies=[Depends(money_desk_only)])
+@api.get("/oem-claims/summary", dependencies=[Depends(oem_claim_desk_only)])
 async def oem_portal_claims_summary():
     return await oem_claims.claims_summary(db)
 
@@ -8221,6 +8223,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
                 "receivedAmount": (existing or {}).get("receivedAmount", 0),
                 "claimReference": (existing or {}).get("claimReference", ""),
                 "manualOemClaimNumber": (existing or {}).get("manualOemClaimNumber") or "",
+                "manualOemLineId": (existing or {}).get("manualOemLineId") or "",
                 "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
             })
     # Manual claims (OEM incentives / executive incentives) — merged into the register
@@ -8282,6 +8285,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
             "receivedAmount": received,
             "claimReference": c.get("claimReference", ""),
             "manualOemClaimNumber": c.get("manualOemClaimNumber") or "",
+            "manualOemLineId": c.get("manualOemLineId") or "",
             "submittedDate": c.get("submittedDate", ""), "approvedDate": c.get("approvedDate", ""),
             "ageingDays": _claim_ageing_days(c.get("submittedDate", ""), status, c.get("approvedDate", "")),
             "permanent": True,
@@ -8317,7 +8321,8 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
             oem_index, row.get("leadId") or "", row.get("componentKey") or "",
             chassis=row.get("chassisNumber") or "",
             invoice=row.get("invoiceNumber") or "",
-            manual_claim_number=row.get("manualOemClaimNumber") or "")
+            manual_claim_number=row.get("manualOemClaimNumber") or "",
+            manual_line_id=row.get("manualOemLineId") or "")
         row, _ = oem_claims.overlay_register_from_oem(row, match)
         row["oemMatch"] = match
         row["ageingDays"] = _claim_ageing_days(
@@ -8330,28 +8335,31 @@ class OemClaimMatchIn(BaseModel):
     leadId: str = ""
     componentKey: str = ""
     claimNumber: str = ""
+    lineId: str = ""
 
 
-@api.post("/claims/oem-match", dependencies=[Depends(money_desk_only)])
+@api.post("/claims/oem-match", dependencies=[Depends(oem_claim_desk_only)])
 async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
     """Manually join a Scheme Claim Register row to an OEM Claim Settlements debit note.
 
     Use when chassis/wording auto-match is wrong or missing. Money on the register is
-    never taken from Coulson.
+    never taken from Coulson. A debit note with several items (Extra Support) is
+    matched one line at a time via `lineId`.
     """
     try:
         out = await oem_claims.link_register_to_oem(
             db, lead_id=body.leadId, component_key=body.componentKey,
-            claim_number=body.claimNumber)
+            claim_number=body.claimNumber, line_id=body.lineId)
     except ValueError as e:
         raise HTTPException(422, str(e))
     await oem_claims.apply_oem_filing_to_register(db)
     await write_audit(act, "oem-match", "claim", leadId=body.leadId,
-                      new={"componentKey": body.componentKey, "claimNumber": body.claimNumber})
+                      new={"componentKey": body.componentKey, "claimNumber": body.claimNumber,
+                           "lineId": body.lineId})
     return {"ok": True, **out}
 
 
-@api.post("/claims/oem-match/clear", dependencies=[Depends(money_desk_only)])
+@api.post("/claims/oem-match/clear", dependencies=[Depends(oem_claim_desk_only)])
 async def clear_claim_oem_match(body: OemClaimMatchIn, act=Depends(actor)):
     try:
         rec = await oem_claims.clear_register_oem_link(
@@ -8364,7 +8372,7 @@ async def clear_claim_oem_match(body: OemClaimMatchIn, act=Depends(actor)):
     return {"ok": True, "register": rec}
 
 
-@api.get("/claims/oem-only", dependencies=[Depends(money_desk_only)])
+@api.get("/claims/oem-only", dependencies=[Depends(oem_claim_desk_only)])
 async def claims_only_in_oem():
     """The reverse direction: claims Euler is processing that this register has no row for.
 
