@@ -884,7 +884,9 @@ function PasswordCell({ row, onSaved }) {
       <div className="flex items-center gap-1.5">
         <Input data-testid={`user-password-${row.userId}`} value={value}
           className="!py-1 text-xs w-32 font-mono"
-          placeholder="set password" onChange={(e) => setValue(e.target.value)} />
+          placeholder="set password"
+          onFocus={(e) => e.target.select()}
+          onChange={(e) => setValue(e.target.value)} />
         {dirty && (
           <Button variant="secondary" className="!py-1 !px-2 text-xs" disabled={busy} onClick={save}
             data-testid={`save-password-${row.userId}`}>
