@@ -112,7 +112,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
 
   return (
     <Drawer open onClose={onClose} width="max-w-5xl" title="Upload agent MIS"
-      subtitle="Match the agent's payout file to Insurance Payouts, then tick and approve received"
+      subtitle="Chassis is unique on the agent's MIS. We fetch the payout from that vehicle, then tick and approve received"
       footer={<div className="flex justify-between items-center gap-2">
         <Button variant="ghost" data-testid="mis-template-btn" onClick={downloadTemplate}>
           <Download size={15} /> Download template
@@ -134,7 +134,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-line rounded-xl py-12 cursor-pointer hover:border-cobalt hover:bg-cobalt-tint/30 transition-colors">
           <UploadCloud size={32} className="text-ink-faint" />
           <div className="text-sm font-medium text-ink">Drop the agent's MIS (.xlsx or .csv)</div>
-          <div className="text-xs text-ink-faint">Policy number, customer, mobile, or lead ID plus the payout amount</div>
+          <div className="text-xs text-ink-faint">Chassis is the unique key — we fetch customer, policy and payout from that vehicle</div>
           <input type="file" accept=".xlsx,.xls,.csv" className="hidden"
             onChange={(e) => onFile(e.target.files?.[0])} />
         </label>
@@ -179,6 +179,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
                 <tr className="bg-zinc-50 text-[11px] uppercase tracking-wide text-ink-faint">
                   <th className="px-3 py-2 w-10" />
                   <th className="px-3 py-2">Customer</th>
+                  <th className="px-3 py-2">Chassis</th>
                   <th className="px-3 py-2">Policy</th>
                   <th className="px-3 py-2 text-right">MIS</th>
                   {isOwner && <th className="px-3 py-2 text-right">Expected</th>}
@@ -196,8 +197,9 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
                     </td>
                     <td className="px-3 py-2">
                       <div className="font-medium">{r.registerCustomer || r.customerName}</div>
-                      <div className="text-[11px] text-ink-faint">{r.entryId}</div>
+                      <div className="text-[11px] text-ink-faint">{r.entryId}{r.leadId ? ` · ${r.leadId}` : ""}</div>
                     </td>
+                    <td className="px-3 py-2 font-mono text-xs">{r.chassisNumber || r.registerChassis || "—"}</td>
                     <td className="px-3 py-2 font-mono text-xs">{r.policyNumber || r.registerPolicy || "—"}</td>
                     <td className="px-3 py-2 text-right font-mono">{inr(r.misAmount)}</td>
                     {isOwner && <td className="px-3 py-2 text-right font-mono">{inr(r.expectedPayout)}</td>}
@@ -214,7 +216,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
                   </tr>
                 ))}
                 {(data.matched || []).length === 0 && (
-                  <tr><td colSpan={7} className="px-3 py-8 text-center text-ink-faint">No rows matched a payout entry</td></tr>
+                  <tr><td colSpan={isOwner ? 8 : 6} className="px-3 py-8 text-center text-ink-faint">No rows matched a payout entry</td></tr>
                 )}
               </tbody>
             </table>
@@ -228,7 +230,8 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
               </div>
               <ul className="text-xs text-amber-900 space-y-1">
                 {data.unmatchedMis.slice(0, 12).map((r, i) => (
-                  <li key={i}>Row {r.row}: {r.customerName || r.policyNumber || "—"} · {r.reason}</li>
+                  <li key={i}>Row {r.row}: {r.chassisNumber || r.customerName || r.policyNumber || "—"}
+                    {r.registerCustomer ? ` · ${r.registerCustomer}` : ""}{r.leadId ? ` · ${r.leadId}` : ""} · {r.reason}</li>
                 ))}
               </ul>
             </Card>

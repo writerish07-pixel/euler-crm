@@ -5792,6 +5792,7 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
         "variant": lead.get("variant", ""),
         "insuranceCompany": lead.get("insurerName", "") or (existing or {}).get("insuranceCompany", ""),
         "policyNumber": (existing or {}).get("policyNumber", ""),
+        "chassisNumber": lead.get("chassisNumber", "") or (existing or {}).get("chassisNumber", ""),
         "insuranceAmount": premium,
         # Preserve a manually set rate / already-received money on re-delivery edits.
         "payoutRate": ce.num((existing or {}).get("payoutRate")),
@@ -7344,7 +7345,7 @@ def _mis_template_bytes():
     ws.title = "Agent MIS"
     headers = [lbl for lbl, _fld in ins_mis.MIS_COLUMNS]
     ws.append(headers)
-    ws.append(["POL123", "Sample Customer", "9876543210", "", "", 19000, 8500,
+    ws.append(["MD9EMVDL26G217350", "POL123", "Sample Customer", "9876543210", "", "", 19000, 8500,
                "ICICI Lombard", "UTR123", "2026-08-15"])
     buf = io.BytesIO()
     wb.save(buf)
@@ -7375,7 +7376,22 @@ async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
     entries = await db.insurance.find().to_list(8000)
+    lead_ids = [e.get("leadId") for e in entries if e.get("leadId")]
+    leads = []
+    if lead_ids:
+        leads = await db.leads.find(
+            {"leadId": {"$in": lead_ids}},
+            {"leadId": 1, "chassisNumber": 1, "customerName": 1, "mobile": 1, "_id": 0},
+        ).to_list(8000)
+    entries = ins_mis.enrich_entries_with_chassis(entries, leads)
     matched = ins_mis.match_file(rows, entries)
+    need_ch = [r.get("chassisNumber") for r in matched["unmatchedMis"] if r.get("chassisNumber")]
+    if need_ch:
+        extra = await db.leads.find(
+            {"chassisNumber": {"$nin": ["", None]}},
+            {"leadId": 1, "chassisNumber": 1, "customerName": 1, "mobile": 1, "_id": 0},
+        ).to_list(8000)
+        ins_mis.attach_lead_hint(matched["unmatchedMis"], extra)
     is_owner = act.get("role") == "owner"
     if not is_owner:
         for r in matched["matched"]:

@@ -1,8 +1,8 @@
 """Match an insurance agent's MIS spreadsheet to Insurance Payout entries.
 
-The agent sends a payout MIS (policy / customer / amount). We map it onto the
-register, show expected vs MIS difference, and the owner ticks rows to accept
-the agent's figure as received — even when it is short or over expected.
+The agent file keys each vehicle by **chassis**. We dedupe on that VIN, fetch the
+Insurance Payout / lead details, show expected vs MIS difference, and the owner
+ticks rows to accept the agent's figure as received — even when it is short or over.
 """
 from __future__ import annotations
 
@@ -12,13 +12,14 @@ from datetime import date, datetime
 import commercial as ce
 
 MIS_COLUMNS = (
+    ("Chassis", "chassisNumber"),
     ("Policy Number", "policyNumber"),
     ("Customer Name", "customerName"),
     ("Mobile", "mobile"),
     ("Lead ID", "leadId"),
     ("Entry ID", "entryId"),
     ("Premium", "insuranceAmount"),
-    ("Payout Amount", "misAmount"),
+    ("Distribution Fee", "misAmount"),
     ("Insurer", "insuranceCompany"),
     ("UTR / Reference", "reference"),
     ("Policy Date", "policyDate"),
@@ -26,29 +27,42 @@ MIS_COLUMNS = (
 
 # Extra header spellings agents actually put on MIS files.
 _FIELD_ALIASES = {
+    "chassisNumber": (
+        "chassis", "chassis number", "chassis no", "chassis no.", "chassis #",
+        "chasis", "chasis number", "vin", "vin no", "vehicle chassis",
+    ),
     "policyNumber": (
         "policy number", "policy no", "policy no.", "policy #", "policyno",
         "policy", "policy_no",
     ),
     "customerName": (
-        "customer name", "customer", "insured", "insured name", "proposer",
+        "insured name", "customer name", "customer", "insured", "proposer",
         "name",
     ),
     "mobile": ("mobile", "phone", "mobile no", "mobile number", "contact"),
     "leadId": ("lead id", "leadid", "lead"),
     "entryId": ("entry id", "entryid", "entry"),
     "insuranceAmount": (
-        "premium", "premium amount", "idv premium", "insurance amount",
-        "od premium",
+        "gross", "gross premium", "premium", "premium amount", "insurance amount",
+        "od premium", "net",
     ),
     "misAmount": (
+        "distribut fee", "distribution fee", "distributor fee", "distrib fee",
         "payout amount", "payout", "commission", "agent payout", "mis amount",
-        "net payout", "payout rs", "amount", "received", "brokerage",
+        "net payout", "payout rs", "brokerage", "amount", "received",
     ),
-    "insuranceCompany": ("insurer", "insurance company", "company"),
+    "insuranceCompany": (
+        "insurance comp", "insurance company", "insurer", "company",
+    ),
     "reference": ("utr", "utr / reference", "reference", "utr no", "txn id"),
-    "policyDate": ("policy date", "date", "risk date"),
+    "policyDate": (
+        "valid from", "valid f", "policy date", "risk date", "date",
+    ),
 }
+
+
+def _norm_chassis(s):
+    return re.sub(r"\s+", "", str(s or "")).strip().upper()
 
 
 def _alnum(s):
@@ -121,6 +135,8 @@ def parse_rows(raw_rows, mapping):
                 rec[field] = _digits(cell)
             elif field == "policyDate":
                 rec[field] = _as_iso_date(cell)
+            elif field == "chassisNumber":
+                rec[field] = _norm_chassis(cell)
             else:
                 rec[field] = str(cell).strip() if cell not in (None, "None") else ""
         if not empty:
@@ -143,18 +159,93 @@ def _as_iso_date(value):
             return date(int(y), int(mo), int(d)).isoformat()
         except ValueError:
             return s
-    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", s)
+    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$", s)
     if m:
         d, mo, y = m.groups()
+        yi = int(y)
+        if yi < 100:
+            yi += 2000
         try:
-            return date(int(y), int(mo), int(d)).isoformat()
+            return date(yi, int(mo), int(d)).isoformat()
+        except ValueError:
+            return s
+    m = re.match(r"^(\d{1,2})[-/\s]([A-Za-z]{3,9})[-/\s](\d{2,4})$", s)
+    if m:
+        d, mon, y = m.groups()
+        yi = int(y)
+        if yi < 100:
+            yi += 2000
+        months = ("jan", "feb", "mar", "apr", "may", "jun",
+                  "jul", "aug", "sep", "oct", "nov", "dec")
+        try:
+            mo = months.index(mon[:3].lower()) + 1
+            return date(yi, mo, int(d)).isoformat()
         except ValueError:
             return s
     return s
 
 
+def enrich_entries_with_chassis(entries, leads):
+    """Copy the lead's chassis onto each payout so the agent MIS can join on VIN."""
+    by_id = {}
+    for lead in leads or []:
+        lid = str(lead.get("leadId") or "").strip()
+        if lid:
+            by_id[lid] = _norm_chassis(lead.get("chassisNumber"))
+    out = []
+    for e in entries or []:
+        e = dict(e)
+        e["chassisNumber"] = (
+            _norm_chassis(e.get("chassisNumber"))
+            or by_id.get(str(e.get("leadId") or "").strip())
+            or ""
+        )
+        out.append(e)
+    return out
+
+
+def unique_by_chassis(rows):
+    """One MIS row per chassis. Blank-chassis rows keep other keys (policy / mobile)."""
+    seen = set()
+    out, dupes = [], []
+    for row in rows or []:
+        ch = _norm_chassis(row.get("chassisNumber"))
+        if not ch:
+            out.append(row)
+            continue
+        row = {**row, "chassisNumber": ch}
+        if ch in seen:
+            dupes.append({**_mis_public(row), "reason": "duplicate_chassis"})
+            continue
+        seen.add(ch)
+        out.append(row)
+    return out, dupes
+
+
+def attach_lead_hint(unmatched, leads):
+    """When chassis misses a payout entry, still fetch the lead so the desk sees who it is."""
+    by_ch = {}
+    for lead in leads or []:
+        ch = _norm_chassis(lead.get("chassisNumber"))
+        if ch:
+            by_ch.setdefault(ch, lead)
+    for r in unmatched or []:
+        if r.get("reason") not in ("chassis_not_found", "no_payout_amount", "duplicate_chassis"):
+            continue
+        lead = by_ch.get(_norm_chassis(r.get("chassisNumber")))
+        if not lead:
+            continue
+        r["leadId"] = lead.get("leadId") or r.get("leadId") or ""
+        r["registerCustomer"] = lead.get("customerName") or ""
+        r["registerChassis"] = _norm_chassis(lead.get("chassisNumber"))
+        if r.get("reason") == "chassis_not_found":
+            r["reason"] = "no_payout_entry"
+    return unmatched
+
+
 def _entry_indexes(entries):
-    by_entry, by_lead, by_policy, by_mobile, by_name_prem = {}, {}, {}, {}, {}
+    by_entry, by_lead, by_chassis, by_policy, by_mobile, by_name_prem = (
+        {}, {}, {}, {}, {}, {})
     for e in entries:
         if str(e.get("status") or "").startswith("N/A"):
             continue
@@ -164,6 +255,9 @@ def _entry_indexes(entries):
         lid = str(e.get("leadId") or "").strip()
         if lid:
             by_lead.setdefault(lid.upper(), []).append(e)
+        ch = _norm_chassis(e.get("chassisNumber"))
+        if ch:
+            by_chassis.setdefault(ch, []).append(e)
         pol = _alnum(e.get("policyNumber"))
         if pol:
             by_policy.setdefault(pol, []).append(e)
@@ -173,7 +267,7 @@ def _entry_indexes(entries):
         nm = _name(e.get("customerName"))
         if nm:
             by_name_prem.setdefault(nm, []).append(e)
-    return by_entry, by_lead, by_policy, by_mobile, by_name_prem
+    return by_entry, by_lead, by_chassis, by_policy, by_mobile, by_name_prem
 
 
 def _pick(hits, reason_ok, reason_amb):
@@ -185,14 +279,21 @@ def _pick(hits, reason_ok, reason_amb):
 
 
 def match_row(row, indexes):
-    """Return (entry, matchKey) or (None, reason)."""
-    by_entry, by_lead, by_policy, by_mobile, by_name_prem = indexes
+    """Return (entry, matchKey) or (None, reason). Chassis wins — it is unique on the vehicle."""
+    by_entry, by_lead, by_chassis, by_policy, by_mobile, by_name_prem = indexes
     eid = str(row.get("entryId") or "").strip()
     if eid:
         hit = by_entry.get(eid.upper())
         if hit:
             return hit, "entryId"
         return None, "entry_id_not_found"
+    ch = _norm_chassis(row.get("chassisNumber"))
+    if ch:
+        hits = by_chassis.get(ch) or []
+        picked, why = _pick(hits, "chassis", "ambiguous_chassis")
+        if picked or why:
+            return picked, why
+        return None, "chassis_not_found"
     lid = str(row.get("leadId") or "").strip()
     if lid:
         hits = by_lead.get(lid.upper()) or []
@@ -224,10 +325,12 @@ def match_row(row, indexes):
 
 
 def match_file(mis_rows, entries):
+    rows, chassis_dupes = unique_by_chassis(mis_rows)
     indexes = _entry_indexes(entries)
     used = set()
     matched, unmatched_mis = [], []
-    for row in mis_rows:
+    unmatched_mis.extend(chassis_dupes)
+    for row in rows:
         amount = parse_money(row.get("misAmount"))
         if amount <= 0:
             unmatched_mis.append({**_mis_public(row), "reason": "no_payout_amount"})
@@ -247,9 +350,10 @@ def match_file(mis_rows, entries):
         matched.append({
             **_mis_public(row),
             "entryId": eid,
-            "leadId": entry.get("leadId") or "",
+            "leadId": entry.get("leadId") or row.get("leadId") or "",
             "registerCustomer": entry.get("customerName") or "",
             "registerPolicy": entry.get("policyNumber") or "",
+            "registerChassis": entry.get("chassisNumber") or "",
             "insuranceAgentName": entry.get("insuranceAgentName") or "",
             "expectedPayout": expected,
             "alreadyReceived": already,
@@ -272,6 +376,7 @@ def match_file(mis_rows, entries):
             "leadId": e.get("leadId") or "",
             "customerName": e.get("customerName") or "",
             "policyNumber": e.get("policyNumber") or "",
+            "chassisNumber": e.get("chassisNumber") or "",
             "mobile": e.get("mobile") or "",
             "expectedPayout": ce.round2(ce.num(e.get("expectedPayout"))),
             "receivedPayout": ce.round2(ce.num(e.get("receivedPayout"))),
@@ -296,6 +401,7 @@ def match_file(mis_rows, entries):
 def _mis_public(row):
     return {
         "row": row.get("_row"),
+        "chassisNumber": _norm_chassis(row.get("chassisNumber")),
         "policyNumber": row.get("policyNumber") or "",
         "customerName": row.get("customerName") or "",
         "mobile": row.get("mobile") or "",
