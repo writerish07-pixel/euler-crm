@@ -265,6 +265,26 @@ def test_needs_detail_keeps_asking_open_claims_with_no_item_docs():
     assert oem_claims.needs_detail(settled, row) is False
 
 
+def test_needs_detail_keeps_asking_until_every_line_has_its_own_doc():
+    """AF-122-CL2627106: three items on one invoice, file on the first only."""
+    row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
+    partial = {"detailFetchedAt": "x", "docsCheckedAt": "x",
+               "lineItems": [
+                   {"chassis": CHASSIS, "documentCount": 1},
+                   {"chassis": CHASSIS, "documentCount": 0},
+                   {"chassis": CHASSIS, "documentCount": 0},
+               ],
+               "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0,
+               "status": "RM Approval Pending"}
+    assert oem_claims.needs_detail(partial, row) is True
+    complete = {**partial, "lineItems": [
+        {"chassis": CHASSIS, "documentCount": 1},
+        {"chassis": CHASSIS, "documentCount": 1},
+        {"chassis": CHASSIS, "documentCount": 2},
+    ]}
+    assert oem_claims.needs_detail(complete, row) is False
+
+
 def test_needs_detail_when_chassis_never_landed():
     """A stored row with no vehicle ids is the blank OEM Settlements column."""
     row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
@@ -1350,6 +1370,42 @@ def test_has_document_yes_from_supporting_uploads():
     empty = oem_claims.merge_detail(doc, inner)
     assert empty["hasDocument"] is False
     assert empty["documentCount"] == 0
+
+
+def test_has_document_no_until_every_line_item_has_its_own_file():
+    """One debit note, three claim items, one invoice — each item needs Docs."""
+    inner = journey("n1", "AF-122-CL2627106")
+    first = dict(inner["line_items"][0])
+    first["id"] = "line-1"
+    first["description"] = f"Insurance Benefits Up to for invoice {INVOICE}"
+    first["documents"] = [{"document_id": "d1", "file_url": "https://example.invalid/a.jpeg"}]
+    second = dict(inner["line_items"][0])
+    second["id"] = "line-2"
+    second["description"] = f"RTO Benefit for invoice {INVOICE}"
+    second["documents"] = []
+    third = dict(inner["line_items"][0])
+    third["id"] = "line-3"
+    third["description"] = f"Consumer Discount for invoice {INVOICE}"
+    third["documents"] = []
+    inner["line_items"] = [first, second, third]
+    raw = list_row("n1", "AF-122-CL2627106")
+    raw["debit_note_s3_link"] = ""
+    got = oem_claims.merge_detail(oem_claims.claim_doc_from_row(raw), inner)
+    assert got["lineItemCount"] == 3
+    assert got["documentedLineCount"] == 1
+    assert got["hasDocument"] is False
+    assert got["lineItems"][0]["documentCount"] == 1
+    assert got["lineItems"][1]["documentCount"] == 0
+    assert got["lineItems"][2]["documentCount"] == 0
+    assert got["lineItems"][0]["componentKey"] == "insuranceBenefit"
+    assert got["lineItems"][1]["componentKey"] == "rtoBenefit"
+    assert got["lineItems"][2]["componentKey"] == "consumerDiscount"
+    third["documents"] = [{"document_id": "d3"}]
+    second["documents"] = [{"document_id": "d2"}]
+    inner["line_items"] = [first, second, third]
+    full = oem_claims.merge_detail(oem_claims.claim_doc_from_row(raw), inner)
+    assert full["hasDocument"] is True
+    assert full["documentedLineCount"] == 3
 
 
 def test_item_docs_count_from_coulson_aliases():

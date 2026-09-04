@@ -278,6 +278,7 @@ def normalise_line_item(item):
         "leadId": str(item.get("leadId") or ""),
         "leadCustomer": str(item.get("leadCustomer") or ""),
         "matchedBy": str(item.get("matchedBy") or ""),
+        "componentKey": map_claim_type_to_component(claim_type, description),
     }
 
 
@@ -294,24 +295,37 @@ def _lines_have_vehicle(lines):
     return any((li.get("chassis") or li.get("sourceInvoiceNumber")) for li in (lines or []))
 
 
+def claim_lines(doc):
+    return [li for li in (doc.get("lineItems") or []) if isinstance(li, dict)]
+
+
+def documented_line_count(doc):
+    return sum(1 for li in claim_lines(doc) if int(li.get("documentCount") or 0) > 0)
+
+
 def claim_document_count(doc):
-    return sum(int(li.get("documentCount") or 0) for li in (doc.get("lineItems") or []))
+    return sum(int(li.get("documentCount") or 0) for li in claim_lines(doc))
 
 
 def claim_has_document(doc):
-    """True when the desk uploaded files on a Claim Item (Coulson's Docs column).
+    """True only when every claim item has its own Docs upload.
 
-    That is `line_items[].documents[]` — the "1 Docs" / Add Documents control, not
-    Euler's generated debit-note PDF (`claimDocumentUrl`). The PDF exists on most
-    claims whether or not anyone attached supporting files, so treating it as Yes
-    hid the rows that still need an upload.
+    One Coulson debit note often carries several lines on the same chassis /
+    invoice (Insurance, RTO, Consumer Discount, …). Each line has its own
+    Add Documents control. A file on the first item does not cover the others.
     """
-    return claim_document_count(doc) > 0
+    lines = claim_lines(doc)
+    if not lines:
+        return False
+    return all(int(li.get("documentCount") or 0) > 0 for li in lines)
 
 
 def stamp_document_flag(doc):
     doc = doc if isinstance(doc, dict) else {}
+    lines = claim_lines(doc)
     doc["documentCount"] = claim_document_count(doc)
+    doc["lineItemCount"] = len(lines)
+    doc["documentedLineCount"] = documented_line_count(doc)
     doc["hasDocument"] = claim_has_document(doc)
     return doc
 
@@ -400,7 +414,8 @@ def needs_detail(existing, row_doc):
 
     Item Docs are uploaded after filing, with no status change. We re-fetch until
     the journey has been seen for documents (`docsCheckedAt`), and we keep asking
-    open claims that still have none so a later Add Documents lands on the next sync.
+    open claims until every line item has its own file — one upload on a
+    multi-item debit note does not cover the rest.
     """
     if not existing or not existing.get("detailFetchedAt"):
         return True
@@ -410,9 +425,7 @@ def needs_detail(existing, row_doc):
         return True
     if abs(_num(existing.get("detailAmountAtFetch")) - _num(row_doc.get("approvedAmount"))) > 0.005:
         return True
-    # Docs column lives on the journey. Count > 0 from a previous pull is enough.
-    # Open claims with none are re-fetched so Add Documents after filing still lands.
-    if claim_document_count(existing) == 0:
+    if not claim_has_document(existing):
         if not existing.get("docsCheckedAt"):
             return True
         status = existing.get("status") or (
@@ -893,6 +906,8 @@ async def register_match_index(db):
                 "description": "",
                 "hasDocument": bool(row.get("hasDocument")),
                 "documentCount": int(row.get("documentCount") or 0),
+                "lineItemCount": int(row.get("lineItemCount") or 0),
+                "documentedLineCount": int(row.get("documentedLineCount") or 0),
                 "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
             }
         for line in row.get("lineItems") or []:
@@ -954,7 +969,7 @@ def _state_from_hits(hits):
         "stageLabel": pick.get("stageLabel") or "",
         "stageDays": int(pick.get("stageDays") or 0),
         "createdAt": str(pick.get("createdAt") or "")[:10],
-        "hasDocument": any(h.get("hasDocument") for h in hits),
+        "hasDocument": bool(hits) and all(h.get("hasDocument") for h in hits),
         "documentCount": max((int(h.get("documentCount") or 0) for h in hits), default=0),
         "claimDocumentUrl": next((h.get("claimDocumentUrl") for h in hits if h.get("claimDocumentUrl")), "") or "",
         "detail": detail,
