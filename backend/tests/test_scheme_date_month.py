@@ -37,6 +37,15 @@ SEP = [
 ROWS = AUG + SEP
 
 
+def test_prior_month_does_not_leak_when_new_month_has_no_circular():
+    """When September has no rows, August's scheme must not still apply."""
+    empty = ce.get_scheme_shares_for_lead(MODEL, "", "2026-09-10", AUG)
+    assert empty == {}
+    rules = ce.get_scheme_offer_rules_for_vehicle(MODEL, "", "2026-09-10", AUG)
+    assert not any((rules.get("rules") or {}).get(k, {}).get("allowed") for k in
+                   ("loyaltyBonus", "consumerDiscount"))
+
+
 def test_shares_switch_when_date_crosses_month():
     aug = ce.get_scheme_shares_for_lead(MODEL, "", "2026-08-15", ROWS)
     sep = ce.get_scheme_shares_for_lead(MODEL, "", "2026-09-10", ROWS)

@@ -435,24 +435,19 @@ def _norm_month(value):
 def get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows):
     """Active scheme rows for a lead model/variant on a booking date -> map componentKey -> shares.
 
-    booking_date falls back to today's date when empty (e.g. Scheme applied before Booking,
-    which the API allows since canScheme only requires an Active lead, not a Booked one) so the
-    effective date is always deterministic. Previously an empty booking_date produced iso="",
-    which silently disabled the effectiveFrom/effectiveTo window check below (`iso and ...`
-    short-circuited to False) -- every active Scheme Master row for the model, from every
-    circular month, was treated as "in window" and merged by componentKey. That was harmless
-    when a component's key stayed the same across months (the later month simply overwrote the
-    earlier one), but broke silently when a component's key changed between circulars (e.g. July's
-    combined 'rtoInsuranceBenefit' vs August's split 'rtoBenefit'+'insuranceBenefit') -- the merge
-    doesn't overwrite distinct keys, it adds them, double-claiming the same entitlement. Falling
-    back to today's date makes Scheme-before-Booking and Scheme-after-Booking resolve to the
-    identical Scheme Master rows for the same business date."""
+    Only the circular for that calendar month is used. Last month's scheme does
+    not leak into a month that has no rows yet — the owner must enter the new
+    circular (or a future OEM fetch, if Coulson ever exposes one).
+
+    booking_date falls back to today when empty so Scheme-before-Booking and
+    Scheme-after-Booking on the same business date resolve the same rows.
+    """
     effective_date = str(booking_date or "")[:10]
     if not effective_date:
         effective_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     month = scheme_month_from_date(effective_date)
     iso = effective_date
-    exact, in_window, any_family = {}, {}, {}
+    exact = {}
     for r in (scheme_rows or []):
         if str(r.get("status") or "").lower() != "active":
             continue
@@ -463,33 +458,25 @@ def get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows):
         key = r.get("componentKey")
         if not key:
             continue
-        r_month = _norm_month(r.get("schemeMonth") or month)
-        payload = {
+        tagged = _norm_month(r.get("schemeMonth") or "")
+        if tagged and tagged != month:
+            continue
+        eff_from = str(r.get("effectiveFrom") or "")[:10]
+        eff_to = str(r.get("effectiveTo") or "")[:10]
+        if eff_from and iso and iso < eff_from:
+            continue
+        if eff_to and iso and iso > eff_to:
+            continue
+        if not tagged and not (eff_from or eff_to):
+            continue
+        exact[key] = {
             "dealerShare": num(r.get("dealerShare")),
             "companyShare": num(r.get("companyShare")),
             "totalBenefit": num(r.get("totalBenefit")) or (num(r.get("dealerShare")) + num(r.get("companyShare"))),
             "label": r.get("component") or SCHEME_COMPONENT_LABELS.get(key, key),
-            "schemeMonth": r_month,
+            "schemeMonth": tagged or month,
         }
-        eff_from = str(r.get("effectiveFrom") or "")[:10]
-        eff_to = str(r.get("effectiveTo") or "")[:10]
-        window_ok = True
-        if eff_from and iso and iso < eff_from:
-            window_ok = False
-        if eff_to and iso and iso > eff_to:
-            window_ok = False
-        if r_month == month and window_ok:
-            exact[key] = payload
-        if window_ok:
-            if key not in in_window or r_month >= str(in_window[key].get("schemeMonth") or ""):
-                in_window[key] = payload
-        if key not in any_family or r_month >= str(any_family[key].get("schemeMonth") or ""):
-            any_family[key] = payload
-    if exact:
-        return exact
-    if in_window:
-        return in_window
-    return any_family
+    return exact
 
 
 def scheme_share_split_for(model, variant, booking_date, offers, scheme_rows):

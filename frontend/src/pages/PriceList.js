@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Search, Copy, ChevronDown, AlertTriangle, RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
-import { get } from "../lib/api";
-import { inr } from "../lib/format";
+import { get, post } from "../lib/api";
+import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Card, Badge, Button, Input, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 
 // A price a salesperson can paste into WhatsApp without reformatting.
-function quoteText(r, schemeMonth) {
+function quoteText(r) {
   const lines = [
     `${r.model} ${r.variant}`.trim(),
     "",
@@ -18,9 +18,6 @@ function quoteText(r, schemeMonth) {
   if (r.otherCharges > 0) lines.push(`Other         ${inr(r.otherCharges)}`);
   if (r.tcsApplies) lines.push(`TCS (1%)      ${inr(r.tcs)}`);
   lines.push("", `On-road       ${inr(r.onRoad)}`);
-  if (r.schemeAvailable > 0) {
-    lines.push("", `Scheme available ${inr(r.schemeAvailable)} (${schemeMonth})`);
-  }
   return lines.join("\n");
 }
 
@@ -31,6 +28,7 @@ export default function PriceList() {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState({});
   const [models, setModels] = useState([]);
+  const [syncing, setSyncing] = useState(false);
 
   const load = useCallback(() => {
     get("/price-list", { ...(model ? { model } : {}), q })
@@ -41,8 +39,20 @@ export default function PriceList() {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then((m) => setModels(m.models || [])).catch(() => {}); }, []);
 
+  const syncOem = async () => {
+    setSyncing(true);
+    try {
+      const r = await post("/integrations/coulson/sync", {});
+      if (r.ok) toast.success(`OEM prices updated · ${r.pricesUpdated || 0} list prices · ${r.inventoryCount || 0} in yard`);
+      else toast.error(r.reason === "not_configured" ? "Save the Coulson session in Settings first" : "OEM sync did not run");
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Coulson sync failed");
+    } finally { setSyncing(false); }
+  };
+
   const copy = (r) => {
-    const text = quoteText(r, data.schemeMonth);
+    const text = quoteText(r);
     const done = () => toast.success("Price copied");
     if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(text).then(done, () => toast.error("Could not copy"));
@@ -53,15 +63,26 @@ export default function PriceList() {
 
   if (!data) return <div className="text-sm text-ink-faint">Loading price list…</div>;
 
+  const oemNote = data.oemSyncedAt
+    ? `OEM ex-showroom · last sync ${fmtDate(data.oemSyncedAt)}`
+    : "OEM ex-showroom from Price Master";
+
   return (
     <div data-testid="price-list">
       <PageHeader
         title="Price List"
-        subtitle={`${data.totalRows} vehicles · scheme shown for ${data.schemeMonth}`}
+        subtitle={`${data.totalRows} vehicles · ${oemNote}`}
         actions={
-          <Button variant="secondary" data-testid="price-list-refresh" onClick={load}>
-            <RefreshCcw size={15} /> Refresh
-          </Button>
+          <div className="flex gap-2">
+            {isOwner && (
+              <Button data-testid="price-list-oem-sync" onClick={syncOem} disabled={syncing}>
+                <RefreshCcw size={15} /> {syncing ? "Syncing…" : "Sync from OEM"}
+              </Button>
+            )}
+            <Button variant="secondary" data-testid="price-list-refresh" onClick={load}>
+              <RefreshCcw size={15} /> Refresh
+            </Button>
+          </div>
         } />
 
       <div className="flex flex-wrap items-center gap-2 mb-5">
@@ -113,11 +134,6 @@ export default function PriceList() {
                     className="w-full text-left px-4 py-3 hover:bg-zinc-50 transition-colors">
                     <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
                       <span className="font-medium text-ink">{r.variant || "—"}</span>
-                      {r.schemeAvailable > 0 && (
-                        <Badge tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">
-                          {inr(r.schemeAvailable)} scheme
-                        </Badge>
-                      )}
                       {r.inYard > 0 && (
                         <Badge tone="bg-sky-50 text-sky-700 ring-sky-600/20">{r.inYard} in yard</Badge>
                       )}
@@ -140,13 +156,6 @@ export default function PriceList() {
                         {r.tcsApplies && <Line k="TCS (1%)" v={r.tcs} />}
                         <Line k="On-road" v={r.onRoad} strong />
                       </dl>
-                      {r.schemeAvailable > 0 && (
-                        <p className="text-xs text-ink-soft mt-3">
-                          Scheme available this month:{" "}
-                          <span className="font-mono font-semibold text-emerald-700">{inr(r.schemeAvailable)}</span>
-                          {" "}— how much of it is passed is decided on the lead.
-                        </p>
-                      )}
                       <div className="mt-3">
                         <Button variant="secondary" data-testid={`copy-price-${r.priceId}`}
                           onClick={(e) => { e.stopPropagation(); copy(r); }}>
@@ -163,8 +172,8 @@ export default function PriceList() {
       ))}
 
       <p className="text-xs text-ink-faint">
-        Prices come from Price Master and update the moment the owner changes them. Accessories,
-        handling and exchange are added per deal on the lead.
+        Ex-showroom comes from the Euler OEM portal (Coulson) into Price Master. RTO and insurance
+        stay dealer-entered. Scheme is applied on the lead for that month — not listed here.
       </p>
     </div>
   );
