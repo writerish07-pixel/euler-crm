@@ -160,16 +160,19 @@ On every Euler sync we record whether the desk uploaded files on the Claim Item
 Those files come back on the journey as `line_items[].documents[]` and show in the
 OEM app as **"N Docs"**.
 
-- **Yes** — at least one supporting file is on a claim item. OEM Claim Settlements
-  and Scheme Claim Register both show **Yes**, with the file count.
-- **No** — no item uploads yet. Open the claim in the OEM app, use **Add Documents**,
-  then **Sync from Euler**. Euler's generated claim PDF (`debit_note_s3_link`) is
-  still linked as **PDF** but does **not** count as Yes — that form exists whether
-  or not anyone attached supporting files.
+- **Yes** — every claim item on that debit note has its own supporting file.
+  One Coulson claim can carry several lines on the same chassis / invoice
+  (Insurance, RTO, Consumer Discount, …); each has its own **Add Documents**
+  control. A file on the first item does **not** cover the others.
+- **No** — at least one item still has no upload. OEM Claim Settlements shows
+  **1 of 3 items** (and per-line **No docs**). Open the claim in the OEM app,
+  attach a file on each item, then **Sync from Euler**. Euler's generated claim
+  PDF (`debit_note_s3_link`) is still linked as **PDF** but does **not** count
+  as Yes.
 
-Open claims with no item docs are re-fetched on later syncs so a file uploaded
-after filing still lands. Customer photo URLs are not stored; only the count and
-the Yes/No flag.
+Open claims that are not fully documented are re-fetched on later syncs so a
+file uploaded after filing still lands. Customer photo URLs are not stored;
+only the count and the Yes/No flag.
 
 Filter **No document** on OEM Claim Settlements to see what still needs a file.
 

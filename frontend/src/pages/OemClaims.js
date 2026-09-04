@@ -184,7 +184,7 @@ export default function OemClaims() {
         <StatCard label="Approved" value={inr(totals.approved)} tone="text-emerald-600" />
         <StatCard label="No document"
           value={mirror.missingDocument ?? "—"}
-          sub="Claim item Docs still missing"
+          sub="Each claim item needs its own file"
           icon={FileText}
           tone={(mirror.missingDocument || 0) > 0 ? "text-rose-600" : "text-ink"} />
       </div>
@@ -369,6 +369,9 @@ export default function OemClaims() {
             <div className="text-xs">
               {(r.lineItems || []).map((li, i) => (
                 <div key={i} className="mb-1">
+                  <div className="font-medium">
+                    {componentLabel(li.componentKey) || li.claimType || "Claim item"}
+                  </div>
                   <div>{[li.model, li.variant].filter(Boolean).join(" ") || "—"}</div>
                   <div className="font-mono text-ink-faint">{li.chassis || "—"}</div>
                   {li.sourceInvoiceNumber
@@ -395,7 +398,8 @@ export default function OemClaims() {
             </div>
           )},
           { key: "doc", label: "Docs", render: (r) => (
-            <DocFlag yes={r.hasDocument} url={r.claimDocumentUrl} count={r.documentCount} />
+            <DocFlag yes={r.hasDocument} url={r.claimDocumentUrl} count={r.documentCount}
+              lines={r.lineItemCount} documented={r.documentedLineCount} />
           )},
           { key: "match", label: "", render: (r) => (
             <button type="button" data-testid={`oem-manual-match-${r.claimNumber}`}

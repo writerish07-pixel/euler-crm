@@ -59,17 +59,24 @@ export function claimsHref({ leadId } = {}) {
   return qs ? `/claims?${qs}` : "/claims";
 }
 
-export function DocFlag({ yes, url, count }) {
+export function DocFlag({ yes, url, count, lines, documented }) {
   const on = !!yes;
   const n = Number(count) || 0;
+  const total = Number(lines) || 0;
+  const done = Number(documented) || 0;
   return (
     <div className="flex flex-col items-start gap-0.5">
       <span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${
         on ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-red-50 text-red-700 ring-red-600/20"
       }`}>{on ? "Yes" : "No"}</span>
-      {on && n > 0 ? (
+      {total > 1 ? (
+        <span className={`text-[10px] leading-tight ${on ? "text-ink-faint" : "text-rose-600"}`}>
+          {done} of {total} items
+        </span>
+      ) : on && n > 0 ? (
         <span className="text-[10px] text-ink-faint">{n} file{n === 1 ? "" : "s"}</span>
-      ) : !on ? (
+      ) : null}
+      {!on ? (
         <span className="text-[10px] text-ink-faint max-w-[90px] leading-tight">Upload in OEM app</span>
       ) : null}
       {url ? (
