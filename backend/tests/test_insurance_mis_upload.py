@@ -43,6 +43,82 @@ def test_suggest_mapping_reads_agent_headers():
     assert mp["misAmount"] == "Payout"
 
 
+def test_agent_mis_headers_map_chassis_and_distribution_fee():
+    headers = [
+        "Month", "Insurance Comp", "Reg No", "INSURED NAME", "MAKE", "MODEL",
+        "Yr of Mfg", "IDV", "Chassis", "Engine", "Policy Number", "Valid From",
+        "Valid To", "OD", "Third Party", "NET", "GST", "GROSS", "Distribut Fee",
+    ]
+    mp = ins_mis.suggest_mapping(headers)
+    assert mp["chassisNumber"] == "Chassis"
+    assert mp["customerName"] == "INSURED NAME"
+    assert mp["insuranceCompany"] == "Insurance Comp"
+    assert mp["policyNumber"] == "Policy Number"
+    assert mp["misAmount"] == "Distribut Fee"
+    assert mp["insuranceAmount"] == "GROSS"
+    assert mp["policyDate"] == "Valid From"
+
+
+def test_match_by_chassis_fetches_register_details():
+    entries = [{
+        "entryId": "INS1", "leadId": "LD1", "customerName": "MR SITA RAM SHARMA",
+        "policyNumber": "2905033126P106579388", "chassisNumber": "MD9EMVDL26G217350",
+        "expectedPayout": 9310, "receivedPayout": 0, "status": "Pending",
+    }]
+    rows = [{
+        "_row": 2, "chassisNumber": " md9emvdl26g217350 ",
+        "customerName": "MR SITA RAM SHARMA", "misAmount": 5275,
+        "policyNumber": "2905033126P106579388",
+    }]
+    out = ins_mis.match_file(rows, entries)
+    assert out["totals"]["matched"] == 1
+    hit = out["matched"][0]
+    assert hit["entryId"] == "INS1"
+    assert hit["matchKey"] == "chassis"
+    assert hit["chassisNumber"] == "MD9EMVDL26G217350"
+    assert hit["registerCustomer"] == "MR SITA RAM SHARMA"
+    assert hit["misAmount"] == 5275
+
+
+def test_duplicate_chassis_keeps_first_row():
+    entries = [{
+        "entryId": "INS1", "chassisNumber": "MD9EMVDL26G217350",
+        "expectedPayout": 100, "status": "Pending", "customerName": "A",
+    }]
+    rows = [
+        {"_row": 2, "chassisNumber": "MD9EMVDL26G217350", "misAmount": 90},
+        {"_row": 3, "chassisNumber": "md9emvdl26g217350", "misAmount": 80},
+    ]
+    out = ins_mis.match_file(rows, entries)
+    assert out["totals"]["matched"] == 1
+    assert out["matched"][0]["misAmount"] == 90
+    assert out["unmatchedMis"][0]["reason"] == "duplicate_chassis"
+
+
+def test_chassis_not_found_stays_unmatched():
+    out = ins_mis.match_file(
+        [{"_row": 2, "chassisNumber": "MD9NOSUCH", "misAmount": 90}],
+        [{"entryId": "A", "chassisNumber": "MD9OTHER", "expectedPayout": 100, "status": "Pending"}])
+    assert out["matched"] == []
+    assert out["unmatchedMis"][0]["reason"] == "chassis_not_found"
+
+
+def test_lead_hint_fetches_details_when_payout_row_is_missing():
+    unmatched = [{"_row": 2, "chassisNumber": "MD9EMVDL26G217350",
+                  "reason": "chassis_not_found", "customerName": ""}]
+    ins_mis.attach_lead_hint(unmatched, [
+        {"leadId": "LD9", "chassisNumber": "md9emvdl26g217350",
+         "customerName": "MR SITA RAM SHARMA"}])
+    assert unmatched[0]["reason"] == "no_payout_entry"
+    assert unmatched[0]["leadId"] == "LD9"
+    assert unmatched[0]["registerCustomer"] == "MR SITA RAM SHARMA"
+
+
+def test_valid_from_dd_mmm_yy():
+    assert ins_mis._as_iso_date("01-Aug-26") == "2026-08-01"
+    assert ins_mis._as_iso_date("31-Jul-27") == "2027-07-31"
+
+
 def test_match_by_policy_and_difference():
     entries = [{
         "entryId": "INS1", "leadId": "LD1", "customerName": "Asha",
@@ -115,6 +191,42 @@ async def test_preview_matches_policy_and_computes_diff(client):
     assert hit["misAmount"] == 8000
     assert hit["expectedPayout"] == expected
     assert hit["difference"] == ce.round2(8000 - expected)
+
+
+_AGENT_MIS_HEADERS = (
+    "Month,Insurance Comp,Reg No,INSURED NAME,MAKE,MODEL,Yr of Mfg,IDV,Chassis,"
+    "Engine,Policy Number,Valid From,Valid To,OD,Third Party,NET,GST,GROSS,Distribut Fee"
+)
+
+
+@pytest.mark.asyncio
+async def test_preview_matches_agent_file_on_chassis(client):
+    e = await _entry(client, policyNumber="2905033126P106579388",
+                     customerName="MR SITA RAM SHARMA", premium=19691)
+    await server.db.insurance.update_one(
+        {"entryId": e["entryId"]}, {"$set": {"leadId": "LD-CHASSIS-1"}})
+    await server.db.leads.insert_one({
+        "leadId": "LD-CHASSIS-1", "chassisNumber": "MD9EMVDL26G217350",
+        "customerName": "MR SITA RAM SHARMA", "mobile": "9000011111"})
+    csv = (
+        _AGENT_MIS_HEADERS + "\n"
+        "Aug'26,United India Ins. Co,NEW,MR SITA RAM SHARMA,EULER MOTORS,TURBO EV 1000,2026,"
+        "847637,MD9EMVDL26G217350,MC3012532020603250091,2905033126P106579388,"
+        "01-Aug-26,31-Jul-27,4448,13742,18190,1501,19691,5275\n"
+    )
+    r = await client.post("/api/insurance/mis/preview", files=_csv(csv))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["suggestedMapping"]["chassisNumber"] == "Chassis"
+    assert body["suggestedMapping"]["misAmount"] == "Distribut Fee"
+    assert body["totals"]["matched"] == 1
+    hit = body["matched"][0]
+    assert hit["entryId"] == e["entryId"]
+    assert hit["matchKey"] == "chassis"
+    assert hit["chassisNumber"] == "MD9EMVDL26G217350"
+    assert hit["registerCustomer"] == "MR SITA RAM SHARMA"
+    assert hit["misAmount"] == 5275
+    assert hit["leadId"] == "LD-CHASSIS-1"
 
 
 @pytest.mark.asyncio
