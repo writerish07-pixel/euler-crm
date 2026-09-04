@@ -380,6 +380,9 @@ CLAIM_LIST_PATH = "debit-note"
 # The dealer SPA (getDebitNoteDetails) calls this — not a bare `journey` path.
 # Hitting /api/v1/journey left every OEM Claim Settlements row with empty line
 # items, so Chassis / Invoice stayed "Not pulled" after a successful list sync.
+# Claim Item Docs (`line_items[].documents[]`, shown as "N Docs") also live only
+# on this journey. Uploads go to POST debit-note/line-item-documents and reappear
+# here after the SPA invalidates debitNoteDetails.
 CLAIM_JOURNEY_PATH = "debit-note/journey"
 
 # Line-item lists hide under several names depending on which envelope we got.
