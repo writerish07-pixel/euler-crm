@@ -369,7 +369,9 @@ def match_file(mis_rows, entries):
             continue
         if e.get("entryId") in used:
             continue
-        if str(e.get("status") or "") == "Received" or e.get("misApproved"):
+        # Already-received cash does not need the agent to chase it. Mapped-but-unpaid
+        # and never-mapped rows that are missing from this file do.
+        if str(e.get("status") or "") == "Received" and ce.num(e.get("receivedPayout")) > 0.01:
             continue
         unmatched_entries.append({
             "entryId": e.get("entryId"),
@@ -381,6 +383,7 @@ def match_file(mis_rows, entries):
             "expectedPayout": ce.round2(ce.num(e.get("expectedPayout"))),
             "receivedPayout": ce.round2(ce.num(e.get("receivedPayout"))),
             "status": e.get("status") or "",
+            "misApproved": bool(e.get("misApproved")),
         })
     return {
         "matched": matched,

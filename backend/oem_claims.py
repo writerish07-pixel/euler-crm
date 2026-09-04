@@ -1138,17 +1138,17 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
     return _state_from_hits(hits)
 
 
-_LOCK_REGISTER_STATUSES = ("Received", "Partial", "Cancelled")
+_LOCK_REGISTER_STATUSES = ("Received", "Partial", "Cancelled", "Dropped")
 _STATUS_RANK = {"Pending": 0, "Submitted": 1, "Approved": 2}
 
 
 def register_status_from_oem(oem_status, current=""):
     """Map Euler's ladder onto the register's Pending/Submitted/Approved/Received.
 
-    Received / Partial / Cancelled stay put — those are money-desk states this
-    overlay must never invent. Open Euler claims become Submitted; generated /
-    settled notes become Approved. Rejected Euler notes become Rejected.
-    The positive ladder only moves forward (never Approved → Submitted).
+    Received / Partial / Cancelled / Dropped stay put — those are money-desk or
+    write-off states this overlay must never invent. Open Euler claims become
+    Submitted; generated / settled notes become Approved. Rejected Euler notes
+    become Rejected. Cancelled Euler notes become Cancelled.
     receivedAmount is never touched.
     """
     cur = str(current or "").strip() or "Pending"
@@ -1157,6 +1157,8 @@ def register_status_from_oem(oem_status, current=""):
     oem = str(oem_status or "").strip()
     if oem == "Rejected":
         return "Rejected"
+    if oem == "Cancelled":
+        return "Cancelled"
     if oem in ACCEPTED_STATUSES:
         target = "Approved"
     elif oem:

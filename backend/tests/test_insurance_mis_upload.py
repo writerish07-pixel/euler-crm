@@ -148,12 +148,15 @@ def test_unmatched_and_ambiguous_policy():
     assert out["unmatchedMis"][0]["reason"] == "ambiguous_policy"
 
 
-def test_dealer_income_switches_to_received_after_approve():
+def test_dealer_income_is_cash_only():
     pending = {"expectedPayout": 9310, "receivedPayout": 0, "status": "Pending"}
-    assert ce.insurance_dealer_income(pending) == 9310
-    approved = {"expectedPayout": 9310, "receivedPayout": 8500,
+    assert ce.insurance_dealer_income(pending) == 0
+    mapped = {"expectedPayout": 9310, "receivedPayout": 0,
+              "status": "Pending", "misApproved": True}
+    assert ce.insurance_dealer_income(mapped) == 0
+    received = {"expectedPayout": 9310, "receivedPayout": 8500,
                 "status": "Received", "misApproved": True}
-    assert ce.insurance_dealer_income(approved) == 8500
+    assert ce.insurance_dealer_income(received) == 8500
     self_arr = {"expectedPayout": 0, "status": "N/A — customer arranged"}
     assert ce.insurance_dealer_income(self_arr) == 0
 
@@ -240,7 +243,7 @@ async def test_apply_fills_mis_without_booking_received(client):
     assert doc["misAmount"] == 8100
     assert doc["receivedPayout"] == 0
     assert doc["status"] == "Pending"
-    assert not doc.get("misApproved")
+    assert doc.get("misApproved") is True
 
 
 @pytest.mark.asyncio
@@ -266,7 +269,7 @@ async def test_approve_short_payout_closes_and_recasts_earnings(client):
     assert d.status_code == 200, d.text
     entry = await server.db.insurance.find_one({"leadId": lid})
     before = await server.db.leads.find_one({"leadId": lid})
-    assert before["dealerInsuranceIncome"] == entry["expectedPayout"]
+    assert before["dealerInsuranceIncome"] == 0
 
     short = ce.round2(entry["expectedPayout"] - 500)
     ap = await client.post("/api/insurance/mis/approve", json={
@@ -277,15 +280,17 @@ async def test_approve_short_payout_closes_and_recasts_earnings(client):
     assert ap.json()["approved"] == 1
     doc = await server.db.insurance.find_one({"entryId": entry["entryId"]})
     assert doc["misApproved"] is True
-    assert doc["status"] == "Received"
-    assert doc["receivedPayout"] == short
-    assert doc["payoutOutstanding"] == 0
+    assert doc["status"] == "Pending"
+    assert doc["receivedPayout"] == 0
     after = await server.db.leads.find_one({"leadId": lid})
-    assert after["dealerInsuranceIncome"] == short
-    assert after["dealerTotalEarnings"] == ce.round2(
-        before["dealerTotalEarnings"] - (entry["expectedPayout"] - short))
+    assert after["dealerInsuranceIncome"] == 0
+    assert after["dealerTotalEarnings"] == before["dealerTotalEarnings"]
+    rec = await client.post(f"/api/insurance/{entry['entryId']}/receipt", json={
+        "amount": short, "date": "2026-09-10", "reference": "BANK-1"})
+    assert rec.status_code == 200, rec.text
+    paid = await server.db.leads.find_one({"leadId": lid})
+    assert paid["dealerInsuranceIncome"] == short
     report = (await client.get("/api/reports/dealer-earnings")).json()
-    # The approved short amount is what the report must use for this lead.
     assert report["totals"]["insurance"] >= 0
 
 
@@ -298,8 +303,9 @@ async def test_approve_over_expected_is_allowed(client):
     })
     assert r.status_code == 200, r.text
     doc = await server.db.insurance.find_one({"entryId": e["entryId"]})
-    assert doc["receivedPayout"] == over
-    assert doc["status"] == "Received"
+    assert doc["misAmount"] == over
+    assert doc["receivedPayout"] == 0
+    assert doc["status"] == "Pending"
     assert doc["misApproved"] is True
 
 
@@ -311,8 +317,10 @@ async def test_approve_is_idempotent(client):
     b = await client.post("/api/insurance/mis/approve", json=body)
     assert a.status_code == 200 and b.status_code == 200
     doc = await server.db.insurance.find_one({"entryId": e["entryId"]})
-    assert doc["receivedPayout"] == 1000
-    assert len(doc.get("receipts") or []) == 1
+    assert doc["misApproved"] is True
+    assert doc["misAmount"] == 1000
+    assert doc["receivedPayout"] == 0
+    assert not doc.get("receipts")
 
 
 @pytest.mark.asyncio

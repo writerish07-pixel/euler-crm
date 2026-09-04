@@ -666,12 +666,15 @@ async def recompute_lead(lead_id):
         ce.num(lead.get("otherIncome")) +
         ce.num(lead.get("financeIncentive")) + ce.num(lead.get("accessoriesMargin")) +
         ce.num(lead.get("exchangeMargin")) + ce.num(lead.get("campaignIncentive")))
-    # Insurance PAYOUT income (premium × rate) — SEPARATE from Insurance Scheme Benefit.
-    # Pending: expected entitlement. After MIS approve / Received: cash booked.
+    # Insurance PAYOUT income — cash booked only. Mapped / Pending is ₹0.
     # Do NOT subtract scheme customerInsuranceBenefitPassed (customer discount).
     _ins = await db.insurance.find_one({"leadId": lead_id}) or {}
     _ins_payout = ce.insurance_dealer_income(_ins)
     _dealer_ins_income = ce.round2(max(0.0, _ins_payout))
+    _claim_docs = await db.claims.find(
+        {"leadId": lead_id, "manual": {"$ne": True}}).to_list(200)
+    _wo = ce.unpayable_write_off_from_claims(_claim_docs)
+    _oem_extra_earn = 0.0 if _wo["extraSupportUnpayable"] else oem_extra_retained
     # Dealer-funded benefit is a REAL cost. Only apply when an authoritative
     # allocation decision exists (schemeAllocationV2 / explicit) — never invent
     # a historical deduction from Benefit Mode alone.
@@ -721,11 +724,16 @@ async def recompute_lead(lead_id):
         "extraDealerIncomeTotal": extra_income,
         "dealerInsuranceIncome": _dealer_ins_income,
         "insurancePayout": _ins_payout,
-        # Margin + retained + payout + extras − dealer-funded scheme benefit cost.
-        # OEM claim is a receivable and must NEVER enter this total.
+        "oemUnpayableWriteOff": _wo["oemUnpayableWriteOff"],
+        "oemUnpayableScheme": _wo["oemUnpayableScheme"],
+        "oemUnpayableExtraSupport": _wo["oemUnpayableExtraSupport"],
+        # Margin + retained + payout + extras − dealer-funded scheme benefit − OEM
+        # write-offs. Extra Support that OEM will not pay is already excluded from
+        # _oem_extra_earn. OEM claim receivables still never enter this total.
         "dealerTotalEarnings": ce.round2(
-            margin["marginNetExGst"] + income["retainedIncomeTotal"] + oem_extra_retained
-            + extra_income + _dealer_ins_income - _dealer_funded_benefit),
+            margin["marginNetExGst"] + income["retainedIncomeTotal"] + _oem_extra_earn
+            + extra_income + _dealer_ins_income - _dealer_funded_benefit
+            - _wo["oemUnpayableScheme"]),
         # Engine summary lives here — NOT in schemeAllocation.
         # schemeAllocation is reserved for the flat {componentKey: amount} decision
         # map written by PUT /scheme-allocation (must not be overwritten).
@@ -789,7 +797,10 @@ async def recompute_lead(lead_id):
             "referralIncome": merged.get("referralIncome", 0),
             "campaignIncentive": merged.get("campaignIncentive", 0),
             "otherIncome": merged.get("otherIncome", 0),
-            "oemExtraSupportRetained": updates["oemExtraSupportRetained"],
+            "oemExtraSupportRetained": _oem_extra_earn,
+            "oemUnpayableWriteOff": _wo["oemUnpayableWriteOff"],
+            "oemUnpayableScheme": _wo["oemUnpayableScheme"],
+            "oemUnpayableExtraSupport": _wo["oemUnpayableExtraSupport"],
             "extraDealerIncomeTotal": updates["extraDealerIncomeTotal"],
             "dealerTotalEarnings": updates["dealerTotalEarnings"],
             "totalDealerEarnings": updates["dealerTotalEarnings"],
@@ -846,6 +857,8 @@ async def recompute_lead(lead_id):
                 "leadId": lead_id, "componentKey": _key, "manual": {"$ne": True},
                 "claimStatus": {"$nin": ["Cancelled"]},
             })
+            if _ex and str(_ex.get("claimStatus") or "") == "Dropped":
+                continue
             _amt = ce.round2(_amt)
             _comp_cols = {f: 0.0 for f in _claim_amount_fields}
             if _key in _comp_cols:
@@ -6268,8 +6281,14 @@ async def coulson_sync_claims(act=Depends(actor)):
     try:
         result = await oem_claims.sync_claims(db)
         patches = result.pop("registerPatches", []) or []
+        leads_to_recompute = set()
         for doc in patches:
             await sheet_sync("claims", doc)
+            if str(doc.get("claimStatus") or "") in ("Rejected", "Cancelled", "Approved"):
+                if doc.get("leadId"):
+                    leads_to_recompute.add(doc["leadId"])
+        for lid in leads_to_recompute:
+            await recompute_lead(lid)
     except coulson_client.CoulsonError as e:
         await db["system"].update_one(
             {"_id": "coulson"},
@@ -7050,6 +7069,7 @@ async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
 
     view=pending  -> payout still owed
     view=overdue  -> pending AND past the settlement date (10th of the next month)
+    view=unmapped -> register rows with no agent MIS map (send these to the agent)
     """
     q = {}
     if lead_id:
@@ -7063,6 +7083,10 @@ async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
         rows = [r for r in rows if r.get("pending")]
     elif view == "overdue":
         rows = [r for r in rows if r.get("overdue")]
+    elif view == "unmapped":
+        rows = [r for r in rows if not r.get("misApproved")
+                and str(r.get("status") or "") != "Received"
+                and not str(r.get("status") or "").startswith("N/A")]
     rows = _rows_in_period(
         rows, _parse_period(month, year),
         lambda r: r.get("policyDate") or r.get("deliveryDate"))
@@ -7078,6 +7102,10 @@ async def insurance_agents_rollup(view: str = "all", act=Depends(actor)):
         rows = [r for r in rows if r.get("pending")]
     elif view == "overdue":
         rows = [r for r in rows if r.get("overdue")]
+    elif view == "unmapped":
+        rows = [r for r in rows if not r.get("misApproved")
+                and str(r.get("status") or "") != "Received"
+                and not str(r.get("status") or "").startswith("N/A")]
     buckets = {}
     for r in rows:
         key = r.get("insuranceAgentId") or ""
@@ -7176,7 +7204,7 @@ def _insurance_enrich(entry: dict, terms: Optional[dict] = None) -> dict:
     e = dict(entry)
     outstanding = ce.num(e.get("payoutOutstanding"))
     status = str(e.get("status") or "")
-    pending = outstanding > 0.01 and status != "Received" and not status.startswith("N/A") and not e.get("misApproved")
+    pending = outstanding > 0.01 and status != "Received" and not status.startswith("N/A")
     basis = e.get("policyDate") or e.get("deliveryDate") or ""
     due_by = ce.insurance_payout_due_by(basis, t["dueDayOfMonth"], t["monthsAfter"])
     e["pending"] = pending
@@ -7203,13 +7231,13 @@ def _insurance_derive(body: dict, agent: Optional[dict] = None):
     approved = bool(body.get("misApproved"))
     outstanding = ce.round2(max(0.0, expected - received))
     status = body.get("status") or "Pending"
-    if approved:
-        status = "Received"
-        outstanding = 0.0
-    elif expected > 0 and received >= expected - 0.01:
+    # Mapped (agent MIS) is not cash. Only receipts flip Received / Partial.
+    if expected > 0 and received >= expected - 0.01:
         status = "Received"
     elif received > 0:
         status = "Partial"
+    elif approved and status == "Received":
+        status = "Pending"
     out = {"payoutRate": rate, "expectedPayout": expected, "receivedPayout": received,
            "payoutOutstanding": outstanding, "status": status,
            "payoutRateSource": resolved["source"], "payoutSlabFamily": resolved["slabFamily"]}
@@ -7420,6 +7448,8 @@ async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
         "misAmount": amount,
         "misDifference": ce.round2(amount - expected),
         "misReference": reference or entry.get("misReference") or "",
+        "misApproved": True,
+        "misMappedAt": now_iso(),
         "lastUpdated": now_iso(),
     }
     if policy_number and not (entry.get("policyNumber") or "").strip():
@@ -7428,51 +7458,76 @@ async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
     return patch
 
 
-async def _approve_insurance_payout(entry, *, amount, reference="", payout_date=None, act=None):
-    """Book the agent's figure as received and close the line, even if it differs."""
-    received = ce.round2(ce.num(amount))
+async def _map_insurance_mis(entry, *, amount, reference="", act=None):
+    """Stamp the agent's MIS figure as mapped. Does not book cash or flip Received."""
+    amount = ce.round2(ce.num(amount))
     expected = ce.round2(ce.num(entry.get("expectedPayout")))
-    payout_date = payout_date or today()
-    already = ce.round2(ce.num(entry.get("receivedPayout")))
-    delta = ce.round2(received - already)
-    receipt = {
-        "amount": delta,
-        "date": payout_date,
-        "reference": reference or "MIS approve",
-        "recordedAt": now_iso(),
-        "source": "mis",
-    }
     patch = {
-        "receivedPayout": received,
-        "payoutOutstanding": 0.0,
-        "status": "Received",
+        "misAmount": amount,
+        "misDifference": ce.round2(amount - expected),
         "misApproved": True,
-        "misAmount": received,
-        "misDifference": ce.round2(received - expected),
-        "misApprovedAt": now_iso(),
-        "lastPayoutDate": payout_date,
+        "misMappedAt": now_iso(),
         "lastUpdated": now_iso(),
     }
     if reference:
         patch["misReference"] = reference
-    ops = {"$set": patch}
-    if abs(delta) > 0.005:
-        ops["$push"] = {"receipts": receipt}
-    await db.insurance.update_one({"entryId": entry["entryId"]}, ops)
+    await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     updated = await db.insurance.find_one({"entryId": entry["entryId"]})
     await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
     if act:
-        await write_audit(act, "mis-approve", "insurance", leadId=entry.get("leadId") or "",
-                          old={"receivedPayout": already, "expectedPayout": expected},
-                          new={"receivedPayout": received, "misDifference": patch["misDifference"]})
-    if entry.get("leadId"):
-        await recompute_lead(entry["leadId"])
+        await write_audit(act, "mis-map", "insurance", leadId=entry.get("leadId") or "",
+                          old={"misAmount": entry.get("misAmount")},
+                          new={"misAmount": amount, "misApproved": True})
     return updated
+
+
+async def _repair_mis_only_received():
+    """Undo MIS-approve that booked cash. Mapped stays; Received requires a real receipt."""
+    fixed = 0
+    leads = set()
+    for e in await db.insurance.find({"misApproved": True}).to_list(8000):
+        receipts = list(e.get("receipts") or [])
+        real = [r for r in receipts if str(r.get("source") or "") != "mis"]
+        mis_only = [r for r in receipts if str(r.get("source") or "") == "mis"]
+        status = str(e.get("status") or "")
+        received = ce.num(e.get("receivedPayout"))
+        if not mis_only and status != "Received" and received <= 0.01:
+            continue
+        if real:
+            booked = ce.round2(sum(ce.num(r.get("amount")) for r in real))
+            expected = ce.num(e.get("expectedPayout"))
+            outstanding = ce.round2(max(0.0, expected - booked))
+            new_status = ("Received" if expected > 0 and booked >= expected - 0.01
+                          else ("Partial" if booked > 0.01 else "Pending"))
+            if (ce.round2(received) == booked and status == new_status
+                    and len(receipts) == len(real)):
+                continue
+            await db.insurance.update_one({"entryId": e["entryId"]}, {"$set": {
+                "receivedPayout": booked, "payoutOutstanding": outstanding,
+                "status": new_status, "receipts": real, "lastUpdated": now_iso(),
+            }})
+        elif mis_only or (status == "Received" and received > 0.01):
+            expected = ce.num(e.get("expectedPayout"))
+            await db.insurance.update_one({"entryId": e["entryId"]}, {"$set": {
+                "receivedPayout": 0.0,
+                "payoutOutstanding": ce.round2(max(0.0, expected)),
+                "status": "Pending",
+                "receipts": real,
+                "lastUpdated": now_iso(),
+            }})
+        else:
+            continue
+        fixed += 1
+        if e.get("leadId"):
+            leads.add(e["leadId"])
+    for lid in leads:
+        await recompute_lead(lid)
+    return fixed
 
 
 @api.post("/insurance/mis/apply")
 async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depends(money_desk_only)):
-    """Stamp MIS amount + difference onto matched entries. Does not book received."""
+    """Stamp MIS amount onto matched entries and mark them mapped. Does not book cash."""
     filled, errors = 0, []
     for item in body.items or []:
         eid = str(item.get("entryId") or "").strip()
@@ -7489,11 +7544,10 @@ async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depend
 
 @api.post("/insurance/mis/approve")
 async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=Depends(money_desk_only)):
-    """Mark ticked payouts received at the MIS (or expected) amount, then recast earnings."""
+    """Mark ticked payouts as mapped to this MIS. Does not mean money was received."""
     approved, errors = [], []
     by_id = {str(it.get("entryId") or ""): it for it in (body.items or []) if it.get("entryId")}
     ids = list(body.entryIds or []) + [k for k in by_id if k not in (body.entryIds or [])]
-    # de-dupe while preserving order
     seen = set()
     ordered = []
     for eid in ids:
@@ -7517,18 +7571,21 @@ async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=D
         if ce.num(amount) <= 0:
             errors.append({"entryId": eid, "error": "no_amount"})
             continue
-        updated = await _approve_insurance_payout(
+        updated = await _map_insurance_mis(
             entry, amount=amount,
             reference=item.get("reference") or entry.get("misReference") or "",
-            payout_date=body.date, act=act)
+            act=act)
         approved.append({
             "entryId": eid,
+            "mapped": True,
             "receivedPayout": ce.num(updated.get("receivedPayout")),
             "expectedPayout": ce.num(updated.get("expectedPayout")),
             "difference": ce.num(updated.get("misDifference")),
             "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
+            "status": updated.get("status"),
         })
-    return {"ok": True, "approved": len(approved), "rows": approved, "errors": errors}
+    return {"ok": True, "approved": len(approved), "mapped": len(approved),
+            "rows": approved, "errors": errors}
 
 
 # ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)
@@ -8187,8 +8244,14 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     """
     oem_index = await oem_claims.register_match_index(db)
     patches = await oem_claims.apply_oem_filing_to_register(db, oem_index)
+    leads_to_recompute = set()
     for doc in patches:
         await sheet_sync("claims", doc)
+        if str(doc.get("claimStatus") or "") in ("Rejected", "Cancelled"):
+            if doc.get("leadId"):
+                leads_to_recompute.add(doc["leadId"])
+    for lid in leads_to_recompute:
+        await recompute_lead(lid)
 
     leads = await _commercial_leads()
     scheme_rows = await get_scheme_rows()
@@ -8262,7 +8325,8 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
         received = ce.round2(ce.num(c.get("receivedAmount")))
         status = (c.get("claimStatus") or "").strip()
         if received <= 0 and status not in (
-            "Received", "Partial", "Submitted", "Approved", "Rejected", "Cancelled", "Pending"):
+            "Received", "Partial", "Submitted", "Approved", "Rejected", "Cancelled",
+            "Pending", "Dropped"):
             # Skip pure empty shells with no lifecycle — only keep real register history.
             if not (c.get("submittedDate") or c.get("approvedDate") or c.get("claimReceivedDate")
                     or ce.num(c.get("claimAmount")) > 0 or ce.num(c.get("eligibleClaim")) > 0):
@@ -8282,6 +8346,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
             "eligibleClaim": elig,
             "approvalStatus": c.get("approvalStatus") or status or "Pending",
             "claimStatus": status or "Pending",
+            "droppedAmount": ce.round2(ce.num(c.get("droppedAmount"))),
             "receivedAmount": received,
             "claimReference": c.get("claimReference", ""),
             "manualOemClaimNumber": c.get("manualOemClaimNumber") or "",
@@ -8525,6 +8590,102 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
                       old={"receivedAmount": ce.num(existing.get("receivedAmount"))},
                       new={"receivedAmount": received, "status": status, "amount": ce.round2(body.amount)})
     return {"ok": True, "receivedAmount": received, "status": status}
+
+
+class DropExtraSupportIn(BaseModel):
+    claimId: str = ""
+    leadId: str = ""
+    reason: str = ""
+
+
+@api.post("/claims/drop-extra-support", dependencies=[Depends(money_desk_only)])
+async def drop_extra_support(body: DropExtraSupportIn, act=Depends(actor)):
+    """Owner / TL / Accounts: Extra Support will not be approved. Remove it from the
+    lead and claim register, keep a dropped register row, recast dealer earnings."""
+    q = {}
+    if body.claimId:
+        q["claimId"] = body.claimId
+    elif body.leadId:
+        q = {"leadId": body.leadId, "componentKey": ce.OEM_EXTRA_SUPPORT_KEY, "manual": {"$ne": True}}
+    else:
+        raise HTTPException(422, "Pick the Extra Support claim to drop")
+    claim = await db.claims.find_one(q)
+    if not claim or claim.get("componentKey") != ce.OEM_EXTRA_SUPPORT_KEY:
+        raise HTTPException(404, "OEM Extra Support claim not found")
+    if str(claim.get("claimStatus") or "") == "Dropped":
+        raise HTTPException(409, "This Extra Support line is already dropped")
+    if ce.num(claim.get("receivedAmount")) > 0.01:
+        raise HTTPException(422, "Cannot drop Extra Support after claim cash has been recorded")
+    lead_id = claim.get("leadId") or body.leadId
+    lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    amount = ce.round2(max(
+        ce.num(lead.get("oemExtraSupportReceived")),
+        ce.num(claim.get("eligibleClaim")),
+        ce.num(claim.get("claimAmount")),
+    ))
+    if amount <= 0:
+        raise HTTPException(422, "Nothing to drop on this Extra Support line")
+    drop_id = f"DXS-{lead_id}"
+    now = now_iso()
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "oemExtraSupportReceived": 0,
+        "oemExtraSupportPassed": 0,
+        "oemExtraSupportDroppedAmount": amount,
+        "oemExtraSupportDroppedAt": now,
+        "oemExtraSupportDroppedBy": act.get("email") or act.get("name") or "",
+    }})
+    await db.claims.update_one({"_id": claim["_id"]}, {"$set": {
+        "claimStatus": "Dropped",
+        "droppedAmount": amount,
+        "eligibleClaim": 0,
+        "claimAmount": 0,
+        "droppedAt": now,
+        "droppedBy": act.get("email") or act.get("name") or "",
+        "dropReason": str(body.reason or "").strip(),
+        "lastUpdated": now,
+    }})
+    dropped = {
+        "dropId": drop_id,
+        "leadId": lead_id,
+        "claimId": claim.get("claimId") or "",
+        "customerName": lead.get("customerName") or claim.get("customer") or "",
+        "model": lead.get("interestedModel") or claim.get("model") or "",
+        "variant": lead.get("variant") or claim.get("variant") or "",
+        "bookingDate": lead.get("bookingDate") or claim.get("bookingDate") or "",
+        "chassisNumber": lead.get("chassisNumber") or "",
+        "invoiceNumber": lead.get("invoiceNumber") or "",
+        "droppedAmount": amount,
+        "claimReference": claim.get("claimReference") or "",
+        "reason": str(body.reason or "").strip(),
+        "droppedAt": now,
+        "droppedBy": act.get("email") or act.get("name") or "",
+        "executive": lead.get("executive") or "",
+    }
+    await db.dropped_oem_extra_support.update_one(
+        {"dropId": drop_id}, {"$set": dropped}, upsert=True)
+    try:
+        await gsheets.ensure_dropped_extra_support_tab()
+    except Exception:
+        pass
+    await sheet_sync("dropped_oem_extra_support", dropped)
+    await sheet_sync("claims", {
+        "claimId": claim.get("claimId"), "leadId": lead_id,
+        "customer": dropped["customerName"], "model": dropped["model"],
+        "claimStatus": "Dropped", "eligibleClaim": 0, "claimAmount": 0,
+        "receivedAmount": 0, "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+        "component": "OEM Extra Support",
+    })
+    await write_audit(act, "drop", "oem-extra-support", leadId=lead_id,
+                      old={"oemExtraSupportReceived": amount},
+                      new={"droppedAmount": amount, "dropId": drop_id})
+    await recompute_lead(lead_id)
+    return {"ok": True, "dropId": drop_id, "droppedAmount": amount, "leadId": lead_id}
+
+
+@api.get("/dropped-extra-support", dependencies=[Depends(oem_claim_desk_only)])
+async def list_dropped_extra_support():
+    rows = await db.dropped_oem_extra_support.find().sort("droppedAt", -1).to_list(2000)
+    return [clean(r) for r in rows]
 
 
 # ---------------------------------------------------------------- audit log (H4) — owner-only viewer
@@ -8797,17 +8958,22 @@ async def delete_scheme_row(scheme_id: str):
 async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] = None):
     """Owner Dealer Earnings grid — live from leads so OEM Extra Retained is always in total.
 
-    total = margin + scheme retained + OEM Extra Retained + insurance income + extras
-            − dealer-funded benefit.
+    total = margin + scheme retained + OEM Extra Retained + insurance cash + extras
+            − dealer-funded benefit − unpayable OEM claims.
     """
     leads = await _commercial_leads()
     # Fallback extras from dealer_earnings docs when lead mirror is thin.
     de_by = {r.get("leadId"): r for r in await db.dealer_earnings.find().to_list(5000)}
+    claims_by = {}
+    for c in await db.claims.find({"manual": {"$ne": True}}).to_list(8000):
+        claims_by.setdefault(c.get("leadId"), []).append(c)
     rows = []
     for l in leads:
         lid = l.get("leadId")
         de = de_by.get(lid) or {}
         oem = ce.compute_oem_extra_support(l)
+        wo = ce.unpayable_write_off_from_claims(claims_by.get(lid) or [])
+        extra_retained = 0.0 if wo["extraSupportUnpayable"] else oem["oemExtraSupportRetained"]
         margin = ce.num(l.get("dealerMarginNetExGst") if l.get("dealerMarginNetExGst") is not None
                         else de.get("dealerMarginNetExGst"))
         scheme = ce.num(l.get("dealerSchemeRetained") if l.get("dealerSchemeRetained") is not None
@@ -8818,7 +8984,8 @@ async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] 
                        else de.get("extraDealerIncomeTotal"))
         funded = ce.num(l.get("dealerFundedBenefit") if l.get("dealerFundedBenefit") is not None
                         else de.get("dealerFundedBenefit"))
-        total = ce.round2(margin + scheme + oem["oemExtraSupportRetained"] + ins + extra - funded)
+        total = ce.round2(margin + scheme + extra_retained + ins + extra - funded
+                          - wo["oemUnpayableScheme"])
         rows.append({
             "leadId": lid,
             "customerName": l.get("customerName") or de.get("customerName"),
@@ -8833,7 +9000,8 @@ async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] 
             "extraDealerIncomeTotal": extra,
             "oemExtraSupportReceived": oem["oemExtraSupportReceived"],
             "oemExtraSupportPassed": oem["oemExtraSupportPassed"],
-            "oemExtraSupportRetained": oem["oemExtraSupportRetained"],
+            "oemExtraSupportRetained": extra_retained,
+            "oemUnpayableWriteOff": wo["oemUnpayableWriteOff"],
             "totalDealerEarnings": total,
             "dealerTotalEarnings": total,
             "bookingDate": l.get("bookingDate") or de.get("bookingDate") or "",
@@ -9308,16 +9476,20 @@ async def dealer_earnings_report():
         lid = e.get("leadId")
         if lid:
             ins_by_lead[lid] = ce.round2(ins_by_lead.get(lid, 0) + ce.insurance_dealer_income(e))
+    claims_by = {}
+    for c in await db.claims.find({"manual": {"$ne": True}}).to_list(8000):
+        claims_by.setdefault(c.get("leadId"), []).append(c)
     by_month = {}
     components = {"Dealer Margin": 0.0, "Scheme Retained": 0.0, "Insurance Income": 0.0,
                   "OEM Extra Support": 0.0, "Documentation": 0.0, "Warranty": 0.0,
                   "RSA": 0.0, "Referral": 0.0, "Other Income": 0.0,
                   "Customer Insurance Benefit Passed (scheme, not income)": 0.0,
                   "Dealer-Funded Benefit (cost)": 0.0,
+                  "Unpayable OEM claims": 0.0,
                   "Finance Incentive": 0.0,
                   "Accessories Margin": 0.0, "Exchange Margin": 0.0, "Campaign Incentive": 0.0}
     totals = {"margin": 0.0, "scheme": 0.0, "insurance": 0.0, "extra": 0.0,
-              "dealerFundedBenefit": 0.0, "total": 0.0, "count": 0}
+              "dealerFundedBenefit": 0.0, "writeOff": 0.0, "total": 0.0, "count": 0}
     for l in leads:
         snap = lead_to_snapshot(l)
         margin = ce.compute_dealer_margin(snap)["marginNetExGst"]
@@ -9328,7 +9500,8 @@ async def dealer_earnings_report():
         insurance = ins_by_lead.get(l.get("leadId"), 0)
         oem_recv = max(0.0, ce.num(l.get("oemExtraSupportReceived")))
         oem_pass = max(0.0, min(ce.num(l.get("oemExtraSupportPassed")), oem_recv))
-        other = ce.round2(max(0.0, oem_recv - oem_pass))   # OEM Extra Support retained
+        wo = ce.unpayable_write_off_from_claims(claims_by.get(l.get("leadId")) or [])
+        other = 0.0 if wo["extraSupportUnpayable"] else ce.round2(max(0.0, oem_recv - oem_pass))
         # Extra dealer income lines (C1) — full port of DEALER_EARNINGS_MANUAL_COLS_
         doc_inc = ce.num(l.get("documentationIncome"))
         war_inc = ce.num(l.get("warrantyIncome"))
@@ -9349,18 +9522,22 @@ async def dealer_earnings_report():
         has_auth = bool(l.get("schemeAllocationV2") or l.get("schemeAllocationExplicit")
                         or ce._explicit_allocation({"schemeAllocation": l.get("schemeAllocation")}))
         funded_cost = ce.round2(ce.num(alloc["totals"].get("dealerFundedBenefit"))) if has_auth else 0.0
-        total = ce.round2(margin + scheme + insurance + other + extra - funded_cost)
+        total = ce.round2(margin + scheme + insurance + other + extra - funded_cost
+                          - wo["oemUnpayableScheme"])
         month = str(l.get("deliveryDate") or l.get("bookingDate") or "")[:7] or "Unknown"
         m = by_month.setdefault(month, {"key": month, "margin": 0.0, "scheme": 0.0,
                                         "insurance": 0.0, "other": 0.0, "extra": 0.0,
-                                        "dealerFundedBenefit": 0.0, "total": 0.0, "count": 0})
+                                        "dealerFundedBenefit": 0.0, "writeOff": 0.0,
+                                        "total": 0.0, "count": 0})
         m["margin"] += margin; m["scheme"] += scheme; m["insurance"] += insurance
         m["other"] += other; m["extra"] += extra
         m["dealerFundedBenefit"] += funded_cost
+        m["writeOff"] += wo["oemUnpayableWriteOff"]
         m["total"] += total; m["count"] += 1
         totals["margin"] += margin; totals["scheme"] += scheme
         totals["insurance"] += insurance; totals["extra"] += extra
         totals["dealerFundedBenefit"] += funded_cost
+        totals["writeOff"] += wo["oemUnpayableWriteOff"]
         totals["total"] += total; totals["count"] += 1
         components["Dealer Margin"] += margin
         components["Scheme Retained"] += scheme
@@ -9373,6 +9550,7 @@ async def dealer_earnings_report():
         components["Other Income"] += other_inc
         components["Customer Insurance Benefit Passed (scheme, not income)"] += cust_ins_benefit
         components["Dealer-Funded Benefit (cost)"] += funded_cost
+        components["Unpayable OEM claims"] += wo["oemUnpayableWriteOff"]
         components["Finance Incentive"] += fin_inc
         components["Accessories Margin"] += acc_margin
         components["Exchange Margin"] += exch_margin
@@ -9380,7 +9558,8 @@ async def dealer_earnings_report():
 
     months = sorted(by_month.values(), key=lambda x: x["key"], reverse=True)
     for m in months:
-        for k in ("margin", "scheme", "insurance", "other", "extra", "dealerFundedBenefit", "total"):
+        for k in ("margin", "scheme", "insurance", "other", "extra", "dealerFundedBenefit",
+                  "writeOff", "total"):
             m[k] = ce.round2(m[k])
     return {
         "byMonth": months,
@@ -10233,6 +10412,10 @@ async def _run_boot_maintenance():
             await _repair_duplicate_finance_receipts()
         except Exception:
             logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
+        try:
+            await _repair_mis_only_received()
+        except Exception:
+            logging.exception("MIS_RECEIVED_REPAIR_ERROR")
         try:
             await _oem_catalog_boot()
         except Exception:

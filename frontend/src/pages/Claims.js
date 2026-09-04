@@ -7,6 +7,7 @@ import { inr, fmtDate, todayISO } from "../lib/format";
 import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
+import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
 
@@ -28,6 +29,7 @@ function OemClaimLink({ claimNumber }) {
 }
 
 export default function Claims() {
+  const { isMoneyDesk } = useAuth();
   const [params] = useSearchParams();
   const leadFilter = params.get("leadId") || "";
   const [rows, setRows] = useState([]);
@@ -212,6 +214,20 @@ export default function Claims() {
             <div className="flex items-center gap-1.5">
               <Badge tone="bg-violet-50 text-violet-700 ring-violet-600/20">{r.component}</Badge>
               {r.manual && <Badge tone="bg-blue-50 text-blue-700 ring-blue-600/20">Manual</Badge>}
+              {isMoneyDesk && r.componentKey === "oemExtraSupport" && r.claimStatus !== "Dropped"
+                && Number(r.receivedAmount || 0) <= 0.01 && (
+                <button type="button" data-testid={`drop-extra-${r.claimId}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!window.confirm("Drop this OEM Extra Support? It leaves the claim register, is recorded on Dropped Extra Support, and is taken out of dealer earnings.")) return;
+                    post("/claims/drop-extra-support", { claimId: r.claimId, leadId: r.leadId })
+                      .then(() => { toast.success("Extra Support dropped"); load(); })
+                      .catch((err) => toast.error(err?.response?.data?.detail || "Could not drop"));
+                  }}
+                  className="text-[10px] font-semibold text-rose-700 hover:underline">
+                  Drop
+                </button>
+              )}
             </div>
           )},
           { key: "claimAmount", label: "Claim Amount", align: "right", mono: true, render: (r) => inr(r.claimAmount) },
@@ -223,6 +239,7 @@ export default function Claims() {
               : r.claimStatus === "Received" ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
                 : r.claimStatus === "Approved" ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20"
                   : r.claimStatus === "Submitted" ? "bg-blue-50 text-blue-700 ring-blue-600/20"
+                    : r.claimStatus === "Dropped" ? "bg-zinc-100 text-zinc-600 ring-zinc-400/30"
                     : r.claimStatus === "Rejected" ? "bg-rose-50 text-rose-700 ring-rose-600/20"
                       : r.claimStatus === "Partial" ? "bg-amber-50 text-amber-700 ring-amber-600/20"
                         : undefined

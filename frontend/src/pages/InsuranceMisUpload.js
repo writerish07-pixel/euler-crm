@@ -97,7 +97,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           reference: row.reference,
         })),
       });
-      toast.success(`${r.data.approved} payout${r.data.approved === 1 ? "" : "s"} recorded as received`);
+      toast.success(`${r.data.approved} payout${r.data.approved === 1 ? "" : "s"} marked as mapped`);
       onDone();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Approve failed");
@@ -112,7 +112,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
 
   return (
     <Drawer open onClose={onClose} width="max-w-5xl" title="Upload agent MIS"
-      subtitle="Chassis is unique on the agent's MIS. We fetch the payout from that vehicle, then tick and approve received"
+      subtitle="Match the file to payouts already in this app. Mapped means the row is on the MIS — not that money arrived."
       footer={<div className="flex justify-between items-center gap-2">
         <Button variant="ghost" data-testid="mis-template-btn" onClick={downloadTemplate}>
           <Download size={15} /> Download template
@@ -125,7 +125,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           </Button>
           <Button data-testid="mis-approve-btn" onClick={approveSelected}
             disabled={step !== "review" || busy || !selected.length}>
-            {busy ? "Working…" : `Approve ${selected.length} as received`}
+            {busy ? "Working…" : `Mark ${selected.length} mapped`}
           </Button>
         </div>
       </div>}>
@@ -144,6 +144,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
         <div className="space-y-4" data-testid="mis-review">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <Stat k="Matched" v={data.totals?.matched} />
+            <Stat k="Not in this MIS" v={data.totals?.unmatchedEntries} tone="text-rose-700" />
             <Stat k="Not in register" v={data.totals?.unmatchedMis} tone="text-amber-700" />
             <Stat k="MIS total" v={inr(data.totals?.misAmount)} />
             {isOwner && <Stat k="Difference" v={inr(data.totals?.difference)}
@@ -221,6 +222,23 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
               </tbody>
             </table>
           </div>
+
+          {(data.unmatchedEntries || []).length > 0 && (
+            <Card className="p-3 bg-rose-50 border-rose-200" data-testid="mis-unmatched-register">
+              <div className="flex gap-2 text-sm text-rose-900 mb-2">
+                <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                {data.unmatchedEntries.length} register payout{data.unmatchedEntries.length === 1 ? "" : "s"} not on this MIS — send to the agent
+              </div>
+              <ul className="text-xs text-rose-900 space-y-1">
+                {data.unmatchedEntries.slice(0, 20).map((r) => (
+                  <li key={r.entryId}>{r.customerName || "—"}
+                    {r.chassisNumber ? ` · ${r.chassisNumber}` : ""}
+                    {r.policyNumber ? ` · ${r.policyNumber}` : ""}
+                    {r.leadId ? ` · ${r.leadId}` : ""}</li>
+                ))}
+              </ul>
+            </Card>
+          )}
 
           {(data.unmatchedMis || []).length > 0 && (
             <Card className="p-3 bg-amber-50 border-amber-200" data-testid="mis-unmatched">

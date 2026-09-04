@@ -1186,17 +1186,59 @@ def insurance_payout_due_by(basis_date, due_day=INSURANCE_PAYOUT_DUE_DAY,
 def insurance_dealer_income(entry):
     """Dealer earnings from the insurer payout on one register row.
 
-    Pending: expected entitlement (premium × rate). After the owner accepts the
-    agent's MIS — or the line is otherwise Received — income is the cash booked,
-    including a short or over settlement.
+    Cash only. Pending / Mapped (agent MIS matched) contribute ₹0 until a
+    payout receipt is recorded. MIS approve is not money received.
     """
     if not entry:
         return 0.0
     if str(entry.get("status") or "").startswith("N/A"):
         return 0.0
-    if entry.get("misApproved") or str(entry.get("status") or "") == "Received":
-        return round2(max(0.0, num(entry.get("receivedPayout"))))
-    return round2(max(0.0, num(entry.get("expectedPayout"))))
+    return round2(max(0.0, num(entry.get("receivedPayout"))))
+
+
+def claim_is_unpayable(claim):
+    """OEM will not pay this register row: Dropped, or Rejected with nothing refiled."""
+    if not claim:
+        return False
+    status = str(claim.get("claimStatus") or "").strip()
+    if status == "Dropped":
+        return True
+    if status == "Rejected" and str(claim.get("oemMatchState") or "") == "rejected":
+        return True
+    return False
+
+
+def unpayable_write_off_from_claims(claims):
+    """Euler eligible amounts OEM will not pay. Never uses Coulson rupees.
+
+    Extra Support that is unpayable is excluded from retained in earnings; scheme
+    components are an explicit deduction. The display total is both.
+    """
+    scheme = 0.0
+    extra = 0.0
+    extra_unpayable = False
+    for c in claims or []:
+        if not claim_is_unpayable(c):
+            continue
+        key = c.get("componentKey")
+        if str(c.get("claimStatus") or "") == "Dropped":
+            amt = num(c.get("droppedAmount"))
+            if amt <= 0:
+                amt = num(c.get("eligibleClaim") or c.get("claimAmount"))
+        else:
+            amt = num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount"))
+        amt = round2(max(0.0, amt))
+        if key == OEM_EXTRA_SUPPORT_KEY:
+            extra = round2(extra + amt)
+            extra_unpayable = True
+        else:
+            scheme = round2(scheme + amt)
+    return {
+        "oemUnpayableWriteOff": round2(scheme + extra),
+        "oemUnpayableScheme": scheme,
+        "oemUnpayableExtraSupport": extra,
+        "extraSupportUnpayable": extra_unpayable,
+    }
 
 
 def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows):
