@@ -2,11 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  IndianRupee, Activity, ClipboardList, Warehouse, Trophy,
+  IndianRupee, Activity, ClipboardList, Warehouse, Trophy, CalendarDays,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { inr, compactInr, num } from "../lib/format";
+import { inr, compactInr, num, ytdCount } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 import ChangePasswordCard from "../components/ChangePasswordCard";
@@ -35,11 +35,11 @@ export default function ExecutiveDashboard() {
         <div className="text-ink-faint text-sm">Loading executive dashboard…</div>
       ) : (
       <>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="My leads (MTD)" value={num(k.myLeadsMtd)} sub={`${k.todayLeads || 0} today`} icon={Users} />
-        <StatCard label="My bookings (MTD)" value={num(k.myBookingsMtd)} sub={`${k.activeBookings || 0} active`} icon={ClipboardCheck} tone="text-emerald-600" />
-        <StatCard label="My deliveries (MTD)" value={num(k.myDeliveriesMtd)} sub={`${k.pendingDeliveries || 0} pending`} icon={Truck} tone="text-cobalt" />
-        <StatCard label="Conversion" value={`${k.conversion || 0}%`} sub="bookings ÷ MTD leads" icon={TrendingUp} tone="text-violet-600" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="exec-period-kpis">
+        <StatCard label="My leads (MTD)" value={num(k.myLeadsMtd)} sub={`${ytdCount(k.myLeadsYtd)} · ${k.todayLeads || 0} today`} icon={Users} />
+        <StatCard label="My bookings (MTD)" value={num(k.myBookingsMtd)} sub={`${ytdCount(k.myBookingsYtd)} · ${k.activeBookings || 0} active`} icon={ClipboardCheck} tone="text-emerald-600" />
+        <StatCard label="My deliveries (MTD)" value={num(k.myDeliveriesMtd)} sub={`${ytdCount(k.myDeliveriesYtd)} · ${k.pendingDeliveries || 0} pending`} icon={Truck} tone="text-cobalt" />
+        <StatCard label="Conversion" value={`${k.conversion || 0}%`} sub={`YTD ${k.conversionYtd || 0}% · bookings ÷ MTD leads`} icon={TrendingUp} tone="text-violet-600" />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
@@ -51,6 +51,7 @@ export default function ExecutiveDashboard() {
 
       <div className="flex flex-wrap gap-2 mt-5">
         <Link to="/leads"><Button variant="secondary" data-testid="exec-go-leads"><Users size={14} /> Leads</Button></Link>
+        <Link to="/monthly"><Button variant="secondary" data-testid="exec-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="exec-go-bookings"><ClipboardList size={14} /> Bookings</Button></Link>
         <Link to="/activities"><Button variant="secondary" data-testid="exec-go-activities"><Activity size={14} /> Activities</Button></Link>
         <Link to="/inventory"><Button variant="secondary" data-testid="exec-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>

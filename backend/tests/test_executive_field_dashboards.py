@@ -96,6 +96,13 @@ async def test_field_dashboard_shared_by_asm_and_rm(client):
     b = await client.get("/api/field/dashboard")
     assert b.status_code == 200, b.text
     assert "leadsMtd" in b.json()["kpis"]
+    k = b.json()["kpis"]
+    assert "leadsYtd" in k
+    assert "deliveriesYtd" in k
+    period = b.json()["period"]
+    assert "mtd" in period and "ytd" in period
+    assert "collected" not in period["mtd"]
+    assert "collected" not in k
 
 
 @pytest.mark.asyncio
@@ -106,6 +113,9 @@ async def test_executive_dashboard_scoped(client):
     body = r.json()
     assert body["scope"]["matchedLeads"] >= 1
     assert "myLeadsMtd" in body["kpis"]
+    assert "myLeadsYtd" in body["kpis"]
+    assert "period" in body
+    assert "collected" not in (body["period"]["mtd"] or {})
     assert "worklist" in body
     assert "incentive" in body
     assert "units" in body["incentive"]

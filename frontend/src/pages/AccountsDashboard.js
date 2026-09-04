@@ -2,11 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Wallet, Landmark, ReceiptText, ShieldCheck, Truck, AlertCircle,
-  IndianRupee, Printer, FileText, ExternalLink, Warehouse,
+  IndianRupee, Printer, FileText, ExternalLink, Warehouse, CalendarDays,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
-import { inr, compactInr, fmtDate, todayISO } from "../lib/format";
+import { inr, compactInr, fmtDate, todayISO, num, ytdCount, ytdMoney } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Portal, Field, Input, Select } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
@@ -56,13 +56,18 @@ export default function AccountsDashboard() {
     <div data-testid="accounts-dashboard">
       <PageHeader
         title="Accounts Dashboard"
-        subtitle={`Tally cross-check · money desk · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
+        subtitle={`Tally cross-check · MTD + YTD · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Customer outstanding" value={compactInr(k.customerOutstanding)} icon={IndianRupee} tone="text-red-600" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="acct-period-kpis">
+        <StatCard label="Collected (MTD)" value={compactInr(k.collectedMtd)} sub={ytdMoney(k.collectedYtd)} icon={Wallet} tone="text-cobalt" />
+        <StatCard label="Deliveries (MTD)" value={num(k.deliveriesMtd)} sub={ytdCount(k.deliveriesYtd)} icon={Truck} tone="text-teal-600" />
+        <StatCard label="Customer outstanding" value={compactInr(k.customerOutstanding)} sub="live · not period-cut" icon={IndianRupee} tone="text-red-600" />
         <StatCard label="Finance pending" value={compactInr(k.financeOutstanding)}
           sub={`${k.financePendingFiles || 0} open files`} icon={Landmark} tone="text-violet-600" />
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
         <StatCard label="OEM claims open" value={compactInr(k.oemClaimsOpen)}
           sub={`${k.oemClaimsOpenCount || 0} claim lines`} icon={ReceiptText} tone="text-amber-600" />
         <StatCard label="Insurance payout due" value={compactInr(k.insurancePayoutDue)}
@@ -70,6 +75,7 @@ export default function AccountsDashboard() {
       </div>
 
       <div className="flex flex-wrap gap-2 mt-5">
+        <Link to="/monthly"><Button variant="secondary" data-testid="acct-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         <Link to="/payments"><Button variant="secondary" data-testid="acct-go-payments"><Wallet size={14} /> Payments</Button></Link>
         <Link to="/finance"><Button variant="secondary" data-testid="acct-go-finance"><Landmark size={14} /> Finance</Button></Link>
         <Link to="/claims"><Button variant="secondary" data-testid="acct-go-claims"><ReceiptText size={14} /> OEM Claims</Button></Link>

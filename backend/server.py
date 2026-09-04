@@ -1449,6 +1449,47 @@ def _field_safe_lead(lead: dict) -> dict:
     return {k: lead.get(k) for k in FIELD_LEAD_SAFE_KEYS if k in lead or lead.get(k) is not None}
 
 
+def _volume_slice(leads, payments, period, cancel_events, *, include_money=True):
+    """One MTD or YTD pack: event-dated counts (and receipts when allowed)."""
+    leads_n = sum(1 for l in leads if periodmod.in_period(l.get("createdDate"), period))
+    bookings_n = sum(
+        1 for l in leads
+        if _is_booked_lead(l) and periodmod.in_period(l.get("bookingDate"), period))
+    deliveries_n = sum(
+        1 for l in leads
+        if _is_delivered_lead(l) and periodmod.in_period(_retail_date(l), period))
+    conv = round((bookings_n / leads_n * 100), 1) if leads_n else 0.0
+    del_conv = round((deliveries_n / bookings_n * 100), 1) if bookings_n else 0.0
+    cancellations = sum(
+        1 for ev in (cancel_events or [])
+        if periodmod.in_period(ev.get("date"), period))
+    out = {
+        "leads": leads_n,
+        "bookings": bookings_n,
+        "deliveries": deliveries_n,
+        "leadToBookPct": conv,
+        "bookToDeliverPct": del_conv,
+        "cancellations": cancellations,
+        "period": periodmod.as_dict(period),
+    }
+    if include_money:
+        out["collected"] = ce.round2(sum(
+            ce.num(p.get("amount")) for p in (payments or [])
+            if periodmod.in_period(p.get("date"), period)))
+    return out
+
+
+def _volume_period_kpis(leads, payments=None, cancel_events=None, *, include_money=True):
+    """Morning-board MTD (this calendar month) + YTD (1 Jan → today)."""
+    events = cancel_events if cancel_events is not None else _cancel_events(leads)
+    mtd_p = periodmod.this_month_period()
+    ytd_p = periodmod.ytd_period()
+    return {
+        "mtd": _volume_slice(leads, payments, mtd_p, events, include_money=include_money),
+        "ytd": _volume_slice(leads, payments, ytd_p, events, include_money=include_money),
+    }
+
+
 # ---------------------------------------------------------------- dashboard
 @api.get("/dashboard")
 async def dashboard():
@@ -1456,6 +1497,7 @@ async def dashboard():
     payments = await db.payments.find().to_list(5000)
     ym = this_month()
     td = today()
+    vol = _volume_period_kpis(leads, payments)
 
     def in_month(d):
         return bool(d) and str(d).startswith(ym)
@@ -1466,9 +1508,6 @@ async def dashboard():
     booked = [l for l in leads if _is_booked_lead(l)]
     delivered = [l for l in leads if _is_delivered_lead(l)]
     active_booked = [l for l in booked if not _is_delivered_lead(l)]
-
-    monthly_leads = [l for l in leads if in_month(l.get("createdDate"))]
-    monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
 
     pay_by_mode = {"Cash": 0.0, "UPI": 0.0, "Finance": 0.0, "Other": 0.0}
     month_payments = [p for p in payments if in_month(p.get("date"))]
@@ -1530,20 +1569,28 @@ async def dashboard():
             "todayLeads": len([l for l in leads if is_today(l.get("createdDate"))]),
             "todayBookings": len([l for l in booked if is_today(l.get("bookingDate"))]),
             "todayDeliveries": len([l for l in delivered if is_today(l.get("deliveryDate"))]),
-            "monthlyLeads": len(monthly_leads),
-            "monthlyBookings": len(monthly_bookings),
+            "monthlyLeads": vol["mtd"]["leads"],
+            "monthlyBookings": vol["mtd"]["bookings"],
             "activeBookings": len(active_booked),
-            "monthlyDeliveries": len([l for l in delivered if in_month(_retail_date(l))]),
+            "monthlyDeliveries": vol["mtd"]["deliveries"],
             "pendingDeliveries": len(active_booked),
             "totalLeads": len(leads),
-            "conversion": round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0,
-            "revenue": ce.round2(sum(ce.num(p.get("amount")) for p in month_payments)),
+            "conversion": vol["mtd"]["leadToBookPct"],
+            "conversionYtd": vol["ytd"]["leadToBookPct"],
+            # `revenue` kept as MTD receipts so older clients keep working.
+            "revenue": vol["mtd"]["collected"],
+            "collectedMtd": vol["mtd"]["collected"],
+            "collectedYtd": vol["ytd"]["collected"],
+            "leadsYtd": vol["ytd"]["leads"],
+            "bookingsYtd": vol["ytd"]["bookings"],
+            "deliveriesYtd": vol["ytd"]["deliveries"],
             "financeOutstanding": ce.round2(finance_os),
             "financeOverdueCount": finance_overdue_count,
             "financeOverdueAmount": finance_overdue_amount,
             "followupDue": followup_due,
             "followupOverdue": followup_overdue,
         },
+        "period": vol,
         "payments": {k: ce.round2(v) for k, v in pay_by_mode.items()},
         "outstanding": {
             "customer": ce.round2(cust_os),
@@ -1559,6 +1606,8 @@ async def dashboard():
 async def accounts_dashboard():
     """Money desk home — Tally cross-check KPIs (Accounts / Owner / Executive)."""
     leads = await db.leads.find().to_list(5000)
+    payments = await db.payments.find().to_list(5000)
+    vol = _volume_period_kpis(leads, payments)
     cust_os = ce.round2(sum(ce.num(l.get("customerOutstanding")) for l in leads))
     company_os = ce.round2(sum(ce.num(l.get("companyOutstanding")) for l in leads))
 
@@ -1655,7 +1704,12 @@ async def accounts_dashboard():
             "deliveredForTally": len(delivered),
             "cancelledRefundDue": len(cancelled_due),
             "cancelledRefundHeld": ce.round2(sum(r["excessReceived"] for r in cancelled_due)),
+            "collectedMtd": vol["mtd"]["collected"],
+            "collectedYtd": vol["ytd"]["collected"],
+            "deliveriesMtd": vol["mtd"]["deliveries"],
+            "deliveriesYtd": vol["ytd"]["deliveries"],
         },
+        "period": vol,
         "tallyQueue": tally_rows,
         "cancelledRefundQueue": cancelled_due[:40],
         "doNotPost": {
@@ -1676,6 +1730,7 @@ async def executive_dashboard(user=Depends(current_user)):
     mine = _leads_for_executive(leads_all, user) if user.get("role") == "executive" else leads_all
     ym = this_month()
     td = today()
+    vol = _volume_period_kpis(mine, include_money=False)
 
     def in_month(d):
         return bool(d) and str(d).startswith(ym)
@@ -1754,8 +1809,6 @@ async def executive_dashboard(user=Depends(current_user)):
             "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
         })
 
-    conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
-
     plan = await _load_exec_incentive_plan_for(user.get("name") or "")
     incentive = ce.evaluate_executive_incentive(len(monthly_deliveries), plan)
     incentive["month"] = ym
@@ -1770,10 +1823,14 @@ async def executive_dashboard(user=Depends(current_user)):
                     else "Owner view — all dealership leads.",
         },
         "kpis": {
-            "myLeadsMtd": len(monthly_leads),
-            "myBookingsMtd": len(monthly_bookings),
-            "myDeliveriesMtd": len(monthly_deliveries),
-            "conversion": conv,
+            "myLeadsMtd": vol["mtd"]["leads"],
+            "myBookingsMtd": vol["mtd"]["bookings"],
+            "myDeliveriesMtd": vol["mtd"]["deliveries"],
+            "myLeadsYtd": vol["ytd"]["leads"],
+            "myBookingsYtd": vol["ytd"]["bookings"],
+            "myDeliveriesYtd": vol["ytd"]["deliveries"],
+            "conversion": vol["mtd"]["leadToBookPct"],
+            "conversionYtd": vol["ytd"]["leadToBookPct"],
             "followupDue": len(followup_due),
             "followupOverdue": len(followup_overdue),
             "pendingDeliveries": len(active_booked),
@@ -1782,6 +1839,7 @@ async def executive_dashboard(user=Depends(current_user)):
             "todayLeads": len([l for l in mine if is_today(l.get("createdDate"))]),
             "activeBookings": len(active_booked),
         },
+        "period": vol,
         "funnel": [{"status": k, "count": funnel.get(k, 0)} for k in funnel_order],
         "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
@@ -2088,8 +2146,9 @@ async def cancellations_report(period: str = "month", executive: str = "",
 # Who may open the OEM board. The owner is included so you can see exactly what
 # the OEM's finance manager sees before handing out the login.
 OEM_FINANCE_ROLES = ("owner", "oem_finance")
-# Month-wise MTD/YTD register — dealership desks that already see pipeline or money.
-MONTHLY_REGISTER_ROLES = ("owner", "sales_gm", "tl", "accounts")
+# Month-wise MTD/YTD register — every dealership login. OEM stays on /reports/oem-monthly.
+MONTHLY_REGISTER_ROLES = ("owner", "sales_gm", "tl", "accounts", "executive", "asm", "rm")
+FIELD_MONTHLY_ROLES = ("asm", "rm")
 EXPORT_ROLES = ("owner", "sales_gm", "tl")
 # Ageing buckets, in days since delivery. The finance receipt SLA is 2 days, so
 # the first bucket is "inside SLA" and everything after it is late.
@@ -2340,8 +2399,19 @@ async def _period_source():
     }
 
 
-async def _monthly_payload(period, *, oem=False):
-    src = await _period_source()
+def _scope_period_source(src, lead_ids):
+    ids = set(lead_ids)
+    return {
+        "leads": [l for l in src["leads"] if l.get("leadId") in ids],
+        "payments": [r for r in src["payments"] if r.get("leadId") in ids],
+        "finance": [r for r in src["finance"] if r.get("leadId") in ids],
+        "insurance": [r for r in src["insurance"] if r.get("leadId") in ids],
+        "claims": [r for r in src["claims"] if r.get("leadId") in ids],
+    }
+
+
+async def _monthly_payload(period, *, oem=False, src=None):
+    src = src if src is not None else await _period_source()
     focus = periodmod.focus_year(period)
     selected = _period_metrics_from(src, period)
     mtd_p = periodmod.this_month_period()
@@ -2368,10 +2438,30 @@ async def _monthly_payload(period, *, oem=False):
 
 @api.get("/reports/monthly")
 async def monthly_register(month: str = "", year: str = "", user=Depends(current_user)):
-    """MTD / YTD / any month-year snapshot for leads, bookings, money, scheme, earnings."""
-    if (user or {}).get("role") not in MONTHLY_REGISTER_ROLES:
-        raise HTTPException(403, "Monthly register is for Owner, Sales GM, Team Leader and Accounts.")
-    return await _monthly_payload(_parse_period(month, year), oem=False)
+    """MTD / YTD / any month-year snapshot for leads, bookings, money, scheme, earnings.
+
+    Executives see their own leads. ASM/RM get the volume+finance pack (no dealer
+    commercials). OEM is not on this route — they use /reports/oem-monthly.
+    """
+    role = (user or {}).get("role")
+    if role not in MONTHLY_REGISTER_ROLES:
+        raise HTTPException(403, "Monthly register is for dealership staff.")
+    src = await _period_source()
+    if role == "executive":
+        ids = {l["leadId"] for l in _leads_for_executive(src["leads"], user) if l.get("leadId")}
+        src = _scope_period_source(src, ids)
+    oem = role in FIELD_MONTHLY_ROLES
+    body = await _monthly_payload(_parse_period(month, year), oem=oem, src=src)
+    if role == "executive":
+        body["scope"] = {"kind": "own", "note": "Your assigned leads only."}
+    elif oem:
+        body["scope"] = {
+            "kind": "field",
+            "note": "Volume and finance totals. No dealer commercials.",
+        }
+    else:
+        body["scope"] = {"kind": "dealership"}
+    return body
 
 
 @api.get("/reports/oem-monthly")
@@ -2391,6 +2481,7 @@ async def _ops_pipeline_dashboard():
     leads = await db.leads.find().to_list(5000)
     ym = this_month()
     td = today()
+    vol = _volume_period_kpis(leads, include_money=False)
 
     def in_month(d):
         return bool(d) and str(d).startswith(ym)
@@ -2497,9 +2588,6 @@ async def _ops_pipeline_dashboard():
             round((row["deliveriesMtd"] / row["bookingsMtd"] * 100), 1) if row["bookingsMtd"] else 0.0
         )
 
-    book_conv = round((len(monthly_bookings) / len(monthly_leads) * 100), 1) if monthly_leads else 0.0
-    deliver_conv = round((len(monthly_deliveries) / len(monthly_bookings) * 100), 1) if monthly_bookings else 0.0
-
     worklist = []
     for l in followup_overdue_leads[:15]:
         worklist.append({
@@ -2523,19 +2611,20 @@ async def _ops_pipeline_dashboard():
             "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
         })
 
-    cancel_mtd = len([
-        e for e in _cancel_events(leads)
-        if in_month(e.get("date"))
-    ])
     cust_os = ce.round2(sum(ce.num(l.get("customerOutstanding")) for l in leads))
 
     return {
         "kpis": {
-            "leadsMtd": len(monthly_leads),
-            "bookingsMtd": len(monthly_bookings),
-            "deliveriesMtd": len(monthly_deliveries),
-            "leadToBookPct": book_conv,
-            "bookToDeliverPct": deliver_conv,
+            "leadsMtd": vol["mtd"]["leads"],
+            "bookingsMtd": vol["mtd"]["bookings"],
+            "deliveriesMtd": vol["mtd"]["deliveries"],
+            "leadsYtd": vol["ytd"]["leads"],
+            "bookingsYtd": vol["ytd"]["bookings"],
+            "deliveriesYtd": vol["ytd"]["deliveries"],
+            "leadToBookPct": vol["mtd"]["leadToBookPct"],
+            "bookToDeliverPct": vol["mtd"]["bookToDeliverPct"],
+            "leadToBookPctYtd": vol["ytd"]["leadToBookPct"],
+            "bookToDeliverPctYtd": vol["ytd"]["bookToDeliverPct"],
             "followupDue": followup_due,
             "followupOverdue": followup_overdue,
             "pendingDeliveries": len(active_booked),
@@ -2548,9 +2637,11 @@ async def _ops_pipeline_dashboard():
             "oemClaimsOpenCount": oem_claim_count,
             "activeBookings": len(active_booked),
             "totalLeads": len(leads),
-            "cancellationsMtd": cancel_mtd,
+            "cancellationsMtd": vol["mtd"]["cancellations"],
+            "cancellationsYtd": vol["ytd"]["cancellations"],
             "customerOutstanding": cust_os,
         },
+        "period": vol,
         "funnel": [{"status": k, "count": funnel.get(k, 0)} for k in funnel_order],
         "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),

@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, Wallet, IndianRupee,
-  AlertCircle, Landmark, Banknote, Smartphone,
+  AlertCircle, Landmark, CalendarDays,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { get } from "../lib/api";
-import { inr, compactInr, num } from "../lib/format";
-import { Card, PageHeader, StatCard, Table, Badge } from "../components/ui";
+import { inr, compactInr, num, ytdCount, ytdMoney } from "../lib/format";
+import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import OwnerPriceEditor from "../components/OwnerPriceEditor";
 import YardStockCard from "../components/YardStockCard";
 import { useAuth } from "../context/AuthContext";
@@ -19,7 +20,9 @@ export default function Dashboard() {
     get("/dashboard").then(setD).catch(() => {});
   }, []);
 
-  const k = d?.kpis;
+  const k = d?.kpis || {};
+  const mtd = d?.period?.mtd || {};
+  const ytd = d?.period?.ytd || {};
   const payColors = { Cash: "#059669", UPI: "#1D4ED8", Finance: "#7C3AED", Other: "#A1A1AA" };
   const payData = Object.entries(d?.payments || {}).map(([name, value]) => ({ name, value }));
 
@@ -28,15 +31,23 @@ export default function Dashboard() {
       <PageHeader
         title="Operations Dashboard"
         subtitle={d?.lastUpdated
-          ? `Live pipeline snapshot · updated ${new Date(d.lastUpdated).toLocaleTimeString("en-IN")}`
-          : "Live pipeline snapshot"}
+          ? `MTD + YTD morning board · updated ${new Date(d.lastUpdated).toLocaleTimeString("en-IN")}`
+          : "MTD + YTD morning board"}
+        actions={<Link to="/monthly"><Button variant="secondary" data-testid="ops-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>}
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Active Bookings" value={d ? num(k.activeBookings) : "—"} sub={d ? `${k.monthlyBookings} new this month` : "loading"} icon={ClipboardCheck} tone="text-emerald-600" />
-        <StatCard label="Total Leads" value={d ? num(k.totalLeads) : "—"} sub={d ? `${k.monthlyLeads} new this month` : "loading"} icon={Users} />
-        <StatCard label="Conversion" value={d ? `${k.conversion}%` : "—"} sub="bookings ÷ monthly leads" icon={TrendingUp} tone="text-violet-600" />
-        <StatCard label="Revenue (MTD)" value={d ? compactInr(k.revenue) : "—"} sub="payments this month" icon={IndianRupee} tone="text-cobalt" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="ops-period-kpis">
+        <StatCard label="Leads (MTD)" value={d ? num(mtd.leads ?? k.monthlyLeads) : "—"} sub={d ? ytdCount(ytd.leads ?? k.leadsYtd) : "loading"} icon={Users} />
+        <StatCard label="Bookings (MTD)" value={d ? num(mtd.bookings ?? k.monthlyBookings) : "—"} sub={d ? ytdCount(ytd.bookings ?? k.bookingsYtd) : "loading"} icon={ClipboardCheck} tone="text-emerald-600" />
+        <StatCard label="Deliveries (MTD)" value={d ? num(mtd.deliveries ?? k.monthlyDeliveries) : "—"} sub={d ? ytdCount(ytd.deliveries ?? k.deliveriesYtd) : "loading"} icon={Truck} tone="text-cobalt" />
+        <StatCard label="Collected (MTD)" value={d ? compactInr(mtd.collected ?? k.collectedMtd ?? k.revenue) : "—"} sub={d ? ytdMoney(ytd.collected ?? k.collectedYtd) : "loading"} icon={IndianRupee} tone="text-cobalt" />
+      </div>
+
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+        <StatCard label="Active Bookings" value={d ? num(k.activeBookings) : "—"} sub={d ? `${num(k.monthlyBookings)} booked MTD` : "loading"} icon={ClipboardCheck} tone="text-emerald-600" />
+        <StatCard label="Total Leads" value={d ? num(k.totalLeads) : "—"} sub="live stock · not period-cut" icon={Users} />
+        <StatCard label="Conversion" value={d ? `${k.conversion}%` : "—"} sub={d ? `${ytdCount(k.conversionYtd)}% · bookings ÷ MTD leads` : "bookings ÷ MTD leads"} icon={TrendingUp} tone="text-violet-600" />
+        <StatCard label="Follow-ups overdue" value={d ? num(k.followupOverdue) : "—"} sub={d ? `${num(k.followupDue)} due today` : "loading"} icon={AlertCircle} tone="text-red-600" />
       </div>
 
       {isOwner && <OwnerPriceEditor />}
@@ -105,7 +116,7 @@ export default function Dashboard() {
             { key: "pending", label: "Pending", align: "right", render: (r) => r.pending ? <Badge tone="bg-amber-50 text-amber-700 ring-amber-600/20">{r.pending}</Badge> : "—" },
             { key: "conv", label: "Book Conv %", align: "right", render: (r) => `${r.leads ? Math.round((r.bookings / r.leads) * 100) : 0}%` },
             { key: "customerOs", label: "Customer OS", align: "right", mono: true, render: (r) => inr(r.customerOs) },
-            { key: "revenue", label: "Revenue", align: "right", mono: true, render: (r) => inr(r.revenue) },
+            { key: "revenue", label: "Collected", align: "right", mono: true, render: (r) => inr(r.revenue) },
           ]}
           rows={d.modelPerformance}
           rowKey="model"
