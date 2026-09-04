@@ -155,12 +155,21 @@ and listed under "Not linked", never dropped.
 
 ## Claim documents (Yes / No)
 
-On every Euler sync we record whether a document exists against that debit note:
+On every Euler sync we record whether the desk uploaded files on the Claim Item
+**Docs** column in Coulson (`Add Documents` → `POST debit-note/line-item-documents`).
+Those files come back on the journey as `line_items[].documents[]` and show in the
+OEM app as **"N Docs"**.
 
-- **Yes** — Coulson holds the claim PDF (`debit_note_s3_link`) or the dealer attached supporting files on the line (`documents[]`). OEM Claim Settlements and Scheme Claim Register both show **Yes**.
-- **No** — neither is present. Upload the file in the OEM (Coulson) app, then **Sync from Euler**.
+- **Yes** — at least one supporting file is on a claim item. OEM Claim Settlements
+  and Scheme Claim Register both show **Yes**, with the file count.
+- **No** — no item uploads yet. Open the claim in the OEM app, use **Add Documents**,
+  then **Sync from Euler**. Euler's generated claim PDF (`debit_note_s3_link`) is
+  still linked as **PDF** but does **not** count as Yes — that form exists whether
+  or not anyone attached supporting files.
 
-Customer photo URLs are still not stored; only the count and the Yes/No flag.
+Open claims with no item docs are re-fetched on later syncs so a file uploaded
+after filing still lands. Customer photo URLs are not stored; only the count and
+the Yes/No flag.
 
 Filter **No document** on OEM Claim Settlements to see what still needs a file.
 
@@ -175,8 +184,8 @@ Auto-join uses chassis, then invoice, then claim wording. When that is wrong or 
 - **Detail is re-fetched only when it can have changed** (first sight, or Euler moved
   the status or the approved amount), keeping steady state at a couple of calls per sync.
 - **Customer photographs are not mirrored.** Line items carry `documents[]` with S3
-  URLs to customer WhatsApp images on an open bucket; only `documentCount` is stored.
-  The claim PDF (`debit_note_s3_link`) is a business document and is kept.
+  URLs to files the desk uploaded under Docs; only `documentCount` is stored.
+  The claim PDF (`debit_note_s3_link`) is kept as a link, separate from Yes/No.
 
 ## Google Sheet (Scheme Claim Register)
 

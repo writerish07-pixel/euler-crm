@@ -211,11 +211,47 @@ def _line_invoice(item):
     return m.group(0) if m else ""
 
 
+def _item_document_count(item):
+    """How many files the desk uploaded on this Claim Item (Coulson's Docs column).
+
+    The dealer SPA renders `line.documents.length` as "N Docs" and POSTs new files
+    to `debit-note/line-item-documents`. Those land back on the journey as
+    `documents[]` with `file_url`. Integer aliases (`document_count`) are accepted
+    so a list payload that already summed them still counts. URLs are never kept.
+    """
+    if not isinstance(item, dict):
+        return 0
+    counts = []
+    for key in ("document_count", "documents_count", "documentCount", "docs_count", "docsCount"):
+        val = item.get(key)
+        if isinstance(val, bool):
+            continue
+        if isinstance(val, (int, float)):
+            counts.append(max(int(val), 0))
+        elif isinstance(val, str) and val.strip().isdigit():
+            counts.append(int(val.strip()))
+    for key in ("documents", "supporting_documents", "supportingDocuments",
+                "attachments", "files", "docs"):
+        val = item.get(key)
+        if isinstance(val, list):
+            counts.append(len(val))
+        elif isinstance(val, dict):
+            nested = val.get("data") or val.get("files") or val.get("documents")
+            if isinstance(nested, list):
+                counts.append(len(nested))
+            for ck in ("count", "total", "total_count"):
+                n = val.get(ck)
+                if isinstance(n, (int, float)) and not isinstance(n, bool):
+                    counts.append(max(int(n), 0))
+    return max(counts) if counts else 0
+
+
 def normalise_line_item(item):
     """One claim line. Chassis and source invoice are the keys back to a lead.
 
-    The per-line `documents[]` are customer photographs on an open S3 bucket. Only
-    their count is kept: the CRM has no business re-hosting customer images, and the
+    The per-line `documents[]` are the files the desk uploads under Docs / Add
+    Documents in Coulson (often customer photographs on an open S3 bucket). Only
+    their count is kept: the CRM has no business re-hosting those images, and the
     read-only OEM finance role must never be able to reach them.
     """
     if not isinstance(item, dict):
@@ -236,7 +272,7 @@ def normalise_line_item(item):
         "totalAmount": round2(item.get("total_amount") or item.get("totalAmount")),
         "rejectedBy": str(item.get("rejected_by") or item.get("rejectedBy") or "") or "",
         "remarks": str(item.get("remarks") or "") or "",
-        "documentCount": len(item.get("documents") or []),
+        "documentCount": _item_document_count(item),
         "sourceInvoiceUrl": str(item.get("source_invoice_s3_link")
                                 or item.get("sourceInvoiceUrl") or ""),
         "leadId": str(item.get("leadId") or ""),
@@ -263,14 +299,13 @@ def claim_document_count(doc):
 
 
 def claim_has_document(doc):
-    """True when Euler holds a claim PDF or the dealer attached supporting files.
+    """True when the desk uploaded files on a Claim Item (Coulson's Docs column).
 
-    Line-item `documents[]` are what the desk uploads in the OEM app. The debit-note
-    PDF (`claimDocumentUrl`) is Euler's own form. Either one is "Yes" — neither is
-    "No", so the desk knows to open Coulson and attach the file.
+    That is `line_items[].documents[]` — the "1 Docs" / Add Documents control, not
+    Euler's generated debit-note PDF (`claimDocumentUrl`). The PDF exists on most
+    claims whether or not anyone attached supporting files, so treating it as Yes
+    hid the rows that still need an upload.
     """
-    if str(doc.get("claimDocumentUrl") or "").strip():
-        return True
     return claim_document_count(doc) > 0
 
 
@@ -329,6 +364,8 @@ def merge_detail(doc, detail):
     lines = _normalise_lines(coulson_client.pick_line_items(detail))
     if lines:
         doc["lineItems"] = lines
+        # Journey is where the SPA reads `documents[]` for the Docs column.
+        doc["docsCheckedAt"] = now_iso()
     if isinstance(detail.get("timeline"), dict):
         doc.update(stage_progress(detail.get("timeline")))
     if header:
@@ -355,12 +392,15 @@ def merge_detail(doc, detail):
 
 
 def needs_detail(existing, row_doc):
-    """Fetch the journey only when it can have changed, or when chassis is still missing.
+    """Fetch the journey when chassis, status, amount, or item Docs could have changed.
 
-    First sight always. After that, only when Euler advanced the status or approved a
-    different amount — which keeps the steady state at a couple of calls per sync
-    instead of one per claim. A stored row with no chassis / invoice is NOT done:
-    that is the OEM Claim Settlements blank column, and we keep asking.
+    First sight always. After that, when Euler advanced the status or approved a
+    different amount. A stored row with no chassis / invoice is NOT done: that is
+    the OEM Claim Settlements blank column, and we keep asking.
+
+    Item Docs are uploaded after filing, with no status change. We re-fetch until
+    the journey has been seen for documents (`docsCheckedAt`), and we keep asking
+    open claims that still have none so a later Add Documents lands on the next sync.
     """
     if not existing or not existing.get("detailFetchedAt"):
         return True
@@ -370,6 +410,15 @@ def needs_detail(existing, row_doc):
         return True
     if abs(_num(existing.get("detailAmountAtFetch")) - _num(row_doc.get("approvedAmount"))) > 0.005:
         return True
+    # Docs column lives on the journey. Count > 0 from a previous pull is enough.
+    # Open claims with none are re-fetched so Add Documents after filing still lands.
+    if claim_document_count(existing) == 0:
+        if not existing.get("docsCheckedAt"):
+            return True
+        status = existing.get("status") or (
+            row_doc.get("status") if isinstance(row_doc, dict) else "") or ""
+        if not is_terminal(status):
+            return True
     return False
 
 
@@ -576,7 +625,8 @@ async def sync_claims(db, *, detail_budget=250, token=None):
     coll = db[CLAIMS_COLLECTION]
     held_by_id = {}
     async for held in coll.find({}, {"debitNoteId": 1, "lineItems": 1, "detailFetchedAt": 1,
-                                     "detailStatusAtFetch": 1, "detailAmountAtFetch": 1}):
+                                     "detailStatusAtFetch": 1, "detailAmountAtFetch": 1,
+                                     "docsCheckedAt": 1, "status": 1, "terminal": 1}):
         held_by_id[held.get("debitNoteId")] = held
 
     def _need_chassis_first(row):
@@ -776,8 +826,8 @@ def _absorb_line(entry, row, line):
         "needsResubmission": bool(row.get("needsResubmission")),
         "resubmittedBy": row.get("resubmittedBy") or "",
         "description": line.get("description") or "",
-        "hasDocument": bool(row.get("hasDocument")) or claim_has_document(row),
-        "documentCount": int(row.get("documentCount") or claim_document_count(row) or 0),
+        "hasDocument": int(line.get("documentCount") or 0) > 0,
+        "documentCount": int(line.get("documentCount") or 0),
         "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
     }
     if status == "Rejected" and row.get("needsResubmission"):

@@ -201,7 +201,7 @@ export default function Claims() {
               </div>
             );
           }},
-          { key: "oemDoc", label: "OEM Doc", render: (r) => (
+          { key: "oemDoc", label: "OEM Docs", render: (r) => (
             r.manual ? <span className="text-ink-faint text-xs">—</span> : (
               <DocFlag yes={r.oemMatch?.hasDocument} url={r.oemMatch?.claimDocumentUrl}
                 count={r.oemMatch?.documentCount} />

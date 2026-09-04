@@ -233,14 +233,36 @@ def test_chassis_is_normalised_for_matching():
 def test_needs_detail_only_when_something_could_have_changed():
     row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
     assert oem_claims.needs_detail({}, row) is True
-    fetched = {"detailFetchedAt": "x", "lineItems": [{"chassis": CHASSIS}],
-               "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0}
+    fetched = {"detailFetchedAt": "x", "docsCheckedAt": "x",
+               "lineItems": [{"chassis": CHASSIS, "documentCount": 1}],
+               "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0,
+               "status": "RM Approval Pending"}
     assert oem_claims.needs_detail(fetched, row) is False
     moved = oem_claims.claim_doc_from_row(
         list_row("n1", "AF-999-CL0001", status="Sales Department Approval Pending"))
     assert oem_claims.needs_detail(fetched, moved) is True
     paid = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001", approved=5000.0))
     assert oem_claims.needs_detail(fetched, paid) is True
+
+
+def test_needs_detail_when_item_docs_have_not_been_seen():
+    """Chassis can land from the list while Docs still need the journey."""
+    row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
+    fetched = {"detailFetchedAt": "x", "lineItems": [{"chassis": CHASSIS, "documentCount": 0}],
+               "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0,
+               "status": "RM Approval Pending"}
+    assert oem_claims.needs_detail(fetched, row) is True
+
+
+def test_needs_detail_keeps_asking_open_claims_with_no_item_docs():
+    row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
+    open_empty = {"detailFetchedAt": "x", "docsCheckedAt": "x",
+                  "lineItems": [{"chassis": CHASSIS, "documentCount": 0}],
+                  "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0,
+                  "status": "RM Approval Pending"}
+    assert oem_claims.needs_detail(open_empty, row) is True
+    settled = {**open_empty, "status": "Settled"}
+    assert oem_claims.needs_detail(settled, row) is False
 
 
 def test_needs_detail_when_chassis_never_landed():
@@ -459,6 +481,75 @@ async def test_second_sync_does_not_refetch_an_unchanged_claim(client, wired):
     first = wired["journey"]
     await client.post("/api/integrations/coulson/sync-claims")
     assert wired["journey"] == first, "unchanged claim was fetched again"
+
+
+@pytest.mark.asyncio
+async def test_sync_yes_no_is_claim_item_docs(client, wired):
+    """The Docs column on the claim item, not Euler's generated PDF."""
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims")).json()
+    assert rows[0]["claimDocumentUrl"]
+    assert rows[0]["hasDocument"] is True
+    assert rows[0]["documentCount"] == 2
+    assert rows[0]["lineItems"][0]["documentCount"] == 2
+    missing = (await client.get("/api/oem-claims", params={"missingDoc": True})).json()
+    assert missing == []
+
+
+@pytest.mark.asyncio
+async def test_sync_no_when_item_docs_are_empty(client, monkeypatch):
+    inner = journey("n1", "AF-999-CL0001")
+    inner["line_items"][0]["documents"] = []
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("n1", "AF-999-CL0001")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims")).json()
+    assert rows[0]["hasDocument"] is False
+    assert rows[0]["documentCount"] == 0
+    assert rows[0]["claimDocumentUrl"]
+    missing = (await client.get("/api/oem-claims", params={"missingDoc": True})).json()
+    assert len(missing) == 1
+    summary = (await client.get("/api/oem-claims/summary")).json()
+    assert summary["mirror"]["missingDocument"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_refetches_open_claims_until_item_docs_land(client, monkeypatch):
+    """Add Documents happens after filing, with no status change. Keep looking."""
+    inner = journey("n1", "AF-999-CL0001")
+    inner["line_items"][0]["documents"] = []
+    calls = {"n": 0}
+
+    def fake_journey(token, note_id):
+        calls["n"] += 1
+        return inner
+
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("n1", "AF-999-CL0001")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", fake_journey)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    first = calls["n"]
+    await client.post("/api/integrations/coulson/sync-claims")
+    assert calls["n"] > first
+    inner["line_items"][0]["documents"] = [{"document_id": "d1", "file_url": "https://example.invalid/a.jpeg"}]
+    await client.post("/api/integrations/coulson/sync-claims")
+    held = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "n1"})
+    assert held["hasDocument"] is True
+    assert held["documentCount"] == 1
+    after = calls["n"]
+    await client.post("/api/integrations/coulson/sync-claims")
+    assert calls["n"] == after
 
 
 @pytest.mark.asyncio
@@ -1229,11 +1320,13 @@ async def test_register_reads_an_unlinked_oem_claim_as_filed_by_chassis(client):
     assert lead_id in (stored.get("leadIds") or [])
 
 
-def test_has_document_yes_from_claim_pdf():
+def test_has_document_is_the_item_docs_column_not_the_euler_pdf():
+    """debit_note_s3_link is Euler's form. Yes/No is Add Documents on the line."""
     row = list_row("n1", "AF-999-CL0001")
     doc = oem_claims.claim_doc_from_row(row)
-    assert doc["hasDocument"] is True
     assert doc["claimDocumentUrl"]
+    assert doc["hasDocument"] is False
+    assert doc["documentCount"] == 0
 
 
 def test_has_document_no_when_euler_has_nothing():
@@ -1252,10 +1345,42 @@ def test_has_document_yes_from_supporting_uploads():
     got = oem_claims.merge_detail(doc, inner)
     assert got["documentCount"] == 2
     assert got["hasDocument"] is True
+    assert got.get("docsCheckedAt")
     inner["line_items"][0]["documents"] = []
     empty = oem_claims.merge_detail(doc, inner)
     assert empty["hasDocument"] is False
     assert empty["documentCount"] == 0
+
+
+def test_item_docs_count_from_coulson_aliases():
+    assert oem_claims._item_document_count({"documents": [{}, {}]}) == 2
+    assert oem_claims._item_document_count({"document_count": 3}) == 3
+    assert oem_claims._item_document_count({"attachments": [{"file_url": "x"}]}) == 1
+    assert oem_claims._item_document_count({"documents": [], "document_count": 4}) == 4
+    assert oem_claims._item_document_count({}) == 0
+    line = oem_claims.normalise_line_item({"claim_type": "Scheme Claim", "document_count": 1})
+    assert line["documentCount"] == 1
+    assert "file_url" not in str(line)
+
+
+def test_register_hit_uses_that_line_item_docs_not_the_claim_pdf():
+    """Two lines on one debit note: only the line the desk uploaded against is Yes."""
+    row = {"claimNumber": "AF-1", "status": "RM Approval Pending",
+           "claimDocumentUrl": "https://example.invalid/form.pdf",
+           "hasDocument": True, "documentCount": 1}
+    with_docs = {"claimType": "Scheme Claim",
+                 "description": "Referral Commission for invoice AF-999-I1",
+                 "documentCount": 1, "totalAmount": 1000}
+    without = {"claimType": "Scheme Claim",
+               "description": "Exchange Bonus for invoice AF-999-I1",
+               "documentCount": 0, "totalAmount": 2000}
+    entry = oem_claims._empty_match_entry()
+    oem_claims._absorb_line(entry, row, with_docs)
+    oem_claims._absorb_line(entry, row, without)
+    assert entry["byComponent"]["referralBonus"][0]["hasDocument"] is True
+    assert entry["byComponent"]["referralBonus"][0]["documentCount"] == 1
+    assert entry["byComponent"]["exchangeBonus"][0]["hasDocument"] is False
+    assert entry["byComponent"]["exchangeBonus"][0]["documentCount"] == 0
 
 
 def test_manual_match_state_uses_the_named_oem_claim():

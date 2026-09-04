@@ -184,7 +184,7 @@ export default function OemClaims() {
         <StatCard label="Approved" value={inr(totals.approved)} tone="text-emerald-600" />
         <StatCard label="No document"
           value={mirror.missingDocument ?? "—"}
-          sub="Upload the file in the OEM app"
+          sub="Claim item Docs still missing"
           icon={FileText}
           tone={(mirror.missingDocument || 0) > 0 ? "text-rose-600" : "text-ink"} />
       </div>
@@ -374,6 +374,11 @@ export default function OemClaims() {
                   {li.sourceInvoiceNumber
                     ? <div className="font-mono text-ink-faint">{li.sourceInvoiceNumber}</div>
                     : null}
+                  <div className={(li.documentCount || 0) > 0 ? "text-emerald-700" : "text-rose-600"}>
+                    {(li.documentCount || 0) > 0
+                      ? `${li.documentCount} doc${li.documentCount === 1 ? "" : "s"}`
+                      : "No docs"}
+                  </div>
                 </div>
               ))}
             </div>
@@ -389,7 +394,7 @@ export default function OemClaims() {
               {!r.terminal && <div className="text-ink-faint">{r.claimAgeingDays}d old</div>}
             </div>
           )},
-          { key: "doc", label: "Doc", render: (r) => (
+          { key: "doc", label: "Docs", render: (r) => (
             <DocFlag yes={r.hasDocument} url={r.claimDocumentUrl} count={r.documentCount} />
           )},
           { key: "match", label: "", render: (r) => (

@@ -61,18 +61,20 @@ export function claimsHref({ leadId } = {}) {
 
 export function DocFlag({ yes, url, count }) {
   const on = !!yes;
+  const n = Number(count) || 0;
   return (
     <div className="flex flex-col items-start gap-0.5">
       <span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${
         on ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-red-50 text-red-700 ring-red-600/20"
       }`}>{on ? "Yes" : "No"}</span>
+      {on && n > 0 ? (
+        <span className="text-[10px] text-ink-faint">{n} file{n === 1 ? "" : "s"}</span>
+      ) : !on ? (
+        <span className="text-[10px] text-ink-faint max-w-[90px] leading-tight">Upload in OEM app</span>
+      ) : null}
       {url ? (
         <a href={url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
           className="text-[10px] text-cobalt hover:underline">PDF</a>
-      ) : !on ? (
-        <span className="text-[10px] text-ink-faint max-w-[90px] leading-tight">Upload in OEM app</span>
-      ) : count ? (
-        <span className="text-[10px] text-ink-faint">{count} file{count === 1 ? "" : "s"}</span>
       ) : null}
     </div>
   );
