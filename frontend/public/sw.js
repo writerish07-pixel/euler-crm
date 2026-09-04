@@ -9,7 +9,7 @@
  * fall back to a cached shell so the app opens offline instead of showing the
  * browser's error page, and data always comes from the network.
  */
-const VERSION = "euler-v1";
+const VERSION = "euler-v3-mobile-login";
 const SHELL = `${VERSION}-shell`;
 const ASSETS = `${VERSION}-assets`;
 const OFFLINE_URL = "/index.html";
@@ -44,6 +44,9 @@ function isApi(url) {
 }
 
 function isAsset(url) {
+  // Never cache-first the worker or manifest — an installed phone would keep
+  // last week's login form after a deploy.
+  if (url.pathname === "/sw.js" || url.pathname === "/manifest.json") return false;
   return url.pathname.startsWith("/static/")
     || /\.(?:js|css|png|jpg|jpeg|svg|webp|ico|woff2?)$/i.test(url.pathname);
 }
