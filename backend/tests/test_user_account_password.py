@@ -156,3 +156,137 @@ async def test_staff_cannot_list_user_passwords(client):
                              json={"email": "peek.user", "password": "secret99"})).json()["token"]
     r = await client.get("/api/auth/users", headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_login_by_unique_staff_name(client):
+    """Staff often type the Staff & Reports name, not the User ID."""
+    r = await client.post("/api/auth/users", json={
+        "name": "Priya Sharma", "loginId": "priya.s", "password": "desk#441",
+        "role": "executive",
+    })
+    assert r.status_code == 200, r.text
+    ok = await client.post("/api/auth/login", json={"email": "Priya Sharma", "password": "desk#441"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["user"]["loginId"] == "priya.s"
+    folded = await client.post("/api/auth/login", json={"email": "priya sharma", "password": "desk#441"})
+    assert folded.status_code == 200, folded.text
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_name_does_not_log_anyone_in(client):
+    await client.post("/api/auth/users", json={
+        "name": "Amit", "loginId": "amit.one", "password": "desk#441", "role": "executive",
+    })
+    await client.post("/api/auth/users", json={
+        "name": "Amit", "loginId": "amit.two", "password": "desk#442", "role": "tl",
+    })
+    r = await client.post("/api/auth/login", json={"email": "Amit", "password": "desk#441"})
+    assert r.status_code == 401
+    one = await client.post("/api/auth/login", json={"email": "amit.one", "password": "desk#441"})
+    assert one.status_code == 200, one.text
+
+
+@pytest.mark.asyncio
+async def test_login_with_login_id_when_norm_field_is_missing(client):
+    """Accounts created before loginIdNorm existed still have a User ID."""
+    r = await client.post("/api/auth/users", json={
+        "name": "Legacy Id", "loginId": "legacy.id", "password": "desk#441",
+        "role": "executive",
+    })
+    assert r.status_code == 200, r.text
+    uid = r.json()["userId"]
+    await server.db.users.update_one({"userId": uid}, {"$unset": {"loginIdNorm": ""}})
+    ok = await client.post("/api/auth/login", json={"email": "legacy.id", "password": "desk#441"})
+    assert ok.status_code == 200, ok.text
+    repaired = await server.db.users.find_one({"userId": uid})
+    assert repaired.get("loginIdNorm") == "legacy.id"
+
+
+@pytest.mark.asyncio
+async def test_login_succeeds_from_plaintext_when_hash_is_missing(client):
+    """A missing passwordHash used to KeyError and toast 'Something went wrong'."""
+    r = await client.post("/api/auth/users", json={
+        "name": "No Hash", "loginId": "no.hash", "password": "desk#441",
+        "role": "executive",
+    })
+    uid = r.json()["userId"]
+    await server.db.users.update_one({"userId": uid}, {"$unset": {"passwordHash": ""}})
+    ok = await client.post("/api/auth/login", json={"email": "no.hash", "password": "desk#441"})
+    assert ok.status_code == 200, ok.text
+    repaired = await server.db.users.find_one({"userId": uid})
+    assert repaired.get("passwordHash")
+    import auth as authmod
+    assert authmod.verify_password("desk#441", repaired["passwordHash"])
+
+
+@pytest.mark.asyncio
+async def test_missing_hash_and_plaintext_is_401_not_500(client):
+    r = await client.post("/api/auth/users", json={
+        "name": "Empty Creds", "loginId": "empty.pw", "password": "desk#441",
+        "role": "executive",
+    })
+    uid = r.json()["userId"]
+    await server.db.users.update_one(
+        {"userId": uid},
+        {"$unset": {"passwordHash": "", "passwordPlain": ""}},
+    )
+    bad = await client.post("/api/auth/login", json={"email": "empty.pw", "password": "desk#441"})
+    assert bad.status_code == 401, bad.text
+    assert "Invalid user ID or password" in bad.text
+
+
+@pytest.mark.asyncio
+async def test_login_strips_password_whitespace(client):
+    await client.post("/api/auth/users", json={
+        "name": "Paste Spaces", "loginId": "paste.pw", "password": "desk#441",
+        "role": "executive",
+    })
+    ok = await client.post("/api/auth/login", json={"email": "paste.pw", "password": "  desk#441  "})
+    assert ok.status_code == 200, ok.text
+
+
+@pytest.mark.asyncio
+async def test_long_password_does_not_500(client):
+    """bcrypt 4.1+ raises past 72 bytes — that used to surface as a blank toast."""
+    pw = "long-pass#" + ("x" * 80)
+    r = await client.post("/api/auth/users", json={
+        "name": "Long Pass", "loginId": "long.pw", "password": pw, "role": "executive",
+    })
+    assert r.status_code == 200, r.text
+    ok = await client.post("/api/auth/login", json={"email": "long.pw", "password": pw})
+    assert ok.status_code == 200, ok.text
+    assert ok.status_code != 500
+
+
+@pytest.mark.asyncio
+async def test_owner_can_reset_staff_password_then_they_sign_in(client):
+    r = await client.post("/api/auth/users", json={
+        "name": "Reset Me", "loginId": "reset.me", "password": "oldPass1",
+        "role": "executive",
+    })
+    uid = r.json()["userId"]
+    put = await client.put(f"/api/auth/users/{uid}/password", json={"password": "newPass9"})
+    assert put.status_code == 200, put.text
+    listed = (await client.get("/api/auth/users")).json()
+    row = _row(listed, "reset.me")
+    assert row["password"] == "newPass9"
+    ok = await client.post("/api/auth/login", json={"email": "reset.me", "password": "newPass9"})
+    assert ok.status_code == 200, ok.text
+    stale = await client.post("/api/auth/login", json={"email": "reset.me", "password": "oldPass1"})
+    assert stale.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_seed_backfills_missing_login_id_norm(client):
+    import auth as authmod
+
+    r = await client.post("/api/auth/users", json={
+        "name": "Needs Norm", "loginId": "needs.norm", "password": "desk#441",
+        "role": "executive",
+    })
+    uid = r.json()["userId"]
+    await server.db.users.update_one({"userId": uid}, {"$unset": {"loginIdNorm": ""}})
+    await authmod.seed_users(server.db)
+    row = await server.db.users.find_one({"userId": uid})
+    assert row.get("loginIdNorm") == "needs.norm"
