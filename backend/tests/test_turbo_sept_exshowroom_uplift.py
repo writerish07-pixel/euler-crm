@@ -52,6 +52,17 @@ def test_turbo_overlay_math():
     assert server._turbo_selling_ex(storm, "2026-09-02") == 640000
 
 
+def test_live_oem_sync_skips_turbo_overlay():
+    """Coulson invoice base price is already the list — overlay would double-count."""
+    live = {
+        "model": "Turbo Max", "variant": "Maxx (DV220)",
+        "exShowroom": 785713.33, "oemSyncedAt": "2026-09-04T08:00:00+00:00",
+    }
+    assert server._turbo_selling_ex(live, "2026-09-04") == 785713.33
+    unsynced = {"model": "Turbo Max", "variant": "Maxx (DV220)", "exShowroom": 809999}
+    assert server._turbo_selling_ex(unsynced, "2026-09-04") == 809999 + UPLIFT
+
+
 @pytest.mark.asyncio
 async def test_price_list_quotes_turbo_with_sept_uplift(client):
     body = (await client.get("/api/price-list", params={"model": "Turbo Max"})).json()

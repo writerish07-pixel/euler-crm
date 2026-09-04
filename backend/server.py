@@ -3441,8 +3441,15 @@ def _lead_price_as_of(lead=None, on=None):
 
 
 def _turbo_selling_ex(row, as_of=None):
-    """Stored OEM ex-showroom, plus the Sept-2026 Turbo overlay when in force."""
+    """Stored list price for quotes.
+
+    A live Coulson sync (`oemSyncedAt`) is the OEM invoice base price — do not
+    add the Sept-2026 Turbo overlay on top, or Price List would no longer match
+    Coulson. Overlay remains only for catalog rows that have never been synced.
+    """
     base = ce.round2(ce.num((row or {}).get("exShowroom")))
+    if (row or {}).get("oemSyncedAt"):
+        return base
     as_of = str(as_of or today())[:10]
     if as_of < TURBO_EXSHOWROOM_UPLIFT_FROM:
         return base
@@ -6020,6 +6027,7 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
             "tcs": tcs, "tcsApplies": applies and tcs > 0,
             "onRoad": ce.round2(gvc + tcs),
             "inYard": counts.get((mdl, variant), 0),
+            "oemSyncedAt": r.get("oemSyncedAt") or "",
         })
     out = [{"model": m, "count": len(v),
             "rows": sorted(v, key=lambda x: x["onRoad"])}

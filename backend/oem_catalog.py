@@ -339,13 +339,19 @@ def sku_for_oem_row(oem: dict):
 
 
 def jaipur_price(oem: dict):
-    v = oem.get("showroom_price_non_delhi")
-    if v in (None, ""):
-        v = oem.get("showroom_price_delhi")
-    try:
-        return float(v or 0)
-    except (TypeError, ValueError):
-        return 0.0
+    """Coulson invoice 'Base Price' for this dealer (Jaipur = non-Delhi)."""
+    for key in ("showroom_price_non_delhi", "showroom_price_delhi",
+                "ex_showroom_price", "base_price", "showroom_price"):
+        v = (oem or {}).get(key)
+        if v in (None, ""):
+            continue
+        try:
+            n = float(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            return round(n, 2)
+    return 0.0
 
 
 def catalog_by_key():

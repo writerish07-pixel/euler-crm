@@ -332,9 +332,13 @@ async def sync_from_coulson(db, *, username=None, password=None):
         oems = by_key.get(sku.key) or []
         if not oems:
             continue
-        # Prefer a row with sap_product_id; Jaipur price.
-        oems_sorted = sorted(oems, key=lambda r: (0 if r.get("sap_product_id") else 1))
-        price = cat.jaipur_price(oems_sorted[0])
+        oems_sorted = sorted(oems, key=lambda r: (
+            0 if r.get("sap_product_id") else 1,
+            -cat.jaipur_price(r),
+        ))
+        price = round(cat.jaipur_price(oems_sorted[0]), 2)
+        if price <= 0:
+            continue
         ids = [r.get("id") for r in oems if r.get("id")]
         existing = await _find_row_for_sku(db, sku)
         if not existing:
