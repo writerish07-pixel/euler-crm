@@ -131,9 +131,40 @@ async def test_monthly_register_counts_leads_bookings_by_month(client):
 
 
 @pytest.mark.asyncio
-async def test_executive_cannot_export_or_open_monthly(exec_client):
+async def test_executive_opens_monthly_own_leads_not_export(exec_client, client):
+    ym = periodmod.utc_month()
+    before_exec = (await exec_client.get("/api/reports/monthly", params={"month": ym})).json()
+    before_owner = (await client.get("/api/reports/monthly", params={"month": ym})).json()
+    await make_lead(client, "Exec Own MTD", created=f"{ym}-05", executive="Executive")
+    await make_lead(client, "Other Exec MTD", created=f"{ym}-05", executive="Sanjay")
+    after_exec = (await exec_client.get("/api/reports/monthly", params={"month": ym})).json()
+    after_owner = (await client.get("/api/reports/monthly", params={"month": ym})).json()
+    assert after_exec["selected"]["leads"]["count"] == before_exec["selected"]["leads"]["count"] + 1
+    assert after_owner["selected"]["leads"]["count"] == before_owner["selected"]["leads"]["count"] + 2
+    assert after_exec["scope"]["kind"] == "own"
+    assert "payments" in after_exec["selected"]
     assert (await exec_client.get("/api/export")).status_code == 403
-    assert (await exec_client.get("/api/reports/monthly")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_field_opens_monthly_volume_only_not_export(client):
+    tok = await _token("asm@euler.com", "euler@123")
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        c.headers.update({"Authorization": f"Bearer {tok}"})
+        r = await c.get("/api/reports/monthly")
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["scope"]["kind"] == "field"
+        assert "leads" in d["selected"]
+        assert "bookings" in d["selected"]
+        assert "deliveries" in d["selected"]
+        assert "finance" in d["selected"]
+        assert "payments" not in d["selected"]
+        assert "scheme" not in d["selected"]
+        assert "earnings" not in d["selected"]
+        assert "extraIncome" not in d["selected"]
+        assert (await c.get("/api/export")).status_code == 403
 
 
 @pytest.mark.asyncio

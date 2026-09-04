@@ -2,11 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  Ban, IndianRupee, Percent, ClipboardList, Warehouse, Trophy,
+  Ban, IndianRupee, Percent, ClipboardList, Warehouse, Trophy, CalendarDays,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { compactInr, inr, num } from "../lib/format";
+import { compactInr, inr, num, ytdCount } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 
@@ -25,27 +25,28 @@ export default function SalesGmDashboard() {
     <div data-testid="sales-gm-dashboard">
       <PageHeader
         title="Sales GM Dashboard"
-        subtitle={`${scope.note || "Showroom-wide sales"} · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
+        subtitle={`${scope.note || "Showroom-wide sales"} · MTD + YTD · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Leads (MTD)" value={num(k.leadsMtd)} sub={`${k.totalLeads || 0} total`} icon={Users} />
-        <StatCard label="Bookings (MTD)" value={num(k.bookingsMtd)} sub={`${k.activeBookings || 0} active`} icon={ClipboardCheck} tone="text-emerald-600" />
-        <StatCard label="Deliveries (MTD)" value={num(k.deliveriesMtd)} sub={`${k.pendingDeliveries || 0} pending`} icon={Truck} tone="text-cobalt" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="gm-period-kpis">
+        <StatCard label="Leads (MTD)" value={num(k.leadsMtd)} sub={ytdCount(k.leadsYtd)} icon={Users} />
+        <StatCard label="Bookings (MTD)" value={num(k.bookingsMtd)} sub={`${ytdCount(k.bookingsYtd)} · ${k.activeBookings || 0} active`} icon={ClipboardCheck} tone="text-emerald-600" />
+        <StatCard label="Deliveries (MTD)" value={num(k.deliveriesMtd)} sub={`${ytdCount(k.deliveriesYtd)} · ${k.pendingDeliveries || 0} pending`} icon={Truck} tone="text-cobalt" />
         <StatCard label="Lead → Book" value={`${k.leadToBookPct || 0}%`}
-          sub={`Book → Del ${k.bookToDeliverPct || 0}%`} icon={TrendingUp} tone="text-violet-600" />
+          sub={`YTD ${k.leadToBookPctYtd || 0}% · Book → Del ${k.bookToDeliverPct || 0}%`} icon={TrendingUp} tone="text-violet-600" />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
         <StatCard label="Follow-ups overdue" value={num(k.followupOverdue)} sub={`${k.followupDue || 0} due today`} icon={AlertCircle} tone="text-red-600" />
         <StatCard label="Finance overdue" value={num(k.financeOverdueCount)}
           sub={compactInr(k.financeOverdueAmount)} icon={Landmark} tone="text-violet-600" />
-        <StatCard label="Cancellations (MTD)" value={num(k.cancellationsMtd)} sub={`${k.lostCount || 0} lost`} icon={Ban} tone="text-amber-700" />
+        <StatCard label="Cancellations (MTD)" value={num(k.cancellationsMtd)} sub={`${ytdCount(k.cancellationsYtd)} · ${k.lostCount || 0} lost`} icon={Ban} tone="text-amber-700" />
         <StatCard label="Customer OS" value={compactInr(k.customerOutstanding)}
           sub={`Scheme use ${k.schemeUseRate || 0}%`} icon={IndianRupee} tone="text-red-600" />
       </div>
 
       <div className="flex flex-wrap gap-2 mt-5">
+        <Link to="/monthly"><Button variant="secondary" data-testid="gm-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         <Link to="/leads"><Button variant="secondary" data-testid="gm-go-leads"><Users size={14} /> Lead Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="gm-go-bookings"><ClipboardCheck size={14} /> Bookings</Button></Link>
         <Link to="/deliveries"><Button variant="secondary" data-testid="gm-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>

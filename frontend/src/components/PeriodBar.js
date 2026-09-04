@@ -3,7 +3,7 @@ import { Button, Field, Input } from "./ui";
 import { thisMonth, thisYear } from "../lib/period";
 
 /**
- * All | This month (MTD) | This year (YTD) | pick a month | pick a year.
+ * All | This month (MTD) | YTD | pick a month | pick a year.
  *
  * Existing list pages default to All so historic rows do not vanish.
  * The Monthly Register defaults to the current month.
@@ -28,7 +28,7 @@ export default function PeriodBar({ month = "", year = "", onChange, showAll = t
       </Button>
       <Button type="button" variant={!month && year === ytd ? "primary" : "secondary"}
         data-testid="period-ytd" onClick={() => set({ month: "", year: ytd })}>
-        This year
+        YTD
       </Button>
       <Field label="Month">
         <Input type="month" data-testid="period-month" value={month}

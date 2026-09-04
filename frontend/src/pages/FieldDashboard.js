@@ -2,11 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  ReceiptText, Percent, Map, Warehouse,
+  ReceiptText, Percent, Map, Warehouse, CalendarDays,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { compactInr, num } from "../lib/format";
+import { compactInr, num, ytdCount } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 
@@ -24,15 +24,15 @@ export default function FieldDashboard() {
     <div data-testid="field-dashboard">
       <PageHeader
         title="Field Dashboard"
-        subtitle={`ASM / RM · company retail view · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
+        subtitle={`ASM / RM · company retail · MTD + YTD · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Leads (MTD)" value={num(k.leadsMtd)} sub={`${k.totalLeads || 0} total`} icon={Users} />
-        <StatCard label="Bookings (MTD)" value={num(k.bookingsMtd)} sub={`${k.activeBookings || 0} active`} icon={ClipboardCheck} tone="text-emerald-600" />
-        <StatCard label="Deliveries (MTD)" value={num(k.deliveriesMtd)} sub={`${k.pendingDeliveries || 0} pending`} icon={Truck} tone="text-cobalt" />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="field-period-kpis">
+        <StatCard label="Leads (MTD)" value={num(k.leadsMtd)} sub={ytdCount(k.leadsYtd)} icon={Users} />
+        <StatCard label="Bookings (MTD)" value={num(k.bookingsMtd)} sub={`${ytdCount(k.bookingsYtd)} · ${k.activeBookings || 0} active`} icon={ClipboardCheck} tone="text-emerald-600" />
+        <StatCard label="Deliveries (MTD)" value={num(k.deliveriesMtd)} sub={`${ytdCount(k.deliveriesYtd)} · ${k.pendingDeliveries || 0} pending`} icon={Truck} tone="text-cobalt" />
         <StatCard label="Lead → Book" value={`${k.leadToBookPct || 0}%`}
-          sub={`Book → Del ${k.bookToDeliverPct || 0}%`} icon={TrendingUp} tone="text-violet-600" />
+          sub={`YTD ${k.leadToBookPctYtd || 0}% · Book → Del ${k.bookToDeliverPct || 0}%`} icon={TrendingUp} tone="text-violet-600" />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
@@ -45,6 +45,7 @@ export default function FieldDashboard() {
       </div>
 
       <div className="flex flex-wrap gap-2 mt-5">
+        <Link to="/monthly"><Button variant="secondary" data-testid="field-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         <Link to="/leads"><Button variant="secondary" data-testid="field-go-leads"><Users size={14} /> Lead Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="field-go-bookings"><ClipboardCheck size={14} /> Bookings</Button></Link>
         <Link to="/deliveries"><Button variant="secondary" data-testid="field-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>

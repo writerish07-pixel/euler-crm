@@ -52,7 +52,8 @@ export function AuthProvider({ children }) {
       canViewFinance: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive"
         || role === "accounts" || role === "asm" || role === "rm",
       canApproveLeads: role === "owner" || role === "sales_gm",
-      canViewMonthly: role === "owner" || role === "sales_gm" || role === "tl" || role === "accounts",
+      canViewMonthly: role === "owner" || role === "sales_gm" || role === "tl" || role === "accounts"
+        || role === "executive" || role === "asm" || role === "rm",
       canExport: role === "owner" || role === "sales_gm" || role === "tl",
     }}>
       {children}

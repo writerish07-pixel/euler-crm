@@ -69,6 +69,11 @@ async def test_sales_gm_dashboard_showroom_wide(client):
     assert "executives" in body["executiveIncentive"]
     assert body["kpis"]["bookingsMtd"] >= 1
     assert body["kpis"]["customerOutstanding"] >= 12000
+    assert "leadsYtd" in body["kpis"]
+    assert "cancellationsYtd" in body["kpis"]
+    assert "period" in body
+    assert "collected" not in (body["period"]["mtd"] or {})
+    assert body["period"]["ytd"]["leads"] >= body["period"]["mtd"]["leads"]
 
 
 @pytest.mark.asyncio

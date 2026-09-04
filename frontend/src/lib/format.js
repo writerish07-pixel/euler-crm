@@ -18,6 +18,9 @@ export const compactInr = (n) => {
   return inr(v);
 };
 
+export const ytdCount = (n) => `YTD ${num(n)}`;
+export const ytdMoney = (n) => `YTD ${compactInr(n)}`;
+
 export const fmtDate = (d) => {
   if (!d) return "—";
   const s = String(d).split("T")[0];

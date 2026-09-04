@@ -79,8 +79,11 @@ async def test_accounts_dashboard_ok(client):
     for key in (
         "customerOutstanding", "financeOutstanding", "oemClaimsOpen",
         "insurancePayoutDue", "deliveredForTally",
+        "collectedMtd", "collectedYtd", "deliveriesMtd", "deliveriesYtd",
     ):
         assert key in k
+    assert "period" in body
+    assert body["period"]["mtd"]["collected"] == k["collectedMtd"]
 
 
 @pytest.mark.asyncio
