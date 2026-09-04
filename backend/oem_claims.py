@@ -821,37 +821,11 @@ def _index_packs(index):
     return {"byLead": index or {}, "byChassis": {}, "byInvoice": {}}
 
 
-# OEM Extra Support is a staff-typed side ledger, not a Scheme Master component.
-# Coulson files it as Additional Support / Dealer Incentive / a Scheme Claim whose
-# description still says "Insurance Benefits Up to…". Those lines map to another
-# key, so Extra Support used to stay Not claimed while OEM Claim Settlements said
-# In scheme register (the 17-row Sita Ram Sharma set). Any live Euler note on the
-# same vehicle is the filing for this component.
-VEHICLE_FILED_KEYS = ("oemExtraSupport",)
-
-
-def _live_vehicle_hits(entry):
-    """Live (non-cancelled, non-rejected) Euler lines on this vehicle, any component."""
-    out = []
-    seen = set()
-    for hits in (entry.get("byComponent") or {}).values():
-        for h in hits or []:
-            if h.get("oemStatus") in ("Rejected", "Cancelled"):
-                continue
-            num = h.get("claimNumber") or id(h)
-            if num in seen:
-                continue
-            seen.add(num)
-            out.append(h)
-    for h in entry.get("unmapped") or []:
-        if h.get("oemStatus") in ("Rejected", "Cancelled"):
-            continue
-        num = h.get("claimNumber") or id(h)
-        if num in seen:
-            continue
-        seen.add(num)
-        out.append(h)
-    return out
+# OEM Extra Support is a staff-typed side ledger in this app. In Coulson it is
+# filed as Additional Support / Dealer Incentive / Support Scheme (BTL), or as
+# prose that names extra/additional support. A Scheme Claim for Insurance /
+# Loyalty on the same vehicle is NOT that filing — treating it as one made Extra
+# Support look claimed in Euler when the dealer never raised it.
 
 
 def _state_from_hits(hits):
@@ -913,12 +887,6 @@ def match_state(index, lead_id, component_key, chassis="", invoice=""):
                 "filedAmount": 0.0, "detail": "No claim filed with Euler for this lead."}
     hits = entry["byComponent"].get(component_key) or []
     if not hits:
-        vehicle = _live_vehicle_hits(entry)
-        if component_key in VEHICLE_FILED_KEYS and vehicle:
-            got = _state_from_hits(vehicle)
-            got["detail"] = (got.get("detail") + " " if got.get("detail") else "") + (
-                "OEM Extra Support is filed from the Euler claim on this vehicle.")
-            return got
         if entry["unmapped"]:
             return {
                 "state": "unmapped",
@@ -927,10 +895,12 @@ def match_state(index, lead_id, component_key, chassis="", invoice=""):
                 "detail": "This lead has claims in Euler, but none of them names this "
                           "component. Check before treating it as unclaimed.",
             }
+        extra = " No Additional Support / Extra Support claim was filed in the OEM app." \
+            if component_key == "oemExtraSupport" else ""
         return {"state": "not_filed", "claimNumbers": [], "oemStatus": "",
                 "filedAmount": 0.0,
                 "detail": "Euler holds a claim for this vehicle, but it maps to a "
-                          "different component than this register row."}
+                          "different component than this register row." + extra}
     return _state_from_hits(hits)
 
 
@@ -998,6 +968,17 @@ def overlay_register_from_oem(row, match):
             if row.get("claimStatus") == "Approved" and not str(row.get("approvedDate") or "").strip():
                 patch["approvedDate"] = created
                 row["approvedDate"] = created
+    elif state == "not_filed":
+        # A previous vehicle-wide Extra Support match may have stamped another
+        # component's claim number / Submitted. Drop that once we know Euler
+        # never filed THIS component.
+        if str(row.get("claimReference") or ""):
+            patch["claimReference"] = ""
+            row["claimReference"] = ""
+        cur = str(row.get("claimStatus") or "").strip() or "Pending"
+        if cur not in _LOCK_REGISTER_STATUSES and cur in ("Submitted", "Approved", "Rejected"):
+            patch["claimStatus"] = "Pending"
+            row["claimStatus"] = "Pending"
     return row, patch
 
 
