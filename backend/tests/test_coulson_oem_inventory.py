@@ -73,6 +73,19 @@ def test_oem_fingerprint_turbo_city_fb():
     assert cat.jaipur_price(oem) == 625000
 
 
+def test_jaipur_price_keeps_paise_and_falls_back():
+    assert cat.jaipur_price({
+        "showroom_price_non_delhi": "785713.33",
+        "showroom_price_delhi": 1,
+    }) == 785713.33
+    assert cat.jaipur_price({"base_price": 785713.33}) == 785713.33
+    assert cat.jaipur_price({"showroom_price_non_delhi": 0, "ex_showroom_price": 100.5}) == 100.5
+    assert cat.jaipur_price({}) == 0.0
+    dv = {"model": "Turbo", "variant": "Range Maxx", "load_body": "DV220",
+          "sap_product_name": "TURBO RANGEMAXX DV220"}
+    assert cat.sku_for_oem_row(dv).key == "turbo.maxx.dv220"
+
+
 def test_tipper_dav_not_plain_tipper():
     city = {"model": "Turbo", "variant": "City", "load_body": "Tipper",
             "sap_product_name": "TURBO CITY TIPPER"}
@@ -183,6 +196,7 @@ async def test_mocked_coulson_sync(client, monkeypatch):
     body = r.json()
     assert body["ok"] is True
     assert body["inventoryCount"] == 1
+    assert body["pricesUpdated"] >= 2
 
     inv = (await client.get("/api/inventory")).json()
     assert len(inv) == 1
@@ -198,6 +212,51 @@ async def test_mocked_coulson_sync(client, monkeypatch):
     assert st["configured"] is True
     assert "secret" not in str(st)
     assert st["username"].startswith("de")
+
+    pm = next(r for r in (await client.get("/api/price-master", params={"model": "Turbo Max"})).json()
+              if r["variant"] == "Maxx (PV)")
+    assert pm["exShowroom"] == 770000
+    assert pm["oemSyncedAt"]
+    assert pm["sellingExShowroom"] == 770000
+    assert pm["turboUplift"] == 0
+    plist = next(r for g in (await client.get("/api/price-list", params={"model": "Turbo Max"})).json()["models"]
+                 for r in g["rows"] if r["variant"] == "Maxx (PV)")
+    assert plist["exShowroom"] == 770000
+
+
+OEM_MAXX_DV220 = 785713.33
+
+
+@pytest.mark.asyncio
+async def test_sync_writes_oem_invoice_price_to_master_and_list(client, monkeypatch):
+    """Price List hero must match Coulson Base Price, including paise, and Price Master too."""
+    oem_models = [{
+        "id": "oem-maxx-dv220", "model": "Turbo", "variant": "Range Maxx", "load_body": "DV220",
+        "sap_product_id": "CD00002200", "sap_product_name": "TURBO RANGEMAXX DV220",
+        "showroom_price_non_delhi": OEM_MAXX_DV220, "showroom_price_delhi": OEM_MAXX_DV220,
+    }]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+
+    await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
+    r = await client.post("/api/integrations/coulson/sync")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+    assert r.json()["pricesUpdated"] >= 1
+
+    pm = next(row for row in (await client.get("/api/price-master", params={"model": "Turbo Max"})).json()
+              if row["variant"] == "Maxx (DV220)")
+    assert pm["exShowroom"] == OEM_MAXX_DV220
+    assert pm["oemSyncedAt"]
+    assert pm["sellingExShowroom"] == OEM_MAXX_DV220
+    assert pm["turboUplift"] == 0
+
+    plist = next(row for g in (await client.get("/api/price-list", params={"model": "Turbo Max"})).json()["models"]
+                 for row in g["rows"] if row["variant"] == "Maxx (DV220)")
+    assert plist["exShowroom"] == OEM_MAXX_DV220
+    assert plist["oemSyncedAt"]
 
 
 @pytest.mark.asyncio

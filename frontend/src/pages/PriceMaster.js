@@ -5,6 +5,7 @@ import { get, del } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, Select, Button } from "../components/ui";
 import { PriceRowDrawer } from "../components/PriceRowDrawer";
+import OemPriceSyncButton from "../components/OemPriceSyncButton";
 
 export default function PriceMaster() {
   const [rows, setRows] = useState([]);
@@ -20,9 +21,10 @@ export default function PriceMaster() {
 
   return (
     <div>
-      <PageHeader title="Price Master" subtitle={`${rows.length} vehicle price rows`}
+      <PageHeader title="Price Master" subtitle={`${rows.length} vehicle price rows · Sync from OEM overwrites ex-showroom`}
         actions={<div className="flex gap-2">
           <Select value={model} onChange={(e) => setModel(e.target.value)} className="w-44"><option value="all">All Models</option>{models.map((m) => <option key={m}>{m}</option>)}</Select>
+          <OemPriceSyncButton onDone={load} testId="price-master-oem-sync" />
           <Button data-testid="add-price-btn" onClick={() => setEdit({})}><Plus size={16} /> Add Row</Button>
         </div>} />
       <Table
@@ -32,7 +34,7 @@ export default function PriceMaster() {
           { key: "variant", label: "Variant" },
           { key: "exShowroom", label: "Ex-Showroom", align: "right", mono: true, render: (r) => (
             <span>
-              {inr(r.exShowroom)}
+              {inr(r.exShowroom, { decimals: 2 })}
               {r.priceSource === "oem" ? <span className="ml-1 text-[10px] text-cobalt font-semibold">OEM</span> : null}
               {Number(r.turboUplift) > 0 ? (
                 <span className="block text-[10px] text-amber-700 font-semibold">From 1 Sep {inr(r.sellingExShowroom)}</span>

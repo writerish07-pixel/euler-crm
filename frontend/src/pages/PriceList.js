@@ -1,17 +1,18 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Search, Copy, ChevronDown, AlertTriangle, RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Card, Badge, Button, Input, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import OemPriceSyncButton from "../components/OemPriceSyncButton";
 
 // A price a salesperson can paste into WhatsApp without reformatting.
 function quoteText(r) {
   const lines = [
     `${r.model} ${r.variant}`.trim(),
     "",
-    `Ex-showroom   ${inr(r.exShowroom)}`,
+    `Ex-showroom   ${inr(r.exShowroom, { decimals: 2 })}`,
     `RTO           ${inr(r.rto)}`,
     `Insurance     ${inr(r.insurance)}`,
   ];
@@ -28,7 +29,6 @@ export default function PriceList() {
   const [q, setQ] = useState("");
   const [open, setOpen] = useState({});
   const [models, setModels] = useState([]);
-  const [syncing, setSyncing] = useState(false);
 
   const load = useCallback(() => {
     get("/price-list", { ...(model ? { model } : {}), q })
@@ -38,18 +38,6 @@ export default function PriceList() {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then((m) => setModels(m.models || [])).catch(() => {}); }, []);
-
-  const syncOem = async () => {
-    setSyncing(true);
-    try {
-      const r = await post("/integrations/coulson/sync", {});
-      if (r.ok) toast.success(`OEM prices updated · ${r.pricesUpdated || 0} list prices · ${r.inventoryCount || 0} in yard`);
-      else toast.error(r.reason === "not_configured" ? "Save the Coulson session in Settings first" : "OEM sync did not run");
-      load();
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || "Coulson sync failed");
-    } finally { setSyncing(false); }
-  };
 
   const copy = (r) => {
     const text = quoteText(r);
@@ -74,11 +62,7 @@ export default function PriceList() {
         subtitle={`${data.totalRows} vehicles · ${oemNote}`}
         actions={
           <div className="flex gap-2">
-            {isOwner && (
-              <Button data-testid="price-list-oem-sync" onClick={syncOem} disabled={syncing}>
-                <RefreshCcw size={15} /> {syncing ? "Syncing…" : "Sync from OEM"}
-              </Button>
-            )}
+            <OemPriceSyncButton onDone={load} testId="price-list-oem-sync" />
             <Button variant="secondary" data-testid="price-list-refresh" onClick={load}>
               <RefreshCcw size={15} /> Refresh
             </Button>
@@ -138,18 +122,18 @@ export default function PriceList() {
                         <Badge tone="bg-sky-50 text-sky-700 ring-sky-600/20">{r.inYard} in yard</Badge>
                       )}
                       <span className="ml-auto flex items-baseline gap-2">
-                        <span className="font-mono font-bold text-ink tabular text-base">{inr(r.onRoad)}</span>
+                        <span className="font-mono font-bold text-ink tabular text-base">{inr(r.exShowroom, { decimals: 2 })}</span>
                         <ChevronDown size={15}
                           className={`text-ink-faint transition-transform ${isOpen ? "rotate-180" : ""}`} />
                       </span>
                     </div>
-                    <div className="text-[11px] text-ink-faint mt-0.5">on-road</div>
+                    <div className="text-[11px] text-ink-faint mt-0.5">OEM ex-showroom{r.onRoad ? ` · on-road ${inr(r.onRoad)}` : ""}</div>
                   </button>
 
                   {isOpen && (
                     <div className="px-4 pb-4 bg-zinc-50/60 border-t border-zinc-100">
                       <dl className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 pt-3 text-sm">
-                        <Line k="Ex-showroom" v={r.exShowroom} />
+                        <Line k="Ex-showroom" v={r.exShowroom} money />
                         <Line k="RTO" v={r.rto} />
                         <Line k="Insurance" v={r.insurance} />
                         {r.otherCharges > 0 && <Line k="Other charges" v={r.otherCharges} />}
@@ -179,11 +163,13 @@ export default function PriceList() {
   );
 }
 
-function Line({ k, v, strong }) {
+function Line({ k, v, strong, money }) {
   return (
     <div>
       <dt className="text-[11px] uppercase tracking-wide text-ink-faint">{k}</dt>
-      <dd className={`font-mono tabular ${strong ? "font-bold text-ink" : "text-ink-soft"}`}>{inr(v)}</dd>
+      <dd className={`font-mono tabular ${strong ? "font-bold text-ink" : "text-ink-soft"}`}>
+        {inr(v, money ? { decimals: 2 } : undefined)}
+      </dd>
     </div>
   );
 }
