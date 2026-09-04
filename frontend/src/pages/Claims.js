@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink } from "lucide-react";
+import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink, Link2 } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { OEM_MATCH, oemMatchOf, oemClaimsHref } from "../lib/claimMatch";
+import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import PeriodBar from "../components/PeriodBar";
@@ -37,6 +37,7 @@ export default function Claims() {
   const [leads, setLeads] = useState([]);
   const [oemOnly, setOemOnly] = useState(null);
   const [matchFilter, setMatchFilter] = useState("");
+  const [matchClaim, setMatchClaim] = useState(null);
   const period = usePeriodState();
   const load = useCallback(() => {
     get("/claims", period.params).then(setRows);
@@ -187,9 +188,25 @@ export default function Claims() {
                     {oemStatus}{stage ? ` · ${days || 0}d ${stage}` : ""}
                   </span>
                 ) : null}
+                {r.oemMatch?.manual ? (
+                  <span className="text-[10px] text-cobalt">Manual match</span>
+                ) : null}
+                {!r.manual ? (
+                  <button type="button" data-testid={`claim-manual-match-${r.claimId}`}
+                    onClick={(e) => { e.stopPropagation(); setMatchClaim(r); }}
+                    className="text-[10px] text-cobalt hover:underline inline-flex items-center gap-0.5">
+                    <Link2 size={10} /> Match OEM claim
+                  </button>
+                ) : null}
               </div>
             );
           }},
+          { key: "oemDoc", label: "OEM Doc", render: (r) => (
+            r.manual ? <span className="text-ink-faint text-xs">—</span> : (
+              <DocFlag yes={r.oemMatch?.hasDocument} url={r.oemMatch?.claimDocumentUrl}
+                count={r.oemMatch?.documentCount} />
+            )
+          )},
           { key: "model", label: "Vehicle", render: (r) => r.model || "—" },
           { key: "component", label: "Component", render: (r) => (
             <div className="flex items-center gap-1.5">
@@ -280,6 +297,10 @@ export default function Claims() {
       {active && <SettleModal claim={active} onClose={() => setActive(null)} onDone={() => { setActive(null); load(); }} />}
       {receipt && <ClaimReceiptModal rows={outstandingRows} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />}
       {manual && <ManualClaimModal leads={leads} onClose={() => setManual(false)} onDone={() => { setManual(false); load(); }} />}
+      {matchClaim && (
+        <MatchOemModal claim={matchClaim} onClose={() => setMatchClaim(null)}
+          onDone={() => { setMatchClaim(null); load(); }} />
+      )}
     </div>
   );
 }
@@ -405,6 +426,100 @@ function SettleModal({ claim, onClose, onDone }) {
         <div className="flex justify-end gap-2 mt-5">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-claim-btn" onClick={submit}>Save</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function MatchOemModal({ claim, onClose, onDone }) {
+  const [oemRows, setOemRows] = useState([]);
+  const [claimNumber, setClaimNumber] = useState(claim.manualOemClaimNumber || claim.oemMatch?.claimNumbers?.[0] || "");
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    get("/oem-claims").then((rows) => setOemRows(Array.isArray(rows) ? rows : [])).catch(() => setOemRows([]));
+  }, []);
+
+  const needle = q.trim().toLowerCase();
+  const shown = oemRows.filter((r) => {
+    if (!needle) return true;
+    const blob = `${r.claimNumber || ""} ${(r.leadIds || []).join(" ")} ${(r.lineItems || []).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""}`).join(" ")}`.toLowerCase();
+    return blob.includes(needle);
+  }).slice(0, 40);
+
+  const save = async () => {
+    if (!claimNumber.trim()) return toast.error("Enter or pick an OEM claim number");
+    setBusy(true);
+    try {
+      await post("/claims/oem-match", {
+        leadId: claim.leadId, componentKey: claim.componentKey,
+        claimNumber: claimNumber.trim(),
+      });
+      toast.success(`Matched ${claim.component} to ${claimNumber.trim()}`);
+      onDone();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not save match");
+    } finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    try {
+      await post("/claims/oem-match/clear", {
+        leadId: claim.leadId, componentKey: claim.componentKey,
+      });
+      toast.success("Manual match cleared");
+      onDone();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not clear match");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal onClose={onClose} width="max-w-lg" testid="claim-match-oem-modal">
+      <div className="p-5 border-b border-line">
+        <div className="font-heading font-bold text-ink">Match OEM claim</div>
+        <div className="text-xs text-ink-faint mt-1">
+          {claim.customer} · {claim.component} · {claim.leadId}
+        </div>
+      </div>
+      <div className="p-5 space-y-3 overflow-y-auto">
+        <p className="text-sm text-ink-soft">
+          Pick the debit note that belongs to this register row. Use this when In Euler is Not claimed or Check match but you already raised it in the OEM app.
+        </p>
+        <Field label="OEM claim number">
+          <Input data-testid="manual-oem-claim-number" value={claimNumber}
+            onChange={(e) => setClaimNumber(e.target.value)} placeholder="AF-122-CL…" />
+        </Field>
+        <Field label="Search OEM claims">
+          <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Claim no. / chassis / invoice" />
+        </Field>
+        <div className="max-h-48 overflow-y-auto border border-line rounded-lg divide-y divide-zinc-100">
+          {shown.map((r) => (
+            <button type="button" key={r.claimNumber}
+              onClick={() => setClaimNumber(r.claimNumber)}
+              className={`w-full text-left px-3 py-2 text-xs hover:bg-zinc-50 ${
+                claimNumber === r.claimNumber ? "bg-cobalt/5" : ""}`}>
+              <div className="font-mono font-semibold text-cobalt">{r.claimNumber}</div>
+              <div className="text-ink-faint">
+                {r.status} · {(r.lineItems || []).map((li) => li.chassis).filter(Boolean).join(", ") || "no chassis"}
+              </div>
+            </button>
+          ))}
+          {shown.length === 0 && (
+            <div className="px-3 py-4 text-ink-faint text-xs">No OEM claims. Sync from Euler first.</div>
+          )}
+        </div>
+      </div>
+      <div className="p-4 border-t border-line flex justify-between gap-2">
+        <Button variant="ghost" onClick={clear} disabled={busy || !claim.manualOemClaimNumber}>Clear match</Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button data-testid="save-oem-match-btn" onClick={save} disabled={busy}>
+            {busy ? "Saving…" : "Save match"}
+          </Button>
         </div>
       </div>
     </Modal>

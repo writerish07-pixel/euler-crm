@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalLink, RotateCcw } from "lucide-react";
+import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalLink, RotateCcw, Link2 } from "lucide-react";
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel } from "../lib/claimMatch";
-import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input } from "../components/ui";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag } from "../lib/claimMatch";
+import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
 
@@ -36,9 +36,11 @@ export default function OemClaims() {
   const [rows, setRows] = useState([]);
   const [status, setStatus] = useState("");
   const [unlinked, setUnlinked] = useState(false);
+  const [missingDoc, setMissingDoc] = useState(false);
   const [matchFilter, setMatchFilter] = useState("");
   const [q, setQ] = useState(params.get("q") || "");
   const [syncing, setSyncing] = useState(false);
+  const [matchRow, setMatchRow] = useState(null);
 
   const chassis = params.get("chassis") || "";
   const invoice = params.get("invoice") || "";
@@ -50,12 +52,13 @@ export default function OemClaims() {
     get("/oem-claims", {
       ...(status ? { status } : {}),
       ...(unlinked ? { unlinked: true } : {}),
+      ...(missingDoc ? { missingDoc: true } : {}),
       ...(qParam ? { q: qParam } : {}),
       ...(chassis ? { chassis } : {}),
       ...(invoice ? { invoice } : {}),
       ...(leadId ? { leadId } : {}),
     }).then((r) => setRows(Array.isArray(r) ? r : [])).catch(() => setRows([]));
-  }, [status, unlinked, qParam, chassis, invoice, leadId]);
+  }, [status, unlinked, missingDoc, qParam, chassis, invoice, leadId]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { setQ(qParam); }, [qParam]);
@@ -106,7 +109,6 @@ export default function OemClaims() {
   const openCount = summary.buckets
     .filter((b) => !TERMINAL.includes(b.status))
     .reduce((s, b) => s + b.count, 0);
-  const worst = summary.stuck[0];
   const joinActive = Boolean(chassis || invoice || leadId || qParam);
 
   const visibleRows = matchFilter
@@ -180,11 +182,11 @@ export default function OemClaims() {
           icon={Clock} tone="text-amber-600" />
         <StatCard label="Total Claimed" value={inr(totals.claimed)} icon={FileText} />
         <StatCard label="Approved" value={inr(totals.approved)} tone="text-emerald-600" />
-        <StatCard label="Longest Wait"
-          value={worst ? `${worst.stageDays} days` : "—"}
-          sub={worst ? worst.stageLabel : "nothing pending"}
-          icon={AlertTriangle}
-          tone={worst && worst.stageDays >= 14 ? "text-rose-600" : "text-ink"} />
+        <StatCard label="No document"
+          value={mirror.missingDocument ?? "—"}
+          sub="Upload the file in the OEM app"
+          icon={FileText}
+          tone={(mirror.missingDocument || 0) > 0 ? "text-rose-600" : "text-ink"} />
       </div>
 
       {/* Reverse of the Scheme Claim Register colours: Euler has it, this app may not. */}
@@ -304,6 +306,11 @@ export default function OemClaims() {
         <Button type="button" variant={unlinked ? "primary" : "secondary"} onClick={() => setUnlinked((v) => !v)}>
           <Link2Off size={16} /> Not linked to a lead
         </Button>
+        <Button type="button" variant={missingDoc ? "primary" : "secondary"}
+          data-testid="oem-missing-doc-filter"
+          onClick={() => setMissingDoc((v) => !v)}>
+          <FileText size={16} /> No document
+        </Button>
       </form>
 
       <Table
@@ -382,18 +389,106 @@ export default function OemClaims() {
               {!r.terminal && <div className="text-ink-faint">{r.claimAgeingDays}d old</div>}
             </div>
           )},
-          { key: "doc", label: "", align: "right", render: (r) => (
-            r.claimDocumentUrl ? (
-              <a href={r.claimDocumentUrl} target="_blank" rel="noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="text-cobalt text-xs font-medium hover:underline">PDF</a>
-            ) : null
+          { key: "doc", label: "Doc", render: (r) => (
+            <DocFlag yes={r.hasDocument} url={r.claimDocumentUrl} count={r.documentCount} />
+          )},
+          { key: "match", label: "", render: (r) => (
+            <button type="button" data-testid={`oem-manual-match-${r.claimNumber}`}
+              onClick={(e) => { e.stopPropagation(); setMatchRow(r); }}
+              className="text-xs text-cobalt hover:underline inline-flex items-center gap-1">
+              <Link2 size={12} /> {r.registerMatch?.manual ? "Rematch" : "Match"}
+            </button>
           )},
         ]}
         rows={visibleRows}
         empty={mirror.syncedAt ? "No claims match this filter" : "Not synced from Euler yet"}
       />
       {drawer}
+      {matchRow && (
+        <MatchRegisterModal row={matchRow} onClose={() => setMatchRow(null)}
+          onDone={() => { setMatchRow(null); load(); }} />
+      )}
     </div>
+  );
+}
+
+function MatchRegisterModal({ row, onClose, onDone }) {
+  const [register, setRegister] = useState([]);
+  const [leadId, setLeadId] = useState((row.leadIds || [])[0] || "");
+  const [componentKey, setComponentKey] = useState(
+    (row.registerMatch?.mappedComponents || [])[0] || "");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    get("/claims").then((rows) => setRegister(Array.isArray(rows) ? rows.filter((r) => !r.manual) : []))
+      .catch(() => setRegister([]));
+  }, []);
+
+  const options = leadId ? register.filter((r) => r.leadId === leadId) : [];
+  const leads = [...new Map(register.map((r) => [r.leadId, r])).values()];
+
+  const save = async () => {
+    if (!leadId || !componentKey) return toast.error("Pick a lead and a scheme component");
+    setBusy(true);
+    try {
+      await post("/claims/oem-match", {
+        leadId, componentKey, claimNumber: row.claimNumber,
+      });
+      toast.success(`Matched ${row.claimNumber} to the scheme register`);
+      onDone();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not save match");
+    } finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    if (!leadId || !componentKey) return toast.error("Pick the register row to unlink");
+    setBusy(true);
+    try {
+      await post("/claims/oem-match/clear", { leadId, componentKey });
+      toast.success("Manual match cleared");
+      onDone();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Could not clear match");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal onClose={onClose} width="max-w-lg" testid="oem-match-register-modal">
+      <div className="p-5 border-b border-line">
+        <div className="font-heading font-bold text-ink">Match to Scheme Claim Register</div>
+        <div className="text-xs text-ink-faint mt-1 font-mono">{row.claimNumber}</div>
+      </div>
+      <div className="p-5 space-y-3 overflow-y-auto">
+        <p className="text-sm text-ink-soft">
+          Use this when chassis or claim wording did not join automatically. Money stays on the register; this only links the OEM claim number.
+        </p>
+        <Field label="Lead">
+          <Select value={leadId} onChange={(e) => { setLeadId(e.target.value); setComponentKey(""); }}>
+            <option value="">— pick lead —</option>
+            {leads.map((r) => (
+              <option key={r.leadId} value={r.leadId}>{r.leadId} · {r.customer || ""}</option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Scheme component">
+          <Select value={componentKey} onChange={(e) => setComponentKey(e.target.value)}>
+            <option value="">— pick component —</option>
+            {options.map((r) => (
+              <option key={`${r.leadId}-${r.componentKey}`} value={r.componentKey}>
+                {r.component || r.componentKey} · {r.claimStatus}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </div>
+      <div className="p-4 border-t border-line flex justify-between gap-2">
+        <Button variant="ghost" onClick={clear} disabled={busy}>Clear match</Button>
+        <div className="flex gap-2">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save match"}</Button>
+        </div>
+      </div>
+    </Modal>
   );
 }

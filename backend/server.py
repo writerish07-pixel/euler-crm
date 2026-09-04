@@ -6291,10 +6291,11 @@ async def coulson_sync_claims(act=Depends(actor)):
 
 @api.get("/oem-claims", dependencies=[Depends(money_desk_only)])
 async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False,
-                                 q: str = "", chassis: str = "", invoice: str = ""):
+                                 q: str = "", chassis: str = "", invoice: str = "",
+                                 missingDoc: bool = False):
     return await oem_claims.list_claims(
         db, status=status, lead_id=leadId, unlinked=unlinked,
-        q=q, chassis=chassis, invoice=invoice)
+        q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc)
 
 
 @api.get("/oem-claims/summary", dependencies=[Depends(money_desk_only)])
@@ -8219,6 +8220,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
                 "claimStatus": claim_status,
                 "receivedAmount": (existing or {}).get("receivedAmount", 0),
                 "claimReference": (existing or {}).get("claimReference", ""),
+                "manualOemClaimNumber": (existing or {}).get("manualOemClaimNumber") or "",
                 "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
             })
     # Manual claims (OEM incentives / executive incentives) — merged into the register
@@ -8279,6 +8281,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
             "claimStatus": status or "Pending",
             "receivedAmount": received,
             "claimReference": c.get("claimReference", ""),
+            "manualOemClaimNumber": c.get("manualOemClaimNumber") or "",
             "submittedDate": c.get("submittedDate", ""), "approvedDate": c.get("approvedDate", ""),
             "ageingDays": _claim_ageing_days(c.get("submittedDate", ""), status, c.get("approvedDate", "")),
             "permanent": True,
@@ -8313,13 +8316,52 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
         match = oem_claims.match_state(
             oem_index, row.get("leadId") or "", row.get("componentKey") or "",
             chassis=row.get("chassisNumber") or "",
-            invoice=row.get("invoiceNumber") or "")
+            invoice=row.get("invoiceNumber") or "",
+            manual_claim_number=row.get("manualOemClaimNumber") or "")
         row, _ = oem_claims.overlay_register_from_oem(row, match)
         row["oemMatch"] = match
         row["ageingDays"] = _claim_ageing_days(
             row.get("submittedDate", ""), row.get("claimStatus", ""), row.get("approvedDate", ""))
         result[i] = row
     return _rows_in_period(result, _parse_period(month, year), lambda r: r.get("bookingDate"))
+
+
+class OemClaimMatchIn(BaseModel):
+    leadId: str = ""
+    componentKey: str = ""
+    claimNumber: str = ""
+
+
+@api.post("/claims/oem-match", dependencies=[Depends(money_desk_only)])
+async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
+    """Manually join a Scheme Claim Register row to an OEM Claim Settlements debit note.
+
+    Use when chassis/wording auto-match is wrong or missing. Money on the register is
+    never taken from Coulson.
+    """
+    try:
+        out = await oem_claims.link_register_to_oem(
+            db, lead_id=body.leadId, component_key=body.componentKey,
+            claim_number=body.claimNumber)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await oem_claims.apply_oem_filing_to_register(db)
+    await write_audit(act, "oem-match", "claim", leadId=body.leadId,
+                      new={"componentKey": body.componentKey, "claimNumber": body.claimNumber})
+    return {"ok": True, **out}
+
+
+@api.post("/claims/oem-match/clear", dependencies=[Depends(money_desk_only)])
+async def clear_claim_oem_match(body: OemClaimMatchIn, act=Depends(actor)):
+    try:
+        rec = await oem_claims.clear_register_oem_link(
+            db, lead_id=body.leadId, component_key=body.componentKey)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await oem_claims.apply_oem_filing_to_register(db)
+    await write_audit(act, "oem-match-clear", "claim", leadId=body.leadId,
+                      new={"componentKey": body.componentKey})
+    return {"ok": True, "register": rec}
 
 
 @api.get("/claims/oem-only", dependencies=[Depends(money_desk_only)])

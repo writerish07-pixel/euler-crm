@@ -153,6 +153,21 @@ A line matching on chassis but disagreeing on invoice is linked **and flagged**
 (`invoiceMismatch`), surfaced under "Invoice disagreements". Unmatched claims are kept
 and listed under "Not linked", never dropped.
 
+## Claim documents (Yes / No)
+
+On every Euler sync we record whether a document exists against that debit note:
+
+- **Yes** — Coulson holds the claim PDF (`debit_note_s3_link`) or the dealer attached supporting files on the line (`documents[]`). OEM Claim Settlements and Scheme Claim Register both show **Yes**.
+- **No** — neither is present. Upload the file in the OEM (Coulson) app, then **Sync from Euler**.
+
+Customer photo URLs are still not stored; only the count and the Yes/No flag.
+
+Filter **No document** on OEM Claim Settlements to see what still needs a file.
+
+## Manual match
+
+Auto-join uses chassis, then invoice, then claim wording. When that is wrong or missing, the desk can **Match** a Scheme Claim Register row to an OEM claim number (or the other way from OEM Claim Settlements). That stamp is `manualOemClaimNumber` on `db.claims`. It does **not** copy Coulson amounts into the register. Clear match returns the row to auto-join.
+
 ## Ledger rules
 
 - **Upsert only.** A claim that disappears from Coulson is marked `missingFromOem`,
