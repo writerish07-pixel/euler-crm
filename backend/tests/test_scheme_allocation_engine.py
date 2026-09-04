@@ -454,7 +454,8 @@ async def test_earnings_no_double_count_scheme_and_payout(client):
         + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
         + lead["dealerInsuranceIncome"] - ce.num(lead.get("dealerFundedBenefit")))
     assert lead["dealerTotalEarnings"] == expected_total
-    assert lead["dealerInsuranceIncome"] == payout
+    assert lead["dealerInsuranceIncome"] == 0
+    assert payout > 0
     assert lead["extraDealerIncomeTotal"] == 1000
     assert lead["dealerSchemeRetained"] == 5000
     assert lead["dealerFundedBenefit"] == 0
@@ -462,7 +463,7 @@ async def test_earnings_no_double_count_scheme_and_payout(client):
 
     report = (await client.get("/api/reports/dealer-earnings")).json()
     assert report["totals"]["scheme"] == 5000
-    assert report["totals"]["insurance"] == payout
+    assert report["totals"]["insurance"] == 0
     ins_benefit_amt = next((c["amount"] for c in report["components"]
                             if "insurance benefit passed" in c["label"].lower()), 0)
     assert ins_benefit_amt == 5000
@@ -521,7 +522,7 @@ async def test_modules_reconcile_turbo_not_used(client):
     report = (await client.get("/api/reports/dealer-earnings")).json()
     assert report["totals"]["scheme"] == 0
     entry = await server.db.insurance.find_one({"leadId": lid})
-    assert report["totals"]["insurance"] == entry["expectedPayout"]
+    assert report["totals"]["insurance"] == 0
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
 import InsuranceMisUpload from "./InsuranceMisUpload";
 
-const VIEWS = [["all", "All Entries"], ["pending", "Pending"], ["overdue", "Overdue"]];
+const VIEWS = [["all", "All Entries"], ["pending", "Pending"], ["unmapped", "Not matched"], ["overdue", "Overdue"]];
 
 export default function Insurance() {
   const { isOwner } = useAuth();
@@ -51,7 +51,7 @@ export default function Insurance() {
   const toggleAll = (on) => {
     const next = {};
     rows.forEach((r) => {
-      if (r.misApproved || String(r.status || "").startsWith("N/A")) return;
+      if (String(r.status || "") === "Received" || String(r.status || "").startsWith("N/A")) return;
       next[r.entryId] = on;
     });
     setSelected(next);
@@ -61,7 +61,7 @@ export default function Insurance() {
     if (!selectedIds.length) return toast.error("Tick the payouts to approve");
     try {
       const r = await post("/insurance/mis/approve", { entryIds: selectedIds });
-      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} recorded as received`);
+      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped`);
       setSelected({});
       load();
     } catch (e) { toast.error(e?.response?.data?.detail || "Approve failed"); }
@@ -84,7 +84,7 @@ export default function Insurance() {
     ), render: (r) => (
       <input type="checkbox" data-testid={`ins-check-${r.entryId}`}
         checked={!!selected[r.entryId]}
-        disabled={!!r.misApproved || String(r.status || "").startsWith("N/A")}
+        disabled={String(r.status || "") === "Received" || String(r.status || "").startsWith("N/A")}
         onClick={(e) => e.stopPropagation()}
         onChange={(e) => toggle(r.entryId, e.target.checked)} />
     ) },
@@ -114,9 +114,11 @@ export default function Insurance() {
       <span className={r.overdue ? "text-red-600 font-semibold" : ""}>{fmtDate(r.payoutDueBy) || "—"}</span>
     ) },
     { key: "status", label: "Status", render: (r) => (
-      r.misApproved ? <Badge tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Received</Badge>
-        : r.overdue ? <Badge tone="bg-red-50 text-red-700 ring-red-600/20">Overdue</Badge>
-          : <Badge>{r.status || "Pending"}</Badge>
+      String(r.status || "") === "Received"
+        ? <Badge tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Received</Badge>
+        : r.misApproved ? <Badge tone="bg-sky-50 text-sky-700 ring-sky-600/20">Mapped</Badge>
+          : r.overdue ? <Badge tone="bg-red-50 text-red-700 ring-red-600/20">Overdue</Badge>
+            : <Badge>{r.status || "Pending"}</Badge>
     ) },
     ...(isOwner ? [
       { key: "act", label: "", align: "right", render: (r) => (
@@ -171,9 +173,9 @@ export default function Insurance() {
             <Card className="p-3 mb-4 flex flex-wrap items-center gap-3" data-testid="ins-approve-bar">
               <span className="text-sm">{selectedIds.length} selected</span>
               <Button data-testid="ins-approve-selected-btn" onClick={approveSelected}>
-                Approve as received
+                Mark mapped
               </Button>
-              <span className="text-xs text-ink-faint">Books the MIS amount (or expected, if no MIS) even when it differs</span>
+              <span className="text-xs text-ink-faint">Confirms these register rows appear on the agent MIS. Does not mean money was received.</span>
             </Card>
           )}
 

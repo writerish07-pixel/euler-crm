@@ -144,6 +144,7 @@ SYNC_MAP = {
                          "referralRetained", "dsaRetained", "schemeRetainedBreakup",
                          # OEM Extra trio, then TOTAL (final calc includes Retained).
                          "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
+                         "oemUnpayableWriteOff",
                          "dealerTotalEarnings",
                          "leadSource", "claimStatus", "insuranceStatus",
                          "lastUpdated", "createdBy", "timestamp", "remarks",
@@ -160,6 +161,11 @@ SYNC_MAP = {
                            "oemExtraSupportReceived", "oemExtraSupportPassed", "oemExtraSupportRetained",
                            "chassisNumber", "invoiceNumber", "claimReference",
                            "status", "lastUpdated", "remarks"], 1),
+    "dropped_oem_extra_support": (
+        _tab("GSHEET_TAB_DROPPED_EXTRA_SUPPORT", "Dropped Extra Support Register"), "dropId",
+        ["dropId", "leadId", "claimId", "customerName", "model", "variant", "bookingDate",
+         "droppedAmount", "chassisNumber", "invoiceNumber", "claimReference",
+         "reason", "droppedAt", "droppedBy", "executive"], 1),
 }
 
 # Entities the CRM computes but which have NO destination in the existing workbook.
@@ -825,6 +831,12 @@ OEM_EXTRA_REGISTER_COLS = (
     "Status", "Last Updated", "Remarks",
 )
 
+DROPPED_EXTRA_REGISTER_COLS = (
+    "Drop ID", "Lead ID", "Claim ID", "Customer Name", "Vehicle Model", "Variant", "Booking Date",
+    "Dropped Amount", "Chassis Number", "Invoice Number", "Claim Reference Number",
+    "Reason", "Dropped At", "Dropped By", "Executive",
+)
+
 
 def _sheet_titles():
     sheet_id = os.environ.get("GSHEET_ID", "")
@@ -1224,6 +1236,37 @@ async def ensure_oem_extra_support_columns():
         _status["lastError"] = str(e)
         _mark_health(False, str(e)[:300])
         return {"ok": False, "reason": str(e)[:300], "tabs": []}
+
+
+def _ensure_dropped_extra_support_tab_sync():
+    titles = _sheet_titles()
+    tab = SYNC_MAP["dropped_oem_extra_support"][0]
+    if tab not in titles:
+        _create_sheet_tab(tab)
+        sheet_id = os.environ.get("GSHEET_ID", "")
+        _with_retry(lambda: _service.spreadsheets().values().update(
+            spreadsheetId=sheet_id, range=f"'{tab}'!A1",
+            valueInputOption="RAW", body={"values": [list(DROPPED_EXTRA_REGISTER_COLS)]},
+        ).execute())
+        invalidate_header_cache(tab)
+        return {"ok": True, "tab": tab, "created": True, "changed": True,
+                "added": list(DROPPED_EXTRA_REGISTER_COLS)}
+    return _append_missing_headers(tab, DROPPED_EXTRA_REGISTER_COLS, 1)
+
+
+async def ensure_dropped_extra_support_tab():
+    global _service
+    if _service is None:
+        _init()
+    if _service is None or not _status.get("enabled"):
+        return {"ok": False, "reason": _status.get("reason", "sync disabled")}
+    blocked = _write_blocked()
+    if blocked:
+        return {"ok": False, "reason": blocked, "writeBlocked": True}
+    try:
+        return await asyncio.to_thread(_ensure_dropped_extra_support_tab_sync)
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:300]}
 
 
 # ---------------------------------------------------------------- upsert (GS-2/GS-3)

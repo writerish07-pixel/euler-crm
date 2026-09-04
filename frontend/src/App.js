@@ -40,6 +40,7 @@ import AuditLog from "./pages/AuditLog";
 import OemFinance from "./pages/OemFinance";
 import OemClaims from "./pages/OemClaims";
 import ClaimReconciliation from "./pages/ClaimReconciliation";
+import DroppedExtraSupport from "./pages/DroppedExtraSupport";
 import Allocation from "./pages/Allocation";
 import SalesGmDashboard from "./pages/SalesGmDashboard";
 import Approvals from "./pages/Approvals";
@@ -140,6 +141,7 @@ function AppRoutes() {
           page from the Scheme Claim Register above — different money, different
           lifecycle. See backend/oem_claims.py. */}
       <Route path="/oem-claims" element={P(<OemClaims />, { oemClaimDesk: true })} />
+      <Route path="/dropped-extra-support" element={P(<DroppedExtraSupport />, { oemClaimDesk: true })} />
       <Route path="/claim-reconciliation" element={P(<ClaimReconciliation />, { ownerOnly: true })} />
       <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />
       <Route path="/incentive-master" element={P(<IncentiveMaster />, { ownerOnly: true })} />

@@ -335,10 +335,11 @@ async def test_same_vehicle_two_agents_two_earnings(client):
     eb = await server.db.insurance.find_one({"leadId": l2})
     assert ea["insuranceAmount"] == eb["insuranceAmount"]      # same vehicle, same premium
     assert ea["payoutRate"] == 0.49 and eb["payoutRate"] == 0.52
-    assert b["dealerInsuranceIncome"] > a["dealerInsuranceIncome"]
-    assert b["dealerInsuranceIncome"] - a["dealerInsuranceIncome"] == ce.round2(
+    assert eb["expectedPayout"] > ea["expectedPayout"]
+    assert eb["expectedPayout"] - ea["expectedPayout"] == ce.round2(
         ea["insuranceAmount"] * 0.03)
-    assert b["dealerTotalEarnings"] > a["dealerTotalEarnings"]
+    assert a["dealerInsuranceIncome"] == 0
+    assert b["dealerInsuranceIncome"] == 0
 
 
 @pytest.mark.asyncio

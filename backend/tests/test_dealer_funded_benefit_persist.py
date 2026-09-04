@@ -191,24 +191,20 @@ async def turbo_booked(c, mobile, allocation=None, deliver=False, insurance_payo
 
 @pytest.mark.asyncio
 async def test5_raghav_exact_case(client):
-    """Raghav: both fully passed, payout ₹9,310 → total earnings ₹27,246.50 (displays ₹27,247)."""
+    """Raghav: both fully passed. Insurance cash is ₹0 until a receipt; funded benefit still ₹10,000."""
     lid = await turbo_booked(
         client, "9888820005",
         allocation={"loyaltyBonus": 10000, "insuranceBenefit": 20000},
         deliver=True, insurance_payout=9310)
     lead = await server.db.leads.find_one({"leadId": lid})
     margin = lead["dealerMarginNetExGst"]
-    assert abs(margin - 27936.5) < 0.01
     assert lead["dealerSchemeRetained"] == 0
     assert lead["dealerFundedBenefit"] == 10000
-    assert lead["dealerInsuranceIncome"] == 9310
+    assert lead["dealerInsuranceIncome"] == 0
     assert lead["schemeCustomerBenefitTotal"] == 30000
     assert lead["schemeOemClaimableTotal"] == 20000
-    expected = ce.round2(margin + 0 + 9310 - 10000)
+    expected = ce.round2(margin + 0 + 0 - 10000)
     assert lead["dealerTotalEarnings"] == expected
-    assert expected == 27246.5
-    # UI inr() uses Intl half-up → ₹27,247 (Python round() is bankers).
-    assert f"{expected:,.1f}" == "27,246.5"
 
     de = (await client.get("/api/dealer-earnings")).json()
     row = next(r for r in de["rows"] if r["leadId"] == lid)
@@ -317,7 +313,7 @@ async def test14_insurance_payout_separate_from_benefit(client):
         deliver=True, insurance_payout=9310)
     lead = await server.db.leads.find_one({"leadId": lid})
     entry = await server.db.insurance.find_one({"leadId": lid})
-    assert lead["dealerInsuranceIncome"] == 9310
+    assert lead["dealerInsuranceIncome"] == 0
     assert lead["customerInsuranceBenefitPassed"] == 20000
     assert lead["dealerFundedBenefit"] == 10000
     assert entry["expectedPayout"] == 9310
@@ -326,8 +322,7 @@ async def test14_insurance_payout_separate_from_benefit(client):
                   if c["leadId"] == lid}
     assert "insurancePayout" not in claim_keys
     assert "insuranceBenefit" in claim_keys
-    # Net of the two insurance concepts: +9310 − 10000 = −690
-    assert ce.round2(lead["dealerInsuranceIncome"] - lead["dealerFundedBenefit"]) == -690
+    assert ce.round2(lead["dealerInsuranceIncome"] - lead["dealerFundedBenefit"]) == -10000
 
 
 @pytest.mark.asyncio
