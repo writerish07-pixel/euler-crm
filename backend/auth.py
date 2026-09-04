@@ -1,5 +1,6 @@
 """JWT email+password auth — Owner / Sales GM / TL / Executive / Accounts / ASM / RM / OEM (Bearer)."""
 import hashlib
+import logging
 import os
 import uuid
 from typing import Optional
@@ -10,6 +11,8 @@ import jwt
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
+
+log = logging.getLogger("auth")
 
 JWT_ALGORITHM = "HS256"
 bearer = HTTPBearer(auto_error=False)
@@ -54,15 +57,47 @@ def _secret():
     return os.environ["JWT_SECRET"]
 
 
+def _bcrypt_secret(pw: str) -> bytes:
+    """bcrypt silently refuses (or raises) past 72 bytes. Truncate so a long
+    passphrase still hashes and verifies the same way."""
+    raw = str(pw or "").encode("utf-8")
+    return raw[:72]
+
+
 def hash_password(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    return bcrypt.hashpw(_bcrypt_secret(pw), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(pw: str, hashed: str) -> bool:
+    hashed = str(hashed or "")
+    if not hashed:
+        return False
     try:
-        return bcrypt.checkpw(pw.encode("utf-8"), hashed.encode("utf-8"))
+        return bcrypt.checkpw(_bcrypt_secret(pw), hashed.encode("utf-8"))
     except Exception:
         return False
+
+
+def password_matches(pw, user) -> bool:
+    """Accept the typed password, a surrounding-space paste, or the plaintext
+    the owner stored when the bcrypt hash is missing or stale."""
+    if not isinstance(user, dict):
+        return False
+    typed = str(pw or "")
+    candidates = [typed]
+    stripped = typed.strip()
+    if stripped != typed:
+        candidates.append(stripped)
+    hashed = user.get("passwordHash") or ""
+    plain = str(user.get("passwordPlain") or "")
+    for candidate in candidates:
+        if hashed and verify_password(candidate, hashed):
+            return True
+        if plain and candidate == plain:
+            return True
+        if plain and candidate.strip() == plain.strip():
+            return True
+    return False
 
 
 def create_token(user):
@@ -102,6 +137,10 @@ class LoginIdIn(BaseModel):
     loginId: str = ""
 
 
+class PasswordSetIn(BaseModel):
+    password: str = ""
+
+
 def norm_login_id(v) -> str:
     """Login IDs are compared case- and space-insensitively, so "Amit" and
     "amit " are the same person and cannot both be created."""
@@ -129,6 +168,40 @@ def _stored_email(email, login_id, user_id) -> str:
         return e
     handle = norm_login_id(login_id) or str(user_id).replace("-", "")[:12]
     return f"{handle}@{_PLACEHOLDER_EMAIL_DOMAIN}"
+
+
+async def find_user_for_login(db, typed):
+    """Resolve whatever the person typed: email, user ID, or unique name.
+
+    Staff are told their User ID, but they often type the Staff & Reports name
+    instead. Accounts created before loginIdNorm existed have a loginId and no
+    norm field — those must still sign in.
+    """
+    typed = str(typed or "").strip()
+    if not typed:
+        return None
+    user = await db.users.find_one({"email": typed.lower()})
+    if user:
+        return user
+    norm = norm_login_id(typed)
+    if not norm:
+        return None
+    if "@" not in typed:
+        user = await db.users.find_one({"email": f"{norm}@{_PLACEHOLDER_EMAIL_DOMAIN}"})
+        if user:
+            return user
+    user = await db.users.find_one({"loginIdNorm": norm})
+    if user:
+        return user
+    name_hits = []
+    async for row in db.users.find({}):
+        if norm_login_id(row.get("loginId")) == norm:
+            return row
+        if norm_login_id(row.get("name")) == norm:
+            name_hits.append(row)
+    if len(name_hits) == 1:
+        return name_hits[0]
+    return None
 
 
 def _owner_user_row(u) -> dict:
@@ -250,18 +323,35 @@ def build_router(db):
     @router.post("/login")
     async def login(body: LoginIn):
         # The field is still called `email` so existing clients keep working, but
-        # it now accepts a login ID too. Both are honoured on purpose: switching
-        # to IDs alone would lock out every account created before they existed —
-        # including the owner's.
-        typed = (body.email or "").strip()
-        user = await db.users.find_one({"email": typed.lower()})
-        if not user:
-            user = await db.users.find_one({"loginIdNorm": norm_login_id(typed)}) \
-                if norm_login_id(typed) else None
-        if not user or not verify_password(body.password, user["passwordHash"]):
-            raise HTTPException(401, "Invalid user ID or password")
-        token = create_token(user)
-        return {"token": token, "user": _public_session_user(user)}
+        # it now accepts a login ID or the person's unique name too.
+        try:
+            user = await find_user_for_login(db, body.email)
+            if not user or not password_matches(body.password, user):
+                raise HTTPException(401, "Invalid user ID or password")
+            # Repair a missing hash or a missing loginIdNorm so the next sign-in
+            # is a cheap indexed lookup.
+            patch = {}
+            typed_pw = str(body.password or "").strip() or str(body.password or "")
+            hashed = user.get("passwordHash") or ""
+            if not hashed or not verify_password(typed_pw, hashed):
+                if typed_pw:
+                    patch["passwordHash"] = hash_password(typed_pw)
+                    if not (user.get("passwordPlain") or "").strip():
+                        patch["passwordPlain"] = typed_pw
+            lid = (user.get("loginId") or "").strip()
+            if lid and not (user.get("loginIdNorm") or "").strip():
+                patch["loginIdNorm"] = norm_login_id(lid)
+            if patch:
+                await db.users.update_one({"userId": user["userId"]}, {"$set": patch})
+                user.update(patch)
+            token = create_token(user)
+            return {"token": token, "user": _public_session_user(user)}
+        except HTTPException:
+            raise
+        except Exception:
+            log.exception("login failed")
+            raise HTTPException(
+                500, "Could not sign in. Ask the owner to reset this password in Settings.")
 
     @router.get("/me")
     async def me(user=Depends(current_user)):
@@ -283,7 +373,7 @@ def build_router(db):
         if current == new_pw:
             raise HTTPException(422, "New password must be different from the current password")
         row = await db.users.find_one({"userId": user["userId"]})
-        if not row or not verify_password(current, row.get("passwordHash") or ""):
+        if not row or not password_matches(current, row):
             raise HTTPException(400, "Current password is incorrect")
         await db.users.update_one(
             {"userId": user["userId"]},
@@ -358,6 +448,26 @@ def build_router(db):
                                   {"$set": {"loginId": login_id, "loginIdNorm": norm}})
         return {"ok": True, "userId": user_id, "loginId": login_id}
 
+    @router.put("/users/{user_id}/password")
+    async def set_user_password(user_id: str, body: PasswordSetIn, user=Depends(owner_only)):
+        """Owner reset. Overwrites bcrypt and the Password column so a stuck
+        login can be handed a new password without deleting the account."""
+        target = await db.users.find_one({"userId": user_id})
+        if not target:
+            raise HTTPException(404, "User not found")
+        pw = (body.password or "").strip()
+        if len(pw) < 6:
+            raise HTTPException(422, "Password must be at least 6 characters")
+        await db.users.update_one(
+            {"userId": user_id},
+            {"$set": {
+                "passwordHash": hash_password(pw),
+                "passwordPlain": pw,
+                "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
+            }},
+        )
+        return {"ok": True, "userId": user_id}
+
     @router.delete("/users/{user_id}")
     async def delete_user(user_id: str, user=Depends(owner_only)):
         if user_id == user["userId"]:
@@ -391,7 +501,15 @@ async def _ensure_login_id(db, email, login_id):
     if not login_id or "@" in login_id:
         return
     row = await db.users.find_one({"email": email})
-    if not row or (row.get("loginId") or "").strip():
+    if not row:
+        return
+    if (row.get("loginId") or "").strip():
+        # Already has an ID — still fill loginIdNorm if a pre-norm row is missing it.
+        if not (row.get("loginIdNorm") or "").strip():
+            await db.users.update_one(
+                {"userId": row["userId"]},
+                {"$set": {"loginIdNorm": norm_login_id(row.get("loginId"))}},
+            )
         return
     norm = norm_login_id(login_id)
     clash = await db.users.find_one({"loginIdNorm": norm})
@@ -401,6 +519,18 @@ async def _ensure_login_id(db, email, login_id):
         {"userId": row["userId"]},
         {"$set": {"loginId": login_id, "loginIdNorm": norm}},
     )
+
+
+async def _backfill_login_id_norm(db):
+    """Staff created before loginIdNorm existed have a User ID that login ignored."""
+    async for row in db.users.find({}):
+        lid = (row.get("loginId") or "").strip()
+        if not lid:
+            continue
+        norm = norm_login_id(lid)
+        if (row.get("loginIdNorm") or "") == norm:
+            continue
+        await db.users.update_one({"userId": row["userId"]}, {"$set": {"loginIdNorm": norm}})
 
 
 async def _ensure_password_plain_if_still_default(db, email, default_pw):
@@ -472,3 +602,4 @@ async def seed_users(db):
         else:
             await _ensure_login_id(db, email, login_id)
             await _ensure_password_plain_if_still_default(db, email, "euler@123")
+    await _backfill_login_id_norm(db)

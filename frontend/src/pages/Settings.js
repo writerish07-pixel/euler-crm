@@ -326,9 +326,10 @@ export default function Settings() {
           <p className="text-sm text-ink-soft mb-3">
             Pick the person from <b>Staff & Reports</b> so the login name matches the
             Executive on existing leads — that is what fills their dashboard.
-            Staff sign in with the <b>User ID</b>. Email is optional.
+            Staff sign in with the <b>User ID</b> (or their name if it is unique). Email is optional.
             After they log in they can change their password; the Password column
-            here updates to whatever they saved.
+            here updates to whatever they saved. If someone cannot sign in, type a
+            new password in that column and Save — that overwrites the login.
             {" "}For an <b>OEM Finance</b> login type the name — they are not on Staff & Reports.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end mb-4">
@@ -377,18 +378,7 @@ export default function Settings() {
               { key: "loginId", label: "User ID", render: (r) => <LoginIdCell row={r} onSaved={loadUsers} /> },
               { key: "email", label: "Email", mono: true, render: (r) => r.email || <span className="text-ink-faint">—</span> },
               { key: "password", label: "Password", render: (r) => (
-                r.password
-                  ? (
-                    <span>
-                      <span className="font-mono text-sm" data-testid={`user-password-${r.userId}`}>{r.password}</span>
-                      {r.passwordChangedAt ? (
-                        <span className="block text-[10px] text-ink-faint">
-                          updated {new Date(r.passwordChangedAt).toLocaleString("en-IN")}
-                        </span>
-                      ) : null}
-                    </span>
-                  )
-                  : <span className="text-ink-faint">—</span>
+                <PasswordCell row={r} onSaved={loadUsers} />
               ) },
               { key: "role", label: "Role", render: (r) => {
                 const tone = r.role === "owner"
@@ -865,6 +855,50 @@ function LoginIdCell({ row, onSaved }) {
           Save
         </Button>
       )}
+    </div>
+  );
+}
+
+function PasswordCell({ row, onSaved }) {
+  const [value, setValue] = useState(row.password || "");
+  const [busy, setBusy] = useState(false);
+  const dirty = value !== (row.password || "");
+  useEffect(() => { setValue(row.password || ""); }, [row.password, row.userId]);
+
+  const save = async () => {
+    const pw = value.trim();
+    if (pw.length < 6) return toast.error("Password must be at least 6 characters");
+    setBusy(true);
+    try {
+      await put(`/auth/users/${row.userId}/password`, { password: pw });
+      toast.success("Password updated — they can sign in with this now");
+      onSaved();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not set the password");
+      setValue(row.password || "");
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <div className="flex items-center gap-1.5">
+        <Input data-testid={`user-password-${row.userId}`} value={value}
+          className="!py-1 text-xs w-32 font-mono"
+          placeholder="set password"
+          onFocus={(e) => e.target.select()}
+          onChange={(e) => setValue(e.target.value)} />
+        {dirty && (
+          <Button variant="secondary" className="!py-1 !px-2 text-xs" disabled={busy} onClick={save}
+            data-testid={`save-password-${row.userId}`}>
+            Save
+          </Button>
+        )}
+      </div>
+      {row.passwordChangedAt ? (
+        <span className="text-[10px] text-ink-faint">
+          updated {new Date(row.passwordChangedAt).toLocaleString("en-IN")}
+        </span>
+      ) : null}
     </div>
   );
 }

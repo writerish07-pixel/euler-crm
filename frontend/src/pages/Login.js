@@ -6,24 +6,28 @@ import { useAuth } from "../context/AuthContext";
 import { Button, Input, Field } from "../components/ui";
 
 function fmtErr(detail) {
-  if (!detail) return "Something went wrong";
+  if (!detail) return "";
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail)) return detail.map((e) => e?.msg || JSON.stringify(e)).join(" ");
+  if (typeof detail === "object" && detail.msg) return String(detail.msg);
   return String(detail);
 }
 
 export default function Login() {
   const { login } = useAuth();
   const nav = useNavigate();
-  const [email, setEmail] = useState("owner@euler.com");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
+    const id = email.trim();
+    const pw = password;
+    if (!id || !pw) return toast.error("Enter your user ID and password");
     setBusy(true);
     try {
-      const u = await login(email.trim(), password);
+      const u = await login(id, pw);
       toast.success("Welcome back");
       const role = u?.role;
       if (role === "accounts") nav("/accounts");
@@ -31,7 +35,17 @@ export default function Login() {
       else if (role === "sales_gm") nav("/");
       else nav("/");
     } catch (err) {
-      toast.error(fmtErr(err.response?.data?.detail) || "Login failed");
+      const status = err.response?.status;
+      const fromApi = fmtErr(err.response?.data?.detail);
+      if (!err.response) {
+        toast.error("Could not reach the server. Check the network and try again.");
+      } else if (fromApi) {
+        toast.error(fromApi);
+      } else if (status === 401) {
+        toast.error("Invalid user ID or password");
+      } else {
+        toast.error("Could not sign in. Ask the owner to reset this password in Settings.");
+      }
     } finally { setBusy(false); }
   };
 
@@ -65,14 +79,15 @@ export default function Login() {
             <Field label="User ID or email">
               <Input data-testid="login-email" type="text" autoCapitalize="none" autoCorrect="off"
                 value={email} onChange={(e) => setEmail(e.target.value)}
-                placeholder="e.g. amit — or owner@euler.com" />
+                placeholder="your user ID (e.g. amit)" />
             </Field>
             <Field label="Password"><Input data-testid="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" /></Field>
             <Button data-testid="login-submit" type="submit" disabled={busy} className="w-full"><LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}</Button>
           </div>
           <p className="text-xs text-ink-faint mt-6 text-center">
-            Email (owner@euler.com) or user ID. The owner password is whatever was last
-            saved in Settings — deploys do not reset it.
+            Email (owner@euler.com) or the User ID from Settings. You can also type
+            your name if it is unique. Ask the owner to reset the password if sign-in
+            still fails.
           </p>
         </form>
       </div>
