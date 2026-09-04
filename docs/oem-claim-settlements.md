@@ -65,11 +65,12 @@ first. **A mapping miss must never render as "not claimed"** — that would send
 the money desk chasing money already sitting in Euler's queue. A test pins it.
 
 **OEM Extra Support is a staff-typed side ledger, not a Scheme Master component.**
-Coulson often files it as Additional Support / Dealer Incentive, or as a Scheme Claim
-whose description still says insurance. If no Extra Support-specific line exists,
-any live Euler debit note on the same chassis/invoice **is** that filing (`filed` /
-`accepted`, claim number shown). Other scheme components (exchange vs referral, …)
-stay per-component: a referral note does not mark Exchange as filed.
+Coulson files it as **Additional Support**, **Dealer Incentive**, or Support Scheme
+(BTL) — or as prose that names extra/additional support (`CLAIM_TYPE_KEYS` first, so
+a line whose description still says “Insurance Benefits Up to…” is not stolen).
+A Scheme Claim for Insurance / Loyalty / Referral on the same vehicle is **not**
+that filing. Extra Support then reads **Not claimed** until the OEM app actually
+has an Extra Support line. Other scheme components stay per-component the same way.
 
 The reverse colour on OEM Claim Settlements is `registerMatch`:
 

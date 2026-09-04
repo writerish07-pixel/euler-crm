@@ -707,23 +707,25 @@ def test_a_lead_with_no_claim_at_all_is_a_genuine_gap():
     assert oem_claims.match_state({}, "LD-NONE", "loyaltyBonus")["state"] == "not_filed"
 
 
-def test_extra_support_files_from_any_euler_claim_on_the_vehicle():
-    """Sita Ram Sharma / AF-122-CL2627077: Euler filed a claim that mapped to
-    insurance (or another component). OEM Extra Support still reads Filed, with
-    that claim number — Extra Support is the vehicle's side ledger."""
+def test_extra_support_is_not_filed_from_another_components_euler_claim():
+    """Insurance / Loyalty on the vehicle is not an Extra Support filing.
+
+    Staff can type Extra Support in this app without raising Additional Support
+    in Coulson. In Euler must stay Not claimed until that chip exists.
+    """
     index = {"LD1": {"byComponent": {"insuranceBenefit": [
         _hit("AF-122-CL2627077", "Dealer Development Department Approval Pending",
              createdAt="2026-08-15T10:00:00+0530")]},
         "unmapped": [], "claimNumbers": ["AF-122-CL2627077"], "filedTotal": 10000.0,
         "acceptedTotal": 0.0, "rejectedOpen": [], "hasAnyClaim": True}}
     got = oem_claims.match_state(index, "LD1", "oemExtraSupport")
-    assert got["state"] == "filed"
-    assert got["claimNumbers"] == ["AF-122-CL2627077"]
-    assert got["oemStatus"] == "Dealer Development Department Approval Pending"
+    assert got["state"] == "not_filed"
+    assert got["claimNumbers"] == []
+    assert "Extra Support" in got["detail"]
 
 
 def test_scheme_component_does_not_wear_another_components_claim_number():
-    """Exchange vs referral stay per-component. Extra Support is the exception."""
+    """Exchange vs referral stay per-component. Extra Support does too."""
     index = {"LD1": {"byComponent": {"referralBonus": [
         _hit("AF-1", "RM Approval Pending")]},
         "unmapped": [], "claimNumbers": ["AF-1"], "filedTotal": 5000.0,
@@ -767,6 +769,25 @@ def test_overlay_promotes_generated_notes_to_approved():
         {"claimStatus": "Approved", "submittedDate": "2026-07-01", "approvedDate": "2026-07-02"},
         {"state": "filed", "claimNumbers": ["AF-1"], "oemStatus": "RM Approval Pending"})
     assert stayed["claimStatus"] == "Approved"
+
+
+def test_overlay_unstamps_when_euler_never_filed_this_component():
+    """Extra Support used to inherit another component's Submitted + claim number."""
+    row = {"claimStatus": "Submitted", "eligibleClaim": 7000, "claimAmount": 7000,
+           "receivedAmount": 0, "claimReference": "AF-122-CL2627077",
+           "submittedDate": "2026-08-15"}
+    out, patch = oem_claims.overlay_register_from_oem(
+        row, {"state": "not_filed", "claimNumbers": [], "oemStatus": ""})
+    assert out["claimStatus"] == "Pending"
+    assert out["claimReference"] == ""
+    assert patch["claimStatus"] == "Pending"
+    assert patch["claimReference"] == ""
+    assert out["eligibleClaim"] == 7000
+    locked, _ = oem_claims.overlay_register_from_oem(
+        {**row, "claimStatus": "Received", "receivedAmount": 7000},
+        {"state": "not_filed", "claimNumbers": [], "oemStatus": ""})
+    assert locked["claimStatus"] == "Received"
+    assert locked["receivedAmount"] == 7000
 
 
 def _hit(number, status, **kw):
@@ -960,10 +981,8 @@ async def test_additional_support_claim_type_files_oem_extra_support(client, mon
 
 
 @pytest.mark.asyncio
-async def test_extra_support_files_from_insurance_mapped_euler_claim(client, monkeypatch):
-    """The 17-row Sita Ram set: Coulson typed Scheme Claim + Insurance Benefits
-    prose, so the line maps to insuranceBenefit. Extra Support must still read
-    Filed and pick up Submitted + the Coulson number — without copying ₹10,000."""
+async def test_extra_support_stays_unclaimed_when_euler_only_filed_insurance(client, monkeypatch):
+    """Scheme Claim + Insurance Benefits is an insurance filing, not Extra Support."""
     lead_id = await _delivered_lead(client)
     await _register_row(lead_id, "oemExtraSupport", 7000.0)
     inner = journey("n1", "AF-122-CL2627077")
@@ -983,17 +1002,16 @@ async def test_extra_support_files_from_insurance_mapped_euler_claim(client, mon
     rows = (await client.get("/api/claims")).json()
     extra = next(r for r in rows if r["leadId"] == lead_id
                  and r["componentKey"] == "oemExtraSupport")
-    assert extra["oemMatch"]["state"] == "filed"
-    assert "AF-122-CL2627077" in extra["oemMatch"]["claimNumbers"]
-    assert extra["claimStatus"] == "Submitted"
-    assert extra["claimReference"] == "AF-122-CL2627077"
+    assert extra["oemMatch"]["state"] == "not_filed"
+    assert extra["oemMatch"]["claimNumbers"] == []
+    assert extra["claimStatus"] == "Pending"
+    assert not extra.get("claimReference")
     assert extra["eligibleClaim"] == 7000.0
     assert extra["receivedAmount"] == 0
     stored = await server.db.claims.find_one(
         {"leadId": lead_id, "componentKey": "oemExtraSupport"})
-    assert stored["claimStatus"] == "Submitted"
+    assert stored["claimStatus"] == "Pending"
     assert stored["eligibleClaim"] == 7000.0
-    assert stored.get("receivedAmount", 0) == 0
 
 
 @pytest.mark.asyncio
