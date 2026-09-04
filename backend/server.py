@@ -1480,10 +1480,15 @@ def _volume_slice(leads, payments, period, cancel_events, *, include_money=True)
 
 
 def _volume_period_kpis(leads, payments=None, cancel_events=None, *, include_money=True):
-    """Morning-board MTD (this calendar month) + YTD (1 Jan → today)."""
+    """Morning-board MTD (this calendar month) + YTD (1 Jan → today).
+
+    Uses `this_month()` so dashboard tests that freeze the month stay aligned
+    with scoreboards and follow-up KPIs.
+    """
     events = cancel_events if cancel_events is not None else _cancel_events(leads)
-    mtd_p = periodmod.this_month_period()
-    ytd_p = periodmod.ytd_period()
+    ym = this_month()
+    mtd_p = periodmod.parse_period(month=ym)
+    ytd_p = periodmod.ytd_period(ym[:4])
     return {
         "mtd": _volume_slice(leads, payments, mtd_p, events, include_money=include_money),
         "ytd": _volume_slice(leads, payments, ytd_p, events, include_money=include_money),
