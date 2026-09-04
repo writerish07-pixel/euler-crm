@@ -4,28 +4,48 @@
  * Registered in production only — in development a cached shell fights the dev
  * server and produces "why is my change not showing" confusion.
  */
+function markUpdateReady() {
+  window.__eulerUpdateReady = true;
+  window.dispatchEvent(new Event("euler:update-ready"));
+}
+
+function watchRegistration(reg) {
+  if (reg.waiting && navigator.serviceWorker.controller) markUpdateReady();
+  reg.addEventListener("updatefound", () => {
+    const next = reg.installing;
+    if (!next) return;
+    next.addEventListener("statechange", () => {
+      if (next.state === "installed" && navigator.serviceWorker.controller) {
+        markUpdateReady();
+      }
+    });
+  });
+}
+
 export function registerServiceWorker() {
   if (process.env.NODE_ENV !== "production") return;
   if (!("serviceWorker" in navigator)) return;
 
+  const check = () => {
+    navigator.serviceWorker.getRegistration().then((reg) => {
+      if (reg) reg.update().catch(() => undefined);
+    });
+  };
+
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("/sw.js").then((reg) => {
-      // A new build is live: take it on the next navigation rather than
-      // swapping code under a form someone is part-way through filling in.
-      reg.addEventListener("updatefound", () => {
-        const next = reg.installing;
-        if (!next) return;
-        next.addEventListener("statechange", () => {
-          if (next.state === "installed" && navigator.serviceWorker.controller) {
-            window.__eulerUpdateReady = true;
-            window.dispatchEvent(new Event("euler:update-ready"));
-          }
-        });
-      });
+      // A new build is live: take it on the next tap of the update bar rather
+      // than swapping code under a form someone is part-way through filling in.
+      watchRegistration(reg);
+      reg.update().catch(() => undefined);
     }).catch(() => {
       // A failed registration must never break the app — it just means no
       // offline shell this session.
     });
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") check();
   });
 }
 

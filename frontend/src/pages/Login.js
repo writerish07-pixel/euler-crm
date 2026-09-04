@@ -1,9 +1,10 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Zap, LogIn } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../context/AuthContext";
 import { Button, Input, Field } from "../components/ui";
+import ConnectionBar from "../components/ConnectionBar";
 
 function fmtErr(detail) {
   if (!detail) return "";
@@ -13,44 +14,61 @@ function fmtErr(detail) {
   return String(detail);
 }
 
+function homeFor(user) {
+  const role = user?.role;
+  if (role === "accounts") return "/accounts";
+  if (role === "asm" || role === "rm") return "/field";
+  if (role === "oem_finance") return "/oem-finance";
+  return "/";
+}
+
 export default function Login() {
-  const { login } = useAuth();
+  const { login, user } = useAuth();
   const nav = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  useEffect(() => {
+    if (user) nav(homeFor(user), { replace: true });
+  }, [user, nav]);
 
   const submit = async (e) => {
     e.preventDefault();
     const id = email.trim();
     const pw = password;
-    if (!id || !pw) return toast.error("Enter your user ID and password");
+    if (!id || !pw) {
+      const msg = "Enter your user ID and password";
+      setFormError(msg);
+      return toast.error(msg);
+    }
     setBusy(true);
+    setFormError("");
     try {
       const u = await login(id, pw);
       toast.success("Welcome back");
-      const role = u?.role;
-      if (role === "accounts") nav("/accounts");
-      else if (role === "asm" || role === "rm") nav("/field");
-      else if (role === "sales_gm") nav("/");
-      else nav("/");
+      nav(homeFor(u), { replace: true });
     } catch (err) {
       const status = err.response?.status;
       const fromApi = fmtErr(err.response?.data?.detail);
+      let msg = "Could not sign in. Ask the owner to reset this password in Settings.";
       if (!err.response) {
-        toast.error("Could not reach the server. Check the network and try again.");
+        msg = "Could not reach the server. Check the network and try again.";
       } else if (fromApi) {
-        toast.error(fromApi);
+        msg = fromApi;
       } else if (status === 401) {
-        toast.error("Invalid user ID or password");
-      } else {
-        toast.error("Could not sign in. Ask the owner to reset this password in Settings.");
+        msg = "Invalid user ID or password";
       }
+      setFormError(msg);
+      toast.error(msg);
     } finally { setBusy(false); }
   };
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-2 bg-app">
+    <div className="min-h-[100dvh] bg-app">
+      <ConnectionBar />
+      <div className="grid lg:grid-cols-2 min-h-[100dvh]">
       <div className="hidden lg:flex flex-col justify-between p-12 bg-ink text-white relative overflow-hidden">
         <div className="absolute -right-24 -top-24 h-96 w-96 rounded-full bg-cobalt/30 blur-3xl" />
         <div className="absolute -left-16 bottom-10 h-72 w-72 rounded-full bg-cobalt/20 blur-3xl" />
@@ -65,8 +83,9 @@ export default function Login() {
         <div className="text-zinc-500 text-sm relative">Full-stack migration · v2.4</div>
       </div>
 
-      <div className="flex items-center justify-center p-8">
-        <form onSubmit={submit} className="w-full max-w-sm">
+      <div className="flex items-center justify-center p-8 pb-[max(2rem,env(safe-area-inset-bottom))]">
+        {/* noValidate: iOS treats some user IDs as invalid emails and blocks submit. */}
+        <form onSubmit={submit} noValidate autoComplete="on" className="w-full max-w-sm">
           <div className="lg:hidden flex items-center gap-2.5 mb-8">
             <div className="h-10 w-10 rounded-lg bg-cobalt flex items-center justify-center"><Zap size={22} fill="white" className="text-white" /></div>
             <span className="font-heading text-xl font-extrabold">Euler CRM</span>
@@ -75,14 +94,46 @@ export default function Login() {
           <p className="text-sm text-ink-soft mt-1 mb-6">Enter your credentials to continue</p>
           <div className="space-y-4">
             {/* type="text", not "email" — the browser would refuse to submit a
-                plain user ID as an email address. */}
+                plain user ID as an email address. text-base (16px) stops iOS
+                zooming the page and hiding Sign In under the keyboard. */}
             <Field label="User ID or email">
-              <Input data-testid="login-email" type="text" autoCapitalize="none" autoCorrect="off"
-                value={email} onChange={(e) => setEmail(e.target.value)}
-                placeholder="your user ID (e.g. amit)" />
+              <Input
+                id="login-username"
+                data-testid="login-email"
+                name="username"
+                type="text"
+                inputMode="text"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                enterKeyHint="next"
+                className="text-base py-3"
+                value={email}
+                onChange={(e) => { setEmail(e.target.value); setFormError(""); }}
+                placeholder="your user ID (e.g. amit)"
+              />
             </Field>
-            <Field label="Password"><Input data-testid="login-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" /></Field>
-            <Button data-testid="login-submit" type="submit" disabled={busy} className="w-full"><LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}</Button>
+            <Field label="Password">
+              <Input
+                id="login-password"
+                data-testid="login-password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                enterKeyHint="go"
+                className="text-base py-3"
+                value={password}
+                onChange={(e) => { setPassword(e.target.value); setFormError(""); }}
+                placeholder="••••••••"
+              />
+            </Field>
+            {formError && (
+              <p data-testid="login-error" className="text-sm text-red-600" role="alert">{formError}</p>
+            )}
+            <Button data-testid="login-submit" type="submit" disabled={busy} className="w-full min-h-12 text-base">
+              <LogIn size={16} /> {busy ? "Signing in…" : "Sign In"}
+            </Button>
           </div>
           <p className="text-xs text-ink-faint mt-6 text-center">
             Email (owner@euler.com) or the User ID from Settings. You can also type
@@ -90,6 +141,7 @@ export default function Login() {
             still fails.
           </p>
         </form>
+      </div>
       </div>
     </div>
   );

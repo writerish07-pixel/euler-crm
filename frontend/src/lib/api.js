@@ -1,4 +1,11 @@
 import axios from "axios";
+import {
+  TOKEN_KEY,
+  readStoredToken,
+  clearStoredToken,
+  requestAuthHeader,
+  shouldClearTokenOn401,
+} from "./authStorage";
 
 // CRA inlines REACT_APP_* at build time. If the production build is made without
 // frontend/.env.production the value is undefined and every call silently goes to
@@ -13,10 +20,10 @@ if (!BASE) {
 }
 export const api = axios.create({ baseURL: `${BASE || ""}/api` });
 
-export const TOKEN_KEY = "euler_token";
+export { TOKEN_KEY };
 
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem(TOKEN_KEY);
+  const token = readStoredToken();
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
@@ -24,13 +31,18 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    const url = String(err.config?.url || "");
-    const path = window.location.pathname || "";
-    const isFormAuth = url.includes("/auth/login") || url.includes("/auth/change-password");
-    if (err.response?.status === 401 && !isFormAuth
-        && !path.startsWith("/login") && !path.startsWith("/share")) {
-      localStorage.removeItem(TOKEN_KEY);
-      window.location.href = "/login";
+    if (err.response?.status === 401) {
+      const url = String(err.config?.url || "");
+      const path = window.location.pathname || "";
+      if (shouldClearTokenOn401({
+        url,
+        path,
+        storedToken: readStoredToken(),
+        requestAuth: requestAuthHeader(err.config),
+      })) {
+        clearStoredToken();
+        window.location.href = "/login";
+      }
     }
     return Promise.reject(err);
   }
