@@ -506,6 +506,11 @@ def test_the_deal_desk_is_owner_tl_and_sales_gm():
     assert "sales_gm" in authmod.SALES_ROLES
     assert "tl" in authmod.MONEY_ROLES        # collection precedes delivery
     assert "sales_gm" not in authmod.MONEY_ROLES  # GM chases files, does not post cash
+    assert "sales_gm" in authmod.OEM_CLAIM_ROLES
+    assert "sales_gm" in authmod.OEM_CLAIM_SYNC_ROLES
+    assert "tl" in authmod.OEM_CLAIM_SYNC_ROLES
+    assert "accounts" in authmod.OEM_CLAIM_ROLES
+    assert "accounts" not in authmod.OEM_CLAIM_SYNC_ROLES
     assert "executive" in authmod.SALES_ROLES
     assert "executive" not in authmod.MONEY_ROLES
     assert "executive" not in authmod.DEAL_DESK_ROLES

@@ -1493,3 +1493,136 @@ async def test_manual_match_joins_register_to_oem_without_touching_money(client)
     gone = next(r for r in (await client.get("/api/claims")).json()
                 if r["leadId"] == lead_id and r["componentKey"] == "exchangeBonus")
     assert gone["oemMatch"]["state"] == "unmapped"
+
+
+def test_oem_description_keeps_customer_and_approver_prose():
+    line = oem_claims.normalise_line_item({
+        "id": "es-1",
+        "claim_type": "Additional Support",
+        "description": (
+            "Claim Type :- Additiniol Support 5000+5000=10000 "
+            "Customer Name:- Mahendra Kumar Yadav & Nagar Mal Yadav "
+            "Approved By :- Siddarth Dubey"),
+        "total_amount": 10000,
+    })
+    assert line["componentKey"] == "oemExtraSupport"
+    assert "Mahendra Kumar Yadav" in line["description"]
+    assert "Siddarth Dubey" in line["description"]
+
+
+def test_oem_description_is_composed_when_coulson_splits_the_fields():
+    line = oem_claims.normalise_line_item({
+        "id": "es-2",
+        "claim_type": "Additional Support",
+        "customer_name": "Kishan Lal Yadav",
+        "approved_by": "Siddarth Dubey",
+        "total_amount": 5000,
+    })
+    assert "Claim Type :- Additional Support" in line["description"]
+    assert "Kishan Lal Yadav" in line["description"]
+    assert "Siddarth Dubey" in line["description"]
+    assert line["customerName"] == "Kishan Lal Yadav"
+
+
+@pytest.mark.asyncio
+async def test_multi_item_debit_note_matches_one_line_at_a_time(client):
+    """AF-122-CL2627070-style: eight Extra Support rows share a claim id.
+
+    Matching one lead must not stamp every sibling line onto that lead.
+    """
+    a = await _delivered_lead(client, chassis="MD9MULTI26G900001", invoice="AF-999-I26271001")
+    b = await _delivered_lead(client, chassis="MD9MULTI26G900002", invoice="AF-999-I26271002")
+    await _register_row(a, "oemExtraSupport", 10000.0)
+    await _register_row(b, "oemExtraSupport", 5000.0)
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "multi-es-1",
+        "claimNumber": "AF-122-CL2627070",
+        "status": "Dealer Development Department Approval Pending",
+        "claimedAmount": 15000.0,
+        "lineItems": [
+            {"lineId": "es-a", "claimType": "Additional Support",
+             "description": "Claim Type :- Additional Support 5000+5000=10000 "
+                            "Customer Name:- Mahendra Kumar Yadav & Nagar Mal Yadav "
+                            "Approved By :- Siddarth Dubey",
+             "totalAmount": 10000.0, "documentCount": 1, "leadId": ""},
+            {"lineId": "es-b", "claimType": "Additional Support",
+             "description": "Claim Type :- Additional Support Customer Name:- Kishan Lal Yadav "
+                            "Approved By :- Siddarth Dubey",
+             "totalAmount": 5000.0, "documentCount": 2, "leadId": ""},
+        ],
+        "leadIds": [], "linkedLineCount": 0, "unlinkedLineCount": 2,
+        "_testSeed": SEED_TAG,
+    })
+    listed = (await client.get("/api/oem-claims", params={"q": "AF-122-CL2627070"})).json()
+    assert listed, listed
+    assert "Mahendra Kumar Yadav" in listed[0]["lineItems"][0]["description"]
+    assert listed[0]["lineItems"][0]["description"] != "OEM Extra Support"
+
+    refused = await client.post("/api/claims/oem-match", json={
+        "leadId": a, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CL2627070"})
+    assert refused.status_code == 422, refused.text
+    assert "separately" in refused.json()["detail"]
+
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": a, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CL2627070", "lineId": "es-a"})
+    assert r.status_code == 200, r.text
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CL2627070"})).json()[0]
+    by_id = {li["lineId"]: li for li in oem["lineItems"]}
+    assert by_id["es-a"]["leadId"] == a
+    assert by_id["es-a"]["matchedBy"] == "manual"
+    assert by_id["es-b"]["leadId"] in ("", None)
+
+    r2 = await client.post("/api/claims/oem-match", json={
+        "leadId": b, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CL2627070", "lineId": "es-b"})
+    assert r2.status_code == 200, r2.text
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CL2627070"})).json()[0]
+    by_id = {li["lineId"]: li for li in oem["lineItems"]}
+    assert by_id["es-a"]["leadId"] == a
+    assert by_id["es-b"]["leadId"] == b
+    rows = (await client.get("/api/claims")).json()
+    ra = next(x for x in rows if x["leadId"] == a and x["componentKey"] == "oemExtraSupport")
+    rb = next(x for x in rows if x["leadId"] == b and x["componentKey"] == "oemExtraSupport")
+    assert ra["manualOemLineId"] == "es-a"
+    assert rb["manualOemLineId"] == "es-b"
+    assert ra["eligibleClaim"] == 10000.0
+    assert rb["eligibleClaim"] == 5000.0
+
+
+async def _login_as(email, password="euler@123"):
+    transport = httpx.ASGITransport(app=server.app)
+    c = httpx.AsyncClient(transport=transport, base_url="http://test")
+    r = await c.post("/api/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200, r.text
+    c.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
+    return c
+
+
+@pytest.mark.asyncio
+async def test_sales_gm_and_tl_can_match_and_sync_oem_claims(client, wired):
+    gm = await _login_as("salesgm@euler.com")
+    try:
+        assert (await gm.get("/api/oem-claims")).status_code == 200
+        assert (await gm.get("/api/oem-claims/summary")).status_code == 200
+        assert (await gm.post("/api/integrations/coulson/sync-claims")).status_code == 200
+        assert (await gm.post("/api/leads/x/payments",
+                              json={"amount": 1, "paymentMode": "Cash"})).status_code == 403
+    finally:
+        await gm.aclose()
+    await client.post("/api/auth/users", json={
+        "name": "Claim TL", "loginId": "claim.tl", "password": "desk#441", "role": "tl",
+    })
+    tl = await _login_as("claim.tl", "desk#441")
+    try:
+        assert (await tl.get("/api/oem-claims")).status_code == 200
+        assert (await tl.post("/api/integrations/coulson/sync-claims")).status_code == 200
+    finally:
+        await tl.aclose()
+    accounts = await _login_as("accounts@euler.com")
+    try:
+        assert (await accounts.get("/api/oem-claims")).status_code == 200
+        assert (await accounts.post("/api/integrations/coulson/sync-claims")).status_code == 403
+    finally:
+        await accounts.aclose()

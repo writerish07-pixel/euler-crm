@@ -206,9 +206,13 @@ the stamped status. Money columns are unchanged.
 
 ## Access
 
-`/oem-claims` and the sync are money-desk (owner, TL, accounts). `/claim-reconciliation`
-is owner-only. The external `oem_finance` role reaches neither — it stays allowlisted to
-its single report.
+`/oem-claims` view and match are Owner, Sales GM, Team Leader and Accounts.
+**Sync from Euler** is Owner, Sales GM and Team Leader (not Accounts).
+`/claim-reconciliation` is owner-only. The external `oem_finance` role reaches
+neither — it stays allowlisted to its single report.
+
+A debit note with several Extra Support items is matched **per line**. The OEM
+description (claim type, customer name, approved by) is shown as Euler wrote it.
 
 ## Cadence
 

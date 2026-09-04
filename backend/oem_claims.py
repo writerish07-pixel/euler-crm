@@ -246,6 +246,49 @@ def _item_document_count(item):
     return max(counts) if counts else 0
 
 
+def _first_text(*vals):
+    for v in vals:
+        s = str(v or "").strip()
+        if s:
+            return s
+    return ""
+
+
+def _oem_line_description(item, claim_type=""):
+    """The prose Euler shows on Additional Support (claim type, customer, approver).
+
+    Extra Support lines often have no chassis — the customer name lives here.
+    Prefer the OEM description blob when it already names the customer.
+    """
+    if not isinstance(item, dict):
+        return ""
+    raw = _first_text(
+        item.get("description"), item.get("remarks"), item.get("particulars"),
+        item.get("narration"), item.get("claim_description"), item.get("claimDescription"),
+        item.get("line_description"), item.get("lineDescription"),
+    )
+    customer = _first_text(
+        item.get("customer_name"), item.get("customerName"), item.get("customer"),
+        item.get("retail_customer_name"), item.get("retailCustomerName"),
+    )
+    approved = _first_text(
+        item.get("approved_by"), item.get("approvedBy"), item.get("approved_by_name"),
+    )
+    folded = raw.lower()
+    if raw and ("customer name" in folded or not customer):
+        return raw
+    bits = []
+    if claim_type:
+        bits.append(f"Claim Type :- {claim_type}")
+    if raw:
+        bits.append(raw)
+    if customer:
+        bits.append(f"Customer Name:- {customer}")
+    if approved:
+        bits.append(f"Approved By :- {approved}")
+    return " ".join(bits)
+
+
 def normalise_line_item(item):
     """One claim line. Chassis and source invoice are the keys back to a lead.
 
@@ -258,11 +301,20 @@ def normalise_line_item(item):
         return None
     claim_type = str(item.get("claim_type") or item.get("claimType")
                      or item.get("type") or "").strip()
-    description = str(item.get("description") or item.get("remarks") or "").strip()
+    description = _oem_line_description(item, claim_type)
+    customer_name = _first_text(
+        item.get("customer_name"), item.get("customerName"), item.get("customer"),
+        item.get("retail_customer_name"), item.get("retailCustomerName"),
+    )
+    approved_by = _first_text(
+        item.get("approved_by"), item.get("approvedBy"), item.get("approved_by_name"),
+    )
     return {
-        "lineId": str(item.get("id") or item.get("line_id") or ""),
+        "lineId": str(item.get("id") or item.get("line_id") or item.get("lineId") or ""),
         "claimType": claim_type,
         "description": description,
+        "customerName": customer_name,
+        "approvedBy": approved_by,
         "chassis": _line_chassis(item),
         "sourceInvoiceNumber": _line_invoice(item),
         "model": str(item.get("model") or "").strip(),
@@ -282,13 +334,24 @@ def normalise_line_item(item):
     }
 
 
+def _ensure_line_ids(lines):
+    """Stable ids so a debit note with eight Extra Support rows can be matched
+    one item at a time even when Coulson omitted `id`."""
+    for i, line in enumerate(lines or []):
+        if not isinstance(line, dict):
+            continue
+        if not str(line.get("lineId") or "").strip():
+            line["lineId"] = f"idx:{i}"
+    return lines
+
+
 def _normalise_lines(raw):
     out = []
     for item in raw or []:
         line = normalise_line_item(item)
         if line:
             out.append(line)
-    return out
+    return _ensure_line_ids(out)
 
 
 def _lines_have_vehicle(lines):
@@ -584,6 +647,12 @@ async def link_claim_lines(db, doc, index=None):
             lead = await _lead_for_invoice(db, line.get("sourceInvoiceNumber"), index)
             matched_by = "invoice" if lead else ""
         if not lead:
+            if line.get("matchedBy") == "manual" and line.get("leadId"):
+                # Desk-made Extra Support joins often have no chassis. Relink
+                # must not wipe them just because the vehicle keys are blank.
+                if line["leadId"] not in lead_ids:
+                    lead_ids.append(line["leadId"])
+                continue
             line["leadId"] = line["leadCustomer"] = line["matchedBy"] = ""
             continue
         line["leadId"] = lead.get("leadId") or ""
@@ -831,6 +900,7 @@ def _absorb_line(entry, row, line):
         entry["claimNumbers"].append(row["claimNumber"])
     hit = {
         "claimNumber": row.get("claimNumber") or "",
+        "lineId": str(line.get("lineId") or ""),
         "oemStatus": status,
         "amount": amount,
         "stageLabel": row.get("stageLabel") or "",
@@ -888,10 +958,11 @@ async def register_match_index(db):
     when the debit note is sitting in oem_portal_claims unlinked.
     """
     await relink_stored_claims(db)
-    by_lead, by_chassis, by_invoice, by_number = {}, {}, {}, {}
+    by_lead, by_chassis, by_invoice, by_number, by_line = {}, {}, {}, {}, {}
     async for row in db[CLAIMS_COLLECTION].find({}):
         row.pop("_id", None)
         stamp_document_flag(row)
+        _ensure_line_ids(row.get("lineItems") or [])
         num = str(row.get("claimNumber") or "").strip().upper()
         if num:
             by_number[num] = {
@@ -924,8 +995,26 @@ async def register_match_index(db):
                 inv = (m.group(0) if m else "").lower()
             if inv:
                 _absorb_line(by_invoice.setdefault(inv, _empty_match_entry()), row, line)
+            lid = str(line.get("lineId") or "").strip()
+            if num and lid:
+                hit = {
+                    "claimNumber": row.get("claimNumber") or "",
+                    "lineId": lid,
+                    "oemStatus": str(row.get("status") or ""),
+                    "amount": round2(line.get("totalAmount")),
+                    "stageLabel": row.get("stageLabel") or "",
+                    "stageDays": int(row.get("stageDays") or 0),
+                    "createdAt": row.get("createdAt") or "",
+                    "needsResubmission": bool(row.get("needsResubmission")),
+                    "resubmittedBy": row.get("resubmittedBy") or "",
+                    "description": line.get("description") or "",
+                    "hasDocument": int(line.get("documentCount") or 0) > 0,
+                    "documentCount": int(line.get("documentCount") or 0),
+                    "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
+                }
+                by_line[f"{num}:{lid}"] = hit
     return {"byLead": by_lead, "byChassis": by_chassis, "byInvoice": by_invoice,
-            "byNumber": by_number}
+            "byNumber": by_number, "byLine": by_line}
 
 
 def _index_packs(index):
@@ -933,8 +1022,10 @@ def _index_packs(index):
     if isinstance(index, dict) and "byLead" in index and "byChassis" in index:
         packs = dict(index)
         packs.setdefault("byNumber", {})
+        packs.setdefault("byLine", {})
         return packs
-    return {"byLead": index or {}, "byChassis": {}, "byInvoice": {}, "byNumber": {}}
+    return {"byLead": index or {}, "byChassis": {}, "byInvoice": {}, "byNumber": {},
+            "byLine": {}}
 
 
 # OEM Extra Support is a staff-typed side ledger in this app. In Coulson it is
@@ -977,13 +1068,13 @@ def _state_from_hits(hits):
 
 
 def match_state(index, lead_id, component_key, chassis="", invoice="",
-                manual_claim_number=""):
+                manual_claim_number="", manual_line_id=""):
     """How this register row stands against Euler. Never guesses "unclaimed".
 
-    Join order: a desk-made manual link (claim number), then lead id, chassis,
-    then invoice. Chassis/invoice are how the desk actually ties a scheme-drawer
-    row to a Coulson debit note; lead id alone misses every claim that was
-    mirrored before those ids landed on the lead.
+    Join order: a desk-made manual link (claim number + optional line id), then
+    lead id, chassis, then invoice. Chassis/invoice are how the desk actually
+    ties a scheme-drawer row to a Coulson debit note; lead id alone misses every
+    claim that was mirrored before those ids landed on the lead.
 
     filed / accepted  — Euler has it, and has agreed it where `accepted`
     rejected          — refused and nobody filed it again: act
@@ -994,17 +1085,23 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
     """
     packs = _index_packs(index)
     manual = str(manual_claim_number or "").strip()
+    line_key = str(manual_line_id or "").strip()
     if manual:
-        hit = packs.get("byNumber", {}).get(manual.upper())
+        hit = None
+        if line_key:
+            hit = packs.get("byLine", {}).get(f"{manual.upper()}:{line_key}")
+        if not hit:
+            hit = packs.get("byNumber", {}).get(manual.upper())
         if hit:
             got = _state_from_hits([hit])
             got["manual"] = True
+            got["lineId"] = hit.get("lineId") or line_key
             got["detail"] = ((got.get("detail") + " ") if got.get("detail") else "") + (
                 "Manually matched to this OEM claim.")
             return got
         return {"state": "not_filed", "claimNumbers": [manual], "oemStatus": "",
                 "filedAmount": 0.0, "hasDocument": False, "documentCount": 0,
-                "manual": True,
+                "manual": True, "lineId": line_key,
                 "detail": "Manual OEM claim number is not in the last Euler sync. Sync again."}
     entry = packs["byLead"].get(lead_id)
     if not entry:
@@ -1140,7 +1237,8 @@ async def apply_oem_filing_to_register(db, index=None):
             index, c.get("leadId") or "", c.get("componentKey") or "",
             chassis=lead.get("chassisNumber") or "",
             invoice=lead.get("invoiceNumber") or "",
-            manual_claim_number=c.get("manualOemClaimNumber") or "")
+            manual_claim_number=c.get("manualOemClaimNumber") or "",
+            manual_line_id=c.get("manualOemLineId") or "")
         row = {
             "claimStatus": c.get("claimStatus") or "Pending",
             "claimReference": c.get("claimReference") or "",
@@ -1235,24 +1333,36 @@ def claim_register_match(row, pairs, manual_links=None):
     """
     num = str(row.get("claimNumber") or "").strip().upper()
     links = (manual_links or {}).get(num) or []
-    if links:
+    line_ids_linked = {str(x.get("lineId") or "") for x in links if x.get("lineId")}
+    whole_manual = bool(links) and not line_ids_linked
+    lines = row.get("lineItems") or []
+    if whole_manual:
         keys = [x.get("componentKey") for x in links if x.get("componentKey")]
         return {"state": "in_register",
                 "detail": "Manually matched to the Scheme Claim Register.",
                 "mappedComponents": keys, "manual": True,
                 "needsResubmission": bool(row.get("needsResubmission")),
                 "resubmittedBy": row.get("resubmittedBy") or ""}
-    lines = row.get("lineItems") or []
     if not lines:
+        if links:
+            keys = [x.get("componentKey") for x in links if x.get("componentKey")]
+            return {"state": "in_register",
+                    "detail": "Manually matched to the Scheme Claim Register.",
+                    "mappedComponents": keys, "manual": True,
+                    "needsResubmission": bool(row.get("needsResubmission")),
+                    "resubmittedBy": row.get("resubmittedBy") or ""}
         return {"state": "unknown_lead", "detail": "No line items on this claim.",
                 "mappedComponents": []}
     states, keys = [], []
     for line in lines:
         lead_id = line.get("leadId") or ""
         key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
+        lid = str(line.get("lineId") or "")
         if key:
             keys.append(key)
-        if not lead_id:
+        if lid and lid in line_ids_linked:
+            states.append("in_register")
+        elif not lead_id:
             states.append("unknown_lead")
         elif not key:
             states.append("unmapped")
@@ -1260,13 +1370,17 @@ def claim_register_match(row, pairs, manual_links=None):
             states.append("in_register")
         else:
             states.append("missing_register")
-    order = ("unknown_lead", "missing_register", "unmapped", "in_register")
-    pick = min(states, key=lambda s: order.index(s) if s in order else 99)
+    if "in_register" in states and any(s != "in_register" for s in states):
+        pick = "partial"
+    else:
+        order = ("unknown_lead", "missing_register", "unmapped", "in_register")
+        pick = min(states, key=lambda s: order.index(s) if s in order else 99)
     detail = {
         "unknown_lead": "No chassis or invoice on this claim matched a lead.",
         "missing_register": "Euler filed this, but the Scheme Claim Register has no row.",
         "unmapped": "This lead is in the register, but the claim wording did not map to a component.",
         "in_register": "Connected to the Scheme Claim Register by chassis / invoice.",
+        "partial": "Some items on this OEM claim are matched; others still need a lead.",
     }.get(pick, "")
     if row.get("status") == "Rejected" and row.get("needsResubmission"):
         detail = (detail + " " if detail else "") + "Rejected — nothing refiled on this chassis."
@@ -1274,21 +1388,24 @@ def claim_register_match(row, pairs, manual_links=None):
         detail = (detail + " " if detail else "") + f"Rejected, refiled as {row['resubmittedBy']}."
     return {"state": pick, "detail": detail.strip(),
             "mappedComponents": keys,
+            "manual": bool(links),
             "needsResubmission": bool(row.get("needsResubmission")),
             "resubmittedBy": row.get("resubmittedBy") or ""}
 
 
 async def load_manual_oem_links(db):
-    """claimNumber.upper() -> [{leadId, componentKey, claimId}]."""
+    """claimNumber.upper() -> [{leadId, componentKey, claimId, lineId}]."""
     by_oem = {}
     async for c in db.claims.find(
             {"manualOemClaimNumber": {"$nin": ["", None]}},
-            {"leadId": 1, "componentKey": 1, "claimId": 1, "manualOemClaimNumber": 1, "_id": 0}):
+            {"leadId": 1, "componentKey": 1, "claimId": 1, "manualOemClaimNumber": 1,
+             "manualOemLineId": 1, "_id": 0}):
         num = str(c.get("manualOemClaimNumber") or "").strip().upper()
         lid, key = c.get("leadId") or "", c.get("componentKey") or ""
         if num and lid and key:
             by_oem.setdefault(num, []).append({
                 "leadId": lid, "componentKey": key, "claimId": c.get("claimId") or "",
+                "lineId": str(c.get("manualOemLineId") or ""),
             })
     return by_oem
 
@@ -1297,6 +1414,7 @@ async def attach_register_match(db, rows):
     pairs = await register_pairs(db)
     manual = await load_manual_oem_links(db)
     for row in rows:
+        _ensure_line_ids(row.get("lineItems") or [])
         stamp_document_flag(row)
         row["registerMatch"] = claim_register_match(row, pairs, manual)
     return rows
@@ -1394,7 +1512,8 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
                 index, lead_id, key,
                 chassis=lead.get("chassisNumber") or "",
                 invoice=lead.get("invoiceNumber") or "",
-                manual_claim_number=c.get("manualOemClaimNumber") or ""),
+                manual_claim_number=c.get("manualOemClaimNumber") or "",
+                manual_line_id=c.get("manualOemLineId") or ""),
         })
     return {
         "claims": oem,
@@ -1493,10 +1612,17 @@ async def find_oem_claim(db, claim_number):
         {"claimNumber": {"$regex": f"^{re.escape(number)}$", "$options": "i"}})
 
 
-async def link_register_to_oem(db, *, lead_id, component_key, claim_number):
-    """Desk-made join. Never copies Coulson amounts into db.claims."""
+async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line_id=""):
+    """Desk-made join. Never copies Coulson amounts into db.claims.
+
+    A debit note can carry several Extra Support items. Matching without a line
+    id is only allowed when exactly one unmatched item is a candidate — otherwise
+    the desk must pick the line so two customers on one claim id are not glued
+    to the same lead.
+    """
     lead_id = str(lead_id or "").strip()
     component_key = str(component_key or "").strip()
+    want_line = str(line_id or "").strip()
     oem = await find_oem_claim(db, claim_number)
     if not oem:
         raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
@@ -1505,35 +1631,67 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number):
     if not rec:
         raise ValueError("Scheme Claim Register has no row for that lead and component.")
     number = str(oem.get("claimNumber") or "").strip()
+    lines = _ensure_line_ids(list(oem.get("lineItems") or []))
+    lead_row = await db.leads.find_one({"leadId": lead_id}, {"customerName": 1, "_id": 0}) or {}
+    customer = lead_row.get("customerName") or ""
+
+    def _line_key(li):
+        return map_claim_type_to_component(li.get("claimType"), li.get("description"))
+
+    if want_line:
+        targets = [li for li in lines if str(li.get("lineId") or "") == want_line]
+        if not targets:
+            raise ValueError("That claim item is not on this OEM claim.")
+    else:
+        same = [li for li in lines if not component_key or _line_key(li) == component_key]
+        pool = same or lines
+        unmatched = [li for li in pool if not li.get("leadId")]
+        if len(unmatched) == 1:
+            targets = unmatched
+        elif len(pool) == 1:
+            targets = pool
+        elif len(lines) == 1:
+            targets = lines
+        else:
+            raise ValueError(
+                f"This OEM claim has {len(pool) or len(lines)} items. "
+                "Match each item separately.")
+
+    prev_line = str(rec.get("manualOemLineId") or "").strip()
+    target_ids = {str(li.get("lineId") or "") for li in targets}
+    for li in lines:
+        if (li.get("matchedBy") == "manual" and li.get("leadId") == lead_id
+                and (not prev_line or str(li.get("lineId") or "") == prev_line)
+                and str(li.get("lineId") or "") not in target_ids):
+            li["leadId"] = ""
+            li["leadCustomer"] = ""
+            li["matchedBy"] = ""
+    for li in targets:
+        li["leadId"] = lead_id
+        li["leadCustomer"] = customer
+        li["matchedBy"] = "manual"
+    chosen_id = str(targets[0].get("lineId") or "")
     patch = {
         "manualOemClaimNumber": number,
+        "manualOemLineId": chosen_id,
         "manualOemMatchedAt": now_iso(),
         "claimReference": number,
     }
     await db.claims.update_one({"_id": rec["_id"]}, {"$set": patch})
-    lines = list(oem.get("lineItems") or [])
-    changed = False
+    lead_ids = []
     for li in lines:
-        if not li.get("leadId"):
-            li["leadId"] = lead_id
-            li["matchedBy"] = "manual"
-            changed = True
-    oem_patch = {}
-    if changed:
-        lead_ids = []
-        for li in lines:
-            lid = li.get("leadId")
-            if lid and lid not in lead_ids:
-                lead_ids.append(lid)
-        oem_patch = {
-            "lineItems": lines,
-            "leadIds": lead_ids,
-            "linkedLineCount": sum(1 for li in lines if li.get("leadId")),
-            "unlinkedLineCount": sum(1 for li in lines if not li.get("leadId")),
-        }
-        await db[CLAIMS_COLLECTION].update_one(
-            {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
-            {"$set": oem_patch})
+        lid = li.get("leadId")
+        if lid and lid not in lead_ids:
+            lead_ids.append(lid)
+    oem_patch = {
+        "lineItems": lines,
+        "leadIds": lead_ids,
+        "linkedLineCount": sum(1 for li in lines if li.get("leadId")),
+        "unlinkedLineCount": sum(1 for li in lines if not li.get("leadId")),
+    }
+    await db[CLAIMS_COLLECTION].update_one(
+        {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
+        {"$set": oem_patch})
     rec.update(patch)
     rec.pop("_id", None)
     oem.update(oem_patch)
@@ -1546,10 +1704,42 @@ async def clear_register_oem_link(db, *, lead_id, component_key):
         {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}})
     if not rec:
         raise ValueError("Scheme Claim Register has no row for that lead and component.")
+    number = str(rec.get("manualOemClaimNumber") or "").strip()
+    line_id = str(rec.get("manualOemLineId") or "").strip()
     await db.claims.update_one(
         {"_id": rec["_id"]},
-        {"$unset": {"manualOemClaimNumber": "", "manualOemMatchedAt": ""}})
+        {"$unset": {"manualOemClaimNumber": "", "manualOemLineId": "",
+                    "manualOemMatchedAt": ""}})
+    if number:
+        oem = await find_oem_claim(db, number)
+        if oem:
+            lines = _ensure_line_ids(list(oem.get("lineItems") or []))
+            changed = False
+            for li in lines:
+                if li.get("matchedBy") != "manual" or li.get("leadId") != lead_id:
+                    continue
+                if line_id and str(li.get("lineId") or "") != line_id:
+                    continue
+                li["leadId"] = ""
+                li["leadCustomer"] = ""
+                li["matchedBy"] = ""
+                changed = True
+            if changed:
+                lead_ids = []
+                for li in lines:
+                    lid = li.get("leadId")
+                    if lid and lid not in lead_ids:
+                        lead_ids.append(lid)
+                await db[CLAIMS_COLLECTION].update_one(
+                    {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
+                    {"$set": {
+                        "lineItems": lines,
+                        "leadIds": lead_ids,
+                        "linkedLineCount": sum(1 for li in lines if li.get("leadId")),
+                        "unlinkedLineCount": sum(1 for li in lines if not li.get("leadId")),
+                    }})
     rec.pop("manualOemClaimNumber", None)
+    rec.pop("manualOemLineId", None)
     rec.pop("manualOemMatchedAt", None)
     rec.pop("_id", None)
     return rec
