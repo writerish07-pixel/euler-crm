@@ -258,6 +258,29 @@ def _lines_have_vehicle(lines):
     return any((li.get("chassis") or li.get("sourceInvoiceNumber")) for li in (lines or []))
 
 
+def claim_document_count(doc):
+    return sum(int(li.get("documentCount") or 0) for li in (doc.get("lineItems") or []))
+
+
+def claim_has_document(doc):
+    """True when Euler holds a claim PDF or the dealer attached supporting files.
+
+    Line-item `documents[]` are what the desk uploads in the OEM app. The debit-note
+    PDF (`claimDocumentUrl`) is Euler's own form. Either one is "Yes" — neither is
+    "No", so the desk knows to open Coulson and attach the file.
+    """
+    if str(doc.get("claimDocumentUrl") or "").strip():
+        return True
+    return claim_document_count(doc) > 0
+
+
+def stamp_document_flag(doc):
+    doc = doc if isinstance(doc, dict) else {}
+    doc["documentCount"] = claim_document_count(doc)
+    doc["hasDocument"] = claim_has_document(doc)
+    return doc
+
+
 def claim_doc_from_row(row):
     """The list row. Chassis usually lives only on the journey, but some list
     payloads already include line items — keep them so a failed journey does not
@@ -288,7 +311,7 @@ def claim_doc_from_row(row):
     lines = _normalise_lines(coulson_client.pick_line_items(row if isinstance(row, dict) else {}))
     if lines:
         doc["lineItems"] = lines
-    return doc
+    return stamp_document_flag(doc)
 
 
 def merge_detail(doc, detail):
@@ -324,7 +347,11 @@ def merge_detail(doc, detail):
         doc["detailFetchedAt"] = now_iso()
         doc["detailStatusAtFetch"] = doc.get("status") or ""
         doc["detailAmountAtFetch"] = doc.get("approvedAmount") or 0.0
-    return doc
+    if header and not doc.get("claimDocumentUrl"):
+        pdf = str(header.get("debit_note_s3_link") or header.get("debitNoteS3Link") or "")
+        if pdf:
+            doc["claimDocumentUrl"] = pdf
+    return stamp_document_flag(doc)
 
 
 def needs_detail(existing, row_doc):
@@ -584,6 +611,7 @@ async def sync_claims(db, *, detail_budget=250, token=None):
             linked += 1
         if _lines_have_vehicle(merged.get("lineItems")):
             with_vehicle += 1
+        merged = stamp_document_flag(merged)
         await coll.update_one({"debitNoteId": note_id}, {"$set": merged}, upsert=True)
 
     # Anything we hold that Coulson no longer lists: keep the row, flag it.
@@ -748,6 +776,9 @@ def _absorb_line(entry, row, line):
         "needsResubmission": bool(row.get("needsResubmission")),
         "resubmittedBy": row.get("resubmittedBy") or "",
         "description": line.get("description") or "",
+        "hasDocument": bool(row.get("hasDocument")) or claim_has_document(row),
+        "documentCount": int(row.get("documentCount") or claim_document_count(row) or 0),
+        "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
     }
     if status == "Rejected" and row.get("needsResubmission"):
         entry["rejectedOpen"].append(hit)
@@ -794,9 +825,26 @@ async def register_match_index(db):
     when the debit note is sitting in oem_portal_claims unlinked.
     """
     await relink_stored_claims(db)
-    by_lead, by_chassis, by_invoice = {}, {}, {}
+    by_lead, by_chassis, by_invoice, by_number = {}, {}, {}, {}
     async for row in db[CLAIMS_COLLECTION].find({}):
         row.pop("_id", None)
+        stamp_document_flag(row)
+        num = str(row.get("claimNumber") or "").strip().upper()
+        if num:
+            by_number[num] = {
+                "claimNumber": row.get("claimNumber") or "",
+                "oemStatus": str(row.get("status") or ""),
+                "amount": round2(row.get("claimedAmount")),
+                "stageLabel": row.get("stageLabel") or "",
+                "stageDays": int(row.get("stageDays") or 0),
+                "createdAt": row.get("createdAt") or "",
+                "needsResubmission": bool(row.get("needsResubmission")),
+                "resubmittedBy": row.get("resubmittedBy") or "",
+                "description": "",
+                "hasDocument": bool(row.get("hasDocument")),
+                "documentCount": int(row.get("documentCount") or 0),
+                "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
+            }
         for line in row.get("lineItems") or []:
             lead_id = line.get("leadId") or ""
             if lead_id:
@@ -811,14 +859,17 @@ async def register_match_index(db):
                 inv = (m.group(0) if m else "").lower()
             if inv:
                 _absorb_line(by_invoice.setdefault(inv, _empty_match_entry()), row, line)
-    return {"byLead": by_lead, "byChassis": by_chassis, "byInvoice": by_invoice}
+    return {"byLead": by_lead, "byChassis": by_chassis, "byInvoice": by_invoice,
+            "byNumber": by_number}
 
 
 def _index_packs(index):
     """Accept the packed index and the older by-lead-id shape the unit tests use."""
     if isinstance(index, dict) and "byLead" in index and "byChassis" in index:
-        return index
-    return {"byLead": index or {}, "byChassis": {}, "byInvoice": {}}
+        packs = dict(index)
+        packs.setdefault("byNumber", {})
+        return packs
+    return {"byLead": index or {}, "byChassis": {}, "byInvoice": {}, "byNumber": {}}
 
 
 # OEM Extra Support is a staff-typed side ledger in this app. In Coulson it is
@@ -853,17 +904,21 @@ def _state_from_hits(hits):
         "stageLabel": pick.get("stageLabel") or "",
         "stageDays": int(pick.get("stageDays") or 0),
         "createdAt": str(pick.get("createdAt") or "")[:10],
+        "hasDocument": any(h.get("hasDocument") for h in hits),
+        "documentCount": max((int(h.get("documentCount") or 0) for h in hits), default=0),
+        "claimDocumentUrl": next((h.get("claimDocumentUrl") for h in hits if h.get("claimDocumentUrl")), "") or "",
         "detail": detail,
     }
 
 
-def match_state(index, lead_id, component_key, chassis="", invoice=""):
+def match_state(index, lead_id, component_key, chassis="", invoice="",
+                manual_claim_number=""):
     """How this register row stands against Euler. Never guesses "unclaimed".
 
-    Join order: lead id (sync-time link), then the lead's chassis, then invoice.
-    Chassis/invoice are how the desk actually ties a scheme-drawer row to a
-    Coulson debit note; lead id alone misses every claim that was mirrored
-    before those ids landed on the lead.
+    Join order: a desk-made manual link (claim number), then lead id, chassis,
+    then invoice. Chassis/invoice are how the desk actually ties a scheme-drawer
+    row to a Coulson debit note; lead id alone misses every claim that was
+    mirrored before those ids landed on the lead.
 
     filed / accepted  — Euler has it, and has agreed it where `accepted`
     rejected          — refused and nobody filed it again: act
@@ -873,6 +928,19 @@ def match_state(index, lead_id, component_key, chassis="", invoice=""):
     not_filed         — nothing at all was filed for this vehicle: a genuine gap
     """
     packs = _index_packs(index)
+    manual = str(manual_claim_number or "").strip()
+    if manual:
+        hit = packs.get("byNumber", {}).get(manual.upper())
+        if hit:
+            got = _state_from_hits([hit])
+            got["manual"] = True
+            got["detail"] = ((got.get("detail") + " ") if got.get("detail") else "") + (
+                "Manually matched to this OEM claim.")
+            return got
+        return {"state": "not_filed", "claimNumbers": [manual], "oemStatus": "",
+                "filedAmount": 0.0, "hasDocument": False, "documentCount": 0,
+                "manual": True,
+                "detail": "Manual OEM claim number is not in the last Euler sync. Sync again."}
     entry = packs["byLead"].get(lead_id)
     if not entry:
         ch = oem_sync._norm_chassis(chassis)
@@ -884,21 +952,25 @@ def match_state(index, lead_id, component_key, chassis="", invoice=""):
             entry = packs["byInvoice"].get(inv)
     if not entry:
         return {"state": "not_filed", "claimNumbers": [], "oemStatus": "",
-                "filedAmount": 0.0, "detail": "No claim filed with Euler for this lead."}
+                "filedAmount": 0.0, "hasDocument": False, "documentCount": 0,
+                "detail": "No claim filed with Euler for this lead."}
     hits = entry["byComponent"].get(component_key) or []
     if not hits:
         if entry["unmapped"]:
+            um = entry["unmapped"]
             return {
                 "state": "unmapped",
-                "claimNumbers": [h["claimNumber"] for h in entry["unmapped"]],
+                "claimNumbers": [h["claimNumber"] for h in um],
                 "oemStatus": "", "filedAmount": round2(entry["filedTotal"]),
+                "hasDocument": any(h.get("hasDocument") for h in um),
+                "documentCount": max((int(h.get("documentCount") or 0) for h in um), default=0),
                 "detail": "This lead has claims in Euler, but none of them names this "
                           "component. Check before treating it as unclaimed.",
             }
         extra = " No Additional Support / Extra Support claim was filed in the OEM app." \
             if component_key == "oemExtraSupport" else ""
         return {"state": "not_filed", "claimNumbers": [], "oemStatus": "",
-                "filedAmount": 0.0,
+                "filedAmount": 0.0, "hasDocument": False, "documentCount": 0,
                 "detail": "Euler holds a claim for this vehicle, but it maps to a "
                           "different component than this register row." + extra}
     return _state_from_hits(hits)
@@ -969,6 +1041,12 @@ def overlay_register_from_oem(row, match):
                 patch["approvedDate"] = created
                 row["approvedDate"] = created
     elif state == "not_filed":
+        if match.get("manual"):
+            nums = [n for n in (match.get("claimNumbers") or []) if n]
+            if nums:
+                patch["claimReference"] = nums[0]
+                row["claimReference"] = nums[0]
+            return row, patch
         # A previous vehicle-wide Extra Support match may have stamped another
         # component's claim number / Submitted. Drop that once we know Euler
         # never filed THIS component.
@@ -996,7 +1074,8 @@ async def apply_oem_filing_to_register(db, index=None):
         match = match_state(
             index, c.get("leadId") or "", c.get("componentKey") or "",
             chassis=lead.get("chassisNumber") or "",
-            invoice=lead.get("invoiceNumber") or "")
+            invoice=lead.get("invoiceNumber") or "",
+            manual_claim_number=c.get("manualOemClaimNumber") or "")
         row = {
             "claimStatus": c.get("claimStatus") or "Pending",
             "claimReference": c.get("claimReference") or "",
@@ -1028,8 +1107,12 @@ async def oem_only_lines(db, register_pairs):
     Euler is processing that this app does not know it is owed.
     """
     out = []
+    manual = await load_manual_oem_links(db)
     async for row in db[CLAIMS_COLLECTION].find({}):
         if str(row.get("status") or "") == "Cancelled":
+            continue
+        num = str(row.get("claimNumber") or "").strip().upper()
+        if num and manual.get(num):
             continue
         for line in row.get("lineItems") or []:
             lead_id = line.get("leadId") or ""
@@ -1077,13 +1160,23 @@ async def register_pairs(db):
     return pairs
 
 
-def claim_register_match(row, pairs):
+def claim_register_match(row, pairs, manual_links=None):
     """How this Euler debit note stands against the Scheme Claim Register.
 
     The reverse of `match_state`: that function colours a register row by whether
     Euler filed it; this colours an Euler claim by whether the register raised it.
     A miss here is money Euler is processing that the books do not know they are owed.
+    A desk-made manual link always wins — that is how unmapped wording is joined.
     """
+    num = str(row.get("claimNumber") or "").strip().upper()
+    links = (manual_links or {}).get(num) or []
+    if links:
+        keys = [x.get("componentKey") for x in links if x.get("componentKey")]
+        return {"state": "in_register",
+                "detail": "Manually matched to the Scheme Claim Register.",
+                "mappedComponents": keys, "manual": True,
+                "needsResubmission": bool(row.get("needsResubmission")),
+                "resubmittedBy": row.get("resubmittedBy") or ""}
     lines = row.get("lineItems") or []
     if not lines:
         return {"state": "unknown_lead", "detail": "No line items on this claim.",
@@ -1120,10 +1213,27 @@ def claim_register_match(row, pairs):
             "resubmittedBy": row.get("resubmittedBy") or ""}
 
 
+async def load_manual_oem_links(db):
+    """claimNumber.upper() -> [{leadId, componentKey, claimId}]."""
+    by_oem = {}
+    async for c in db.claims.find(
+            {"manualOemClaimNumber": {"$nin": ["", None]}},
+            {"leadId": 1, "componentKey": 1, "claimId": 1, "manualOemClaimNumber": 1, "_id": 0}):
+        num = str(c.get("manualOemClaimNumber") or "").strip().upper()
+        lid, key = c.get("leadId") or "", c.get("componentKey") or ""
+        if num and lid and key:
+            by_oem.setdefault(num, []).append({
+                "leadId": lid, "componentKey": key, "claimId": c.get("claimId") or "",
+            })
+    return by_oem
+
+
 async def attach_register_match(db, rows):
     pairs = await register_pairs(db)
+    manual = await load_manual_oem_links(db)
     for row in rows:
-        row["registerMatch"] = claim_register_match(row, pairs)
+        stamp_document_flag(row)
+        row["registerMatch"] = claim_register_match(row, pairs, manual)
     return rows
 
 
@@ -1155,7 +1265,7 @@ def _claim_matches_query(row, *, q="", chassis="", invoice=""):
 
 
 async def list_claims(db, *, status="", lead_id="", unlinked=False,
-                      q="", chassis="", invoice=""):
+                      q="", chassis="", invoice="", missing_doc=False):
     filt = {}
     if status:
         filt["status"] = status
@@ -1164,6 +1274,8 @@ async def list_claims(db, *, status="", lead_id="", unlinked=False,
     rows = [r async for r in db[CLAIMS_COLLECTION].find(filt)]
     if unlinked:
         rows = [r for r in rows if not (r.get("linkedLineCount") or 0)]
+    if missing_doc:
+        rows = [r for r in rows if not stamp_document_flag(r).get("hasDocument")]
     if q or chassis or invoice:
         rows = [r for r in rows if _claim_matches_query(
             r, q=q, chassis=chassis, invoice=invoice)]
@@ -1216,7 +1328,8 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
             "oemMatch": match_state(
                 index, lead_id, key,
                 chassis=lead.get("chassisNumber") or "",
-                invoice=lead.get("invoiceNumber") or ""),
+                invoice=lead.get("invoiceNumber") or "",
+                manual_claim_number=c.get("manualOemClaimNumber") or ""),
         })
     return {
         "claims": oem,
@@ -1238,9 +1351,13 @@ async def claims_summary(db):
     stuck, rejected, conflicts = [], [], []
     total = 0
     with_vehicle = 0
+    missing_doc = 0
     async for row in db[CLAIMS_COLLECTION].find({}):
         row.pop("_id", None)
         total += 1
+        stamp_document_flag(row)
+        if not row.get("hasDocument") and str(row.get("status") or "") != "Cancelled":
+            missing_doc += 1
         if _lines_have_vehicle(row.get("lineItems")):
             with_vehicle += 1
         status = str(row.get("status") or "Unknown")
@@ -1295,5 +1412,79 @@ async def claims_summary(db):
             "syncedAt": doc.get("claimsSyncedAt") or "",
             "detailFailures": doc.get("claimDetailFailures") or 0,
             "withVehicle": with_vehicle,
+            "missingDocument": missing_doc,
         },
     }
+
+
+async def find_oem_claim(db, claim_number):
+    number = str(claim_number or "").strip()
+    if not number:
+        return None
+    row = await db[CLAIMS_COLLECTION].find_one({"claimNumber": number})
+    if row:
+        return row
+    return await db[CLAIMS_COLLECTION].find_one(
+        {"claimNumber": {"$regex": f"^{re.escape(number)}$", "$options": "i"}})
+
+
+async def link_register_to_oem(db, *, lead_id, component_key, claim_number):
+    """Desk-made join. Never copies Coulson amounts into db.claims."""
+    lead_id = str(lead_id or "").strip()
+    component_key = str(component_key or "").strip()
+    oem = await find_oem_claim(db, claim_number)
+    if not oem:
+        raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
+    rec = await db.claims.find_one(
+        {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}})
+    if not rec:
+        raise ValueError("Scheme Claim Register has no row for that lead and component.")
+    number = str(oem.get("claimNumber") or "").strip()
+    patch = {
+        "manualOemClaimNumber": number,
+        "manualOemMatchedAt": now_iso(),
+        "claimReference": number,
+    }
+    await db.claims.update_one({"_id": rec["_id"]}, {"$set": patch})
+    lines = list(oem.get("lineItems") or [])
+    changed = False
+    for li in lines:
+        if not li.get("leadId"):
+            li["leadId"] = lead_id
+            li["matchedBy"] = "manual"
+            changed = True
+    oem_patch = {}
+    if changed:
+        lead_ids = []
+        for li in lines:
+            lid = li.get("leadId")
+            if lid and lid not in lead_ids:
+                lead_ids.append(lid)
+        oem_patch = {
+            "lineItems": lines,
+            "leadIds": lead_ids,
+            "linkedLineCount": sum(1 for li in lines if li.get("leadId")),
+            "unlinkedLineCount": sum(1 for li in lines if not li.get("leadId")),
+        }
+        await db[CLAIMS_COLLECTION].update_one(
+            {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
+            {"$set": oem_patch})
+    rec.update(patch)
+    rec.pop("_id", None)
+    oem.update(oem_patch)
+    oem.pop("_id", None)
+    return {"register": rec, "oemClaim": stamp_document_flag(oem)}
+
+
+async def clear_register_oem_link(db, *, lead_id, component_key):
+    rec = await db.claims.find_one(
+        {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}})
+    if not rec:
+        raise ValueError("Scheme Claim Register has no row for that lead and component.")
+    await db.claims.update_one(
+        {"_id": rec["_id"]},
+        {"$unset": {"manualOemClaimNumber": "", "manualOemMatchedAt": ""}})
+    rec.pop("manualOemClaimNumber", None)
+    rec.pop("manualOemMatchedAt", None)
+    rec.pop("_id", None)
+    return rec

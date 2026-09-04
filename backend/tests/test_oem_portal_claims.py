@@ -1227,3 +1227,88 @@ async def test_register_reads_an_unlinked_oem_claim_as_filed_by_chassis(client):
     assert "AF-122-CLINS" in mine[0]["oemMatch"]["claimNumbers"]
     stored = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "divine-1"})
     assert lead_id in (stored.get("leadIds") or [])
+
+
+def test_has_document_yes_from_claim_pdf():
+    row = list_row("n1", "AF-999-CL0001")
+    doc = oem_claims.claim_doc_from_row(row)
+    assert doc["hasDocument"] is True
+    assert doc["claimDocumentUrl"]
+
+
+def test_has_document_no_when_euler_has_nothing():
+    raw = list_row("n1", "AF-999-CL0001")
+    raw["debit_note_s3_link"] = ""
+    doc = oem_claims.claim_doc_from_row(raw)
+    assert doc["hasDocument"] is False
+    assert doc["documentCount"] == 0
+
+
+def test_has_document_yes_from_supporting_uploads():
+    raw = list_row("n1", "AF-999-CL0001")
+    raw["debit_note_s3_link"] = ""
+    doc = oem_claims.claim_doc_from_row(raw)
+    inner = journey("n1", "AF-999-CL0001")
+    got = oem_claims.merge_detail(doc, inner)
+    assert got["documentCount"] == 2
+    assert got["hasDocument"] is True
+    inner["line_items"][0]["documents"] = []
+    empty = oem_claims.merge_detail(doc, inner)
+    assert empty["hasDocument"] is False
+    assert empty["documentCount"] == 0
+
+
+def test_manual_match_state_uses_the_named_oem_claim():
+    index = {"byLead": {}, "byChassis": {}, "byInvoice": {}, "byNumber": {
+        "AF-122-CLMANUAL": _hit("AF-122-CLMANUAL", "RM Approval Pending",
+                                hasDocument=False, documentCount=0)}}
+    got = oem_claims.match_state(index, "LD1", "exchangeBonus",
+                                 manual_claim_number="af-122-clmanual")
+    assert got["state"] == "filed"
+    assert got["manual"] is True
+    assert got["claimNumbers"] == ["AF-122-CLMANUAL"]
+    assert got["hasDocument"] is False
+
+
+@pytest.mark.asyncio
+async def test_manual_match_joins_register_to_oem_without_touching_money(client):
+    lead_id = await _delivered_lead(client)
+    await _register_row(lead_id, "exchangeBonus", 7000.0)
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "manual-link-1",
+        "claimNumber": "AF-122-CLMANUAL",
+        "status": "RM Approval Pending",
+        "claimedAmount": 7000.0,
+        "claimDocumentUrl": "",
+        "lineItems": [{
+            "claimType": "Scheme Claim", "description": "Diwali special",
+            "chassis": CHASSIS, "sourceInvoiceNumber": INVOICE,
+            "totalAmount": 7000.0, "documentCount": 0, "leadId": lead_id,
+        }],
+        "leadIds": [lead_id], "linkedLineCount": 1,
+        "_testSeed": SEED_TAG,
+    })
+    before = next(r for r in (await client.get("/api/claims")).json()
+                  if r["leadId"] == lead_id and r["componentKey"] == "exchangeBonus")
+    assert before["oemMatch"]["state"] == "unmapped"
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "exchangeBonus",
+        "claimNumber": "AF-122-CLMANUAL"})
+    assert r.status_code == 200, r.text
+    after = next(r for r in (await client.get("/api/claims")).json()
+                 if r["leadId"] == lead_id and r["componentKey"] == "exchangeBonus")
+    assert after["oemMatch"]["state"] == "filed"
+    assert after["oemMatch"]["manual"] is True
+    assert after["claimReference"] == "AF-122-CLMANUAL"
+    assert after["eligibleClaim"] == 7000.0
+    assert after["receivedAmount"] == 0
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLMANUAL"})).json()
+    assert oem[0]["registerMatch"]["state"] == "in_register"
+    assert oem[0]["registerMatch"]["manual"] is True
+    assert oem[0]["hasDocument"] is False
+    clr = await client.post("/api/claims/oem-match/clear", json={
+        "leadId": lead_id, "componentKey": "exchangeBonus"})
+    assert clr.status_code == 200, clr.text
+    gone = next(r for r in (await client.get("/api/claims")).json()
+                if r["leadId"] == lead_id and r["componentKey"] == "exchangeBonus")
+    assert gone["oemMatch"]["state"] == "unmapped"
