@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
-import { Plus, Pencil, Trash2, Banknote, HandCoins, ShieldCheck } from "lucide-react";
+import { Plus, Pencil, Trash2, Banknote, HandCoins, ShieldCheck, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
@@ -7,6 +7,7 @@ import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card, M
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
+import InsuranceMisUpload from "./InsuranceMisUpload";
 
 const VIEWS = [["all", "All Entries"], ["pending", "Pending"], ["overdue", "Overdue"]];
 
@@ -22,6 +23,8 @@ export default function Insurance() {
   const [masters, setMasters] = useState(null);
   const [delivered, setDelivered] = useState([]);
   const [receipt, setReceipt] = useState(false);
+  const [misOpen, setMisOpen] = useState(false);
+  const [selected, setSelected] = useState({});
   const period = usePeriodState();
 
   const load = useCallback(() => {
@@ -42,6 +45,27 @@ export default function Insurance() {
   const expected = rows.reduce((s, r) => s + Number(r.expectedPayout || 0), 0);
   const received = rows.reduce((s, r) => s + Number(r.receivedPayout || 0), 0);
   const overdueCount = rows.filter((r) => r.overdue).length;
+  const selectedIds = rows.filter((r) => selected[r.entryId]).map((r) => r.entryId);
+
+  const toggle = (id, on) => setSelected((s) => ({ ...s, [id]: on }));
+  const toggleAll = (on) => {
+    const next = {};
+    rows.forEach((r) => {
+      if (r.misApproved || String(r.status || "").startsWith("N/A")) return;
+      next[r.entryId] = on;
+    });
+    setSelected(next);
+  };
+
+  const approveSelected = async () => {
+    if (!selectedIds.length) return toast.error("Tick the payouts to approve");
+    try {
+      const r = await post("/insurance/mis/approve", { entryIds: selectedIds });
+      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} recorded as received`);
+      setSelected({});
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Approve failed"); }
+  };
 
   const remove = async (r) => {
     if (!window.confirm("Delete entry?")) return;
@@ -53,6 +77,17 @@ export default function Insurance() {
   const outstandingRows = isOwner ? rows.filter((r) => Number(r.payoutOutstanding || 0) > 0.01) : rows;
 
   const columns = [
+    { key: "pick", label: (
+      <input type="checkbox" data-testid="ins-check-all"
+        onChange={(e) => toggleAll(e.target.checked)}
+        onClick={(e) => e.stopPropagation()} />
+    ), render: (r) => (
+      <input type="checkbox" data-testid={`ins-check-${r.entryId}`}
+        checked={!!selected[r.entryId]}
+        disabled={!!r.misApproved || String(r.status || "").startsWith("N/A")}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => toggle(r.entryId, e.target.checked)} />
+    ) },
     { key: "customerName", label: "Customer", render: (r) => <span className="font-semibold">{r.customerName}</span> },
     { key: "insuranceAgentName", label: "Agent", render: (r) => (
       <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.insuranceAgentName || "— none —"}</Badge>
@@ -67,13 +102,21 @@ export default function Insurance() {
     ] : []),
     { key: "receivedPayout", label: "Received", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedPayout)}</span> },
     ...(isOwner ? [
+      { key: "misAmount", label: "MIS", align: "right", mono: true, render: (r) => r.misAmount ? inr(r.misAmount) : "—" },
+      { key: "misDifference", label: "Diff", align: "right", mono: true, render: (r) => (
+        r.misAmount
+          ? <span className={Number(r.misDifference) ? "text-amber-700 font-semibold" : ""}>{inr(r.misDifference)}</span>
+          : "—"
+      ) },
       { key: "payoutOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.payoutOutstanding > 0 ? "text-red-600 font-semibold" : ""}>{inr(r.payoutOutstanding)}</span> },
     ] : []),
     { key: "payoutDueBy", label: "Due By", render: (r) => (
       <span className={r.overdue ? "text-red-600 font-semibold" : ""}>{fmtDate(r.payoutDueBy) || "—"}</span>
     ) },
     { key: "status", label: "Status", render: (r) => (
-      r.overdue ? <Badge tone="bg-red-50 text-red-700 ring-red-600/20">Overdue</Badge> : <Badge>{r.status || "Pending"}</Badge>
+      r.misApproved ? <Badge tone="bg-emerald-50 text-emerald-700 ring-emerald-600/20">Received</Badge>
+        : r.overdue ? <Badge tone="bg-red-50 text-red-700 ring-red-600/20">Overdue</Badge>
+          : <Badge>{r.status || "Pending"}</Badge>
     ) },
     ...(isOwner ? [
       { key: "act", label: "", align: "right", render: (r) => (
@@ -98,6 +141,9 @@ export default function Insurance() {
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${tab === k ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}>{l}</button>
             ))}
           </div>
+          <Button variant="secondary" data-testid="upload-mis-btn" onClick={() => setMisOpen(true)}>
+            <UploadCloud size={16} /> Upload MIS
+          </Button>
           <Button variant="secondary" data-testid="record-payout-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record {isOwner ? "Payout" : "Received"}</Button>
           <Button data-testid="add-insurance-btn" onClick={() => setEdit({})}><Plus size={16} /> Add Entry</Button>
         </div>} />
@@ -120,6 +166,16 @@ export default function Insurance() {
               {agents.map((a) => <option key={a.agentId} value={a.agentId}>{a.agentName}</option>)}
             </Select>
           </div>
+
+          {selectedIds.length > 0 && (
+            <Card className="p-3 mb-4 flex flex-wrap items-center gap-3" data-testid="ins-approve-bar">
+              <span className="text-sm">{selectedIds.length} selected</span>
+              <Button data-testid="ins-approve-selected-btn" onClick={approveSelected}>
+                Approve as received
+              </Button>
+              <span className="text-xs text-ink-faint">Books the MIS amount (or expected, if no MIS) even when it differs</span>
+            </Card>
+          )}
 
           {rollup.length > 0 && (
             <Card className="p-5 mb-6" data-testid="insurance-by-agent">
@@ -158,6 +214,7 @@ export default function Insurance() {
         onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
       {receipt && <PayoutReceiptModal rows={outstandingRows} isOwner={isOwner}
         onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />}
+      {misOpen && <InsuranceMisUpload onClose={() => setMisOpen(false)} onDone={() => { setMisOpen(false); load(); }} />}
     </div>
   );
 }
