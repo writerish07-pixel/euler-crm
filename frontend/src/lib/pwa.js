@@ -57,6 +57,26 @@ export function applyUpdate() {
   });
 }
 
+/** On the login screen, take a waiting worker immediately so staff phones
+ *  are not stuck on last week's sign-in code. */
+export function primeLoginApp() {
+  if (typeof window === "undefined") return;
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.getRegistration().then((reg) => {
+    if (!reg) return;
+    if (reg.waiting) {
+      window.__eulerReloadOnController = true;
+      reg.waiting.postMessage("SKIP_WAITING");
+    }
+    reg.update().catch(() => undefined);
+  });
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!window.__eulerReloadOnController || window.__eulerReloadedOnce) return;
+    window.__eulerReloadedOnce = true;
+    window.location.reload();
+  });
+}
+
 function urlBase64ToUint8Array(b64) {
   const pad = "=".repeat((4 - (b64.length % 4)) % 4);
   const raw = atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));

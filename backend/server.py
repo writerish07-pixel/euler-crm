@@ -10101,6 +10101,12 @@ async def botspace_clear_report_marker(slot: str = "eod"):
 
 
 # ---------------------------------------------------------------- public share board (no auth)
+@public.get("/ping")
+async def api_ping():
+    """Unauthenticated reachability for the login screen on phones."""
+    return {"ok": True, "status": "up"}
+
+
 @public.get("/share/dashboard")
 async def share_dashboard():
     leads = await db.leads.find().to_list(5000)

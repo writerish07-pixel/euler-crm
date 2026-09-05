@@ -290,3 +290,23 @@ async def test_seed_backfills_missing_login_id_norm(client):
     await authmod.seed_users(server.db)
     row = await server.db.users.find_one({"userId": uid})
     assert row.get("loginIdNorm") == "needs.norm"
+
+
+@pytest.mark.asyncio
+async def test_ping_is_public(client):
+    r = await client.get("/api/ping")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_staff_login_id_is_case_insensitive_without_scan_field(client):
+    r = await client.post("/api/auth/users", json={
+        "name": "Ashoke", "loginId": "ashoke", "password": "desk#441",
+        "role": "executive",
+    })
+    uid = r.json()["userId"]
+    await server.db.users.update_one({"userId": uid}, {"$unset": {"loginIdNorm": ""}})
+    ok = await client.post("/api/auth/login", json={"email": "Ashoke", "password": "desk#441"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["user"]["loginId"] == "ashoke"

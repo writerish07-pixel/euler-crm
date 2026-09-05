@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { useAuth } from "../context/AuthContext";
 import { Button, Input, Field } from "../components/ui";
 import ConnectionBar from "../components/ConnectionBar";
+import { primeLoginApp } from "../lib/pwa";
 
 function fmtErr(detail) {
   if (!detail) return "";
@@ -31,13 +32,21 @@ export default function Login() {
   const [formError, setFormError] = useState("");
 
   useEffect(() => {
+    primeLoginApp();
+  }, []);
+
+  useEffect(() => {
     if (user) nav(homeFor(user), { replace: true });
   }, [user, nav]);
 
   const submit = async (e) => {
     e.preventDefault();
-    const id = email.trim();
-    const pw = password;
+    // Android password managers fill the DOM, not always React state.
+    const fd = e.target && typeof e.target === "object" && "elements" in e.target
+      ? new FormData(e.target)
+      : null;
+    const id = String((fd && fd.get("username")) || email || "").trim();
+    const pw = String((fd && fd.get("password")) || password || "");
     if (!id || !pw) {
       const msg = "Enter your user ID and password";
       setFormError(msg);
@@ -53,12 +62,16 @@ export default function Login() {
       const status = err.response?.status;
       const fromApi = fmtErr(err.response?.data?.detail);
       let msg = "Could not sign in. Ask the owner to reset this password in Settings.";
-      if (!err.response) {
-        msg = "Could not reach the server. Check the network and try again.";
+      if (err.code === "ECONNABORTED") {
+        msg = "The server took too long. Tap Sign In again.";
+      } else if (!err.response) {
+        msg = "Could not reach the server. Stay on this page and tap Sign In again — do not use an old Home Screen icon.";
       } else if (fromApi) {
         msg = fromApi;
       } else if (status === 401) {
         msg = "Invalid user ID or password";
+      } else if (status === 502 || status === 503 || status === 504) {
+        msg = "The server is waking up. Tap Sign In again.";
       }
       setFormError(msg);
       toast.error(msg);
