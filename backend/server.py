@@ -7467,7 +7467,7 @@ async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[
 
 
 async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
-    amount = ce.round2(ce.num(mis_amount))
+    amount = _insurance_mis_money(mis_amount)
     expected = ce.round2(ce.num(entry.get("expectedPayout")))
     patch = {
         "misAmount": amount,
@@ -7493,7 +7493,7 @@ async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
 
 async def _map_insurance_mis(entry, *, amount, reference="", act=None):
     """Stamp the agent's MIS figure as mapped. Does not book cash or flip Received."""
-    amount = ce.round2(ce.num(amount))
+    amount = _insurance_mis_money(amount)
     expected = ce.round2(ce.num(entry.get("expectedPayout")))
     patch = {
         "misAmount": amount,
@@ -7607,9 +7607,9 @@ async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=D
         amount = item.get("misAmount")
         if amount in (None, ""):
             amount = entry.get("misAmount")
-        if ce.num(amount) <= 0:
+        if _insurance_mis_money(amount) <= 0:
             amount = entry.get("expectedPayout")
-        if ce.num(amount) <= 0:
+        if _insurance_mis_money(amount) <= 0:
             errors.append({"entryId": eid, "error": "no_amount"})
             continue
         updated = await _map_insurance_mis(
@@ -7629,13 +7629,20 @@ async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=D
             "rows": approved, "errors": errors}
 
 
+def _insurance_mis_money(v):
+    """MIS figures sometimes arrive as '5,275' / '₹5275' from the agent file."""
+    if isinstance(v, str):
+        return ins_mis.parse_money(v)
+    return ce.round2(ce.num(v))
+
+
 async def _adopt_mis_expected(entry, act=None):
     """Replace Euler (lead) expected payout with the mapped MIS amount.
 
     Mapping only stamps the agent figure. This next step makes the register
-    expected / outstanding follow that figure. Does not book cash.
+    expected follow that figure and counts it in dealer earnings.
     """
-    amount = ce.round2(ce.num(entry.get("misAmount")))
+    amount = _insurance_mis_money(entry.get("misAmount"))
     prior_expected = ce.round2(ce.num(entry.get("expectedPayout")))
     original = entry.get("leadExpectedPayout")
     if original in (None, ""):
@@ -7665,14 +7672,18 @@ async def _adopt_mis_expected(entry, act=None):
     }
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     updated = await db.insurance.find_one({"entryId": entry["entryId"]})
-    await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
+    try:
+        await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
+    except Exception:
+        pass
     if act:
-        await write_audit(act, "mis-adopt-amount", "insurance",
-                          leadId=entry.get("leadId") or "",
-                          old={"expectedPayout": prior_expected},
-                          new={"expectedPayout": amount, "misAmount": amount})
-    if entry.get("leadId"):
-        await recompute_lead(entry["leadId"])
+        try:
+            await write_audit(act, "mis-adopt-amount", "insurance",
+                              leadId=entry.get("leadId") or "",
+                              old={"expectedPayout": prior_expected},
+                              new={"expectedPayout": amount, "misAmount": amount})
+        except Exception:
+            pass
     return updated
 
 
@@ -7681,8 +7692,8 @@ async def insurance_mis_adopt_amount(body: MisApproveIn, act=Depends(actor),
                                      _money=Depends(money_desk_only)):
     """Replace expected payout with MIS amount on mapped rows only.
 
-    Unmapped / N/A / missing MIS amount are skipped with an error per row.
-    Does not mark cash received.
+    One bad row does not stop the rest. Unmapped / N/A / missing MIS amount
+    are skipped with an error per row. Adopted amount is dealer insurance income.
     """
     adopted, errors = [], []
     ids = list(body.entryIds or [])
@@ -7691,38 +7702,48 @@ async def insurance_mis_adopt_amount(body: MisApproveIn, act=Depends(actor),
         if eid and eid not in ids:
             ids.append(eid)
     seen = set()
+    lead_ids = set()
     for eid in ids:
         if not eid or eid in seen:
             continue
         seen.add(eid)
-        entry = await db.insurance.find_one({"entryId": eid})
-        if not entry:
-            errors.append({"entryId": eid, "error": "not_found"})
-            continue
-        if str(entry.get("status") or "").startswith("N/A"):
-            errors.append({"entryId": eid, "error": "not_applicable"})
-            continue
-        if str(entry.get("status") or "") == "Received":
-            errors.append({"entryId": eid, "error": "already_received"})
-            continue
-        if not entry.get("misApproved"):
-            errors.append({"entryId": eid, "error": "not_mapped"})
-            continue
-        if ce.num(entry.get("misAmount")) <= 0:
-            errors.append({"entryId": eid, "error": "no_mis_amount"})
-            continue
-        updated = await _adopt_mis_expected(entry, act=act)
-        adopted.append({
-            "entryId": eid,
-            "leadId": updated.get("leadId") or "",
-            "previousExpected": ce.num(entry.get("expectedPayout")),
-            "expectedPayout": ce.num(updated.get("expectedPayout")),
-            "misAmount": ce.num(updated.get("misAmount")),
-            "payoutOutstanding": ce.num(updated.get("payoutOutstanding")),
-            "receivedPayout": ce.num(updated.get("receivedPayout")),
-            "status": updated.get("status"),
-            "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
-        })
+        try:
+            entry = await db.insurance.find_one({"entryId": eid})
+            if not entry:
+                errors.append({"entryId": eid, "error": "not_found"})
+                continue
+            if str(entry.get("status") or "").startswith("N/A"):
+                errors.append({"entryId": eid, "error": "not_applicable"})
+                continue
+            if not entry.get("misApproved"):
+                errors.append({"entryId": eid, "error": "not_mapped"})
+                continue
+            if _insurance_mis_money(entry.get("misAmount")) <= 0:
+                errors.append({"entryId": eid, "error": "no_mis_amount"})
+                continue
+            updated = await _adopt_mis_expected(entry, act=act)
+            if updated.get("leadId"):
+                lead_ids.add(updated["leadId"])
+            adopted.append({
+                "entryId": eid,
+                "leadId": updated.get("leadId") or "",
+                "previousExpected": ce.num(entry.get("expectedPayout")),
+                "expectedPayout": ce.num(updated.get("expectedPayout")),
+                "misAmount": ce.num(updated.get("misAmount")),
+                "payoutOutstanding": ce.num(updated.get("payoutOutstanding")),
+                "receivedPayout": ce.num(updated.get("receivedPayout")),
+                "status": updated.get("status"),
+                "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
+            })
+        except Exception as exc:
+            errors.append({"entryId": eid, "error": "failed",
+                           "detail": str(exc)[:240]})
+    for lid in lead_ids:
+        try:
+            await recompute_lead(lid)
+        except Exception as exc:
+            errors.append({"leadId": lid, "error": "recompute_failed",
+                           "detail": str(exc)[:240]})
     return {"ok": True, "adopted": len(adopted), "rows": adopted, "errors": errors}
 
 
@@ -9096,8 +9117,8 @@ async def delete_scheme_row(scheme_id: str):
 async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] = None):
     """Owner Dealer Earnings grid — live from leads so OEM Extra Retained is always in total.
 
-    total = margin + scheme retained + OEM Extra Retained + insurance cash + extras
-            − dealer-funded benefit − unpayable OEM claims.
+    total = margin + scheme retained + OEM Extra Retained + insurance
+            (adopted MIS or cash) + extras − dealer-funded benefit − unpayable OEM.
     """
     leads = await _commercial_leads()
     # Fallback extras from dealer_earnings docs when lead mirror is thin.
