@@ -5771,7 +5771,8 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
     the one captured at delivery, and the rate/expected/outstanding/status come from the
     existing _insurance_derive + suggested_insurance_payout_rate (49% Storm/Turbo,
     36.5% others). Idempotent — one entry per lead, refreshed rather than duplicated.
-    An accepted agent MIS (misApproved / received cash) survives re-delivery."""
+    An accepted agent MIS (misApproved / received cash / adopted MIS expected)
+    survives re-delivery."""
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
     # Customer-arranged insurance: dealer does not earn a payout.
     if ce.normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) == "self":
@@ -5817,6 +5818,8 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
         "misAmount": ce.num((existing or {}).get("misAmount")),
         "misDifference": ce.num((existing or {}).get("misDifference")),
         "misReference": (existing or {}).get("misReference") or "",
+        "misAmountAdopted": bool((existing or {}).get("misAmountAdopted")),
+        "leadExpectedPayout": ce.num((existing or {}).get("leadExpectedPayout")),
         "deliveryDate": delivery_date,
         "insuranceExecutive": lead.get("executive", ""),
         "remarks": (existing or {}).get("remarks", ""),
@@ -7070,6 +7073,7 @@ async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
     view=pending  -> payout still owed
     view=overdue  -> pending AND past the settlement date (10th of the next month)
     view=unmapped -> register rows with no agent MIS map (send these to the agent)
+    view=mapped   -> MIS-mapped rows that are not yet Received
     """
     q = {}
     if lead_id:
@@ -7085,6 +7089,10 @@ async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
         rows = [r for r in rows if r.get("overdue")]
     elif view == "unmapped":
         rows = [r for r in rows if not r.get("misApproved")
+                and str(r.get("status") or "") != "Received"
+                and not str(r.get("status") or "").startswith("N/A")]
+    elif view == "mapped":
+        rows = [r for r in rows if r.get("misApproved")
                 and str(r.get("status") or "") != "Received"
                 and not str(r.get("status") or "").startswith("N/A")]
     rows = _rows_in_period(
@@ -7104,6 +7112,10 @@ async def insurance_agents_rollup(view: str = "all", act=Depends(actor)):
         rows = [r for r in rows if r.get("overdue")]
     elif view == "unmapped":
         rows = [r for r in rows if not r.get("misApproved")
+                and str(r.get("status") or "") != "Received"
+                and not str(r.get("status") or "").startswith("N/A")]
+    elif view == "mapped":
+        rows = [r for r in rows if r.get("misApproved")
                 and str(r.get("status") or "") != "Received"
                 and not str(r.get("status") or "").startswith("N/A")]
     buckets = {}
@@ -7219,6 +7231,9 @@ def _insurance_derive(body: dict, agent: Optional[dict] = None):
     The rate is resolved through the agent's slab (manual override > agent slab >
     catch-all > legacy 49/36.5) and SNAPSHOT onto the entry together with its
     source, so a later slab edit never restates money already booked.
+
+    After the owner adopts the agent MIS figure, expected follows misAmount
+    (not the lead premium × slab). Mapping alone does not adopt.
     """
     premium = ce.num(body.get("insuranceAmount"))
     basis = body.get("policyDate") or body.get("deliveryDate") or ""
@@ -7226,7 +7241,14 @@ def _insurance_derive(body: dict, agent: Optional[dict] = None):
         agent or {}, body.get("model"), body.get("variant"),
         on_date=basis, manual_rate=body.get("payoutRate"))
     rate = resolved["rate"]
+    source = resolved["source"]
     expected = ce.round2(premium * rate)
+    mis_amt = ce.round2(ce.num(body.get("misAmount")))
+    if bool(body.get("misAmountAdopted")) and mis_amt > 0:
+        expected = mis_amt
+        if premium > 0:
+            rate = round(expected / premium, 6)
+        source = "mis"
     received = ce.num(body.get("receivedPayout"))
     approved = bool(body.get("misApproved"))
     outstanding = ce.round2(max(0.0, expected - received))
@@ -7240,7 +7262,7 @@ def _insurance_derive(body: dict, agent: Optional[dict] = None):
         status = "Pending"
     out = {"payoutRate": rate, "expectedPayout": expected, "receivedPayout": received,
            "payoutOutstanding": outstanding, "status": status,
-           "payoutRateSource": resolved["source"], "payoutSlabFamily": resolved["slabFamily"]}
+           "payoutRateSource": source, "payoutSlabFamily": resolved["slabFamily"]}
     if agent:
         out["insuranceAgentId"] = agent.get("agentId", "")
         out["insuranceAgentName"] = agent.get("agentName", "")
@@ -7284,6 +7306,9 @@ async def update_insurance(entry_id: str, body: InsuranceIn, act=Depends(actor))
     data["misAmount"] = existing.get("misAmount")
     data["misDifference"] = existing.get("misDifference")
     data["misReference"] = existing.get("misReference") or ""
+    data["leadExpectedPayout"] = existing.get("leadExpectedPayout")
+    # A typed rate is an owner override; otherwise keep the adopted MIS expected.
+    data["misAmountAdopted"] = bool(existing.get("misAmountAdopted")) and ce.num(data.get("payoutRate")) <= 0
     agent = await _get_insurance_agent(data.get("insuranceAgentId") or existing.get("insuranceAgentId"))
     data.update(_insurance_derive(data, agent))
     res = await db.insurance.update_one({"entryId": entry_id}, {"$set": data})
@@ -7454,6 +7479,14 @@ async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
     }
     if policy_number and not (entry.get("policyNumber") or "").strip():
         patch["policyNumber"] = policy_number
+    if entry.get("misAmountAdopted"):
+        patch["misDifference"] = 0.0
+        patch["expectedPayout"] = amount
+        premium = ce.num(entry.get("insuranceAmount"))
+        received = ce.num(entry.get("receivedPayout"))
+        patch["payoutRate"] = round(amount / premium, 6) if premium > 0 else ce.num(entry.get("payoutRate"))
+        patch["payoutRateSource"] = "mis"
+        patch["payoutOutstanding"] = ce.round2(max(0.0, amount - received))
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     return patch
 
@@ -7471,6 +7504,14 @@ async def _map_insurance_mis(entry, *, amount, reference="", act=None):
     }
     if reference:
         patch["misReference"] = reference
+    if entry.get("misAmountAdopted"):
+        patch["misDifference"] = 0.0
+        patch["expectedPayout"] = amount
+        premium = ce.num(entry.get("insuranceAmount"))
+        received = ce.num(entry.get("receivedPayout"))
+        patch["payoutRate"] = round(amount / premium, 6) if premium > 0 else ce.num(entry.get("payoutRate"))
+        patch["payoutRateSource"] = "mis"
+        patch["payoutOutstanding"] = ce.round2(max(0.0, amount - received))
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     updated = await db.insurance.find_one({"entryId": entry["entryId"]})
     await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
@@ -7586,6 +7627,103 @@ async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=D
         })
     return {"ok": True, "approved": len(approved), "mapped": len(approved),
             "rows": approved, "errors": errors}
+
+
+async def _adopt_mis_expected(entry, act=None):
+    """Replace Euler (lead) expected payout with the mapped MIS amount.
+
+    Mapping only stamps the agent figure. This next step makes the register
+    expected / outstanding follow that figure. Does not book cash.
+    """
+    amount = ce.round2(ce.num(entry.get("misAmount")))
+    prior_expected = ce.round2(ce.num(entry.get("expectedPayout")))
+    original = entry.get("leadExpectedPayout")
+    if original in (None, ""):
+        original = prior_expected
+    else:
+        original = ce.round2(ce.num(original))
+    premium = ce.num(entry.get("insuranceAmount"))
+    received = ce.num(entry.get("receivedPayout"))
+    rate = round(amount / premium, 6) if premium > 0 else ce.num(entry.get("payoutRate"))
+    outstanding = ce.round2(max(0.0, amount - received))
+    if amount > 0 and received >= amount - 0.01:
+        status = "Received"
+    elif received > 0.01:
+        status = "Partial"
+    else:
+        status = "Pending"
+    patch = {
+        "expectedPayout": amount,
+        "payoutOutstanding": outstanding,
+        "payoutRate": rate,
+        "payoutRateSource": "mis",
+        "misDifference": 0.0,
+        "misAmountAdopted": True,
+        "leadExpectedPayout": original,
+        "status": status,
+        "lastUpdated": now_iso(),
+    }
+    await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
+    updated = await db.insurance.find_one({"entryId": entry["entryId"]})
+    await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
+    if act:
+        await write_audit(act, "mis-adopt-amount", "insurance",
+                          leadId=entry.get("leadId") or "",
+                          old={"expectedPayout": prior_expected},
+                          new={"expectedPayout": amount, "misAmount": amount})
+    if entry.get("leadId"):
+        await recompute_lead(entry["leadId"])
+    return updated
+
+
+@api.post("/insurance/mis/adopt-amount")
+async def insurance_mis_adopt_amount(body: MisApproveIn, act=Depends(actor),
+                                     _money=Depends(money_desk_only)):
+    """Replace expected payout with MIS amount on mapped rows only.
+
+    Unmapped / N/A / missing MIS amount are skipped with an error per row.
+    Does not mark cash received.
+    """
+    adopted, errors = [], []
+    ids = list(body.entryIds or [])
+    for it in body.items or []:
+        eid = str(it.get("entryId") or "").strip()
+        if eid and eid not in ids:
+            ids.append(eid)
+    seen = set()
+    for eid in ids:
+        if not eid or eid in seen:
+            continue
+        seen.add(eid)
+        entry = await db.insurance.find_one({"entryId": eid})
+        if not entry:
+            errors.append({"entryId": eid, "error": "not_found"})
+            continue
+        if str(entry.get("status") or "").startswith("N/A"):
+            errors.append({"entryId": eid, "error": "not_applicable"})
+            continue
+        if str(entry.get("status") or "") == "Received":
+            errors.append({"entryId": eid, "error": "already_received"})
+            continue
+        if not entry.get("misApproved"):
+            errors.append({"entryId": eid, "error": "not_mapped"})
+            continue
+        if ce.num(entry.get("misAmount")) <= 0:
+            errors.append({"entryId": eid, "error": "no_mis_amount"})
+            continue
+        updated = await _adopt_mis_expected(entry, act=act)
+        adopted.append({
+            "entryId": eid,
+            "leadId": updated.get("leadId") or "",
+            "previousExpected": ce.num(entry.get("expectedPayout")),
+            "expectedPayout": ce.num(updated.get("expectedPayout")),
+            "misAmount": ce.num(updated.get("misAmount")),
+            "payoutOutstanding": ce.num(updated.get("payoutOutstanding")),
+            "receivedPayout": ce.num(updated.get("receivedPayout")),
+            "status": updated.get("status"),
+            "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
+        })
+    return {"ok": True, "adopted": len(adopted), "rows": adopted, "errors": errors}
 
 
 # ---------------------------------------------------------------- OEM claim / owner reports (ports of OemClaimService.gs)

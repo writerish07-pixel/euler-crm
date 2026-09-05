@@ -97,7 +97,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           reference: row.reference,
         })),
       });
-      toast.success(`${r.data.approved} payout${r.data.approved === 1 ? "" : "s"} marked as mapped`);
+      toast.success(`${r.data.approved} payout${r.data.approved === 1 ? "" : "s"} marked as mapped. Next on the register: Replace with MIS amount.`);
       onDone();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Approve failed");

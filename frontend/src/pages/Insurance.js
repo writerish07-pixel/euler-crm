@@ -9,7 +9,7 @@ import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
 import InsuranceMisUpload from "./InsuranceMisUpload";
 
-const VIEWS = [["all", "All Entries"], ["pending", "Pending"], ["unmapped", "Not matched"], ["overdue", "Overdue"]];
+const VIEWS = [["all", "All Entries"], ["pending", "Pending"], ["unmapped", "Not matched"], ["mapped", "Mapped"], ["overdue", "Overdue"]];
 
 export default function Insurance() {
   const { isOwner } = useAuth();
@@ -45,7 +45,15 @@ export default function Insurance() {
   const expected = rows.reduce((s, r) => s + Number(r.expectedPayout || 0), 0);
   const received = rows.reduce((s, r) => s + Number(r.receivedPayout || 0), 0);
   const overdueCount = rows.filter((r) => r.overdue).length;
-  const selectedIds = rows.filter((r) => selected[r.entryId]).map((r) => r.entryId);
+  const selectedRows = rows.filter((r) => selected[r.entryId]);
+  const selectedIds = selectedRows.map((r) => r.entryId);
+  const unmappedSelected = selectedRows.filter((r) => !r.misApproved
+    && String(r.status || "") !== "Received"
+    && !String(r.status || "").startsWith("N/A"));
+  const mappedSelected = selectedRows.filter((r) => r.misApproved
+    && Number(r.misAmount || 0) > 0
+    && String(r.status || "") !== "Received"
+    && !String(r.status || "").startsWith("N/A"));
 
   const toggle = (id, on) => setSelected((s) => ({ ...s, [id]: on }));
   const toggleAll = (on) => {
@@ -58,13 +66,26 @@ export default function Insurance() {
   };
 
   const approveSelected = async () => {
-    if (!selectedIds.length) return toast.error("Tick the payouts to approve");
+    if (!unmappedSelected.length) return toast.error("Tick unmapped payouts to mark mapped");
     try {
-      const r = await post("/insurance/mis/approve", { entryIds: selectedIds });
-      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped`);
-      setSelected({});
+      const ids = unmappedSelected.map((r) => r.entryId);
+      const r = await post("/insurance/mis/approve", { entryIds: ids });
+      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped — next: Replace with MIS amount`);
       load();
     } catch (e) { toast.error(e?.response?.data?.detail || "Approve failed"); }
+  };
+
+  const adoptMisAmount = async () => {
+    if (!mappedSelected.length) return toast.error("Tick mapped payouts that have an MIS amount");
+    try {
+      const ids = mappedSelected.map((r) => r.entryId);
+      const r = await post("/insurance/mis/adopt-amount", { entryIds: ids });
+      const n = r.adopted || 0;
+      const skipped = (r.errors || []).length;
+      toast.success(`${n} payout${n === 1 ? "" : "s"} now use the MIS amount${skipped ? ` · ${skipped} skipped` : ""}`);
+      setSelected({});
+      load();
+    } catch (e) { toast.error(e?.response?.data?.detail || "Could not apply MIS amount"); }
   };
 
   const remove = async (r) => {
@@ -98,7 +119,11 @@ export default function Insurance() {
       { key: "payoutRate", label: "Rate %", align: "right", render: (r) => (
         <span title={rateHint(r)}>{(Number(r.payoutRate) * 100).toFixed(1)}%</span>
       ) },
-      { key: "expectedPayout", label: "Expected", align: "right", mono: true, render: (r) => inr(r.expectedPayout) },
+      { key: "expectedPayout", label: "Expected", align: "right", mono: true, render: (r) => (
+        <span title={r.misAmountAdopted ? "From agent MIS" : r.leadExpectedPayout ? `Lead ${inr(r.leadExpectedPayout)}` : ""}>
+          {inr(r.expectedPayout)}
+        </span>
+      ) },
     ] : []),
     { key: "receivedPayout", label: "Received", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedPayout)}</span> },
     ...(isOwner ? [
@@ -172,10 +197,21 @@ export default function Insurance() {
           {selectedIds.length > 0 && (
             <Card className="p-3 mb-4 flex flex-wrap items-center gap-3" data-testid="ins-approve-bar">
               <span className="text-sm">{selectedIds.length} selected</span>
-              <Button data-testid="ins-approve-selected-btn" onClick={approveSelected}>
-                Mark mapped
-              </Button>
-              <span className="text-xs text-ink-faint">Confirms these register rows appear on the agent MIS. Does not mean money was received.</span>
+              {unmappedSelected.length > 0 && (
+                <Button data-testid="ins-approve-selected-btn" onClick={approveSelected}>
+                  Mark mapped
+                </Button>
+              )}
+              {mappedSelected.length > 0 && (
+                <Button data-testid="ins-adopt-mis-btn" onClick={adoptMisAmount}>
+                  Replace with MIS amount
+                </Button>
+              )}
+              <span className="text-xs text-ink-faint">
+                {mappedSelected.length
+                  ? "Replaces the Euler (lead) expected payout with the agent MIS figure. Mapped rows only — not cash received."
+                  : "Confirms these register rows appear on the agent MIS. Does not mean money was received."}
+              </span>
             </Card>
           )}
 
@@ -226,6 +262,7 @@ function rateHint(r) {
     "agent-slab": "from the agent's model slab",
     "agent-catch-all": "from the agent's catch-all slab",
     manual: "set manually by the owner",
+    mis: "from the agent MIS amount",
     "legacy-default": "default rate — no agent slab matched",
   }[r.payoutRateSource];
   return src ? `${(Number(r.payoutRate) * 100).toFixed(1)}% — ${src}` : "";

@@ -332,3 +332,88 @@ async def test_executive_cannot_upload_mis(client):
     denied = await client.post("/api/insurance/mis/preview", files=_csv(csv),
                                headers={"Authorization": f"Bearer {token}"})
     assert denied.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_adopt_amount_replaces_expected_on_mapped_only(client):
+    mapped = await _entry(client, policyNumber="POL-ADOPT-1", premium=20000)
+    pending = await _entry(client, policyNumber="POL-ADOPT-SKIP", premium=20000)
+    lead_expected = mapped["expectedPayout"]
+    assert lead_expected != 8000
+    ap = await client.post("/api/insurance/mis/approve", json={
+        "entryIds": [mapped["entryId"]],
+        "items": [{"entryId": mapped["entryId"], "misAmount": 8000}],
+    })
+    assert ap.status_code == 200, ap.text
+    still_lead = await server.db.insurance.find_one({"entryId": mapped["entryId"]})
+    assert still_lead["expectedPayout"] == lead_expected
+    assert still_lead["misAmount"] == 8000
+
+    mixed = await client.post("/api/insurance/mis/adopt-amount", json={
+        "entryIds": [mapped["entryId"], pending["entryId"]],
+    })
+    assert mixed.status_code == 200, mixed.text
+    body = mixed.json()
+    assert body["adopted"] == 1
+    assert any(e["error"] == "not_mapped" for e in body["errors"])
+    doc = await server.db.insurance.find_one({"entryId": mapped["entryId"]})
+    assert doc["expectedPayout"] == 8000
+    assert doc["misAmountAdopted"] is True
+    assert doc["leadExpectedPayout"] == lead_expected
+    assert doc["misDifference"] == 0
+    assert doc["payoutOutstanding"] == 8000
+    assert doc["receivedPayout"] == 0
+    assert doc["status"] == "Pending"
+    assert doc["payoutRateSource"] == "mis"
+    assert ce.insurance_dealer_income(doc) == 0
+    skipped = await server.db.insurance.find_one({"entryId": pending["entryId"]})
+    assert skipped["expectedPayout"] == pending["expectedPayout"]
+    assert not skipped.get("misAmountAdopted")
+
+    listed = (await client.get("/api/insurance", params={"view": "mapped"})).json()
+    assert any(r["entryId"] == mapped["entryId"] for r in listed)
+    assert all(r.get("misApproved") for r in listed)
+
+
+@pytest.mark.asyncio
+async def test_adopt_is_idempotent_and_survives_redelivery(client):
+    e = await _entry(client, policyNumber="POL-ADOPT-2", premium=19000)
+    eid = e["entryId"]
+    await client.post("/api/insurance/mis/approve", json={
+        "items": [{"entryId": eid, "misAmount": 5275}],
+    })
+    a = await client.post("/api/insurance/mis/adopt-amount", json={"entryIds": [eid]})
+    b = await client.post("/api/insurance/mis/adopt-amount", json={"entryIds": [eid]})
+    assert a.status_code == 200 and b.status_code == 200
+    await server.db.insurance.update_one({"entryId": eid}, {"$set": {"leadId": "LD-ADOPT-2"}})
+    await server.db.leads.insert_one({
+        "leadId": "LD-ADOPT-2", "customerName": "MIS Cust",
+        "insuranceAmount": 19000, "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)", "insuranceArrangedBy": "dealer",
+        "chassisNumber": "CH-ADOPT-2",
+    })
+    await server._upsert_insurance_on_delivery("LD-ADOPT-2", "2026-08-15")
+    doc = await server.db.insurance.find_one({"entryId": eid})
+    assert doc["expectedPayout"] == 5275
+    assert doc["misAmountAdopted"] is True
+    assert doc["payoutRateSource"] == "mis"
+
+
+@pytest.mark.asyncio
+async def test_adopt_skips_unmapped_and_received(client):
+    e = await _entry(client, policyNumber="POL-ADOPT-3", premium=10000)
+    denied = await client.post("/api/insurance/mis/adopt-amount",
+                               json={"entryIds": [e["entryId"]]})
+    assert denied.json()["adopted"] == 0
+    assert denied.json()["errors"][0]["error"] == "not_mapped"
+
+    await client.post("/api/insurance/mis/approve", json={
+        "items": [{"entryId": e["entryId"], "misAmount": 3000}],
+    })
+    await server.db.insurance.update_one({"entryId": e["entryId"]}, {"$set": {
+        "status": "Received", "receivedPayout": 3000, "payoutOutstanding": 0,
+    }})
+    again = await client.post("/api/insurance/mis/adopt-amount",
+                              json={"entryIds": [e["entryId"]]})
+    assert again.json()["adopted"] == 0
+    assert again.json()["errors"][0]["error"] == "already_received"
