@@ -51,15 +51,14 @@ export default function Insurance() {
     && String(r.status || "") !== "Received"
     && !String(r.status || "").startsWith("N/A"));
   const mappedSelected = selectedRows.filter((r) => r.misApproved
-    && Number(r.misAmount || 0) > 0
-    && String(r.status || "") !== "Received"
+    && Number(String(r.misAmount || "").toString().replace(/[^0-9.-]/g, "")) > 0
     && !String(r.status || "").startsWith("N/A"));
 
   const toggle = (id, on) => setSelected((s) => ({ ...s, [id]: on }));
   const toggleAll = (on) => {
     const next = {};
     rows.forEach((r) => {
-      if (String(r.status || "") === "Received" || String(r.status || "").startsWith("N/A")) return;
+      if (String(r.status || "").startsWith("N/A")) return;
       next[r.entryId] = on;
     });
     setSelected(next);
@@ -77,15 +76,42 @@ export default function Insurance() {
 
   const adoptMisAmount = async () => {
     if (!mappedSelected.length) return toast.error("Tick mapped payouts that have an MIS amount");
+    const ids = mappedSelected.map((r) => r.entryId);
+    const errors = [];
+    let n = 0;
     try {
-      const ids = mappedSelected.map((r) => r.entryId);
-      const r = await post("/insurance/mis/adopt-amount", { entryIds: ids });
-      const n = r.adopted || 0;
-      const skipped = (r.errors || []).length;
-      toast.success(`${n} payout${n === 1 ? "" : "s"} now use the MIS amount${skipped ? ` · ${skipped} skipped` : ""}`);
-      setSelected({});
+      const chunk = 12;
+      for (let i = 0; i < ids.length; i += chunk) {
+        const r = await post("/insurance/mis/adopt-amount", { entryIds: ids.slice(i, i + chunk) });
+        n += r.adopted || 0;
+        (r.errors || []).forEach((e) => errors.push(e));
+      }
+      const why = (e) => ({
+        not_mapped: "not mapped",
+        no_mis_amount: "no MIS amount",
+        not_found: "not found",
+        not_applicable: "customer-arranged",
+        failed: e.detail || "could not update",
+        recompute_failed: "saved — earnings refresh failed, retry",
+      }[e.error] || e.error);
+      if (n && !errors.length) {
+        toast.success(`${n} payout${n === 1 ? "" : "s"} now use the MIS amount in dealer earnings`);
+      } else if (n && errors.length) {
+        toast.success(`${n} updated · ${errors.length} still need a retry (${errors.slice(0, 3).map(why).join(", ")})`);
+      } else {
+        toast.error(errors.length
+          ? `None updated — ${errors.slice(0, 4).map(why).join(", ")}`
+          : "Could not apply MIS amount");
+      }
+      const failed = new Set(errors.map((e) => e.entryId).filter(Boolean));
+      setSelected(Object.fromEntries(ids.filter((id) => failed.has(id)).map((id) => [id, true])));
       load();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Could not apply MIS amount"); }
+    } catch (e) {
+      toast.error(typeof e?.response?.data?.detail === "string"
+        ? e.response.data.detail
+        : "Could not apply MIS amount — retry the remaining rows");
+      load();
+    }
   };
 
   const remove = async (r) => {
@@ -105,7 +131,7 @@ export default function Insurance() {
     ), render: (r) => (
       <input type="checkbox" data-testid={`ins-check-${r.entryId}`}
         checked={!!selected[r.entryId]}
-        disabled={String(r.status || "") === "Received" || String(r.status || "").startsWith("N/A")}
+        disabled={String(r.status || "").startsWith("N/A")}
         onClick={(e) => e.stopPropagation()}
         onChange={(e) => toggle(r.entryId, e.target.checked)} />
     ) },

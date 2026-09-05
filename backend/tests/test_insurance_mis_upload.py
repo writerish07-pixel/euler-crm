@@ -154,6 +154,10 @@ def test_dealer_income_is_cash_only():
     mapped = {"expectedPayout": 9310, "receivedPayout": 0,
               "status": "Pending", "misApproved": True}
     assert ce.insurance_dealer_income(mapped) == 0
+    adopted = {"expectedPayout": 8500, "receivedPayout": 0,
+               "status": "Pending", "misApproved": True,
+               "misAmount": 8500, "misAmountAdopted": True}
+    assert ce.insurance_dealer_income(adopted) == 8500
     received = {"expectedPayout": 9310, "receivedPayout": 8500,
                 "status": "Received", "misApproved": True}
     assert ce.insurance_dealer_income(received) == 8500
@@ -285,6 +289,15 @@ async def test_approve_short_payout_closes_and_recasts_earnings(client):
     after = await server.db.leads.find_one({"leadId": lid})
     assert after["dealerInsuranceIncome"] == 0
     assert after["dealerTotalEarnings"] == before["dealerTotalEarnings"]
+    ad = await client.post("/api/insurance/mis/adopt-amount", json={
+        "entryIds": [entry["entryId"]],
+    })
+    assert ad.status_code == 200, ad.text
+    assert ad.json()["adopted"] == 1
+    adopted_lead = await server.db.leads.find_one({"leadId": lid})
+    assert adopted_lead["dealerInsuranceIncome"] == short
+    assert adopted_lead["dealerTotalEarnings"] == ce.round2(
+        before["dealerTotalEarnings"] + short)
     rec = await client.post(f"/api/insurance/{entry['entryId']}/receipt", json={
         "amount": short, "date": "2026-09-10", "reference": "BANK-1"})
     assert rec.status_code == 200, rec.text
@@ -365,7 +378,7 @@ async def test_adopt_amount_replaces_expected_on_mapped_only(client):
     assert doc["receivedPayout"] == 0
     assert doc["status"] == "Pending"
     assert doc["payoutRateSource"] == "mis"
-    assert ce.insurance_dealer_income(doc) == 0
+    assert ce.insurance_dealer_income(doc) == 8000
     skipped = await server.db.insurance.find_one({"entryId": pending["entryId"]})
     assert skipped["expectedPayout"] == pending["expectedPayout"]
     assert not skipped.get("misAmountAdopted")
@@ -400,20 +413,53 @@ async def test_adopt_is_idempotent_and_survives_redelivery(client):
 
 
 @pytest.mark.asyncio
-async def test_adopt_skips_unmapped_and_received(client):
+async def test_adopt_skips_unmapped_and_continues_after_failure(client, monkeypatch):
     e = await _entry(client, policyNumber="POL-ADOPT-3", premium=10000)
     denied = await client.post("/api/insurance/mis/adopt-amount",
                                json={"entryIds": [e["entryId"]]})
     assert denied.json()["adopted"] == 0
     assert denied.json()["errors"][0]["error"] == "not_mapped"
 
+    ok = await _entry(client, policyNumber="POL-ADOPT-OK", premium=10000)
     await client.post("/api/insurance/mis/approve", json={
-        "items": [{"entryId": e["entryId"], "misAmount": 3000}],
+        "items": [{"entryId": ok["entryId"], "misAmount": 3100}],
+    })
+    boom = await _entry(client, policyNumber="POL-ADOPT-BOOM", premium=10000)
+    await client.post("/api/insurance/mis/approve", json={
+        "items": [{"entryId": boom["entryId"], "misAmount": 3200}],
+    })
+    real = server._adopt_mis_expected
+
+    async def flaky(entry, act=None):
+        if entry.get("entryId") == boom["entryId"]:
+            raise RuntimeError("sheet quota")
+        return await real(entry, act=act)
+
+    monkeypatch.setattr(server, "_adopt_mis_expected", flaky)
+    mixed = await client.post("/api/insurance/mis/adopt-amount", json={
+        "entryIds": [boom["entryId"], ok["entryId"]],
+    })
+    assert mixed.status_code == 200, mixed.text
+    body = mixed.json()
+    assert body["adopted"] == 1
+    assert any(err["error"] == "failed" for err in body["errors"])
+    saved = await server.db.insurance.find_one({"entryId": ok["entryId"]})
+    assert saved["misAmountAdopted"] is True
+    assert saved["expectedPayout"] == 3100
+    stuck = await server.db.insurance.find_one({"entryId": boom["entryId"]})
+    assert not stuck.get("misAmountAdopted")
+
+    await client.post("/api/insurance/mis/approve", json={
+        "items": [{"entryId": e["entryId"], "misAmount": "3,000"}],
     })
     await server.db.insurance.update_one({"entryId": e["entryId"]}, {"$set": {
-        "status": "Received", "receivedPayout": 3000, "payoutOutstanding": 0,
+        "status": "Received", "receivedPayout": 500, "payoutOutstanding": 0,
+        "misAmount": "3,000",
     }})
     again = await client.post("/api/insurance/mis/adopt-amount",
                               json={"entryIds": [e["entryId"]]})
-    assert again.json()["adopted"] == 0
-    assert again.json()["errors"][0]["error"] == "already_received"
+    assert again.status_code == 200, again.text
+    assert again.json()["adopted"] == 1
+    rec = await server.db.insurance.find_one({"entryId": e["entryId"]})
+    assert rec["expectedPayout"] == 3000
+    assert ce.insurance_dealer_income(rec) == 3000

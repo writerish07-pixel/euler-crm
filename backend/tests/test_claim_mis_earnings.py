@@ -41,6 +41,9 @@ def test_insurance_income_is_cash_only():
     mapped = {"expectedPayout": 9310, "receivedPayout": 0, "status": "Pending",
               "misApproved": True, "misAmount": 8500}
     assert ce.insurance_dealer_income(mapped) == 0
+    adopted = {"expectedPayout": 8500, "receivedPayout": 0, "status": "Pending",
+               "misApproved": True, "misAmount": 8500, "misAmountAdopted": True}
+    assert ce.insurance_dealer_income(adopted) == 8500
     paid = {"expectedPayout": 9310, "receivedPayout": 8500, "status": "Received"}
     assert ce.insurance_dealer_income(paid) == 8500
     assert ce.insurance_dealer_income({"status": "N/A — customer arranged"}) == 0
