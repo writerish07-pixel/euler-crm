@@ -2,6 +2,7 @@
 import hashlib
 import logging
 import os
+import re
 import uuid
 from typing import Optional
 from datetime import datetime, timezone, timedelta
@@ -199,8 +200,24 @@ async def find_user_for_login(db, typed):
     user = await db.users.find_one({"loginIdNorm": norm})
     if user:
         return user
+    # Staff phones type the User ID. A missing loginIdNorm used to scan every
+    # user document and the mobile request timed out — desktop waited longer.
+    safe = re.escape(typed)
+    user = await db.users.find_one({"loginId": {"$regex": f"^{safe}$", "$options": "i"}})
+    if user:
+        return user
+    if "@" in typed:
+        return None
+    exact_names = await db.users.find(
+        {"name": {"$regex": f"^{safe}$", "$options": "i"}}
+    ).to_list(8)
+    if len(exact_names) == 1:
+        return exact_names[0]
     name_hits = []
-    async for row in db.users.find({}):
+    async for row in db.users.find(
+            {},
+            {"name": 1, "loginId": 1, "loginIdNorm": 1, "email": 1,
+             "passwordHash": 1, "passwordPlain": 1, "role": 1, "userId": 1}):
         if norm_login_id(row.get("loginId")) == norm:
             return row
         if norm_login_id(row.get("name")) == norm:
