@@ -11,6 +11,7 @@ import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
 import { LocalKycBlock, kycReady, uploadKycFiles } from "../components/LeadDocuments";
+import DealFormatCard from "../components/DealFormatCard";
 
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
@@ -143,16 +144,34 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const [kyc, setKyc] = useState({});
   const [busy, setBusy] = useState(false);
   const [variants, setVariants] = useState([]);
+  const [deal, setDeal] = useState(null);
+  const [dealLoading, setDealLoading] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   useEffect(() => {
     if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants);
+    else setVariants([]);
   }, [form.interestedModel]);
+
+  useEffect(() => {
+    if (!form.interestedModel || !form.variant) {
+      setDeal(null);
+      return undefined;
+    }
+    let alive = true;
+    setDealLoading(true);
+    get("/commercial/deal-preview", {
+      model: form.interestedModel, variant: form.variant, cxDemand: Number(form.budget) || 0,
+    }).then((d) => { if (alive) setDeal(d); })
+      .catch(() => { if (alive) setDeal(null); })
+      .finally(() => { if (alive) setDealLoading(false); });
+    return () => { alive = false; };
+  }, [form.interestedModel, form.variant, form.budget]);
 
   const submit = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
-    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter the deal amount for GM / Owner approval");
+    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand — the final amount given to the customer");
     const kycErr = kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
     setBusy(true);
@@ -183,7 +202,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const execOptions = [...(masters.executives || [])];
   if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
   return (
-    <Drawer open onClose={onClose} width="max-w-xl" title={isExecutive ? "Request a lead" : "New Lead"}
+    <Drawer open onClose={onClose} width="max-w-2xl" title={isExecutive ? "Request a lead" : "New Lead"}
       subtitle={isExecutive ? "GM or Owner must Approve before this becomes a live lead" : "Capture a fresh enquiry"}
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : (isExecutive ? "Send for approval" : "Create Lead")}</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -201,9 +220,17 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{execOptions.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{masters.models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label="Variant"><Select value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
+        <Field label="Variant"><Select data-testid="lead-variant" value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label={isExecutive ? "Deal amount (₹) *" : "Budget (₹)"}><Input type="number" data-testid="lead-budget" value={form.budget} onChange={set("budget")} /></Field>
+        <div className="sm:col-span-2">
+          <DealFormatCard
+            snapshot={deal}
+            cxDemand={form.budget}
+            onCxDemand={(v) => setForm((f) => ({ ...f, budget: v }))}
+            loading={dealLoading}
+            missingPrice={!form.interestedModel || !form.variant}
+          />
+        </div>
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} />
       </div>

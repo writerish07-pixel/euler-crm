@@ -640,7 +640,9 @@ async def recompute_lead(lead_id):
     # which already reduces by Σ customerBenefit across offers + entitlements.
     # Do NOT subtract entitlement benefits again — that double-counted after the
     # allocation engines were merged onto one path.
-    customer_payable = totals["customerPayable"]
+    customer_payable = _deal_price_payable(lead)
+    if customer_payable is None:
+        customer_payable = totals["customerPayable"]
     if lead.get("dealCancelled"):
         # The deal is off. The customer owes nothing — showing an outstanding here
         # is not just cosmetic: once a cancelled lead is revived it goes back to
@@ -1018,6 +1020,8 @@ class BookingIn(BaseModel):
     paymentMode: str = "Cash"
     financeRequired: str = "No"
     exchangeRequired: str = "No"
+    # UTR / cheque / transaction number for the booking advance.
+    paymentReference: str = ""
 
 
 class PriceStructureIn(BaseModel):
@@ -1064,6 +1068,7 @@ class PaymentIn(BaseModel):
     narration: str = ""
     financerName: str = ""
     financeFileNumber: str = ""
+    paymentReference: str = ""
     # Collecting MORE than Customer Payable is a real situation (round figure paid,
     # charge reduced later). It stays blocked by default so a mistyped amount is still
     # caught; the UI asks for confirmation and re-sends with this set. The surplus is
@@ -2802,6 +2807,11 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     await db.activities.insert_one(dict(_act_doc))
     await sheet_sync("activities", _act_doc)
     await sheet_sync("leads", doc)
+    cx = ce.round2(ce.num(payload.get("budget")))
+    if cx > 0:
+        return await _apply_quoted_deal(
+            lead_id, payload.get("interestedModel"), payload.get("variant"), cx,
+            created_date)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -2843,6 +2853,10 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
         if not str(payload.get("executive") or "").strip():
             payload["executive"] = user.get("name") or ""
         request_id = await next_id("lead_request", "LR26")
+        deal_amount = ce.round2(ce.num(body.budget))
+        deal_format = await _deal_format_for(
+            payload.get("interestedModel"), payload.get("variant"), deal_amount,
+            payload.get("createdDate"))
         req = {
             "requestId": request_id,
             "status": "pending",
@@ -2851,7 +2865,9 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             "submittedByName": user.get("name") or "",
             "submittedByUserId": user.get("userId") or user.get("email") or "",
             "createdAt": now_iso(),
-            "dealAmount": ce.round2(ce.num(body.budget)),
+            "dealAmount": deal_amount,
+            "dealFormat": deal_format,
+            "cxDemand": deal_amount,
         }
         await db.lead_requests.insert_one(req)
         name = (body.customerName or "Customer").strip()
@@ -2887,6 +2903,8 @@ def _request_out(doc):
     row["variant"] = payload.get("variant") or ""
     row["executive"] = payload.get("executive") or ""
     row["budget"] = payload.get("budget") or row.get("dealAmount") or 0
+    row["cxDemand"] = row.get("cxDemand") or row["budget"]
+    row["dealFormat"] = row.get("dealFormat") or payload.get("dealFormat") or {}
     row["remarks"] = payload.get("remarks") or ""
     row["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
     row["gstin"] = payload.get("gstin") or ""
@@ -3493,6 +3511,65 @@ def _price_structure_from_master(row, as_of=None):
     }
 
 
+def _charges_from_price_structure(ps):
+    ps = ps or {}
+    return {
+        "exShowroom": ce.num(ps.get("exShowroom")),
+        "rto": ce.num(ps.get("rto")),
+        "insurance": ce.num(ps.get("insuranceAmount") if ps.get("insuranceAmount") is not None else ps.get("insurance")),
+        "handlingCharges": ce.num(ps.get("handlingCharges")),
+        "accessories": ce.num(ps.get("accessoriesAmount") if ps.get("accessoriesAmount") is not None else ps.get("accessories")),
+        "trc": ce.num(ps.get("trc")),
+        "fastag": ce.num(ps.get("fastag")),
+        "extendedWarranty": ce.num(ps.get("extendedWarranty")),
+        "otherCharges": ce.num(ps.get("otherCharges")),
+    }
+
+
+def _deal_price_payable(lead):
+    """Agreed Cx Demand is customer payable while useDealPrice is on."""
+    if not lead or lead.get("dealCancelled"):
+        return None
+    if lead.get("useDealPrice") and ce.num(lead.get("cxDemand")) > 0:
+        return ce.round2(ce.num(lead.get("cxDemand")))
+    return None
+
+
+async def _deal_format_for(model, variant, cx_demand, on=None):
+    as_of = str(on or today())[:10]
+    row = await _price_master_row(model, variant) if model else None
+    charges = _charges_from_price_structure(_price_structure_from_master(row, as_of)) if row else {}
+    deal = ce.compute_deal_format(charges, cx_demand)
+    deal["model"] = model or ""
+    deal["variant"] = variant or ""
+    deal["asOf"] = as_of
+    deal["priceFound"] = bool(row)
+    deal["priceId"] = (row or {}).get("priceId") or ""
+    return deal
+
+
+async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None):
+    """Persist the scheme-free deal card and lock customer payable to Cx Demand."""
+    cx = ce.round2(ce.num(cx_demand))
+    deal = await _deal_format_for(model, variant, cx, on)
+    patch = {
+        "cxDemand": cx,
+        "budget": cx if cx > 0 else 0,
+        "dealFormat": deal,
+        "useDealPrice": cx > 0,
+        "lastUpdated": now_iso(),
+    }
+    if deal.get("priceFound"):
+        row = await _price_master_row(model, variant)
+        if row:
+            patch.update(_price_structure_from_master(row, deal.get("asOf")))
+            patch["priceStructureSaved"] = False
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    if cx > 0:
+        await recompute_lead(lead_id)
+    return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
 async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, realign_scheme=True):
     """After model/variant or price edits, refresh Master-backed fields and recompute.
 
@@ -3649,10 +3726,12 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
         # Allow booking-confirm WhatsApp for this new booking (cancel cleared it too).
         "whatsappBookingSentAt": "",
     }})
+    pay_ref = str(body.paymentReference or "").strip()
     await db.bookings.insert_one({
         "bookingId": booking_id, "leadId": lead_id, "customerName": lead.get("customerName"),
         "bookingDate": bdate, "model": lead.get("interestedModel"), "variant": lead.get("variant"),
         "bookingAmount": requested, "amountReceived": requested, "paymentMode": body.paymentMode,
+        "paymentReference": pay_ref,
         "financeRequired": body.financeRequired, "exchangeRequired": body.exchangeRequired,
         "snapshotId": snapshot_id, "bookingStatus": "Booked", "createdBy": "crm", "createdDate": today(),
     })
@@ -3663,9 +3742,12 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
     })
     # Re-book must not post a second advance for money already on the ledger.
     if extra > 0.01:
+        adv_note = "Booking advance"
+        if pay_ref:
+            adv_note = f"Booking advance · {pay_ref}"
         await _add_payment_internal(lead_id, PaymentIn(
             amount=extra, paymentMode=body.paymentMode, date=bdate,
-            narration="Booking advance"))
+            narration=adv_note, paymentReference=pay_ref))
     _bk_act = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": bdate,
         "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Booking",
@@ -5028,7 +5110,9 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
     ]).to_list(1)
     running = ce.round2((prior[0]["t"] if prior else 0) + body.amount)
     snap = lead_to_snapshot(lead) if lead else {}
-    payable = ce.compute_commercial_totals(snap)["customerPayable"] if lead else 0
+    payable = _deal_price_payable(lead) if lead else None
+    if payable is None:
+        payable = ce.compute_commercial_totals(snap)["customerPayable"] if lead else 0
     # Over-payment guard (port of BusinessRulesService.validatePaymentAmount_): a receipt may
     # never push total received above Customer Payable *by accident*. Provisional allowed only
     # when payable is still ₹0 (slim booking, price deferred to Price Structure). Staff can
@@ -5047,7 +5131,9 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         "date": body.date or today(), "amount": ce.round2(body.amount), "paymentMode": body.paymentMode,
         "narration": body.narration, "runningTotal": running, "outstandingBalance": outstanding,
         "paymentId": f"PY{uuid.uuid4().hex[:12]}", "financerName": body.financerName,
-        "financeFileNumber": finance_file_number, "recordedAt": now_iso(),
+        "financeFileNumber": finance_file_number,
+        "paymentReference": str(body.paymentReference or "").strip(),
+        "recordedAt": now_iso(),
     }
     try:
         await db.payments.insert_one(doc)
@@ -5091,7 +5177,9 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _money=
 async def _rebuild_payment_running_totals(lead_id):
     """After a receipt is removed, rewrite runningTotal / outstandingBalance in date order."""
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
-    payable = ce.compute_commercial_totals(lead_to_snapshot(lead), await get_scheme_rows())["customerPayable"]
+    payable = _deal_price_payable(lead)
+    if payable is None:
+        payable = ce.compute_commercial_totals(lead_to_snapshot(lead), await get_scheme_rows())["customerPayable"]
     rows = await db.payments.find({"leadId": lead_id}).sort(
         [("date", 1), ("recordedAt", 1), ("receiptNumber", 1)]
     ).to_list(2000)
@@ -6065,6 +6153,13 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
         "oemSyncedAt": coulson.get("lastSyncAt") or "",
         "oemSyncOk": coulson.get("lastSyncOk"),
     }
+
+
+@api.get("/commercial/deal-preview")
+async def deal_preview(model: str = "", variant: str = "", cxDemand: float = 0,
+                       on: Optional[str] = None, _user=Depends(current_user)):
+    """Scheme-free reverse quote: Price Master charges + billing TCS, no circular."""
+    return await _deal_format_for(model, variant, cxDemand, on)
 
 
 @api.get("/price-master/variants")

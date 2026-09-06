@@ -868,7 +868,7 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
 
 /* -------------------------------------------------- Payments */
 function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, onSaved }) {
-  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
+  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
@@ -881,11 +881,14 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
     // The backend requires a financer on Finance receipts (it is what resolves/creates the
     // finance file). Ask for it here so staff get a clear prompt instead of a raw 422.
     if (isFinance && !form.financerName) return toast.error("Select a Financer for a Finance receipt");
+    if (paymentRefRequired(form.paymentMode, form.amount) && !String(form.paymentReference || "").trim()) {
+      return toast.error(`Enter the ${paymentRefLabel(form.paymentMode).toLowerCase()}`);
+    }
     try {
       const saved = await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount, allowExcess });
       const file = saved?.financeFileNumber ? ` · Finance File ${saved.financeFileNumber}` : "";
       toast.success(`Receipt added · ${inr(+form.amount)}${file}`);
-      setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
+      setForm({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
       onSaved();
     } catch (e) {
       const detail = e?.response?.data?.detail || "Could not add receipt";
@@ -938,6 +941,10 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
           <Field label="Date"><Input data-testid="payment-date" type="date" value={form.date} onChange={set("date")} /></Field>
           <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{(masters?.paymentModes || []).map((m) => <option key={m}>{m}</option>)}</Select></Field>
+          <Field label={paymentRefLabel(form.paymentMode)}>
+            <Input data-testid="payment-ref" value={form.paymentReference} onChange={set("paymentReference")}
+              placeholder={form.paymentMode === "Cheque" ? "Cheque number" : "UTR / transaction number"} />
+          </Field>
           <Field label="Narration"><Input value={form.narration} onChange={set("narration")} /></Field>
           <Button data-testid="add-payment-btn" onClick={() => add(false)} disabled={locked}><Wallet size={15} /> Add Receipt</Button>
         </div>
@@ -1794,8 +1801,22 @@ function ActivityTab({ lead, activities, masters, onSaved, readOnly = false }) {
 }
 
 /* -------------------------------------------------- Modals */
+function paymentRefLabel(mode) {
+  const m = String(mode || "").toLowerCase();
+  if (m === "cheque") return "Cheque number";
+  if (m === "upi" || m === "neft") return "UTR / transaction number";
+  if (m === "card") return "Transaction number";
+  return "Transaction number";
+}
+
+function paymentRefRequired(mode, amount) {
+  const m = String(mode || "").toLowerCase();
+  if (m === "cash" || m === "finance" || !m) return false;
+  return Number(amount) > 0;
+}
+
 function BookingModal({ lead, onClose, onDone }) {
-  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO() });
+  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", paymentReference: "", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO() });
   // Commercial gate: a booking may only be confirmed once the backend has resolved
   // the vehicle against Price Master. All figures below come from the API — nothing
   // is calculated or defaulted in React, so there is no path to a silent zero.
@@ -1827,10 +1848,15 @@ function BookingModal({ lead, onClose, onDone }) {
     setBusy(true);
     try {
       if (!form.bookingDate) { toast.error("Booking date is required"); setBusy(false); return; }
+      if (paymentRefRequired(form.paymentMode, form.bookingAmount) && !String(form.paymentReference || "").trim()) {
+        toast.error(`Enter the ${paymentRefLabel(form.paymentMode).toLowerCase()}`);
+        setBusy(false);
+        return;
+      }
       const res = await post(`/leads/${lead.leadId}/convert-booking`, {
         bookingAmount: +form.bookingAmount, paymentMode: form.paymentMode, executive: lead.executive,
         financeRequired: form.financeRequired, exchangeRequired: form.exchangeRequired,
-        bookingDate: form.bookingDate,
+        bookingDate: form.bookingDate, paymentReference: String(form.paymentReference || "").trim(),
       });
       // Report the ACTUAL backend sync state, never an assumption from a 200.
       let sync = "Pending";
@@ -1906,7 +1932,11 @@ function BookingModal({ lead, onClose, onDone }) {
             ? ` ₹${Number(lead.totalReceived).toLocaleString("en-IN")} is already on this lead — leave 0 unless they are paying extra now, or you will not create a second receipt.`
             : ""}
         </p>
-        <Field label="Payment Mode"><Select value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
+        <Field label="Payment Mode"><Select data-testid="booking-payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
+        <Field label={paymentRefLabel(form.paymentMode)}>
+          <Input data-testid="booking-payment-ref" value={form.paymentReference} onChange={set("paymentReference")}
+            placeholder={form.paymentMode === "Cheque" ? "Cheque number" : "UTR / transaction number"} />
+        </Field>
         <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
         <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
       </div>

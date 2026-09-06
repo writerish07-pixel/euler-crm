@@ -9,7 +9,6 @@ import { get } from "../lib/api";
 import { inr, compactInr, num, ytdCount } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
-import ChangePasswordCard from "../components/ChangePasswordCard";
 
 export default function ExecutiveDashboard() {
   const [d, setD] = useState(null);
@@ -28,8 +27,6 @@ export default function ExecutiveDashboard() {
           ? `${scope.note || "My pipeline"} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`
           : "My pipeline"}
       />
-
-      <ChangePasswordCard compact />
 
       {!d ? (
         <div className="text-ink-faint text-sm">Loading executive dashboard…</div>
