@@ -1548,7 +1548,7 @@ async def load_manual_oem_links(db):
              "manualOemLineId": 1, "_id": 0}):
         num = str(c.get("manualOemClaimNumber") or "").strip().upper()
         lid, key = c.get("leadId") or "", c.get("componentKey") or ""
-        if num and lid and key:
+        if num and key:
             by_oem.setdefault(num, []).append({
                 "leadId": lid, "componentKey": key, "claimId": c.get("claimId") or "",
                 "lineId": str(c.get("manualOemLineId") or ""),
@@ -1764,6 +1764,48 @@ async def find_oem_claim(db, claim_number):
         {"claimNumber": {"$regex": f"^{re.escape(number)}$", "$options": "i"}})
 
 
+_OEM_CUSTOMER_RE = re.compile(
+    r"customer\s*name\s*[:-]\s*(.+?)(?=\s+approved\s*by|\s*$)", re.I | re.S)
+
+
+def oem_entry_name(line, oem=None):
+    """The name Euler printed on the debit-note line — not a CRM lead."""
+    for raw in ((line or {}).get("customerName"), (line or {}).get("leadCustomer")):
+        name = str(raw or "").strip()
+        if name:
+            return name
+    desc = str((line or {}).get("description") or "")
+    m = _OEM_CUSTOMER_RE.search(desc)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip(" -:.")
+    desc = re.sub(r"\s+", " ", desc).strip()
+    if desc:
+        return desc[:120]
+    return str((oem or {}).get("claimNumber") or "OEM claim")
+
+
+def _oem_create_claim_id(claim_number, line_id, component_key):
+    safe_num = re.sub(r"[^A-Za-z0-9-]+", "", str(claim_number or "")) or "OEM"
+    safe_line = re.sub(r"[^A-Za-z0-9:-]+", "", str(line_id or "0")) or "0"
+    safe_key = re.sub(r"[^A-Za-z0-9]+", "", str(component_key or "oemClaim")) or "oemClaim"
+    return f"CLM-OEM-{safe_num}-{safe_line}-{safe_key}"
+
+
+def _pick_oem_line(oem, line_id=""):
+    lines = _ensure_line_ids(list((oem or {}).get("lineItems") or []))
+    want_line = str(line_id or "").strip()
+    if want_line:
+        targets = [li for li in lines if str(li.get("lineId") or "") == want_line]
+        if not targets:
+            raise ValueError("That claim item is not on this OEM claim.")
+        return targets[0], lines
+    if len(lines) == 1:
+        return lines[0], lines
+    if not lines:
+        raise ValueError("This OEM claim has no line items. Sync from Euler first.")
+    raise ValueError(f"This OEM claim has {len(lines)} items. Create each item separately.")
+
+
 async def resolve_oem_create_target(db, *, claim_number, line_id="", lead_id="",
                                     component_key=""):
     """Pick the OEM line + existing CRM lead + component. Never inserts a lead."""
@@ -1851,24 +1893,90 @@ async def ensure_register_row(db, lead, component_key, *, claim_amount=0.0,
     return doc, True
 
 
+async def create_named_register_from_oem(db, *, claim_number, line_id="",
+                                         component_key=""):
+    """Insert a Scheme Claim Register row named from the OEM line.
+
+    Does not invent a lead and does not attach one. Coulson claimed/approved
+    amounts stay off db.claims. The OEM claim number is stored so the two
+    registers stay joined without a CRM lead.
+    """
+    import commercial as ce
+    oem = await find_oem_claim(db, claim_number)
+    if not oem:
+        raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
+    if str(oem.get("status") or "") == "Cancelled":
+        raise ValueError("That OEM claim is cancelled.")
+    line, _ = _pick_oem_line(oem, line_id)
+    key = str(component_key or "").strip() or map_claim_type_to_component(
+        line.get("claimType"), line.get("description")) or "oemClaim"
+    number = str(oem.get("claimNumber") or "").strip()
+    lid = str(line.get("lineId") or "")
+    claim_id = _oem_create_claim_id(number, lid, key)
+    rec = await db.claims.find_one({"claimId": claim_id})
+    if not rec:
+        rec = await db.claims.find_one({
+            "source": "Created from OEM claim",
+            "manualOemClaimNumber": number,
+            "manualOemLineId": lid,
+            "leadId": {"$in": ["", None]},
+        })
+    patch = {
+        "manualOemClaimNumber": number,
+        "manualOemLineId": lid,
+        "claimReference": number,
+    }
+    if rec:
+        await db.claims.update_one({"_id": rec["_id"]}, {"$set": patch})
+        rec.update(patch)
+        rec.pop("_id", None)
+        oem.pop("_id", None)
+        return {"created": False, "register": rec, "oemClaim": stamp_document_flag(oem)}
+    name = oem_entry_name(line, oem)
+    label = (str(line.get("claimType") or "OEM Claim") if key == "oemClaim"
+             else ce.SCHEME_COMPONENT_LABELS.get(key, key))
+    as_of = str(oem.get("createdDate") or "")[:10]
+    doc = {
+        "claimId": claim_id,
+        "leadId": "",
+        "customer": name,
+        "model": line.get("model") or "",
+        "variant": line.get("variant") or "",
+        "bookingDate": as_of,
+        "executive": "",
+        "component": label,
+        "componentKey": key,
+        "eligibleClaim": 0.0,
+        "claimAmount": 0.0,
+        "receivedAmount": 0.0,
+        "claimStatus": "Pending",
+        "claimReference": number,
+        "source": "Created from OEM claim",
+        "manual": False,
+        "oemUnmatched": True,
+        "chassisNumber": line.get("chassis") or "",
+        "invoiceNumber": line.get("sourceInvoiceNumber") or "",
+        "schemeMonth": ce.scheme_month_from_date(as_of),
+        "submittedDate": "",
+        "approvedDate": "",
+        "manualOemClaimNumber": number,
+        "manualOemLineId": lid,
+        "manualOemMatchedAt": now_iso(),
+    }
+    await db.claims.insert_one(dict(doc))
+    oem.pop("_id", None)
+    return {"created": True, "register": doc, "oemClaim": stamp_document_flag(oem)}
+
+
 async def create_register_from_oem(db, *, claim_number, line_id="", lead_id="",
                                    component_key="", claim_amount=0.0,
                                    eligible_claim=0.0):
-    """Create the missing register row (if needed) and match it to the OEM line.
+    """Create a register entry named from the OEM line. Does not attach a lead.
 
-    Coulson claimed/approved amounts are never written onto the register.
+    `lead_id` / Coulson amounts are ignored — Create is not a lead match.
     """
-    target = await resolve_oem_create_target(
-        db, claim_number=claim_number, line_id=line_id, lead_id=lead_id,
-        component_key=component_key)
-    rec, created = await ensure_register_row(
-        db, target["lead"], target["componentKey"],
-        claim_amount=claim_amount, eligible_claim=eligible_claim)
-    linked = await link_register_to_oem(
-        db, lead_id=target["lead"]["leadId"], component_key=target["componentKey"],
-        claim_number=target["claimNumber"], line_id=target["lineId"])
-    return {"created": created, "register": linked["register"] or rec,
-            "oemClaim": linked["oemClaim"]}
+    return await create_named_register_from_oem(
+        db, claim_number=claim_number, line_id=line_id, component_key=component_key)
 
 
 async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line_id=""):
