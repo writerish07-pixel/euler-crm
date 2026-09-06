@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, looksCombinedSupport } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, looksCombinedSupport, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
@@ -108,10 +108,14 @@ export default function OemClaims({ missingVehicleOnly = false }) {
 
   if (!summary) return <div className="text-ink-faint text-sm">Loading OEM claims…</div>;
 
-  const { totals, mirror } = summary;
-  const openCount = summary.buckets
+  const totals = summary.totals || {};
+  const mirror = summary.mirror || {};
+  const buckets = Array.isArray(summary.buckets) ? summary.buckets : [];
+  const rejected = Array.isArray(summary.rejected) ? summary.rejected : [];
+  const invoiceConflicts = Array.isArray(summary.invoiceConflicts) ? summary.invoiceConflicts : [];
+  const openCount = buckets
     .filter((b) => !TERMINAL.includes(b.status))
-    .reduce((s, b) => s + b.count, 0);
+    .reduce((s, b) => s + (b.count || 0), 0);
   const joinActive = Boolean(chassis || invoice || leadId || qParam);
 
   const visibleRows = matchFilter
@@ -242,10 +246,10 @@ export default function OemClaims({ missingVehicleOnly = false }) {
       </Card>
 
       {/* Money the books may still be carrying as receivable that Euler has refused. */}
-      {summary.rejected.length > 0 && (
+      {rejected.length > 0 && (
         <Card className="mb-6 p-4 border-rose-200">
           <div className="flex items-center gap-2 mb-3 text-rose-700 font-semibold text-sm">
-            <XCircle size={16} /> {summary.rejected.length} rejected by Euler
+            <XCircle size={16} /> {rejected.length} rejected by Euler
           </div>
           <p className="text-xs text-ink-faint mb-3">
             Euler does not reopen a rejected debit note — a resubmission is a new claim
@@ -253,7 +257,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
             as eligible.
           </p>
           <div className="flex flex-wrap gap-2">
-            {summary.rejected.map((r) => (
+            {rejected.map((r) => (
               <div key={r.claimNumber} className="rounded-lg border border-rose-200 bg-rose-50/60 px-3 py-2 text-xs">
                 <div className="flex items-center gap-2">
                   <span className="font-mono font-semibold text-rose-800">{r.claimNumber}</span>
@@ -267,8 +271,8 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                       : null}
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                  {(r.leadIds || []).length
-                    ? r.leadIds.map((id) => (
+                  {rowLeadIds(r).length
+                    ? rowLeadIds(r).map((id) => (
                       <LeadLink key={id} leadId={id} onOpen={openLead} />
                     ))
                     : <span className="text-ink-faint">not linked</span>}
@@ -279,13 +283,13 @@ export default function OemClaims({ missingVehicleOnly = false }) {
         </Card>
       )}
 
-      {summary.invoiceConflicts.length > 0 && (
+      {invoiceConflicts.length > 0 && (
         <Card className="mb-6 p-4 border-amber-200">
           <div className="flex items-center gap-2 mb-2 text-amber-800 font-semibold text-sm">
             <AlertTriangle size={16} /> Invoice disagreements
           </div>
           <ul className="text-xs text-ink-soft space-y-1">
-            {summary.invoiceConflicts.map((c, i) => (
+            {invoiceConflicts.map((c, i) => (
               <li key={i}><span className="font-mono">{c.claimNumber}</span> — {c.detail}</li>
             ))}
           </ul>
@@ -297,7 +301,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
           Where the claims are sitting
         </div>
         <div className="flex flex-wrap gap-2">
-          {summary.buckets.map((b) => (
+          {buckets.map((b) => (
             <button key={b.status} onClick={() => setStatus(status === b.status ? "" : b.status)}
               className={`text-left rounded-lg border px-3 py-2 transition-colors ${
                 status === b.status ? "border-cobalt bg-cobalt/5" : "border-line hover:bg-zinc-50"}`}>
@@ -320,7 +324,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
         <Button type="submit" variant="secondary">Search</Button>
         <Select value={status} onChange={(e) => setStatus(e.target.value)} className="max-w-xs">
           <option value="">All statuses</option>
-          {summary.buckets.map((b) => <option key={b.status}>{b.status}</option>)}
+          {buckets.map((b) => <option key={b.status}>{b.status}</option>)}
         </Select>
         <Button type="button" variant={unlinked ? "primary" : "secondary"} onClick={() => setUnlinked((v) => !v)}>
           <Link2Off size={16} /> Not linked to a lead
@@ -371,24 +375,24 @@ export default function OemClaims({ missingVehicleOnly = false }) {
             </div>
           )},
           { key: "lead", label: "Lead", render: (r) => (
-            r.leadIds && r.leadIds.length ? (
+            rowLeadIds(r).length ? (
               <div className="flex flex-col items-start gap-0.5">
-                {r.leadIds.map((id) => (
+                {rowLeadIds(r).map((id) => (
                   <LeadLink key={id} leadId={id} onOpen={openLead}
                     subtitle={lineLeadLabel(
-                      (r.lineItems || []).find((li) => lineLeadIds(li).includes(id)) || {},
+                      rowLineItems(r).find((li) => lineLeadIds(li).includes(id)) || {},
                       id)} />
                 ))}
-                <Link to={claimsHref({ leadId: r.leadIds[0] })}
+                <Link to={claimsHref({ leadId: rowLeadIds(r)[0] })}
                   onClick={(e) => e.stopPropagation()}
                   className="text-[10px] text-cobalt hover:underline">Scheme register</Link>
               </div>
             ) : <Badge tone="bg-zinc-100 text-zinc-600 ring-zinc-500/20">Not linked</Badge>
           )},
           { key: "vehicle", label: "Claim items", render: (r) => (
-            (r.lineItems || []).length ? (
+            rowLineItems(r).length ? (
             <div className="text-xs space-y-2">
-              {(r.lineItems || []).map((li, i) => (
+              {rowLineItems(r).map((li, i) => (
                 <div key={li.lineId || i} className="mb-1 pb-1 border-b border-zinc-100 last:border-0 last:mb-0 last:pb-0"
                   data-testid={`oem-line-${r.claimNumber}-${li.lineId || i}`}>
                   <div className="font-medium text-ink whitespace-normal leading-snug">
@@ -455,17 +459,17 @@ export default function OemClaims({ missingVehicleOnly = false }) {
               lines={r.lineItemCount} documented={r.documentedLineCount} />
           )},
           { key: "match", label: "", render: (r) => (
-            (r.lineItems || []).length > 1 ? (
+            rowLineItems(r).length > 1 ? (
               <span className="text-[10px] text-ink-faint">Match each item</span>
             ) : (
             <div className="flex flex-col items-end gap-1">
               <button type="button" data-testid={`oem-manual-match-${r.claimNumber}`}
-                onClick={(e) => { e.stopPropagation(); setMatchRow({ ...r, matchLine: (r.lineItems || [])[0] }); }}
+                onClick={(e) => { e.stopPropagation(); setMatchRow({ ...r, matchLine: rowLineItems(r)[0] }); }}
                 className="text-xs text-cobalt hover:underline inline-flex items-center gap-1">
-                <Link2 size={12} /> {lineLeadIds((r.lineItems || [])[0] || {}).length ? "Add lead" : "Match"}
+                <Link2 size={12} /> {lineLeadIds(rowLineItems(r)[0] || {}).length ? "Add lead" : "Match"}
               </button>
-              {lineNeedsCreate(r, (r.lineItems || [])[0] || {}) ? (
-                <CreateOemButton row={r} line={(r.lineItems || [])[0] || {}} onDone={load} />
+              {lineNeedsCreate(r, rowLineItems(r)[0] || {}) ? (
+                <CreateOemButton row={r} line={rowLineItems(r)[0] || {}} onDone={load} />
               ) : null}
             </div>
             )
@@ -521,7 +525,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const relatedKey = line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "";
   const [register, setRegister] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [leadId, setLeadId] = useState(already[0] || (row.leadIds || [])[0] || "");
+  const [leadId, setLeadId] = useState(already[0] || rowLeadIds(row)[0] || "");
   const [extraLeadIds, setExtraLeadIds] = useState(already.slice(1));
   const [addId, setAddId] = useState("");
   const [componentKey, setComponentKey] = useState(relatedKey);

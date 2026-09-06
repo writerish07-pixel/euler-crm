@@ -45,10 +45,27 @@ export function componentLabel(key) {
 
 export const CREATE_COMPONENTS = Object.entries(COMPONENT_LABEL);
 
+function asIdList(value) {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (value == null || value === "") return [];
+  return [String(value)].filter(Boolean);
+}
+
 export function lineLeadIds(li) {
-  const ids = [...(li?.leadIds || [])].map(String).filter(Boolean);
-  if (li?.leadId && !ids.includes(li.leadId)) ids.unshift(li.leadId);
+  if (!li || typeof li !== "object") return [];
+  const ids = asIdList(li.leadIds);
+  if (li.leadId && !ids.includes(String(li.leadId))) ids.unshift(String(li.leadId));
   return ids;
+}
+
+export function rowLeadIds(row) {
+  return lineLeadIds({ leadIds: row?.leadIds, leadId: row?.leadId });
+}
+
+export function rowLineItems(row) {
+  const raw = row?.lineItems;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((li) => li && typeof li === "object");
 }
 
 export function lineLeadLabel(li, leadId) {

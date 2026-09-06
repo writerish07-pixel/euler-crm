@@ -1956,3 +1956,125 @@ async def test_oem_create_combined_line_keeps_euler_names_and_ignores_leads(clie
     oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLCR2L"})).json()[0]
     assert not oem["lineItems"][0].get("leadId")
     assert not (oem["lineItems"][0].get("leadIds") or [])
+
+
+# ---------------------------------------------------------------- crash hardening (dirty Coulson / Mongo shapes)
+def test_as_int_accepts_string_floats_and_junk():
+    assert oem_claims._as_int("2.0") == 2
+    assert oem_claims._as_int("10.5") == 10
+    assert oem_claims._as_int("2 docs") == 0
+    assert oem_claims._as_int([1, 2]) == 0
+    assert oem_claims._as_int(None) == 0
+    assert oem_claims._as_int("") == 0
+    assert oem_claims._as_int(3.9) == 3
+
+
+def test_as_id_list_accepts_string_and_dict():
+    assert oem_claims._as_id_list("LD1") == ["LD1"]
+    assert oem_claims._as_id_list(["LD1", "LD2", "LD1"]) == ["LD1", "LD2"]
+    assert oem_claims._as_id_list({"a": "LD9"}) == ["LD9"]
+    assert oem_claims._as_id_list(None) == []
+    assert oem_claims._as_id_list("") == []
+
+
+def test_line_lead_ids_survives_string_lead_ids_and_non_dict_line():
+    assert oem_claims.line_lead_ids({"leadIds": "LD1"}) == ["LD1"]
+    assert oem_claims.line_lead_ids("not-a-line") == []
+    assert oem_claims.line_lead_ids(None) == []
+    assert oem_claims.line_lead_ids({"leadId": "LD2", "leadIds": 7}) == ["LD2", "7"]
+
+
+def test_stamp_document_flag_survives_string_and_list_document_count():
+    doc = oem_claims.stamp_document_flag({
+        "lineItems": [
+            {"lineId": "a", "documentCount": "2.0"},
+            {"lineId": "b", "documentCount": []},
+            None,
+            "junk",
+            {"lineId": "c", "documentCount": "1"},
+        ],
+    })
+    assert doc["documentCount"] == 3
+    assert doc["lineItemCount"] == 3
+    assert doc["hasDocument"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_survives_string_document_count_and_junk_line_items(client):
+    """Create used to 500 when documentCount was '2.0' or lineItems held junk."""
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "dirty-create",
+        "claimNumber": "AF-999-CLDIRTY",
+        "status": "RM Approval Pending",
+        "claimedAmount": "5000.00",
+        "stageDays": "10.5",
+        "lineItems": [
+            None,
+            "not-a-line",
+            {"lineId": "dirty-1", "claimType": "Additional Support",
+             "description": "Customer Name:- Dirty Create",
+             "documentCount": "2.0", "totalAmount": "5000", "leadId": "",
+             "leadIds": "LD-SHOULD-IGNORE"},
+        ],
+        "leadIds": "not-a-list",
+        "_testSeed": SEED_TAG,
+    })
+    r = await client.post("/api/claims/oem-create", json={
+        "claimNumber": "AF-999-CLDIRTY", "lineId": "dirty-1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] is True
+    assert r.json()["register"]["customer"] == "Dirty Create"
+    assert r.json()["register"]["leadId"] in ("", None)
+    assert r.json()["register"]["claimAmount"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_and_summary_survive_dirty_stored_claims(client):
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "dirty-list",
+        "claimNumber": "AF-999-CLLIST",
+        "status": "RM Approval Pending",
+        "claimedAmount": "1234",
+        "approvedAmount": "0",
+        "stageDays": "14.0",
+        "claimAgeingDays": "3.5",
+        "lineItems": [
+            "junk",
+            {"lineId": "l1", "claimType": "Scheme Claim",
+             "description": "Referral Commission",
+             "documentCount": "1.0", "chassis": CHASSIS,
+             "leadIds": "LDDIRTY"},
+        ],
+        "leadIds": "LDDIRTY",
+        "_testSeed": SEED_TAG,
+    })
+    rows = (await client.get("/api/oem-claims")).json()
+    assert isinstance(rows, list)
+    hit = next(r for r in rows if r["claimNumber"] == "AF-999-CLLIST")
+    assert all(isinstance(li, dict) for li in hit["lineItems"])
+    assert hit["lineItems"][0]["documentCount"] == 1
+    summary = (await client.get("/api/oem-claims/summary")).json()
+    assert isinstance(summary.get("buckets"), list)
+    assert summary["total"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_sync_survives_dirty_existing_claim(client, wired):
+    """A leftover row with string counts / junk lines must not 500 the Euler sync."""
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "n1",
+        "claimNumber": "AF-999-CL0001",
+        "status": "RM Approval Pending",
+        "stageDays": "7.0",
+        "documentCount": "2.0",
+        "lineItems": [None, {"lineId": "old", "documentCount": "1.0", "leadIds": "LD1"}],
+        "leadIds": "LD1",
+        "detailFetchedAt": "",
+        "_testSeed": SEED_TAG,
+    })
+    r = await client.post("/api/integrations/coulson/sync-claims")
+    assert r.status_code == 200, r.text
+    assert r.json().get("ok") is True
+    rows = (await client.get("/api/oem-claims")).json()
+    assert rows
+    assert all(isinstance(li, dict) for li in rows[0].get("lineItems") or [])

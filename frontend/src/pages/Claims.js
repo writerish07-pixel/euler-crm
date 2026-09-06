@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink, Link2 } from "lucide-react";
 import { get, post } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText } from "../lib/claimMatch";
+import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
@@ -42,7 +42,7 @@ export default function Claims() {
   const [matchClaim, setMatchClaim] = useState(null);
   const period = usePeriodState();
   const load = useCallback(() => {
-    get("/claims", period.params).then(setRows);
+    get("/claims", period.params).then((r) => setRows(Array.isArray(r) ? r : [])).catch(() => setRows([]));
     get("/claims/oem-only").then(setOemOnly).catch(() => setOemOnly(null));
   }, [period.params]);
   useEffect(() => { load(); get("/leads").then(setLeads); }, [load]);
@@ -494,11 +494,11 @@ function MatchOemModal({ claim, onClose, onDone }) {
   const needle = q.trim().toLowerCase();
   const shown = oemRows.filter((r) => {
     if (!needle) return true;
-    const blob = `${r.claimNumber || ""} ${(r.leadIds || []).join(" ")} ${(r.lineItems || []).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""} ${li.description || ""} ${li.customerName || ""}`).join(" ")}`.toLowerCase();
+    const blob = `${r.claimNumber || ""} ${rowLeadIds(r).join(" ")} ${rowLineItems(r).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""} ${li.description || ""} ${li.customerName || ""}`).join(" ")}`.toLowerCase();
     return blob.includes(needle);
   }).slice(0, 40);
   const picked = shown.find((r) => r.claimNumber === claimNumber) || oemRows.find((r) => r.claimNumber === claimNumber);
-  const lines = picked?.lineItems || [];
+  const lines = rowLineItems(picked);
 
   const save = async () => {
     if (!claimNumber.trim()) return toast.error("Enter or pick an OEM claim number");
@@ -553,14 +553,14 @@ function MatchOemModal({ claim, onClose, onDone }) {
         <div className="max-h-48 overflow-y-auto border border-line rounded-lg divide-y divide-zinc-100">
           {shown.map((r) => (
             <button type="button" key={r.claimNumber}
-              onClick={() => { setClaimNumber(r.claimNumber); setLineId((r.lineItems || []).length === 1 ? ((r.lineItems || [])[0].lineId || "") : ""); }}
+              onClick={() => { setClaimNumber(r.claimNumber); setLineId(rowLineItems(r).length === 1 ? (rowLineItems(r)[0].lineId || "") : ""); }}
               className={`w-full text-left px-3 py-2 text-xs hover:bg-zinc-50 ${
                 claimNumber === r.claimNumber ? "bg-cobalt/5" : ""}`}>
               <div className="font-mono font-semibold text-cobalt">{r.claimNumber}</div>
               <div className="text-ink-faint whitespace-normal">
-                {r.status} · {(r.lineItems || []).length > 1
-                  ? `${(r.lineItems || []).length} items`
-                  : oemLineText((r.lineItems || [])[0]) || ((r.lineItems || []).map((li) => li.chassis).filter(Boolean).join(", ") || "no chassis")}
+                {r.status} · {rowLineItems(r).length > 1
+                  ? `${rowLineItems(r).length} items`
+                  : oemLineText(rowLineItems(r)[0]) || (rowLineItems(r).map((li) => li.chassis).filter(Boolean).join(", ") || "no chassis")}
               </div>
             </button>
           ))}
