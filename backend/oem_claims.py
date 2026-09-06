@@ -329,6 +329,8 @@ def normalise_line_item(item):
                                 or item.get("sourceInvoiceUrl") or ""),
         "leadId": str(item.get("leadId") or ""),
         "leadCustomer": str(item.get("leadCustomer") or ""),
+        "leadIds": [str(x).strip() for x in (item.get("leadIds") or []) if str(x).strip()],
+        "leadCustomers": [str(x) for x in (item.get("leadCustomers") or [])],
         "matchedBy": str(item.get("matchedBy") or ""),
         "componentKey": map_claim_type_to_component(claim_type, description),
     }
@@ -342,7 +344,125 @@ def _ensure_line_ids(lines):
             continue
         if not str(line.get("lineId") or "").strip():
             line["lineId"] = f"idx:{i}"
+        if line_lead_ids(line):
+            stamp_line_leads(line, list(zip(line_lead_ids(line), line_lead_customers(line))))
     return lines
+
+
+def line_lead_ids(line):
+    """Every CRM lead on this Euler line. Extra Support can name two customers
+    on one 5000+5000 row; `leadId` alone only held the first."""
+    ids = []
+    for lid in (line or {}).get("leadIds") or []:
+        lid = str(lid or "").strip()
+        if lid and lid not in ids:
+            ids.append(lid)
+    primary = str((line or {}).get("leadId") or "").strip()
+    if primary and primary not in ids:
+        ids.insert(0, primary)
+    return ids
+
+
+def line_lead_customers(line):
+    ids = line_lead_ids(line)
+    names = [str(x or "") for x in ((line or {}).get("leadCustomers") or [])]
+    by_id = {}
+    if (line or {}).get("leadId") and (line or {}).get("leadCustomer"):
+        by_id[str(line.get("leadId"))] = str(line.get("leadCustomer") or "")
+    for i, lid in enumerate(ids):
+        if i < len(names) and names[i]:
+            by_id.setdefault(lid, names[i])
+    return [by_id.get(lid, "") for lid in ids]
+
+
+def stamp_line_leads(line, leads):
+    """Write leadId + leadIds. leadId stays the first lead for older readers."""
+    if not isinstance(line, dict):
+        return line
+    ids, names = [], []
+    for item in leads or []:
+        if isinstance(item, dict):
+            lid = str(item.get("leadId") or "").strip()
+            name = str(item.get("customer") or item.get("leadCustomer")
+                       or item.get("customerName") or "")
+        elif isinstance(item, (list, tuple)) and item:
+            lid = str(item[0] or "").strip()
+            name = str(item[1] if len(item) > 1 else "")
+        else:
+            lid, name = str(item or "").strip(), ""
+        if lid and lid not in ids:
+            ids.append(lid)
+            names.append(name)
+    line["leadIds"] = ids
+    line["leadCustomers"] = names
+    line["leadId"] = ids[0] if ids else ""
+    line["leadCustomer"] = names[0] if names else ""
+    if not ids:
+        line["matchedBy"] = ""
+    return line
+
+
+def collect_claim_lead_ids(lines):
+    out = []
+    for li in lines or []:
+        for lid in line_lead_ids(li):
+            if lid not in out:
+                out.append(lid)
+    return out
+
+
+def _add_line_lead(line, lead_id, customer=""):
+    lead_id = str(lead_id or "").strip()
+    if not lead_id:
+        return line
+    ids = line_lead_ids(line)
+    names = line_lead_customers(line)
+    if lead_id in ids:
+        names[ids.index(lead_id)] = customer or names[ids.index(lead_id)]
+    else:
+        ids.append(lead_id)
+        names.append(customer or "")
+    stamp_line_leads(line, list(zip(ids, names)))
+    return line
+
+
+def _drop_line_lead(line, lead_id):
+    lead_id = str(lead_id or "").strip()
+    ids = line_lead_ids(line)
+    names = line_lead_customers(line)
+    if lead_id not in ids:
+        return line
+    i = ids.index(lead_id)
+    ids.pop(i)
+    if i < len(names):
+        names.pop(i)
+    stamp_line_leads(line, list(zip(ids, names)))
+    if ids:
+        line["matchedBy"] = "manual"
+    return line
+
+
+def _restore_manual_line_joins(new_lines, old_lines):
+    """Keep desk-made Extra Support joins across a Coulson re-fetch."""
+    by_id = {}
+    for li in old_lines or []:
+        if not isinstance(li, dict):
+            continue
+        key = str(li.get("lineId") or "").strip()
+        if key:
+            by_id[key] = li
+    for line in new_lines or []:
+        if not isinstance(line, dict):
+            continue
+        old = by_id.get(str(line.get("lineId") or "").strip())
+        if not old or old.get("matchedBy") != "manual":
+            continue
+        ids = line_lead_ids(old)
+        if not ids:
+            continue
+        stamp_line_leads(line, list(zip(ids, line_lead_customers(old))))
+        line["matchedBy"] = "manual"
+    return new_lines
 
 
 def _normalise_lines(raw):
@@ -641,38 +761,52 @@ async def link_claim_lines(db, doc, index=None):
     lines = doc.get("lineItems") or []
     lead_ids, conflicts = [], []
     for line in lines:
+        held = line_lead_ids(line)
+        held_names = line_lead_customers(line)
         lead = await _lead_for_chassis(db, line.get("chassis"), index)
         matched_by = "chassis" if lead else ""
         if not lead:
             lead = await _lead_for_invoice(db, line.get("sourceInvoiceNumber"), index)
             matched_by = "invoice" if lead else ""
         if not lead:
-            if line.get("matchedBy") == "manual" and line.get("leadId"):
+            if line.get("matchedBy") == "manual" and held:
                 # Desk-made Extra Support joins often have no chassis. Relink
-                # must not wipe them just because the vehicle keys are blank.
-                if line["leadId"] not in lead_ids:
-                    lead_ids.append(line["leadId"])
+                # must not wipe them — including a second lead on a 5000+5000 line.
+                stamp_line_leads(line, list(zip(held, held_names)))
+                line["matchedBy"] = "manual"
+                for lid in held:
+                    if lid not in lead_ids:
+                        lead_ids.append(lid)
                 continue
-            line["leadId"] = line["leadCustomer"] = line["matchedBy"] = ""
+            stamp_line_leads(line, [])
             continue
-        line["leadId"] = lead.get("leadId") or ""
-        line["leadCustomer"] = lead.get("customerName") or ""
-        line["matchedBy"] = matched_by
+        auto_id = str(lead.get("leadId") or "").strip()
+        auto_name = str(lead.get("customerName") or "")
+        if line.get("matchedBy") == "manual" and held:
+            pairs = list(zip(held, held_names))
+            if auto_id and auto_id not in held:
+                pairs.insert(0, (auto_id, auto_name))
+            stamp_line_leads(line, pairs)
+            line["matchedBy"] = "manual"
+        else:
+            stamp_line_leads(line, [(auto_id, auto_name)])
+            line["matchedBy"] = matched_by
         want_inv = str(line.get("sourceInvoiceNumber") or "").strip().lower()
         got_inv = str(lead.get("invoiceNumber") or "").strip().lower()
         if matched_by == "chassis" and want_inv and got_inv and want_inv != got_inv:
             line["invoiceMismatch"] = True
             conflicts.append(
                 f"{line.get('chassis')}: claim says invoice {line.get('sourceInvoiceNumber')}, "
-                f"lead {line['leadId']} says {lead.get('invoiceNumber')}")
+                f"lead {auto_id} says {lead.get('invoiceNumber')}")
         else:
             line["invoiceMismatch"] = False
-        if line["leadId"] not in lead_ids:
-            lead_ids.append(line["leadId"])
+        for lid in line_lead_ids(line):
+            if lid not in lead_ids:
+                lead_ids.append(lid)
     doc["lineItems"] = lines
     doc["leadIds"] = lead_ids
-    doc["linkedLineCount"] = sum(1 for li in lines if li.get("leadId"))
-    doc["unlinkedLineCount"] = sum(1 for li in lines if not li.get("leadId"))
+    doc["linkedLineCount"] = sum(1 for li in lines if line_lead_ids(li))
+    doc["unlinkedLineCount"] = sum(1 for li in lines if not line_lead_ids(li))
     doc["invoiceConflicts"] = conflicts
     return doc
 
@@ -737,6 +871,8 @@ async def sync_claims(db, *, detail_budget=250, token=None):
                 detail_failures += 1
                 log.exception("Coulson journey %s failed", note_id)
         merged.setdefault("lineItems", existing.get("lineItems") or [])
+        _restore_manual_line_joins(
+            merged.get("lineItems") or [], existing.get("lineItems") or [])
         merged = await link_claim_lines(db, merged, lead_index)
         merged["missingFromOem"] = False
         if merged.get("linkedLineCount"):
@@ -982,8 +1118,7 @@ async def register_match_index(db):
                 "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
             }
         for line in row.get("lineItems") or []:
-            lead_id = line.get("leadId") or ""
-            if lead_id:
+            for lead_id in line_lead_ids(line):
                 _absorb_line(by_lead.setdefault(lead_id, _empty_match_entry()), row, line)
             ch = oem_sync._norm_chassis(line.get("chassis"))
             if ch:
@@ -1280,31 +1415,40 @@ async def oem_only_lines(db, register_pairs):
         if num and manual.get(num):
             continue
         for line in row.get("lineItems") or []:
-            lead_id = line.get("leadId") or ""
+            leads = line_lead_ids(line)
+            names = line_lead_customers(line)
             key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
-            if lead_id and key and (lead_id, key) in register_pairs:
+            if leads and key and all((lid, key) in register_pairs for lid in leads):
                 continue
-            if lead_id and not key and any(p[0] == lead_id for p in register_pairs):
+            if leads and not key and any(p[0] in leads for p in register_pairs):
                 # The lead is in the register; the phrase just did not map. That is the
                 # `unmapped` amber on the register side, not a missing row here.
                 continue
-            out.append({
-                "claimNumber": row.get("claimNumber") or "",
-                "oemStatus": row.get("status") or "",
-                "stageLabel": row.get("stageLabel") or "",
-                "stageDays": int(row.get("stageDays") or 0),
-                "createdDate": row.get("createdDate") or "",
-                "leadId": lead_id,
-                "customer": line.get("leadCustomer") or "",
-                "chassis": line.get("chassis") or "",
-                "sourceInvoiceNumber": line.get("sourceInvoiceNumber") or "",
-                "description": line.get("description") or "",
-                "claimType": line.get("claimType") or "",
-                "mappedComponent": key,
-                "amount": round2(line.get("totalAmount")),
-                "reason": "unknown_lead" if not lead_id else (
-                    "unmapped_component" if not key else "missing_register_row"),
-            })
+            missing = [lid for lid in leads if not key or (lid, key) not in register_pairs]
+            show = missing or [""]
+            for i, lead_id in enumerate(show):
+                name = ""
+                if lead_id and lead_id in leads:
+                    name = names[leads.index(lead_id)] if leads.index(lead_id) < len(names) else ""
+                out.append({
+                    "claimNumber": row.get("claimNumber") or "",
+                    "oemStatus": row.get("status") or "",
+                    "stageLabel": row.get("stageLabel") or "",
+                    "stageDays": int(row.get("stageDays") or 0),
+                    "createdDate": row.get("createdDate") or "",
+                    "leadId": lead_id,
+                    "lineId": str(line.get("lineId") or ""),
+                    "customer": name or (line.get("leadCustomer") or ""),
+                    "chassis": line.get("chassis") or "",
+                    "sourceInvoiceNumber": line.get("sourceInvoiceNumber") or "",
+                    "description": line.get("description") or "",
+                    "claimType": line.get("claimType") or "",
+                    "mappedComponent": key,
+                    "amount": round2(line.get("totalAmount")),
+                    "hasVehicle": bool(line.get("chassis") or line.get("sourceInvoiceNumber")),
+                    "reason": "unknown_lead" if not lead_id else (
+                        "unmapped_component" if not key else "missing_register_row"),
+                })
     out.sort(key=lambda r: -r["amount"])
     return out
 
@@ -1357,18 +1501,18 @@ def claim_register_match(row, pairs, manual_links=None):
                 "mappedComponents": []}
     states, keys = [], []
     for line in lines:
-        lead_id = line.get("leadId") or ""
+        leads = line_lead_ids(line)
         key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
         lid = str(line.get("lineId") or "")
         if key:
             keys.append(key)
         if lid and lid in line_ids_linked:
             states.append("in_register")
-        elif not lead_id:
+        elif not leads:
             states.append("unknown_lead")
         elif not key:
             states.append("unmapped")
-        elif (lead_id, key) in pairs:
+        elif any((lead_id, key) in pairs for lead_id in leads):
             states.append("in_register")
         else:
             states.append("missing_register")
@@ -1450,7 +1594,8 @@ def _claim_matches_query(row, *, q="", chassis="", invoice=""):
 
 
 async def list_claims(db, *, status="", lead_id="", unlinked=False,
-                      q="", chassis="", invoice="", missing_doc=False):
+                      q="", chassis="", invoice="", missing_doc=False,
+                      missing_vehicle=False, exclude_missing_vehicle=False):
     filt = {}
     if status:
         filt["status"] = status
@@ -1461,6 +1606,10 @@ async def list_claims(db, *, status="", lead_id="", unlinked=False,
         rows = [r for r in rows if not (r.get("linkedLineCount") or 0)]
     if missing_doc:
         rows = [r for r in rows if not stamp_document_flag(r).get("hasDocument")]
+    if missing_vehicle:
+        rows = [r for r in rows if not _lines_have_vehicle(r.get("lineItems"))]
+    elif exclude_missing_vehicle:
+        rows = [r for r in rows if _lines_have_vehicle(r.get("lineItems"))]
     if q or chassis or invoice:
         rows = [r for r in rows if _claim_matches_query(
             r, q=q, chassis=chassis, invoice=invoice)]
@@ -1477,7 +1626,7 @@ async def claims_for_lead(db, lead_id):
     out = []
     async for row in db[CLAIMS_COLLECTION].find({"leadIds": lead_id}):
         row.pop("_id", None)
-        mine = [li for li in (row.get("lineItems") or []) if li.get("leadId") == lead_id]
+        mine = [li for li in (row.get("lineItems") or []) if lead_id in line_lead_ids(li)]
         out.append({
             **{k: v for k, v in row.items() if k != "lineItems"},
             "lineItems": mine,
@@ -1598,6 +1747,7 @@ async def claims_summary(db):
             "syncedAt": doc.get("claimsSyncedAt") or "",
             "detailFailures": doc.get("claimDetailFailures") or 0,
             "withVehicle": with_vehicle,
+            "missingVehicle": max(0, total - with_vehicle),
             "missingDocument": missing_doc,
         },
     }
@@ -1614,6 +1764,113 @@ async def find_oem_claim(db, claim_number):
         {"claimNumber": {"$regex": f"^{re.escape(number)}$", "$options": "i"}})
 
 
+async def resolve_oem_create_target(db, *, claim_number, line_id="", lead_id="",
+                                    component_key=""):
+    """Pick the OEM line + existing CRM lead + component. Never inserts a lead."""
+    oem = await find_oem_claim(db, claim_number)
+    if not oem:
+        raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
+    if str(oem.get("status") or "") == "Cancelled":
+        raise ValueError("That OEM claim is cancelled.")
+    lines = _ensure_line_ids(list(oem.get("lineItems") or []))
+    want_line = str(line_id or "").strip()
+    if want_line:
+        targets = [li for li in lines if str(li.get("lineId") or "") == want_line]
+        if not targets:
+            raise ValueError("That claim item is not on this OEM claim.")
+        line = targets[0]
+    elif len(lines) == 1:
+        line = lines[0]
+    elif not lines:
+        raise ValueError("This OEM claim has no line items. Sync from Euler first.")
+    else:
+        raise ValueError(
+            f"This OEM claim has {len(lines)} items. Create each item separately.")
+    want_lead = str(lead_id or line.get("leadId") or "").strip()
+    lead = await db.leads.find_one({"leadId": want_lead}) if want_lead else None
+    if not lead:
+        lead = await _lead_for_chassis(db, line.get("chassis"))
+    if not lead:
+        lead = await _lead_for_invoice(db, line.get("sourceInvoiceNumber"))
+    if not lead:
+        raise ValueError("Pick an existing lead. This will not create a new lead.")
+    key = str(component_key or "").strip() or map_claim_type_to_component(
+        line.get("claimType"), line.get("description"))
+    if not key:
+        raise ValueError("Pick a scheme component. The OEM wording did not map.")
+    return {
+        "oem": oem,
+        "line": line,
+        "lead": lead,
+        "componentKey": key,
+        "claimNumber": str(oem.get("claimNumber") or "").strip(),
+        "lineId": str(line.get("lineId") or ""),
+    }
+
+
+async def ensure_register_row(db, lead, component_key, *, claim_amount=0.0,
+                              eligible_claim=0.0):
+    """Insert a Scheme Claim Register row for an existing lead. Money is scheme/lead only."""
+    import commercial as ce
+    lead_id = str((lead or {}).get("leadId") or "").strip()
+    key = str(component_key or "").strip()
+    if not lead_id or not key:
+        raise ValueError("Lead and scheme component are required.")
+    rec = await db.claims.find_one(
+        {"leadId": lead_id, "componentKey": key, "manual": {"$ne": True}})
+    if rec:
+        rec.pop("_id", None)
+        return rec, False
+    amt = round2(claim_amount)
+    elig = round2(eligible_claim if eligible_claim else claim_amount)
+    doc = {
+        "claimId": f"CLM-{lead_id}-{key}",
+        "leadId": lead_id,
+        "customer": lead.get("customerName") or "",
+        "model": lead.get("interestedModel") or "",
+        "variant": lead.get("variant") or "",
+        "bookingDate": lead.get("bookingDate") or "",
+        "executive": lead.get("executive") or "",
+        "component": ce.SCHEME_COMPONENT_LABELS.get(key, key),
+        "componentKey": key,
+        "eligibleClaim": elig,
+        "claimAmount": amt,
+        "receivedAmount": 0.0,
+        "claimStatus": "Pending",
+        "claimReference": "",
+        "source": "Created from OEM claim",
+        "manual": False,
+        "chassisNumber": lead.get("chassisNumber") or "",
+        "invoiceNumber": lead.get("invoiceNumber") or "",
+        "schemeMonth": ce.scheme_month_from_date(
+            lead.get("schemeAsOf") or lead.get("bookingDate") or ""),
+        "submittedDate": "",
+        "approvedDate": "",
+    }
+    await db.claims.insert_one(dict(doc))
+    return doc, True
+
+
+async def create_register_from_oem(db, *, claim_number, line_id="", lead_id="",
+                                   component_key="", claim_amount=0.0,
+                                   eligible_claim=0.0):
+    """Create the missing register row (if needed) and match it to the OEM line.
+
+    Coulson claimed/approved amounts are never written onto the register.
+    """
+    target = await resolve_oem_create_target(
+        db, claim_number=claim_number, line_id=line_id, lead_id=lead_id,
+        component_key=component_key)
+    rec, created = await ensure_register_row(
+        db, target["lead"], target["componentKey"],
+        claim_amount=claim_amount, eligible_claim=eligible_claim)
+    linked = await link_register_to_oem(
+        db, lead_id=target["lead"]["leadId"], component_key=target["componentKey"],
+        claim_number=target["claimNumber"], line_id=target["lineId"])
+    return {"created": created, "register": linked["register"] or rec,
+            "oemClaim": linked["oemClaim"]}
+
+
 async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line_id=""):
     """Desk-made join. Never copies Coulson amounts into db.claims.
 
@@ -1621,6 +1878,9 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     id is only allowed when exactly one unmatched item is a candidate — otherwise
     the desk must pick the line so two customers on one claim id are not glued
     to the same lead.
+
+    One Extra Support line can itself cover two leads (5000+5000=10000). Matching
+    a second lead ADDS it to that line; it does not replace the first.
     """
     lead_id = str(lead_id or "").strip()
     component_key = str(component_key or "").strip()
@@ -1662,15 +1922,17 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     prev_line = str(rec.get("manualOemLineId") or "").strip()
     target_ids = {str(li.get("lineId") or "") for li in targets}
     for li in lines:
-        if (li.get("matchedBy") == "manual" and li.get("leadId") == lead_id
-                and (not prev_line or str(li.get("lineId") or "") == prev_line)
-                and str(li.get("lineId") or "") not in target_ids):
-            li["leadId"] = ""
-            li["leadCustomer"] = ""
-            li["matchedBy"] = ""
+        if str(li.get("lineId") or "") in target_ids:
+            continue
+        if lead_id not in line_lead_ids(li):
+            continue
+        if li.get("matchedBy") != "manual":
+            continue
+        if prev_line and str(li.get("lineId") or "") != prev_line:
+            continue
+        _drop_line_lead(li, lead_id)
     for li in targets:
-        li["leadId"] = lead_id
-        li["leadCustomer"] = customer
+        _add_line_lead(li, lead_id, customer)
         li["matchedBy"] = "manual"
     chosen_id = str(targets[0].get("lineId") or "")
     patch = {
@@ -1680,16 +1942,12 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
         "claimReference": number,
     }
     await db.claims.update_one({"_id": rec["_id"]}, {"$set": patch})
-    lead_ids = []
-    for li in lines:
-        lid = li.get("leadId")
-        if lid and lid not in lead_ids:
-            lead_ids.append(lid)
+    lead_ids = collect_claim_lead_ids(lines)
     oem_patch = {
         "lineItems": lines,
         "leadIds": lead_ids,
-        "linkedLineCount": sum(1 for li in lines if li.get("leadId")),
-        "unlinkedLineCount": sum(1 for li in lines if not li.get("leadId")),
+        "linkedLineCount": sum(1 for li in lines if line_lead_ids(li)),
+        "unlinkedLineCount": sum(1 for li in lines if not line_lead_ids(li)),
     }
     await db[CLAIMS_COLLECTION].update_one(
         {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
@@ -1718,27 +1976,21 @@ async def clear_register_oem_link(db, *, lead_id, component_key):
             lines = _ensure_line_ids(list(oem.get("lineItems") or []))
             changed = False
             for li in lines:
-                if li.get("matchedBy") != "manual" or li.get("leadId") != lead_id:
+                if lead_id not in line_lead_ids(li):
                     continue
                 if line_id and str(li.get("lineId") or "") != line_id:
                     continue
-                li["leadId"] = ""
-                li["leadCustomer"] = ""
-                li["matchedBy"] = ""
+                _drop_line_lead(li, lead_id)
                 changed = True
             if changed:
-                lead_ids = []
-                for li in lines:
-                    lid = li.get("leadId")
-                    if lid and lid not in lead_ids:
-                        lead_ids.append(lid)
+                lead_ids = collect_claim_lead_ids(lines)
                 await db[CLAIMS_COLLECTION].update_one(
                     {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
                     {"$set": {
                         "lineItems": lines,
                         "leadIds": lead_ids,
-                        "linkedLineCount": sum(1 for li in lines if li.get("leadId")),
-                        "unlinkedLineCount": sum(1 for li in lines if not li.get("leadId")),
+                        "linkedLineCount": sum(1 for li in lines if line_lead_ids(li)),
+                        "unlinkedLineCount": sum(1 for li in lines if not line_lead_ids(li)),
                     }})
     rec.pop("manualOemClaimNumber", None)
     rec.pop("manualOemLineId", None)

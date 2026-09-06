@@ -47,6 +47,7 @@ const NAV = [
     // own scheme entitlement, the second is Euler's claim workflow mirrored in.
     { to: "/claims", label: "Scheme Claim Register", icon: ReceiptText, oemClaimDesk: true },
     { to: "/oem-claims", label: "OEM Claim Settlements", icon: FileCheck, oemClaimDesk: true },
+    { to: "/oem-claims/no-vehicle", label: "OEM claims — no chassis", icon: FileCheck, oemClaimDesk: true },
     { to: "/dropped-extra-support", label: "Dropped Extra Support", icon: Ban, oemClaimDesk: true },
     { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },

@@ -6412,10 +6412,12 @@ async def coulson_sync_claims(act=Depends(actor)):
 @api.get("/oem-claims", dependencies=[Depends(oem_claim_desk_only)])
 async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False,
                                  q: str = "", chassis: str = "", invoice: str = "",
-                                 missingDoc: bool = False):
+                                 missingDoc: bool = False, missingVehicle: bool = False,
+                                 excludeMissingVehicle: bool = False):
     return await oem_claims.list_claims(
         db, status=status, lead_id=leadId, unlinked=unlinked,
-        q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc)
+        q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc,
+        missing_vehicle=missingVehicle, exclude_missing_vehicle=excludeMissingVehicle)
 
 
 @api.get("/oem-claims/summary", dependencies=[Depends(oem_claim_desk_only)])
@@ -8653,9 +8655,75 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
 
 class OemClaimMatchIn(BaseModel):
     leadId: str = ""
+    leadIds: List[str] = Field(default_factory=list)
     componentKey: str = ""
     claimNumber: str = ""
     lineId: str = ""
+
+
+def _oem_match_lead_ids(body: "OemClaimMatchIn"):
+    ids = []
+    for x in list(body.leadIds or []) + [body.leadId]:
+        x = str(x or "").strip()
+        if x and x not in ids:
+            ids.append(x)
+    return ids
+
+
+async def _scheme_register_amounts(lead, component_key):
+    """Scheme/lead money only — never the Coulson line amount."""
+    scheme_rows = await get_scheme_rows()
+    shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
+    key = str(component_key or "")
+    amt = ce.round2(ce.num((shares.get("displayByComponent") or {}).get(key)))
+    elig = ce.round2(ce.num((shares.get("eligibleByComponent") or {}).get(key)))
+    if key == ce.OEM_EXTRA_SUPPORT_KEY:
+        recv = ce.round2(ce.num(lead.get("oemExtraSupportReceived")))
+        amt = recv
+        elig = recv
+    return amt, elig
+
+
+@api.post("/claims/oem-create", dependencies=[Depends(oem_claim_desk_only)])
+async def create_claim_from_oem(body: OemClaimMatchIn, act=Depends(actor)):
+    """Create the missing Scheme Claim Register row and match it to this OEM line.
+
+    Does not invent a lead. Does not copy Coulson claimed/approved amounts into
+    db.claims money fields.
+    """
+    lead_ids = _oem_match_lead_ids(body)
+    created_any = False
+    last = {}
+    recs = []
+    try:
+        if not lead_ids:
+            target = await oem_claims.resolve_oem_create_target(
+                db, claim_number=body.claimNumber, line_id=body.lineId,
+                lead_id="", component_key=body.componentKey)
+            lead_ids = [target["lead"]["leadId"]]
+        for lid in lead_ids:
+            target = await oem_claims.resolve_oem_create_target(
+                db, claim_number=body.claimNumber, line_id=body.lineId,
+                lead_id=lid, component_key=body.componentKey)
+            amt, elig = await _scheme_register_amounts(target["lead"], target["componentKey"])
+            out = await oem_claims.create_register_from_oem(
+                db, claim_number=body.claimNumber, line_id=body.lineId,
+                lead_id=target["lead"]["leadId"], component_key=target["componentKey"],
+                claim_amount=amt, eligible_claim=elig)
+            created_any = created_any or bool(out.get("created"))
+            last = out
+            recs.append(out.get("register") or {})
+            await sheet_sync("claims", out.get("register") or {})
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await oem_claims.apply_oem_filing_to_register(db)
+    rec = last.get("register") or {}
+    await write_audit(act, "oem-create", "claim", leadId=rec.get("leadId"),
+                      new={"componentKey": rec.get("componentKey"),
+                           "claimNumber": body.claimNumber, "lineId": body.lineId,
+                           "created": created_any, "leadIds": lead_ids})
+    return {"ok": True, "created": created_any, "register": rec,
+            "registers": recs, "oemClaim": last.get("oemClaim")}
 
 
 @api.post("/claims/oem-match", dependencies=[Depends(oem_claim_desk_only)])
@@ -8666,17 +8734,22 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
     never taken from Coulson. A debit note with several items (Extra Support) is
     matched one line at a time via `lineId`.
     """
+    lead_ids = _oem_match_lead_ids(body)
+    if not lead_ids:
+        raise HTTPException(422, "Pick at least one existing lead.")
+    last = {}
     try:
-        out = await oem_claims.link_register_to_oem(
-            db, lead_id=body.leadId, component_key=body.componentKey,
-            claim_number=body.claimNumber, line_id=body.lineId)
+        for lid in lead_ids:
+            last = await oem_claims.link_register_to_oem(
+                db, lead_id=lid, component_key=body.componentKey,
+                claim_number=body.claimNumber, line_id=body.lineId)
     except ValueError as e:
         raise HTTPException(422, str(e))
     await oem_claims.apply_oem_filing_to_register(db)
-    await write_audit(act, "oem-match", "claim", leadId=body.leadId,
+    await write_audit(act, "oem-match", "claim", leadId=lead_ids[0],
                       new={"componentKey": body.componentKey, "claimNumber": body.claimNumber,
-                           "lineId": body.lineId})
-    return {"ok": True, **out}
+                           "lineId": body.lineId, "leadIds": lead_ids})
+    return {"ok": True, **last}
 
 
 @api.post("/claims/oem-match/clear", dependencies=[Depends(oem_claim_desk_only)])

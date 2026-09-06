@@ -43,6 +43,37 @@ export function componentLabel(key) {
   return COMPONENT_LABEL[key] || key || "";
 }
 
+export const CREATE_COMPONENTS = Object.entries(COMPONENT_LABEL);
+
+export function lineLeadIds(li) {
+  const ids = [...(li?.leadIds || [])].map(String).filter(Boolean);
+  if (li?.leadId && !ids.includes(li.leadId)) ids.unshift(li.leadId);
+  return ids;
+}
+
+export function lineLeadLabel(li, leadId) {
+  const ids = lineLeadIds(li);
+  const names = li?.leadCustomers || [];
+  const i = ids.indexOf(leadId);
+  if (i >= 0 && names[i]) return names[i];
+  if (li?.leadId === leadId) return li.leadCustomer || "";
+  return "";
+}
+
+/** Extra Support prose like `5000+5000=10000` + two names joined by &. */
+export function looksCombinedSupport(li) {
+  const blob = `${li?.description || ""} ${li?.customerName || ""}`;
+  return /\d+\s*\+\s*\d+\s*=/.test(blob) || /&|\band\b/i.test(blob);
+}
+
+export function lineNeedsCreate(row, li) {
+  const st = row?.registerMatch?.state || "";
+  const n = lineLeadIds(li).length;
+  if (st === "in_register" && n) return false;
+  return st === "missing_register" || st === "unknown_lead" || st === "unmapped"
+    || st === "partial" || !n;
+}
+
 /** Euler's own wording for a debit-note line (customer, claim type, approver). */
 export function oemLineText(li) {
   const desc = String(li?.description || "").trim();
@@ -52,7 +83,8 @@ export function oemLineText(li) {
   return bits.join(" · ") || componentLabel(li?.componentKey) || "Claim item";
 }
 
-export function oemClaimsHref({ q, chassis, invoice, leadId } = {}) {
+export function oemClaimsHref({ q, chassis, invoice, leadId, noVehicle } = {}) {
+  if (noVehicle) return "/oem-claims/no-vehicle";
   const p = new URLSearchParams();
   if (q) p.set("q", q);
   if (chassis) p.set("chassis", chassis);
