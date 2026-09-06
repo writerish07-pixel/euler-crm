@@ -8724,44 +8724,25 @@ async def claim_match_options():
 
 @api.post("/claims/oem-create", dependencies=[Depends(oem_claim_desk_only)])
 async def create_claim_from_oem(body: OemClaimMatchIn, act=Depends(actor)):
-    """Create the missing Scheme Claim Register row and match it to this OEM line.
+    """Create a Scheme Claim Register entry named from the OEM line.
 
-    Does not invent a lead. Does not copy Coulson claimed/approved amounts into
-    db.claims money fields.
+    Does not invent a lead and does not attach one. Coulson claimed/approved
+    amounts are never written to db.claims. Use Match to join a CRM lead later.
     """
-    lead_ids = _oem_match_lead_ids(body)
-    created_any = False
-    last = {}
-    recs = []
     try:
-        if not lead_ids:
-            target = await oem_claims.resolve_oem_create_target(
-                db, claim_number=body.claimNumber, line_id=body.lineId,
-                lead_id="", component_key=body.componentKey)
-            lead_ids = [target["lead"]["leadId"]]
-        for lid in lead_ids:
-            target = await oem_claims.resolve_oem_create_target(
-                db, claim_number=body.claimNumber, line_id=body.lineId,
-                lead_id=lid, component_key=body.componentKey)
-            amt, elig = await _scheme_register_amounts(target["lead"], target["componentKey"])
-            out = await oem_claims.create_register_from_oem(
-                db, claim_number=body.claimNumber, line_id=body.lineId,
-                lead_id=target["lead"]["leadId"], component_key=target["componentKey"],
-                claim_amount=amt, eligible_claim=elig)
-            created_any = created_any or bool(out.get("created"))
-            last = out
-            recs.append(out.get("register") or {})
-            await sheet_sync("claims", out.get("register") or {})
+        out = await oem_claims.create_named_register_from_oem(
+            db, claim_number=body.claimNumber, line_id=body.lineId,
+            component_key=body.componentKey)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    await oem_claims.apply_oem_filing_to_register(db)
-    rec = last.get("register") or {}
-    await write_audit(act, "oem-create", "claim", leadId=rec.get("leadId"),
+    rec = out.get("register") or {}
+    await sheet_sync("claims", rec)
+    await write_audit(act, "oem-create", "claim", leadId="",
                       new={"componentKey": rec.get("componentKey"),
                            "claimNumber": body.claimNumber, "lineId": body.lineId,
-                           "created": created_any, "leadIds": lead_ids})
-    return {"ok": True, "created": created_any, "register": rec,
-            "registers": recs, "oemClaim": last.get("oemClaim")}
+                           "customer": rec.get("customer"),
+                           "created": out.get("created")})
+    return {"ok": True, **out}
 
 
 @api.post("/claims/oem-match", dependencies=[Depends(oem_claim_desk_only)])

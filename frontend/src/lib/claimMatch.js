@@ -68,10 +68,9 @@ export function looksCombinedSupport(li) {
 
 export function lineNeedsCreate(row, li) {
   const st = row?.registerMatch?.state || "";
-  const n = lineLeadIds(li).length;
-  if (st === "in_register" && n) return false;
+  if (st === "in_register") return false;
   return st === "missing_register" || st === "unknown_lead" || st === "unmapped"
-    || st === "partial" || !n;
+    || st === "partial" || !lineLeadIds(li).length;
 }
 
 /** Euler's own wording for a debit-note line (customer, claim type, approver). */

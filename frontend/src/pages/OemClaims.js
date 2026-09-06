@@ -432,8 +432,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                       <Link2 size={12} /> {lineLeadIds(li).length ? "Add lead" : "Match"}
                     </button>
                     {lineNeedsCreate(r, li) ? (
-                      <CreateOemButton row={r} line={li} onNeedPick={() => setMatchRow({ ...r, matchLine: li, createMode: true })}
-                        onDone={load} />
+                      <CreateOemButton row={r} line={li} onDone={load} />
                     ) : null}
                   </div>
                 </div>
@@ -466,9 +465,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                 <Link2 size={12} /> {lineLeadIds((r.lineItems || [])[0] || {}).length ? "Add lead" : "Match"}
               </button>
               {lineNeedsCreate(r, (r.lineItems || [])[0] || {}) ? (
-                <CreateOemButton row={r} line={(r.lineItems || [])[0] || {}}
-                  onNeedPick={() => setMatchRow({ ...r, matchLine: (r.lineItems || [])[0], createMode: true })}
-                  onDone={load} />
+                <CreateOemButton row={r} line={(r.lineItems || [])[0] || {}} onDone={load} />
               ) : null}
             </div>
             )
@@ -486,34 +483,30 @@ export default function OemClaims({ missingVehicleOnly = false }) {
   );
 }
 
-function CreateOemButton({ row, line, onNeedPick, onDone }) {
+function CreateOemButton({ row, line, onDone }) {
   const [busy, setBusy] = useState(false);
-  const oneClick = Boolean(line?.leadId);
   const go = async (e) => {
     e?.stopPropagation?.();
-    if (!oneClick) return onNeedPick();
     setBusy(true);
     try {
       const out = await post("/claims/oem-create", {
         claimNumber: row.claimNumber,
         lineId: line.lineId || "",
-        leadId: line.leadId || "",
       });
+      const name = out.register?.customer || out.register?.claimId || "register row";
       toast.success(out.created
-        ? `Created ${out.register?.claimId || "register row"} and matched ${row.claimNumber}`
-        : `Matched ${row.claimNumber} to the existing register row`);
+        ? `Created ${name} from ${row.claimNumber}`
+        : `${name} is already on the scheme register`);
       onDone();
     } catch (err) {
-      const detail = err?.response?.data?.detail || "";
-      if (/pick an existing lead|pick a scheme component/i.test(detail)) onNeedPick();
-      else toast.error(detail || "Could not create the register row");
+      toast.error(err?.response?.data?.detail || "Could not create the register row");
     } finally { setBusy(false); }
   };
   return (
     <button type="button" data-testid={`oem-create-${row.claimNumber}-${line?.lineId || "0"}`}
       onClick={go} disabled={busy}
       className="text-xs text-violet-800 hover:underline inline-flex items-center gap-1">
-      <Plus size={12} /> {busy ? "Creating…" : (oneClick ? "Create" : "Create…")}
+      <Plus size={12} /> {busy ? "Creating…" : "Create"}
     </button>
   );
 }
@@ -565,39 +558,21 @@ function MatchRegisterModal({ row, onClose, onDone }) {
     ? openLeadRows.filter((r) => r.componentKey === relatedKey)
     : openLeadRows;
   if (!options.length) options = openLeadRows.length ? openLeadRows : leadRows;
-  if (row.createMode && relatedKey && leadId
-      && !options.some((r) => r.componentKey === relatedKey)) {
-    options.push({
-      leadId, componentKey: relatedKey,
-      component: componentLabel(relatedKey), claimStatus: "will create",
-    });
-  }
   const extraCandidates = leads.filter((r) => r.leadId && !picked.includes(r.leadId)
     && (!componentKey || register.some((c) => c.leadId === r.leadId && c.componentKey === componentKey
       && isOpenRegisterRow(c))));
-  const hasRow = picked.length > 0 && picked.every((id) =>
-    register.some((r) => r.leadId === id && r.componentKey === componentKey));
-  const createFirst = Boolean(row.createMode) && !hasRow;
 
   const save = async () => {
     if (!leadId || !componentKey) return toast.error("Pick a lead and a scheme component");
     setBusy(true);
     try {
-      const payload = {
+      await post("/claims/oem-match", {
         leadId, leadIds: picked, componentKey,
         claimNumber: row.claimNumber, lineId: line.lineId || "",
-      };
-      if (createFirst) {
-        const out = await post("/claims/oem-create", payload);
-        toast.success(out.created
-          ? `Created the register row and matched ${row.claimNumber}`
-          : `Matched ${row.claimNumber} to the existing register row`);
-      } else {
-        await post("/claims/oem-match", payload);
-        toast.success(picked.length > 1
-          ? `Matched ${row.claimNumber} to ${picked.length} leads`
-          : `Matched ${row.claimNumber} to the scheme register`);
-      }
+      });
+      toast.success(picked.length > 1
+        ? `Matched ${row.claimNumber} to ${picked.length} leads`
+        : `Matched ${row.claimNumber} to the scheme register`);
       onDone();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Could not save match");
@@ -619,9 +594,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   return (
     <Modal onClose={onClose} width="max-w-lg" testid="oem-match-register-modal">
       <div className="p-5 border-b border-line">
-        <div className="font-heading font-bold text-ink">
-          {createFirst ? "Create in Scheme Claim Register" : "Match to Scheme Claim Register"}
-        </div>
+        <div className="font-heading font-bold text-ink">Match to Scheme Claim Register</div>
         <div className="text-xs text-ink-faint mt-1 font-mono">{row.claimNumber}</div>
         {oemLineText(line) ? (
           <div className="text-xs text-ink-soft mt-2 whitespace-normal leading-snug">{oemLineText(line)}</div>
@@ -702,7 +675,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
         <div className="flex gap-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button onClick={save} disabled={busy} data-testid="oem-create-save">
-            {busy ? "Saving…" : (createFirst ? "Create & match" : "Save match")}
+            {busy ? "Saving…" : "Save match"}
           </Button>
         </div>
       </div>

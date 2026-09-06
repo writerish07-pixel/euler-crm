@@ -1655,91 +1655,84 @@ async def _orphan_oem(claim_number, *, line_id="line-1", claimed=12345.67,
     })
 
 
+def test_oem_entry_name_uses_euler_customer_not_a_lead():
+    line = {"description":
+            "Claim Type :- Additiniol Support 5000+5000=10000 "
+            "Customer Name:- Mahendra Kumar Yadav & Nagar Mal Yadav "
+            "Approved By :- Siddarth Dubey"}
+    assert oem_claims.oem_entry_name(line) == "Mahendra Kumar Yadav & Nagar Mal Yadav"
+    assert oem_claims.oem_entry_name({
+        "description": "Referral Commission for invoice AF-122-I26270073",
+    }).startswith("Referral Commission")
+
+
 @pytest.mark.asyncio
-async def test_oem_create_inserts_register_row_and_matches_without_coulson_money(client):
-    """Create on a missing_register line: new scheme row, then matched.
-
-    The Coulson claimed amount is 12345.67 so a leaked copy is obvious. The
-    register may get a scheme share (often 0 on a bare lead) but never that
-    payout figure, and receivedAmount stays 0 until the money desk books it.
-    """
-    lead_id = await _delivered_lead(client, chassis="MD9CREATE26G900001",
-                                    invoice="AF-999-I26280001")
+async def test_oem_create_inserts_named_register_row_without_a_lead(client):
+    """Create copies the OEM customer/wording onto the register. No lead."""
+    leads_before = await server.db.leads.count_documents({})
     await _orphan_oem("AF-999-CLCREATE", line_id="create-1", claimed=12345.67,
-                      chassis="MD9CREATE26G900001", invoice="AF-999-I26280001",
-                      lead_id=lead_id)
-    listed = (await client.get("/api/oem-claims", params={"q": "AF-999-CLCREATE"})).json()
-    assert listed and listed[0]["registerMatch"]["state"] == "missing_register"
-
+                      chassis="", invoice="", lead_id="",
+                      description="Referral Commission for invoice AF-122-I26270073")
     r = await client.post("/api/claims/oem-create", json={
-        "claimNumber": "AF-999-CLCREATE", "lineId": "create-1", "leadId": lead_id})
+        "claimNumber": "AF-999-CLCREATE", "lineId": "create-1"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["created"] is True
     rec = body["register"]
-    assert rec["claimId"] == f"CLM-{lead_id}-referralBonus"
+    assert rec["leadId"] in ("", None)
+    assert "Referral Commission" in rec["customer"]
     assert rec["manual"] is not True
     assert rec["receivedAmount"] == 0
-    assert rec["claimAmount"] != 12345.67
-    assert rec["eligibleClaim"] != 12345.67
+    assert rec["claimAmount"] == 0
+    assert rec["eligibleClaim"] == 0
     assert rec["manualOemClaimNumber"] == "AF-999-CLCREATE"
     assert rec["manualOemLineId"] == "create-1"
-
-    stored = await server.db.claims.find_one(
-        {"leadId": lead_id, "componentKey": "referralBonus", "manual": {"$ne": True}})
-    assert stored["receivedAmount"] == 0
-    assert stored["claimAmount"] != 12345.67
-    assert stored["source"] == "Created from OEM claim"
-
+    assert await server.db.leads.count_documents({}) == leads_before
     oem = (await client.get("/api/oem-claims", params={"q": "AF-999-CLCREATE"})).json()[0]
     assert oem["registerMatch"]["state"] == "in_register"
+    assert not oem["lineItems"][0].get("leadId")
     only = (await client.get("/api/claims/oem-only")).json()
     assert not [x for x in only["rows"] if x["claimNumber"] == "AF-999-CLCREATE"]
 
 
 @pytest.mark.asyncio
 async def test_oem_create_without_a_lead_does_not_invent_one(client):
-    await _orphan_oem("AF-999-CLNOLEAD", chassis="", invoice="", lead_id="")
+    await _orphan_oem("AF-999-CLNOLEAD", chassis="", invoice="", lead_id="",
+                      description="Insurance Benefits Up to for invoice AF-122-I1")
     leads_before = await server.db.leads.count_documents({})
-    claims_before = await server.db.claims.count_documents(
-        {"source": "Created from OEM claim"})
     r = await client.post("/api/claims/oem-create", json={
         "claimNumber": "AF-999-CLNOLEAD", "lineId": "line-1"})
-    assert r.status_code == 422, r.text
-    assert "lead" in r.json()["detail"].lower()
+    assert r.status_code == 200, r.text
+    rec = r.json()["register"]
+    assert rec["leadId"] in ("", None)
+    assert "Insurance Benefits" in rec["customer"]
     assert await server.db.leads.count_documents({}) == leads_before
-    assert await server.db.claims.count_documents(
-        {"source": "Created from OEM claim"}) == claims_before
 
 
 @pytest.mark.asyncio
-async def test_oem_create_on_existing_register_row_only_links(client):
+async def test_oem_create_does_not_reuse_or_stamp_an_existing_lead_row(client):
     lead_id = await _delivered_lead(client, chassis="MD9EXIST26G900002",
                                     invoice="AF-999-I26280002")
     await _register_row(lead_id, "referralBonus", 4000.0)
     await _orphan_oem("AF-999-CLEXIST", line_id="exist-1", claimed=12345.67,
                       chassis="MD9EXIST26G900002", invoice="AF-999-I26280002",
-                      lead_id=lead_id)
+                      lead_id=lead_id,
+                      description="Referral Commission for invoice AF-999-I26280002")
     r = await client.post("/api/claims/oem-create", json={
         "claimNumber": "AF-999-CLEXIST", "lineId": "exist-1", "leadId": lead_id})
     assert r.status_code == 200, r.text
-    assert r.json()["created"] is False
-    assert await server.db.claims.count_documents(
-        {"leadId": lead_id, "componentKey": "referralBonus"}) == 1
+    assert r.json()["created"] is True
+    assert r.json()["register"]["leadId"] in ("", None)
     stored = await server.db.claims.find_one(
         {"leadId": lead_id, "componentKey": "referralBonus"})
     assert stored["eligibleClaim"] == 4000.0
-    assert stored["receivedAmount"] == 0
-    assert stored["claimAmount"] == 4000.0
-    assert stored["manualOemClaimNumber"] == "AF-999-CLEXIST"
+    assert stored.get("manualOemClaimNumber") in ("", None)
+    assert await server.db.claims.count_documents(
+        {"leadId": lead_id, "componentKey": "referralBonus"}) == 1
 
 
 @pytest.mark.asyncio
 async def test_oem_create_one_line_does_not_stamp_siblings(client):
-    a = await _delivered_lead(client, chassis="MD9CRMULTI26G900001",
-                              invoice="AF-999-I26281001")
-    b = await _delivered_lead(client, chassis="MD9CRMULTI26G900002",
-                              invoice="AF-999-I26281002")
     await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
         "debitNoteId": "create-multi",
         "claimNumber": "AF-122-CLCREATE70",
@@ -1757,21 +1750,20 @@ async def test_oem_create_one_line_does_not_stamp_siblings(client):
         "_testSeed": SEED_TAG,
     })
     r = await client.post("/api/claims/oem-create", json={
-        "leadId": a, "componentKey": "oemExtraSupport",
         "claimNumber": "AF-122-CLCREATE70", "lineId": "es-a"})
     assert r.status_code == 200, r.text
     assert r.json()["created"] is True
+    assert r.json()["register"]["customer"] == "A"
     oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLCREATE70"})).json()[0]
     by_id = {li["lineId"]: li for li in oem["lineItems"]}
-    assert by_id["es-a"]["leadId"] == a
-    assert by_id["es-b"]["leadId"] in ("", None)
-    assert await server.db.claims.count_documents(
-        {"componentKey": "oemExtraSupport", "leadId": {"$in": [a, b]}}) == 1
+    assert by_id["es-a"].get("leadId") in ("", None)
+    assert by_id["es-b"].get("leadId") in ("", None)
     stored = await server.db.claims.find_one(
-        {"leadId": a, "componentKey": "oemExtraSupport"})
+        {"manualOemClaimNumber": "AF-122-CLCREATE70", "manualOemLineId": "es-a"})
     assert stored["receivedAmount"] == 0
-    assert stored["claimAmount"] != 10000.0
-    assert stored["manualOemLineId"] == "es-a"
+    assert stored["claimAmount"] == 0
+    assert not await server.db.claims.find_one(
+        {"manualOemClaimNumber": "AF-122-CLCREATE70", "manualOemLineId": "es-b"})
 
 
 @pytest.mark.asyncio
@@ -1931,11 +1923,12 @@ async def test_oem_match_accepts_two_leads_in_one_call(client):
 
 
 @pytest.mark.asyncio
-async def test_oem_create_two_leads_on_one_combined_line(client):
+async def test_oem_create_combined_line_keeps_euler_names_and_ignores_leads(client):
     a = await _delivered_lead(client, chassis="MD9CR2L26G900001",
                               invoice="AF-999-I26284001")
     b = await _delivered_lead(client, chassis="MD9CR2L26G900002",
                               invoice="AF-999-I26284002")
+    leads_before = await server.db.leads.count_documents({})
     await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
         "debitNoteId": "create-2l",
         "claimNumber": "AF-122-CLCR2L",
@@ -1953,13 +1946,13 @@ async def test_oem_create_two_leads_on_one_combined_line(client):
         "leadIds": [a, b], "componentKey": "oemExtraSupport",
         "claimNumber": "AF-122-CLCR2L", "lineId": "es-2l"})
     assert r.status_code == 200, r.text
+    rec = r.json()["register"]
     assert r.json()["created"] is True
-    assert await server.db.claims.count_documents(
-        {"componentKey": "oemExtraSupport", "leadId": {"$in": [a, b]}}) == 2
-    async for rec in server.db.claims.find(
-            {"componentKey": "oemExtraSupport", "leadId": {"$in": [a, b]}}):
-        assert rec["receivedAmount"] == 0
-        assert rec["claimAmount"] != 10000.0
-        assert rec["manualOemLineId"] == "es-2l"
+    assert rec["customer"] == "Mahendra & Nagar Mal"
+    assert rec["leadId"] in ("", None)
+    assert rec["claimAmount"] == 0
+    assert rec["receivedAmount"] == 0
+    assert await server.db.leads.count_documents({}) == leads_before
     oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLCR2L"})).json()[0]
-    assert set(oem["lineItems"][0].get("leadIds") or []) == {a, b}
+    assert not oem["lineItems"][0].get("leadId")
+    assert not (oem["lineItems"][0].get("leadIds") or [])
