@@ -1295,6 +1295,7 @@ async def oem_only_lines(db, register_pairs):
                 "stageDays": int(row.get("stageDays") or 0),
                 "createdDate": row.get("createdDate") or "",
                 "leadId": lead_id,
+                "lineId": str(line.get("lineId") or ""),
                 "customer": line.get("leadCustomer") or "",
                 "chassis": line.get("chassis") or "",
                 "sourceInvoiceNumber": line.get("sourceInvoiceNumber") or "",
@@ -1302,6 +1303,7 @@ async def oem_only_lines(db, register_pairs):
                 "claimType": line.get("claimType") or "",
                 "mappedComponent": key,
                 "amount": round2(line.get("totalAmount")),
+                "hasVehicle": bool(line.get("chassis") or line.get("sourceInvoiceNumber")),
                 "reason": "unknown_lead" if not lead_id else (
                     "unmapped_component" if not key else "missing_register_row"),
             })
@@ -1450,7 +1452,8 @@ def _claim_matches_query(row, *, q="", chassis="", invoice=""):
 
 
 async def list_claims(db, *, status="", lead_id="", unlinked=False,
-                      q="", chassis="", invoice="", missing_doc=False):
+                      q="", chassis="", invoice="", missing_doc=False,
+                      missing_vehicle=False, exclude_missing_vehicle=False):
     filt = {}
     if status:
         filt["status"] = status
@@ -1461,6 +1464,10 @@ async def list_claims(db, *, status="", lead_id="", unlinked=False,
         rows = [r for r in rows if not (r.get("linkedLineCount") or 0)]
     if missing_doc:
         rows = [r for r in rows if not stamp_document_flag(r).get("hasDocument")]
+    if missing_vehicle:
+        rows = [r for r in rows if not _lines_have_vehicle(r.get("lineItems"))]
+    elif exclude_missing_vehicle:
+        rows = [r for r in rows if _lines_have_vehicle(r.get("lineItems"))]
     if q or chassis or invoice:
         rows = [r for r in rows if _claim_matches_query(
             r, q=q, chassis=chassis, invoice=invoice)]
@@ -1598,6 +1605,7 @@ async def claims_summary(db):
             "syncedAt": doc.get("claimsSyncedAt") or "",
             "detailFailures": doc.get("claimDetailFailures") or 0,
             "withVehicle": with_vehicle,
+            "missingVehicle": max(0, total - with_vehicle),
             "missingDocument": missing_doc,
         },
     }
@@ -1612,6 +1620,113 @@ async def find_oem_claim(db, claim_number):
         return row
     return await db[CLAIMS_COLLECTION].find_one(
         {"claimNumber": {"$regex": f"^{re.escape(number)}$", "$options": "i"}})
+
+
+async def resolve_oem_create_target(db, *, claim_number, line_id="", lead_id="",
+                                    component_key=""):
+    """Pick the OEM line + existing CRM lead + component. Never inserts a lead."""
+    oem = await find_oem_claim(db, claim_number)
+    if not oem:
+        raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
+    if str(oem.get("status") or "") == "Cancelled":
+        raise ValueError("That OEM claim is cancelled.")
+    lines = _ensure_line_ids(list(oem.get("lineItems") or []))
+    want_line = str(line_id or "").strip()
+    if want_line:
+        targets = [li for li in lines if str(li.get("lineId") or "") == want_line]
+        if not targets:
+            raise ValueError("That claim item is not on this OEM claim.")
+        line = targets[0]
+    elif len(lines) == 1:
+        line = lines[0]
+    elif not lines:
+        raise ValueError("This OEM claim has no line items. Sync from Euler first.")
+    else:
+        raise ValueError(
+            f"This OEM claim has {len(lines)} items. Create each item separately.")
+    want_lead = str(lead_id or line.get("leadId") or "").strip()
+    lead = await db.leads.find_one({"leadId": want_lead}) if want_lead else None
+    if not lead:
+        lead = await _lead_for_chassis(db, line.get("chassis"))
+    if not lead:
+        lead = await _lead_for_invoice(db, line.get("sourceInvoiceNumber"))
+    if not lead:
+        raise ValueError("Pick an existing lead. This will not create a new lead.")
+    key = str(component_key or "").strip() or map_claim_type_to_component(
+        line.get("claimType"), line.get("description"))
+    if not key:
+        raise ValueError("Pick a scheme component. The OEM wording did not map.")
+    return {
+        "oem": oem,
+        "line": line,
+        "lead": lead,
+        "componentKey": key,
+        "claimNumber": str(oem.get("claimNumber") or "").strip(),
+        "lineId": str(line.get("lineId") or ""),
+    }
+
+
+async def ensure_register_row(db, lead, component_key, *, claim_amount=0.0,
+                              eligible_claim=0.0):
+    """Insert a Scheme Claim Register row for an existing lead. Money is scheme/lead only."""
+    import commercial as ce
+    lead_id = str((lead or {}).get("leadId") or "").strip()
+    key = str(component_key or "").strip()
+    if not lead_id or not key:
+        raise ValueError("Lead and scheme component are required.")
+    rec = await db.claims.find_one(
+        {"leadId": lead_id, "componentKey": key, "manual": {"$ne": True}})
+    if rec:
+        rec.pop("_id", None)
+        return rec, False
+    amt = round2(claim_amount)
+    elig = round2(eligible_claim if eligible_claim else claim_amount)
+    doc = {
+        "claimId": f"CLM-{lead_id}-{key}",
+        "leadId": lead_id,
+        "customer": lead.get("customerName") or "",
+        "model": lead.get("interestedModel") or "",
+        "variant": lead.get("variant") or "",
+        "bookingDate": lead.get("bookingDate") or "",
+        "executive": lead.get("executive") or "",
+        "component": ce.SCHEME_COMPONENT_LABELS.get(key, key),
+        "componentKey": key,
+        "eligibleClaim": elig,
+        "claimAmount": amt,
+        "receivedAmount": 0.0,
+        "claimStatus": "Pending",
+        "claimReference": "",
+        "source": "Created from OEM claim",
+        "manual": False,
+        "chassisNumber": lead.get("chassisNumber") or "",
+        "invoiceNumber": lead.get("invoiceNumber") or "",
+        "schemeMonth": ce.scheme_month_from_date(
+            lead.get("schemeAsOf") or lead.get("bookingDate") or ""),
+        "submittedDate": "",
+        "approvedDate": "",
+    }
+    await db.claims.insert_one(dict(doc))
+    return doc, True
+
+
+async def create_register_from_oem(db, *, claim_number, line_id="", lead_id="",
+                                   component_key="", claim_amount=0.0,
+                                   eligible_claim=0.0):
+    """Create the missing register row (if needed) and match it to the OEM line.
+
+    Coulson claimed/approved amounts are never written onto the register.
+    """
+    target = await resolve_oem_create_target(
+        db, claim_number=claim_number, line_id=line_id, lead_id=lead_id,
+        component_key=component_key)
+    rec, created = await ensure_register_row(
+        db, target["lead"], target["componentKey"],
+        claim_amount=claim_amount, eligible_claim=eligible_claim)
+    linked = await link_register_to_oem(
+        db, lead_id=target["lead"]["leadId"], component_key=target["componentKey"],
+        claim_number=target["claimNumber"], line_id=target["lineId"])
+    return {"created": created, "register": linked["register"] or rec,
+            "oemClaim": linked["oemClaim"]}
 
 
 async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line_id=""):

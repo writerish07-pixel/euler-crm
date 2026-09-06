@@ -6412,10 +6412,12 @@ async def coulson_sync_claims(act=Depends(actor)):
 @api.get("/oem-claims", dependencies=[Depends(oem_claim_desk_only)])
 async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False,
                                  q: str = "", chassis: str = "", invoice: str = "",
-                                 missingDoc: bool = False):
+                                 missingDoc: bool = False, missingVehicle: bool = False,
+                                 excludeMissingVehicle: bool = False):
     return await oem_claims.list_claims(
         db, status=status, lead_id=leadId, unlinked=unlinked,
-        q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc)
+        q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc,
+        missing_vehicle=missingVehicle, exclude_missing_vehicle=excludeMissingVehicle)
 
 
 @api.get("/oem-claims/summary", dependencies=[Depends(oem_claim_desk_only)])
@@ -8656,6 +8658,48 @@ class OemClaimMatchIn(BaseModel):
     componentKey: str = ""
     claimNumber: str = ""
     lineId: str = ""
+
+
+async def _scheme_register_amounts(lead, component_key):
+    """Scheme/lead money only — never the Coulson line amount."""
+    scheme_rows = await get_scheme_rows()
+    shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
+    key = str(component_key or "")
+    amt = ce.round2(ce.num((shares.get("displayByComponent") or {}).get(key)))
+    elig = ce.round2(ce.num((shares.get("eligibleByComponent") or {}).get(key)))
+    if key == ce.OEM_EXTRA_SUPPORT_KEY:
+        recv = ce.round2(ce.num(lead.get("oemExtraSupportReceived")))
+        amt = recv
+        elig = recv
+    return amt, elig
+
+
+@api.post("/claims/oem-create", dependencies=[Depends(oem_claim_desk_only)])
+async def create_claim_from_oem(body: OemClaimMatchIn, act=Depends(actor)):
+    """Create the missing Scheme Claim Register row and match it to this OEM line.
+
+    Does not invent a lead. Does not copy Coulson claimed/approved amounts into
+    db.claims money fields.
+    """
+    try:
+        target = await oem_claims.resolve_oem_create_target(
+            db, claim_number=body.claimNumber, line_id=body.lineId,
+            lead_id=body.leadId, component_key=body.componentKey)
+        amt, elig = await _scheme_register_amounts(target["lead"], target["componentKey"])
+        out = await oem_claims.create_register_from_oem(
+            db, claim_number=body.claimNumber, line_id=body.lineId,
+            lead_id=target["lead"]["leadId"], component_key=target["componentKey"],
+            claim_amount=amt, eligible_claim=elig)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await oem_claims.apply_oem_filing_to_register(db)
+    rec = out.get("register") or {}
+    await sheet_sync("claims", rec)
+    await write_audit(act, "oem-create", "claim", leadId=rec.get("leadId"),
+                      new={"componentKey": rec.get("componentKey"),
+                           "claimNumber": body.claimNumber, "lineId": body.lineId,
+                           "created": out.get("created")})
+    return {"ok": True, **out}
 
 
 @api.post("/claims/oem-match", dependencies=[Depends(oem_claim_desk_only)])

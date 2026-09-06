@@ -303,6 +303,9 @@ export default function Claims() {
               { key: "oemStatus", label: "Status", render: (r) => (
                 <Badge tone="bg-violet-50 text-violet-700 ring-violet-600/20">{r.oemStatus}</Badge>
               )},
+              { key: "act", label: "", render: (r) => (
+                <OemOnlyCreate row={r} onDone={load} />
+              )},
             ]}
             rows={oemOnly.rows}
             empty="Nothing"
@@ -319,6 +322,43 @@ export default function Claims() {
           onDone={() => { setMatchClaim(null); load(); }} />
       )}
     </div>
+  );
+}
+
+function OemOnlyCreate({ row, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    if (!row.leadId && !row.mappedComponent) {
+      return toast.error("Open OEM settlements and pick a lead, then Create");
+    }
+    setBusy(true);
+    try {
+      const out = await post("/claims/oem-create", {
+        claimNumber: row.claimNumber,
+        lineId: row.lineId || "",
+        leadId: row.leadId || "",
+        componentKey: row.mappedComponent || "",
+      });
+      toast.success(out.created
+        ? `Created ${out.register?.claimId || "register row"} and matched ${row.claimNumber}`
+        : `Matched ${row.claimNumber}`);
+      onDone();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not create the register row");
+    } finally { setBusy(false); }
+  };
+  if (row.reason !== "missing_register_row" && !(row.leadId && row.mappedComponent)) {
+    return (
+      <Link to={oemClaimsHref({ q: row.claimNumber, noVehicle: !row.hasVehicle })}
+        className="text-xs text-cobalt hover:underline">Match / Create</Link>
+    );
+  }
+  return (
+    <button type="button" data-testid={`oem-only-create-${row.claimNumber}`}
+      onClick={go} disabled={busy}
+      className="text-xs text-violet-800 hover:underline inline-flex items-center gap-1">
+      <Plus size={12} /> {busy ? "Creating…" : "Create"}
+    </button>
   );
 }
 

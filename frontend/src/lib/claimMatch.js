@@ -43,6 +43,15 @@ export function componentLabel(key) {
   return COMPONENT_LABEL[key] || key || "";
 }
 
+export const CREATE_COMPONENTS = Object.entries(COMPONENT_LABEL);
+
+export function lineNeedsCreate(row, li) {
+  const st = row?.registerMatch?.state || "";
+  if (st === "in_register" && li?.leadId) return false;
+  return st === "missing_register" || st === "unknown_lead" || st === "unmapped"
+    || st === "partial" || !li?.leadId;
+}
+
 /** Euler's own wording for a debit-note line (customer, claim type, approver). */
 export function oemLineText(li) {
   const desc = String(li?.description || "").trim();
@@ -52,7 +61,8 @@ export function oemLineText(li) {
   return bits.join(" · ") || componentLabel(li?.componentKey) || "Claim item";
 }
 
-export function oemClaimsHref({ q, chassis, invoice, leadId } = {}) {
+export function oemClaimsHref({ q, chassis, invoice, leadId, noVehicle } = {}) {
+  if (noVehicle) return "/oem-claims/no-vehicle";
   const p = new URLSearchParams();
   if (q) p.set("q", q);
   if (chassis) p.set("chassis", chassis);
