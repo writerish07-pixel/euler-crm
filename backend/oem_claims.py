@@ -58,10 +58,50 @@ def now_iso():
 
 
 def _num(v):
+    """Money / count from Coulson or Mongo. Strings like '2.0' / '5,000' are fine."""
     try:
-        return float(v or 0)
+        if v is None or v is False or v == "":
+            return 0.0
+        if isinstance(v, bool):
+            return 1.0 if v else 0.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            s = v.strip().replace(",", "").replace("₹", "").replace("Rs", "")
+            if not s:
+                return 0.0
+            return float(s)
+        return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _as_int(v, default=0):
+    """int() that does not throw on '2.0', '', lists, or None."""
+    try:
+        return int(_num(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_id_list(value):
+    """leadIds may be a list, a single string, or junk from an older sync."""
+    if value is None or value is False or value == "":
+        return []
+    if isinstance(value, str):
+        v = value.strip()
+        return [v] if v else []
+    if isinstance(value, dict):
+        value = value.values()
+    if isinstance(value, (list, tuple, set)):
+        out = []
+        for x in value:
+            s = str(x or "").strip()
+            if s and s not in out:
+                out.append(s)
+        return out
+    s = str(value).strip()
+    return [s] if s else []
 
 
 def round2(v):
@@ -227,9 +267,11 @@ def _item_document_count(item):
         if isinstance(val, bool):
             continue
         if isinstance(val, (int, float)):
-            counts.append(max(int(val), 0))
-        elif isinstance(val, str) and val.strip().isdigit():
-            counts.append(int(val.strip()))
+            counts.append(max(_as_int(val), 0))
+        elif isinstance(val, str) and val.strip():
+            n = _as_int(val)
+            if n or val.strip().replace(",", "").replace(".", "", 1).isdigit():
+                counts.append(max(n, 0))
     for key in ("documents", "supporting_documents", "supportingDocuments",
                 "attachments", "files", "docs"):
         val = item.get(key)
@@ -241,8 +283,10 @@ def _item_document_count(item):
                 counts.append(len(nested))
             for ck in ("count", "total", "total_count"):
                 n = val.get(ck)
-                if isinstance(n, (int, float)) and not isinstance(n, bool):
-                    counts.append(max(int(n), 0))
+                if isinstance(n, bool):
+                    continue
+                if n not in (None, ""):
+                    counts.append(max(_as_int(n), 0))
     return max(counts) if counts else 0
 
 
@@ -329,35 +373,60 @@ def normalise_line_item(item):
                                 or item.get("sourceInvoiceUrl") or ""),
         "leadId": str(item.get("leadId") or ""),
         "leadCustomer": str(item.get("leadCustomer") or ""),
-        "leadIds": [str(x).strip() for x in (item.get("leadIds") or []) if str(x).strip()],
-        "leadCustomers": [str(x) for x in (item.get("leadCustomers") or [])],
+        "leadIds": _as_id_list(item.get("leadIds")),
+        "leadCustomers": [str(x) for x in _as_id_list(item.get("leadCustomers"))],
         "matchedBy": str(item.get("matchedBy") or ""),
         "componentKey": map_claim_type_to_component(claim_type, description),
     }
 
 
+def _line_item_list(raw):
+    """Coulson / older syncs have stored a dict, a string, or mixed junk here."""
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, dict):
+        items = list(raw.values()) if raw else []
+    else:
+        items = []
+    return [li for li in items if isinstance(li, dict)]
+
+
 def _ensure_line_ids(lines):
     """Stable ids so a debit note with eight Extra Support rows can be matched
-    one item at a time even when Coulson omitted `id`."""
-    for i, line in enumerate(lines or []):
-        if not isinstance(line, dict):
-            continue
+    one item at a time even when Coulson omitted `id`. Drops non-dict junk so
+    later `.get` / `int()` calls cannot crash the sync or Create."""
+    kept = []
+    for i, line in enumerate(_line_item_list(lines)):
         if not str(line.get("lineId") or "").strip():
             line["lineId"] = f"idx:{i}"
         if line_lead_ids(line):
             stamp_line_leads(line, list(zip(line_lead_ids(line), line_lead_customers(line))))
+        kept.append(line)
+    if isinstance(lines, list):
+        lines[:] = kept
+        return lines
+    return kept
+
+
+def coerce_line_items(doc):
+    """Guarantee doc['lineItems'] is a list of dicts. Safe to call on any row."""
+    if not isinstance(doc, dict):
+        return []
+    lines = _ensure_line_ids(_line_item_list(doc.get("lineItems")))
+    doc["lineItems"] = lines
     return lines
 
 
 def line_lead_ids(line):
     """Every CRM lead on this Euler line. Extra Support can name two customers
     on one 5000+5000 row; `leadId` alone only held the first."""
+    if not isinstance(line, dict):
+        return []
     ids = []
-    for lid in (line or {}).get("leadIds") or []:
-        lid = str(lid or "").strip()
+    for lid in _as_id_list(line.get("leadIds")):
         if lid and lid not in ids:
             ids.append(lid)
-    primary = str((line or {}).get("leadId") or "").strip()
+    primary = str(line.get("leadId") or "").strip()
     if primary and primary not in ids:
         ids.insert(0, primary)
     return ids
@@ -365,7 +434,7 @@ def line_lead_ids(line):
 
 def line_lead_customers(line):
     ids = line_lead_ids(line)
-    names = [str(x or "") for x in ((line or {}).get("leadCustomers") or [])]
+    names = [str(x or "") for x in _as_id_list((line or {}).get("leadCustomers"))]
     by_id = {}
     if (line or {}).get("leadId") and (line or {}).get("leadCustomer"):
         by_id[str(line.get("leadId"))] = str(line.get("leadCustomer") or "")
@@ -475,7 +544,9 @@ def _normalise_lines(raw):
 
 
 def _lines_have_vehicle(lines):
-    return any((li.get("chassis") or li.get("sourceInvoiceNumber")) for li in (lines or []))
+    return any(
+        isinstance(li, dict) and (li.get("chassis") or li.get("sourceInvoiceNumber"))
+        for li in (lines or []) if isinstance(li, dict))
 
 
 def claim_lines(doc):
@@ -483,11 +554,11 @@ def claim_lines(doc):
 
 
 def documented_line_count(doc):
-    return sum(1 for li in claim_lines(doc) if int(li.get("documentCount") or 0) > 0)
+    return sum(1 for li in claim_lines(doc) if _as_int(li.get("documentCount")) > 0)
 
 
 def claim_document_count(doc):
-    return sum(int(li.get("documentCount") or 0) for li in claim_lines(doc))
+    return sum(_as_int(li.get("documentCount")) for li in claim_lines(doc))
 
 
 def claim_has_document(doc):
@@ -500,7 +571,7 @@ def claim_has_document(doc):
     lines = claim_lines(doc)
     if not lines:
         return False
-    return all(int(li.get("documentCount") or 0) > 0 for li in lines)
+    return all(_as_int(li.get("documentCount")) > 0 for li in lines)
 
 
 def stamp_document_flag(doc):
@@ -758,7 +829,7 @@ async def link_claim_lines(db, doc, index=None):
     mobile can. A line that matches on chassis but disagrees on invoice is linked and
     FLAGGED rather than silently accepted: that disagreement is real information.
     """
-    lines = doc.get("lineItems") or []
+    lines = coerce_line_items(doc)
     lead_ids, conflicts = [], []
     for line in lines:
         held = line_lead_ids(line)
@@ -985,7 +1056,7 @@ async def annotate_resubmissions(db):
     """
     by_chassis = {}
     async for row in db[CLAIMS_COLLECTION].find({}):
-        for line in row.get("lineItems") or []:
+        for line in _line_item_list(row.get("lineItems")):
             ch = oem_sync._norm_chassis(line.get("chassis"))
             if ch:
                 by_chassis.setdefault(ch, []).append(row)
@@ -995,7 +1066,7 @@ async def annotate_resubmissions(db):
     async for row in db[CLAIMS_COLLECTION].find({"status": "Rejected"}):
         created = str(row.get("createdAt") or "")
         successor = ""
-        for line in row.get("lineItems") or []:
+        for line in _line_item_list(row.get("lineItems")):
             ch = oem_sync._norm_chassis(line.get("chassis"))
             for other in by_chassis.get(ch) or []:
                 if other.get("debitNoteId") == row.get("debitNoteId"):
@@ -1025,6 +1096,8 @@ def _empty_match_entry():
 
 def _absorb_line(entry, row, line):
     """Fold one Euler line into a match entry (by lead, chassis or invoice)."""
+    if not isinstance(line, dict):
+        return entry
     status = str(row.get("status") or "")
     entry["hasAnyClaim"] = True
     amount = round2(line.get("totalAmount"))
@@ -1040,13 +1113,13 @@ def _absorb_line(entry, row, line):
         "oemStatus": status,
         "amount": amount,
         "stageLabel": row.get("stageLabel") or "",
-        "stageDays": int(row.get("stageDays") or 0),
+        "stageDays": _as_int(row.get("stageDays")),
         "createdAt": row.get("createdAt") or "",
         "needsResubmission": bool(row.get("needsResubmission")),
         "resubmittedBy": row.get("resubmittedBy") or "",
         "description": line.get("description") or "",
-        "hasDocument": int(line.get("documentCount") or 0) > 0,
-        "documentCount": int(line.get("documentCount") or 0),
+        "hasDocument": _as_int(line.get("documentCount")) > 0,
+        "documentCount": _as_int(line.get("documentCount")),
         "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
     }
     if status == "Rejected" and row.get("needsResubmission"):
@@ -1069,9 +1142,9 @@ async def relink_stored_claims(db):
     lead_index = await build_lead_index(db)
     patched = 0
     async for row in db[CLAIMS_COLLECTION].find({}):
-        before = list(row.get("leadIds") or [])
+        before = _as_id_list(row.get("leadIds"))
         updated = await link_claim_lines(db, row, lead_index)
-        if list(updated.get("leadIds") or []) == before:
+        if _as_id_list(updated.get("leadIds")) == before:
             continue
         await db[CLAIMS_COLLECTION].update_one(
             {"_id": row["_id"]} if row.get("_id") else {"debitNoteId": row.get("debitNoteId")},
@@ -1098,7 +1171,7 @@ async def register_match_index(db):
     async for row in db[CLAIMS_COLLECTION].find({}):
         row.pop("_id", None)
         stamp_document_flag(row)
-        _ensure_line_ids(row.get("lineItems") or [])
+        coerce_line_items(row)
         num = str(row.get("claimNumber") or "").strip().upper()
         if num:
             by_number[num] = {
@@ -1106,18 +1179,18 @@ async def register_match_index(db):
                 "oemStatus": str(row.get("status") or ""),
                 "amount": round2(row.get("claimedAmount")),
                 "stageLabel": row.get("stageLabel") or "",
-                "stageDays": int(row.get("stageDays") or 0),
+                "stageDays": _as_int(row.get("stageDays")),
                 "createdAt": row.get("createdAt") or "",
                 "needsResubmission": bool(row.get("needsResubmission")),
                 "resubmittedBy": row.get("resubmittedBy") or "",
                 "description": "",
                 "hasDocument": bool(row.get("hasDocument")),
-                "documentCount": int(row.get("documentCount") or 0),
-                "lineItemCount": int(row.get("lineItemCount") or 0),
-                "documentedLineCount": int(row.get("documentedLineCount") or 0),
+                "documentCount": _as_int(row.get("documentCount")),
+                "lineItemCount": _as_int(row.get("lineItemCount")),
+                "documentedLineCount": _as_int(row.get("documentedLineCount")),
                 "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
             }
-        for line in row.get("lineItems") or []:
+        for line in coerce_line_items(row):
             for lead_id in line_lead_ids(line):
                 _absorb_line(by_lead.setdefault(lead_id, _empty_match_entry()), row, line)
             ch = oem_sync._norm_chassis(line.get("chassis"))
@@ -1138,13 +1211,13 @@ async def register_match_index(db):
                     "oemStatus": str(row.get("status") or ""),
                     "amount": round2(line.get("totalAmount")),
                     "stageLabel": row.get("stageLabel") or "",
-                    "stageDays": int(row.get("stageDays") or 0),
+                    "stageDays": _as_int(row.get("stageDays")),
                     "createdAt": row.get("createdAt") or "",
                     "needsResubmission": bool(row.get("needsResubmission")),
                     "resubmittedBy": row.get("resubmittedBy") or "",
                     "description": line.get("description") or "",
-                    "hasDocument": int(line.get("documentCount") or 0) > 0,
-                    "documentCount": int(line.get("documentCount") or 0),
+                    "hasDocument": _as_int(line.get("documentCount")) > 0,
+                    "documentCount": _as_int(line.get("documentCount")),
                     "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
                 }
                 by_line[f"{num}:{lid}"] = hit
@@ -1193,10 +1266,10 @@ def _state_from_hits(hits):
         "oemStatus": pick.get("oemStatus") or "",
         "filedAmount": round2(sum(_num(h.get("amount")) for h in hits)),
         "stageLabel": pick.get("stageLabel") or "",
-        "stageDays": int(pick.get("stageDays") or 0),
+        "stageDays": _as_int(pick.get("stageDays")),
         "createdAt": str(pick.get("createdAt") or "")[:10],
         "hasDocument": bool(hits) and all(h.get("hasDocument") for h in hits),
-        "documentCount": max((int(h.get("documentCount") or 0) for h in hits), default=0),
+        "documentCount": max((_as_int(h.get("documentCount")) for h in hits), default=0),
         "claimDocumentUrl": next((h.get("claimDocumentUrl") for h in hits if h.get("claimDocumentUrl")), "") or "",
         "detail": detail,
     }
@@ -1260,7 +1333,7 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
                 "claimNumbers": [h["claimNumber"] for h in um],
                 "oemStatus": "", "filedAmount": round2(entry["filedTotal"]),
                 "hasDocument": any(h.get("hasDocument") for h in um),
-                "documentCount": max((int(h.get("documentCount") or 0) for h in um), default=0),
+                "documentCount": max((_as_int(h.get("documentCount")) for h in um), default=0),
                 "detail": "This lead has claims in Euler, but none of them names this "
                           "component. Check before treating it as unclaimed.",
             }
@@ -1414,7 +1487,7 @@ async def oem_only_lines(db, register_pairs):
         num = str(row.get("claimNumber") or "").strip().upper()
         if num and manual.get(num):
             continue
-        for line in row.get("lineItems") or []:
+        for line in _line_item_list(row.get("lineItems")):
             leads = line_lead_ids(line)
             names = line_lead_customers(line)
             key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
@@ -1434,7 +1507,7 @@ async def oem_only_lines(db, register_pairs):
                     "claimNumber": row.get("claimNumber") or "",
                     "oemStatus": row.get("status") or "",
                     "stageLabel": row.get("stageLabel") or "",
-                    "stageDays": int(row.get("stageDays") or 0),
+                    "stageDays": _as_int(row.get("stageDays")),
                     "createdDate": row.get("createdDate") or "",
                     "leadId": lead_id,
                     "lineId": str(line.get("lineId") or ""),
@@ -1481,7 +1554,7 @@ def claim_register_match(row, pairs, manual_links=None):
     links = (manual_links or {}).get(num) or []
     line_ids_linked = {str(x.get("lineId") or "") for x in links if x.get("lineId")}
     whole_manual = bool(links) and not line_ids_linked
-    lines = row.get("lineItems") or []
+    lines = _line_item_list(row.get("lineItems"))
     if whole_manual:
         keys = [x.get("componentKey") for x in links if x.get("componentKey")]
         return {"state": "in_register",
@@ -1560,33 +1633,33 @@ async def attach_register_match(db, rows):
     pairs = await register_pairs(db)
     manual = await load_manual_oem_links(db)
     for row in rows:
-        _ensure_line_ids(row.get("lineItems") or [])
+        coerce_line_items(row)
         stamp_document_flag(row)
         row["registerMatch"] = claim_register_match(row, pairs, manual)
     return rows
 
 
 def _claim_matches_query(row, *, q="", chassis="", invoice=""):
+    lines = _line_item_list(row.get("lineItems"))
     if chassis:
         ch = oem_sync._norm_chassis(chassis)
-        if not any(oem_sync._norm_chassis(li.get("chassis")) == ch
-                   for li in (row.get("lineItems") or [])):
+        if not any(oem_sync._norm_chassis(li.get("chassis")) == ch for li in lines):
             return False
     if invoice:
         inv = str(invoice or "").strip().lower()
         if not any(str(li.get("sourceInvoiceNumber") or "").strip().lower() == inv
-                   for li in (row.get("lineItems") or [])):
+                   for li in lines):
             return False
     if q:
         needle = str(q).strip().lower()
         blob = " ".join([
             str(row.get("claimNumber") or ""),
             str(row.get("status") or ""),
-            " ".join(str(x) for x in (row.get("leadIds") or [])),
-            " ".join(str(li.get("chassis") or "") for li in (row.get("lineItems") or [])),
-            " ".join(str(li.get("sourceInvoiceNumber") or "") for li in (row.get("lineItems") or [])),
-            " ".join(str(li.get("leadCustomer") or "") for li in (row.get("lineItems") or [])),
-            " ".join(str(li.get("description") or "") for li in (row.get("lineItems") or [])),
+            " ".join(_as_id_list(row.get("leadIds"))),
+            " ".join(str(li.get("chassis") or "") for li in lines),
+            " ".join(str(li.get("sourceInvoiceNumber") or "") for li in lines),
+            " ".join(str(li.get("leadCustomer") or "") for li in lines),
+            " ".join(str(li.get("description") or "") for li in lines),
         ]).lower()
         if needle not in blob:
             return False
@@ -1613,7 +1686,7 @@ async def list_claims(db, *, status="", lead_id="", unlinked=False,
     if q or chassis or invoice:
         rows = [r for r in rows if _claim_matches_query(
             r, q=q, chassis=chassis, invoice=invoice)]
-    rows.sort(key=lambda r: (r.get("terminal") and 1 or 0, -int(r.get("stageDays") or 0),
+    rows.sort(key=lambda r: (r.get("terminal") and 1 or 0, -_as_int(r.get("stageDays")),
                              str(r.get("createdAt") or "")))
     for r in rows:
         r.pop("_id", None)
@@ -1626,7 +1699,7 @@ async def claims_for_lead(db, lead_id):
     out = []
     async for row in db[CLAIMS_COLLECTION].find({"leadIds": lead_id}):
         row.pop("_id", None)
-        mine = [li for li in (row.get("lineItems") or []) if lead_id in line_lead_ids(li)]
+        mine = [li for li in _line_item_list(row.get("lineItems")) if lead_id in line_lead_ids(li)]
         out.append({
             **{k: v for k, v in row.items() if k != "lineItems"},
             "lineItems": mine,
@@ -1707,8 +1780,8 @@ async def claims_summary(db):
             stuck.append({
                 "claimNumber": row.get("claimNumber"), "status": status,
                 "stageLabel": row.get("stageLabel") or status,
-                "stageDays": int(row.get("stageDays") or 0),
-                "claimAgeingDays": int(row.get("claimAgeingDays") or 0),
+                "stageDays": _as_int(row.get("stageDays")),
+                "claimAgeingDays": _as_int(row.get("claimAgeingDays")),
                 "claimedAmount": round2(row.get("claimedAmount")),
                 "leadIds": row.get("leadIds") or [],
             })
@@ -1724,7 +1797,7 @@ async def claims_summary(db):
                                "sourceInvoiceNumber": li.get("sourceInvoiceNumber") or "",
                                "totalAmount": round2(li.get("totalAmount")),
                                "rejectedBy": li.get("rejectedBy") or ""}
-                              for li in (row.get("lineItems") or [])],
+                              for li in _line_item_list(row.get("lineItems"))],
             })
         for msg in row.get("invoiceConflicts") or []:
             conflicts.append({"claimNumber": row.get("claimNumber"), "detail": msg})
@@ -1792,7 +1865,7 @@ def _oem_create_claim_id(claim_number, line_id, component_key):
 
 
 def _pick_oem_line(oem, line_id=""):
-    lines = _ensure_line_ids(list((oem or {}).get("lineItems") or []))
+    lines = coerce_line_items(oem if isinstance(oem, dict) else {})
     want_line = str(line_id or "").strip()
     if want_line:
         targets = [li for li in lines if str(li.get("lineId") or "") == want_line]
@@ -1814,7 +1887,7 @@ async def resolve_oem_create_target(db, *, claim_number, line_id="", lead_id="",
         raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
     if str(oem.get("status") or "") == "Cancelled":
         raise ValueError("That OEM claim is cancelled.")
-    lines = _ensure_line_ids(list(oem.get("lineItems") or []))
+    lines = coerce_line_items(oem)
     want_line = str(line_id or "").strip()
     if want_line:
         targets = [li for li in lines if str(li.get("lineId") or "") == want_line]
@@ -2001,7 +2074,7 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     if not rec:
         raise ValueError("Scheme Claim Register has no row for that lead and component.")
     number = str(oem.get("claimNumber") or "").strip()
-    lines = _ensure_line_ids(list(oem.get("lineItems") or []))
+    lines = coerce_line_items(oem)
     lead_row = await db.leads.find_one({"leadId": lead_id}, {"customerName": 1, "_id": 0}) or {}
     customer = lead_row.get("customerName") or ""
 
@@ -2081,7 +2154,7 @@ async def clear_register_oem_link(db, *, lead_id, component_key):
     if number:
         oem = await find_oem_claim(db, number)
         if oem:
-            lines = _ensure_line_ids(list(oem.get("lineItems") or []))
+            lines = coerce_line_items(oem)
             changed = False
             for li in lines:
                 if lead_id not in line_lead_ids(li):
