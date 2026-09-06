@@ -83,6 +83,45 @@ def calculate_tcs(taxable, rate=TCS_RATE, threshold=TCS_THRESHOLD):
     return round2(taxable * rate)
 
 
+DEAL_OTHER_CHARGE_KEYS = ("accessories", "trc", "fastag", "extendedWarranty", "otherCharges")
+
+
+def compute_deal_format(charges, cx_demand=0):
+    """Scheme-free quote card. TCS matches billing with nothing passed: 1% of GVC.
+
+    Staff never see scheme here. Support Required = Net to Cx − Cx Demand
+    (negative = extra margin when the customer pays above list).
+    """
+    charges = charges or {}
+    ex = round2(num(charges.get("exShowroom")))
+    rto = round2(num(charges.get("rto")))
+    insurance = round2(num(charges.get("insurance")))
+    transport = round2(num(charges.get("handlingCharges") if charges.get("handlingCharges") is not None
+                          else charges.get("transport")))
+    other = round2(sum(num(charges.get(k)) for k in DEAL_OTHER_CHARGE_KEYS))
+    gvc = round2(ex + rto + insurance + transport + other)
+    tcs = calculate_tcs(gvc)
+    net_to_cx = round2(gvc + tcs)
+    cx = round2(max(0.0, num(cx_demand)))
+    support = round2(net_to_cx - cx)
+    return {
+        "exShowroom": ex,
+        "rto": rto,
+        "insurance": insurance,
+        "transport": transport,
+        "handlingCharges": transport,
+        "otherCharges": other,
+        "grossVehicleCost": gvc,
+        "tcs": tcs,
+        "tcsBase": gvc,
+        "netToCx": net_to_cx,
+        "cxDemand": cx,
+        "supportRequired": support,
+        "extraMargin": round2(max(0.0, -support)),
+        "schemeIncluded": False,
+    }
+
+
 def normalize_benefit_mode(mode):
     m = str(mode or "").strip().lower()
     if not m or m in ("full", "full benefit"):

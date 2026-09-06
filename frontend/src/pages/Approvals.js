@@ -7,6 +7,7 @@ import { PageHeader, Card, Table, Badge, Button, Field, Input } from "../compone
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
 import { RequestKycPreview } from "../components/LeadDocuments";
+import DealFormatCard from "../components/DealFormatCard";
 
 export default function Approvals() {
   const { canApproveLeads, isExecutive } = useAuth();
@@ -111,7 +112,11 @@ export default function Approvals() {
               <div className="text-sm">{r.interestedModel} <span className="text-ink-faint">{r.variant}</span></div>
             ) },
             { key: "executive", label: "Executive" },
-            { key: "budget", label: "Deal amount", align: "right", mono: true, render: (r) => inr(r.budget || r.dealAmount) },
+            { key: "deal", label: "Deal format", render: (r) => (
+              r.dealFormat && (r.dealFormat.netToCx != null || r.dealFormat.cxDemand != null)
+                ? <DealFormatCard snapshot={r.dealFormat} cxDemand={r.cxDemand || r.budget || r.dealAmount} readOnly />
+                : <span className="font-mono">{inr(r.budget || r.dealAmount)}</span>
+            ) },
             { key: "kyc", label: "KYC", render: (r) => (
               <div>
                 <RequestKycPreview documents={r.documents || []} />
