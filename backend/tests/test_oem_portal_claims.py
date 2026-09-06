@@ -1802,3 +1802,146 @@ async def test_executive_cannot_create_from_oem(client):
         c.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
         assert (await c.post("/api/claims/oem-create", json={
             "claimNumber": "AF-999-CLCREATE"})).status_code == 403
+
+
+def test_line_lead_helpers_keep_first_lead_and_extras():
+    line = {"leadId": "LD1", "leadCustomer": "Mahendra"}
+    assert oem_claims.line_lead_ids(line) == ["LD1"]
+    oem_claims._add_line_lead(line, "LD2", "Nagar Mal")
+    assert oem_claims.line_lead_ids(line) == ["LD1", "LD2"]
+    assert line["leadId"] == "LD1"
+    assert line["leadCustomers"][1] == "Nagar Mal"
+    oem_claims._drop_line_lead(line, "LD1")
+    assert oem_claims.line_lead_ids(line) == ["LD2"]
+    assert line["leadId"] == "LD2"
+
+
+@pytest.mark.asyncio
+async def test_one_extra_support_line_matches_two_leads(client):
+    """AF-122-CL… 5000+5000=10000 for two customers on ONE line.
+
+    Matching the second lead must add it, not replace the first. Each register
+    row keeps its own Extra Support amount — never the combined 10000.
+    """
+    a = await _delivered_lead(client, chassis="MD9COMBO26G900001",
+                              invoice="AF-999-I26282001")
+    b = await _delivered_lead(client, chassis="MD9COMBO26G900002",
+                              invoice="AF-999-I26282002")
+    await _register_row(a, "oemExtraSupport", 5000.0)
+    await _register_row(b, "oemExtraSupport", 5000.0)
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "combo-es-1",
+        "claimNumber": "AF-122-CLCOMBO",
+        "status": "Dealer Development Department Approval Pending",
+        "claimedAmount": 10000.0,
+        "lineItems": [{
+            "lineId": "es-combo",
+            "claimType": "Additional Support",
+            "description": "Claim Type :- Additiniol Support 5000+5000=10000 "
+                           "Customer Name:- Mahendra Kumar Yadav & Nagar Mal Yadav "
+                           "Approved By :- Siddarth Dubey",
+            "totalAmount": 10000.0, "documentCount": 1, "leadId": "",
+        }],
+        "leadIds": [], "linkedLineCount": 0, "unlinkedLineCount": 1,
+        "_testSeed": SEED_TAG,
+    })
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": a, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CLCOMBO", "lineId": "es-combo"})
+    assert r.status_code == 200, r.text
+    r2 = await client.post("/api/claims/oem-match", json={
+        "leadId": b, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CLCOMBO", "lineId": "es-combo"})
+    assert r2.status_code == 200, r2.text
+
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLCOMBO"})).json()[0]
+    line = oem["lineItems"][0]
+    assert set(line.get("leadIds") or []) == {a, b}
+    assert line["leadId"] in (a, b)
+    assert set(oem["leadIds"]) == {a, b}
+    assert line["matchedBy"] == "manual"
+    assert line["totalAmount"] == 10000.0
+
+    rows = (await client.get("/api/claims")).json()
+    ra = next(x for x in rows if x["leadId"] == a and x["componentKey"] == "oemExtraSupport")
+    rb = next(x for x in rows if x["leadId"] == b and x["componentKey"] == "oemExtraSupport")
+    assert ra["manualOemClaimNumber"] == rb["manualOemClaimNumber"] == "AF-122-CLCOMBO"
+    assert ra["manualOemLineId"] == rb["manualOemLineId"] == "es-combo"
+    assert ra["eligibleClaim"] == 5000.0
+    assert rb["eligibleClaim"] == 5000.0
+    assert ra["receivedAmount"] == 0
+    assert rb["receivedAmount"] == 0
+    assert ra["claimAmount"] != 10000.0
+    assert rb["claimAmount"] != 10000.0
+
+    clr = await client.post("/api/claims/oem-match/clear", json={
+        "leadId": a, "componentKey": "oemExtraSupport"})
+    assert clr.status_code == 200, clr.text
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLCOMBO"})).json()[0]
+    line = oem["lineItems"][0]
+    assert b in (line.get("leadIds") or [line.get("leadId")])
+    assert a not in (line.get("leadIds") or [])
+    assert line["leadId"] == b
+
+
+@pytest.mark.asyncio
+async def test_oem_match_accepts_two_leads_in_one_call(client):
+    a = await _delivered_lead(client, chassis="MD9BATCH26G900001",
+                              invoice="AF-999-I26283001")
+    b = await _delivered_lead(client, chassis="MD9BATCH26G900002",
+                              invoice="AF-999-I26283002")
+    await _register_row(a, "oemExtraSupport", 5000.0)
+    await _register_row(b, "oemExtraSupport", 5000.0)
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "batch-es-1",
+        "claimNumber": "AF-122-CLBATCH",
+        "status": "RM Approval Pending",
+        "claimedAmount": 10000.0,
+        "lineItems": [{
+            "lineId": "es-batch", "claimType": "Additional Support",
+            "description": "5000+5000=10000 Customer Name:- A & B",
+            "totalAmount": 10000.0, "leadId": "",
+        }],
+        "leadIds": [], "_testSeed": SEED_TAG,
+    })
+    r = await client.post("/api/claims/oem-match", json={
+        "leadIds": [a, b], "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CLBATCH", "lineId": "es-batch"})
+    assert r.status_code == 200, r.text
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLBATCH"})).json()[0]
+    assert set(oem["lineItems"][0].get("leadIds") or []) == {a, b}
+
+
+@pytest.mark.asyncio
+async def test_oem_create_two_leads_on_one_combined_line(client):
+    a = await _delivered_lead(client, chassis="MD9CR2L26G900001",
+                              invoice="AF-999-I26284001")
+    b = await _delivered_lead(client, chassis="MD9CR2L26G900002",
+                              invoice="AF-999-I26284002")
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "create-2l",
+        "claimNumber": "AF-122-CLCR2L",
+        "status": "RM Approval Pending",
+        "claimedAmount": 10000.0,
+        "lineItems": [{
+            "lineId": "es-2l", "claimType": "Additional Support",
+            "description": "Additiniol Support 5000+5000=10000 "
+                           "Customer Name:- Mahendra & Nagar Mal",
+            "totalAmount": 10000.0, "leadId": "",
+        }],
+        "leadIds": [], "_testSeed": SEED_TAG,
+    })
+    r = await client.post("/api/claims/oem-create", json={
+        "leadIds": [a, b], "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CLCR2L", "lineId": "es-2l"})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] is True
+    assert await server.db.claims.count_documents(
+        {"componentKey": "oemExtraSupport", "leadId": {"$in": [a, b]}}) == 2
+    async for rec in server.db.claims.find(
+            {"componentKey": "oemExtraSupport", "leadId": {"$in": [a, b]}}):
+        assert rec["receivedAmount"] == 0
+        assert rec["claimAmount"] != 10000.0
+        assert rec["manualOemLineId"] == "es-2l"
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CLCR2L"})).json()[0]
+    assert set(oem["lineItems"][0].get("leadIds") or []) == {a, b}
