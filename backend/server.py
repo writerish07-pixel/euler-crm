@@ -31,6 +31,7 @@ import botspace as wa
 import web_push
 import lead_docs
 import insurance_mis as ins_mis
+import sept_2026_schemes
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -10585,6 +10586,10 @@ async def _run_boot_maintenance():
             await _oem_catalog_boot()
         except Exception:
             logging.exception("OEM_CATALOG_BOOT_ERROR")
+        try:
+            await sept_2026_schemes.ensure_sept_2026_schemes(db)
+        except Exception:
+            logging.exception("SEPT_2026_SCHEME_BOOT_ERROR")
         _boot_state["maintenance"] = "done"
         logging.info("BOOT_MAINTENANCE: finished")
     except Exception:

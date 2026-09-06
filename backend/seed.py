@@ -449,6 +449,11 @@ async def run_seed(db, force=False):
         if ml_docs:
             await db["masters_list"].insert_many(ml_docs)
         result["masters_list"] = len(ml_docs)
+    try:
+        from sept_2026_schemes import ensure_sept_2026_schemes
+        result["sept_2026_schemes"] = await ensure_sept_2026_schemes(db)
+    except Exception as exc:
+        result["sept_2026_schemes"] = f"error ({type(exc).__name__})"
     return {"seeded": True, "result": result}
 
 

@@ -10,6 +10,7 @@ const COMPONENTS = [
   ["Consumer Discount", "consumerDiscount"], ["Exchange Bonus", "exchangeBonus"],
   ["Loyalty Bonus", "loyaltyBonus"], ["Referral Bonus", "referralBonus"],
   ["DSA Bonus", "dsaDiscount"], ["Additional Discount", "additionalDiscount"],
+  ["Free Insurance Up To", "insuranceBenefit"], ["Free RTO Up To", "rtoBenefit"],
 ];
 
 function monthOf(iso) {
@@ -98,7 +99,8 @@ function EditDrawer({ row, models, defaultMonth, onClose, onSaved }) {
   const isNew = !row.schemeId;
   const startMonth = monthOf(row.schemeMonth) || defaultMonth || monthOf(todayISO());
   const [form, setForm] = useState({
-    model: row.model || "", variant: row.variant || "", component: row.component || "Consumer Discount",
+    model: row.model || "", variant: row.variant || "",
+    component: COMPONENTS.find((c) => c[1] === row.componentKey)?.[0] || row.component || "Consumer Discount",
     componentKey: row.componentKey || "consumerDiscount", dealerShare: row.dealerShare || 0,
     companyShare: row.companyShare || 0, circularRef: row.circularRef || "",
     schemeMonth: startMonth,
