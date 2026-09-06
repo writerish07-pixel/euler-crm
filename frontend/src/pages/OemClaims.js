@@ -527,6 +527,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const already = lineLeadIds(line);
   const relatedKey = line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "";
   const [register, setRegister] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [leadId, setLeadId] = useState(already[0] || (row.leadIds || [])[0] || "");
   const [extraLeadIds, setExtraLeadIds] = useState(already.slice(1));
   const [addId, setAddId] = useState("");
@@ -534,15 +535,23 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    get("/claims").then((rows) => setRegister(Array.isArray(rows) ? rows.filter((r) => !r.manual) : []))
-      .catch(() => setRegister([]));
+    setLoading(true);
+    get("/claims/match-options")
+      .then((rows) => setRegister(Array.isArray(rows) ? rows : []))
+      .catch((e) => {
+        toast.error(e?.response?.data?.detail || "Could not load the scheme register");
+        setRegister([]);
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   const picked = [leadId, ...extraLeadIds].filter(Boolean);
   const openRows = register.filter(isOpenRegisterRow);
-  const leadSource = relatedKey
+  const relatedRows = relatedKey
     ? openRows.filter((r) => r.componentKey === relatedKey)
-    : openRows;
+    : [];
+  // Prefer the related component, but never leave the Lead list empty after load.
+  const leadSource = relatedRows.length ? relatedRows : (openRows.length ? openRows : register);
   const leads = [...new Map(leadSource.map((r) => [r.leadId, r])).values()];
   for (const id of picked) {
     if (id && !leads.some((r) => r.leadId === id)) {
@@ -550,9 +559,12 @@ function MatchRegisterModal({ row, onClose, onDone }) {
       if (hit) leads.unshift(hit);
     }
   }
-  const options = leadId
-    ? openRows.filter((r) => r.leadId === leadId && (!relatedKey || r.componentKey === relatedKey))
-    : [];
+  const leadRows = leadId ? register.filter((r) => r.leadId === leadId) : [];
+  const openLeadRows = leadRows.filter(isOpenRegisterRow);
+  let options = relatedKey
+    ? openLeadRows.filter((r) => r.componentKey === relatedKey)
+    : openLeadRows;
+  if (!options.length) options = openLeadRows.length ? openLeadRows : leadRows;
   if (row.createMode && relatedKey && leadId
       && !options.some((r) => r.componentKey === relatedKey)) {
     options.push({
@@ -627,20 +639,27 @@ function MatchRegisterModal({ row, onClose, onDone }) {
           </p>
         ) : null}
         <Field label="Lead">
-          <Select value={leadId} onChange={(e) => {
-            setLeadId(e.target.value);
-            setExtraLeadIds([]);
-            setComponentKey(relatedKey);
-          }}>
-            <option value="">— pick lead —</option>
+          <Select data-testid="oem-match-lead" disabled={loading} value={leadId}
+            onChange={(e) => {
+              setLeadId(e.target.value);
+              setExtraLeadIds([]);
+              setComponentKey(relatedKey);
+            }}>
+            <option value="">{loading ? "Loading register…" : "— pick lead —"}</option>
             {leads.map((r) => (
               <option key={r.leadId} value={r.leadId}>{r.leadId} · {r.customer || r.customerName || lineLeadLabel(line, r.leadId)}</option>
             ))}
           </Select>
+          {!loading && !leads.length ? (
+            <p className="text-xs text-amber-800 mt-1">
+              No Scheme Claim Register rows yet. Use Create on this OEM line first,
+              or open Scheme Claim Register.
+            </p>
+          ) : null}
         </Field>
         <Field label="Scheme component">
-          <Select value={componentKey} onChange={(e) => setComponentKey(e.target.value)}>
-            <option value="">— pick component —</option>
+          <Select disabled={loading} value={componentKey} onChange={(e) => setComponentKey(e.target.value)}>
+            <option value="">{loading ? "Loading…" : "— pick component —"}</option>
             {options.map((r) => (
               <option key={`${r.leadId}-${r.componentKey}`} value={r.componentKey}>
                 {r.component || componentLabel(r.componentKey) || r.componentKey} · {r.claimStatus}

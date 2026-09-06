@@ -8684,6 +8684,44 @@ async def _scheme_register_amounts(lead, component_key):
     return amt, elig
 
 
+@api.get("/claims/match-options", dependencies=[Depends(oem_claim_desk_only)])
+async def claim_match_options():
+    """Leads and components already on the Scheme Claim Register.
+
+    The OEM match modal must not call GET /claims. That path recomputes every
+    scheme share, overlays Euler, and often exceeds the 25s browser timeout —
+    the Lead dropdown then stays on 'pick lead' with nothing in it.
+    """
+    rows = []
+    lead_ids = set()
+    async for c in db.claims.find(
+            {"manual": {"$ne": True}},
+            {"leadId": 1, "customer": 1, "componentKey": 1, "component": 1,
+             "claimStatus": 1, "_id": 0}):
+        lid = str(c.get("leadId") or "").strip()
+        key = str(c.get("componentKey") or "").strip()
+        if not lid or not key:
+            continue
+        lead_ids.add(lid)
+        rows.append({
+            "leadId": lid,
+            "customer": c.get("customer") or "",
+            "componentKey": key,
+            "component": c.get("component") or ce.SCHEME_COMPONENT_LABELS.get(key, key),
+            "claimStatus": c.get("claimStatus") or "Pending",
+        })
+    if lead_ids:
+        names = {}
+        async for lead in db.leads.find(
+                {"leadId": {"$in": list(lead_ids)}},
+                {"leadId": 1, "customerName": 1, "_id": 0}):
+            names[lead.get("leadId")] = lead.get("customerName") or ""
+        for r in rows:
+            if not r["customer"]:
+                r["customer"] = names.get(r["leadId"], "")
+    return rows
+
+
 @api.post("/claims/oem-create", dependencies=[Depends(oem_claim_desk_only)])
 async def create_claim_from_oem(body: OemClaimMatchIn, act=Depends(actor)):
     """Create the missing Scheme Claim Register row and match it to this OEM line.
