@@ -92,7 +92,7 @@ def _as_id_list(value):
         v = value.strip()
         return [v] if v else []
     if isinstance(value, dict):
-        value = value.values()
+        value = list(value.values())
     if isinstance(value, (list, tuple, set)):
         out = []
         for x in value:
@@ -577,6 +577,8 @@ def claim_has_document(doc):
 def stamp_document_flag(doc):
     doc = doc if isinstance(doc, dict) else {}
     lines = claim_lines(doc)
+    for li in lines:
+        li["documentCount"] = _as_int(li.get("documentCount"))
     doc["documentCount"] = claim_document_count(doc)
     doc["lineItemCount"] = len(lines)
     doc["documentedLineCount"] = documented_line_count(doc)

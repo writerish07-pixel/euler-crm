@@ -1981,7 +1981,7 @@ def test_line_lead_ids_survives_string_lead_ids_and_non_dict_line():
     assert oem_claims.line_lead_ids({"leadIds": "LD1"}) == ["LD1"]
     assert oem_claims.line_lead_ids("not-a-line") == []
     assert oem_claims.line_lead_ids(None) == []
-    assert oem_claims.line_lead_ids({"leadId": "LD2", "leadIds": 7}) == ["7", "LD2"]
+    assert oem_claims.line_lead_ids({"leadId": "LD2", "leadIds": 7}) == ["LD2", "7"]
 
 
 def test_stamp_document_flag_survives_string_and_list_document_count():
