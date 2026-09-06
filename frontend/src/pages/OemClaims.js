@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, CREATE_COMPONENTS, lineNeedsCreate, lineLeadIds, lineLeadLabel, looksCombinedSupport } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, looksCombinedSupport } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
@@ -518,63 +518,73 @@ function CreateOemButton({ row, line, onNeedPick, onDone }) {
   );
 }
 
+function isOpenRegisterRow(r) {
+  return !["Received", "Dropped", "Cancelled"].includes(r?.claimStatus || "");
+}
+
 function MatchRegisterModal({ row, onClose, onDone }) {
   const line = row.matchLine || {};
   const already = lineLeadIds(line);
+  const relatedKey = line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "";
   const [register, setRegister] = useState([]);
-  const [allLeads, setAllLeads] = useState([]);
-  const [leadIds, setLeadIds] = useState(already.length ? already : [""]);
+  const [leadId, setLeadId] = useState(already[0] || (row.leadIds || [])[0] || "");
+  const [extraLeadIds, setExtraLeadIds] = useState(already.slice(1));
   const [addId, setAddId] = useState("");
-  const [componentKey, setComponentKey] = useState(
-    line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "");
+  const [componentKey, setComponentKey] = useState(relatedKey);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     get("/claims").then((rows) => setRegister(Array.isArray(rows) ? rows.filter((r) => !r.manual) : []))
       .catch(() => setRegister([]));
-    get("/leads").then((rows) => setAllLeads(Array.isArray(rows) ? rows : [])).catch(() => setAllLeads([]));
   }, []);
 
-  const leads = [...new Map([
-    ...allLeads.map((r) => [r.leadId, r]),
-    ...register.map((r) => [r.leadId, r]),
-  ]).values()];
-  const picked = leadIds.filter(Boolean);
-  const missingRow = picked.some((id) => !register.some(
-    (r) => r.leadId === id && r.componentKey === componentKey));
-  const createFirst = Boolean(row.createMode) || missingRow;
-
-  const addLead = (id) => {
-    if (!id || leadIds.includes(id)) return;
-    setLeadIds((cur) => {
-      const next = cur.filter(Boolean);
-      return next.includes(id) ? next : [...next, id];
+  const picked = [leadId, ...extraLeadIds].filter(Boolean);
+  const openRows = register.filter(isOpenRegisterRow);
+  const leadSource = relatedKey
+    ? openRows.filter((r) => r.componentKey === relatedKey)
+    : openRows;
+  const leads = [...new Map(leadSource.map((r) => [r.leadId, r])).values()];
+  for (const id of picked) {
+    if (id && !leads.some((r) => r.leadId === id)) {
+      const hit = register.find((r) => r.leadId === id);
+      if (hit) leads.unshift(hit);
+    }
+  }
+  const options = leadId
+    ? openRows.filter((r) => r.leadId === leadId && (!relatedKey || r.componentKey === relatedKey))
+    : [];
+  if (row.createMode && relatedKey && leadId
+      && !options.some((r) => r.componentKey === relatedKey)) {
+    options.push({
+      leadId, componentKey: relatedKey,
+      component: componentLabel(relatedKey), claimStatus: "will create",
     });
-    setAddId("");
-  };
-  const dropLead = (id) => {
-    setLeadIds((cur) => {
-      const next = cur.filter((x) => x && x !== id);
-      return next.length ? next : [""];
-    });
-  };
+  }
+  const extraCandidates = leads.filter((r) => r.leadId && !picked.includes(r.leadId)
+    && (!componentKey || register.some((c) => c.leadId === r.leadId && c.componentKey === componentKey
+      && isOpenRegisterRow(c))));
+  const hasRow = picked.length > 0 && picked.every((id) =>
+    register.some((r) => r.leadId === id && r.componentKey === componentKey));
+  const createFirst = Boolean(row.createMode) && !hasRow;
 
   const save = async () => {
-    if (!picked.length || !componentKey) return toast.error("Pick at least one lead and a scheme component");
+    if (!leadId || !componentKey) return toast.error("Pick a lead and a scheme component");
     setBusy(true);
     try {
       const payload = {
-        leadIds: picked, leadId: picked[0], componentKey,
+        leadId, leadIds: picked, componentKey,
         claimNumber: row.claimNumber, lineId: line.lineId || "",
       };
       if (createFirst) {
         const out = await post("/claims/oem-create", payload);
         toast.success(out.created
-          ? `Created register row(s) and matched ${picked.length} lead${picked.length === 1 ? "" : "s"}`
-          : `Matched ${row.claimNumber} to ${picked.length} lead${picked.length === 1 ? "" : "s"}`);
+          ? `Created the register row and matched ${row.claimNumber}`
+          : `Matched ${row.claimNumber} to the existing register row`);
       } else {
         await post("/claims/oem-match", payload);
-        toast.success(`Matched ${row.claimNumber} to ${picked.length} lead${picked.length === 1 ? "" : "s"}`);
+        toast.success(picked.length > 1
+          ? `Matched ${row.claimNumber} to ${picked.length} leads`
+          : `Matched ${row.claimNumber} to the scheme register`);
       }
       onDone();
     } catch (e) {
@@ -583,22 +593,15 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   };
 
   const clear = async () => {
-    if (!picked.length || !componentKey) return toast.error("Pick the lead to unlink");
+    if (!leadId || !componentKey) return toast.error("Pick the register row to unlink");
     setBusy(true);
     try {
-      for (const leadId of picked) {
-        await post("/claims/oem-match/clear", { leadId, componentKey });
-      }
-      toast.success(picked.length > 1 ? "Manual matches cleared" : "Manual match cleared");
+      await post("/claims/oem-match/clear", { leadId, componentKey });
+      toast.success("Manual match cleared");
       onDone();
     } catch (e) {
       toast.error(e.response?.data?.detail || "Could not clear match");
     } finally { setBusy(false); }
-  };
-
-  const leadLabel = (id) => {
-    const r = leads.find((x) => x.leadId === id);
-    return r ? `${r.leadId} · ${r.customer || r.customerName || lineLeadLabel(line, id) || ""}` : id;
   };
 
   return (
@@ -614,56 +617,73 @@ function MatchRegisterModal({ row, onClose, onDone }) {
       </div>
       <div className="p-5 space-y-3 overflow-y-auto">
         <p className="text-sm text-ink-soft">
-          One Extra Support line can cover two leads (for example 5000+5000=10000).
-          Add each existing lead. Money stays on each register row; this only links
-          the OEM claim.
+          Use this when chassis or claim wording did not join automatically. A debit
+          note with several Extra Support items is matched one item at a time. Money
+          stays on the register; this only links the OEM claim.
         </p>
         {looksCombinedSupport(line) ? (
           <p className="text-xs text-amber-800">
-            This wording names more than one customer. Match every lead that belongs
-            on this amount.
+            Combined amount — add the second lead that has the same open component.
           </p>
         ) : null}
-        <Field label="Leads on this claim item">
-          <div className="space-y-1.5" data-testid="oem-match-lead-list">
-            {picked.map((id) => (
-              <div key={id} className="flex items-center justify-between gap-2 rounded-md border border-line px-2 py-1.5 text-xs">
-                <span className="truncate">{leadLabel(id)}</span>
-                <button type="button" className="text-cobalt hover:underline shrink-0"
-                  onClick={() => dropLead(id)}>Remove</button>
-              </div>
-            ))}
-            {!picked.length ? (
-              <div className="text-xs text-ink-faint">No lead selected yet.</div>
-            ) : null}
-          </div>
-        </Field>
-        <Field label="Add another lead">
-          <Select data-testid="oem-match-add-lead" value={addId}
-            onChange={(e) => addLead(e.target.value)}>
+        <Field label="Lead">
+          <Select value={leadId} onChange={(e) => {
+            setLeadId(e.target.value);
+            setExtraLeadIds([]);
+            setComponentKey(relatedKey);
+          }}>
             <option value="">— pick lead —</option>
-            {leads.filter((r) => !picked.includes(r.leadId)).map((r) => (
-              <option key={r.leadId} value={r.leadId}>{r.leadId} · {r.customer || r.customerName || ""}</option>
+            {leads.map((r) => (
+              <option key={r.leadId} value={r.leadId}>{r.leadId} · {r.customer || r.customerName || lineLeadLabel(line, r.leadId)}</option>
             ))}
           </Select>
         </Field>
         <Field label="Scheme component">
           <Select value={componentKey} onChange={(e) => setComponentKey(e.target.value)}>
             <option value="">— pick component —</option>
-            {CREATE_COMPONENTS.map(([key, label]) => (
-              <option key={key} value={key}>{label}</option>
+            {options.map((r) => (
+              <option key={`${r.leadId}-${r.componentKey}`} value={r.componentKey}>
+                {r.component || componentLabel(r.componentKey) || r.componentKey} · {r.claimStatus}
+              </option>
             ))}
           </Select>
         </Field>
+        {(looksCombinedSupport(line) || extraLeadIds.length > 0 || extraCandidates.length > 0) ? (
+          <Field label="Add another lead">
+            <Select data-testid="oem-match-add-lead" value={addId}
+              onChange={(e) => {
+                const id = e.target.value;
+                setAddId("");
+                if (id && !picked.includes(id)) setExtraLeadIds((cur) => [...cur, id]);
+              }}>
+              <option value="">— pick lead —</option>
+              {extraCandidates.map((r) => (
+                <option key={r.leadId} value={r.leadId}>{r.leadId} · {r.customer || r.customerName || ""}</option>
+              ))}
+            </Select>
+            {extraLeadIds.length ? (
+              <div className="mt-1.5 space-y-1" data-testid="oem-match-lead-list">
+                {extraLeadIds.map((id) => {
+                  const r = leads.find((x) => x.leadId === id) || {};
+                  return (
+                    <div key={id} className="flex items-center justify-between gap-2 text-xs">
+                      <span>{id} · {r.customer || r.customerName || lineLeadLabel(line, id)}</span>
+                      <button type="button" className="text-cobalt hover:underline"
+                        onClick={() => setExtraLeadIds((cur) => cur.filter((x) => x !== id))}>Remove</button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </Field>
+        ) : null}
       </div>
       <div className="p-4 border-t border-line flex justify-between gap-2">
         <Button variant="ghost" onClick={clear} disabled={busy}>Clear match</Button>
         <div className="flex gap-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button onClick={save} disabled={busy} data-testid="oem-create-save">
-            {busy ? "Saving…" : (createFirst
-              ? `Create & match${picked.length > 1 ? ` ${picked.length} leads` : ""}`
-              : `Save match${picked.length > 1 ? ` · ${picked.length} leads` : ""}`)}
+            {busy ? "Saving…" : (createFirst ? "Create & match" : "Save match")}
           </Button>
         </div>
       </div>
