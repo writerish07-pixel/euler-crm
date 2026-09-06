@@ -1804,6 +1804,24 @@ async def test_executive_cannot_create_from_oem(client):
             "claimNumber": "AF-999-CLCREATE"})).status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_match_options_lists_register_leads_without_the_full_claims_path(client):
+    """The OEM match dropdown must not depend on GET /claims (too slow / empty)."""
+    lead_id = await _delivered_lead(client, chassis="MD9OPT26G900001",
+                                    invoice="AF-999-I26285001")
+    await _register_row(lead_id, "referralBonus", 5000.0)
+    rows = (await client.get("/api/claims/match-options")).json()
+    mine = [r for r in rows if r["leadId"] == lead_id]
+    assert mine, rows
+    assert any(r["componentKey"] == "referralBonus" for r in mine)
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post("/api/auth/login",
+                         json={"email": "executive@euler.com", "password": "euler@123"})
+        c.headers.update({"Authorization": f"Bearer {r.json()['token']}"})
+        assert (await c.get("/api/claims/match-options")).status_code == 403
+
+
 def test_line_lead_helpers_keep_first_lead_and_extras():
     line = {"leadId": "LD1", "leadCustomer": "Mahendra"}
     assert oem_claims.line_lead_ids(line) == ["LD1"]
