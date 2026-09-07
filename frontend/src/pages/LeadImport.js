@@ -1,7 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { UploadCloud, Download, CheckCircle2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
-import { api, downloadFile } from "../lib/api";
+import { downloadFile, get, postForm, apiErrorMessage } from "../lib/api";
 import { Drawer, Button, Card, Badge, Select } from "../components/ui";
 
 export default function LeadImport({ onClose, onDone }) {
@@ -10,19 +10,33 @@ export default function LeadImport({ onClose, onDone }) {
   const [mapping, setMapping] = useState({});
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState("upload"); // upload -> map
+  const [execMap, setExecMap] = useState({});
+
+  useEffect(() => {
+    get("/leads/split").then(setSplit).catch(() => {});
+  }, []);
+
+  const splitNote = (() => {
+    const shares = (split?.shares || []).filter((s) => Number(s.pct) > 0);
+    if (!shares.length || Math.abs(Number(split?.totalPct || 0) - 100) > 0.05) {
+      return "Blank Executive cells stay unassigned until Owner or Sales GM save a 100% split on Lead Allocation.";
+    }
+    return `Blank Executive cells are split: ${shares.map((s) => `${s.executive} ${s.pct}%`).join(" · ")}.`;
+  })();
 
   const downloadTemplate = async () => {
     try {
       await downloadFile("/leads/import/template", "euler_lead_upload_template.xlsx");
-    } catch {
-      toast.error("Could not download template");
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not download template"));
     }
   };
 
   const runPreview = async (f, mp) => {
-    const fd = new FormData(); fd.append("file", f);
+    const fd = new FormData();
+    fd.append("file", f);
     if (mp) fd.append("mapping", JSON.stringify(mp));
-    return api.post("/leads/import/preview", fd, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data);
+    return postForm("/leads/import/preview", fd);
   };
 
   const onFile = async (f) => {
@@ -30,16 +44,28 @@ export default function LeadImport({ onClose, onDone }) {
     setFile(f); setBusy(true);
     try {
       const res = await runPreview(f, null);
-      setData(res); setMapping(res.suggestedMapping || {}); setStep("map");
-    } catch (e) { toast.error(e.response?.data?.detail || "Could not read file"); setFile(null); }
-    finally { setBusy(false); }
+      setData(res); setMapping(res.suggestedMapping || {});
+      const next = {};
+      (res.executivePrompts || []).forEach((p) => { next[p.key] = p.suggested || ""; });
+      setExecMap(next);
+      setStep("map");
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not read file"));
+      setFile(null);
+    } finally { setBusy(false); }
   };
 
   const changeMap = async (field, header) => {
     const mp = { ...mapping, [field]: header };
     setMapping(mp);
     setBusy(true);
-    try { const res = await runPreview(file, mp); setData((d) => ({ ...d, ...res, suggestedMapping: d.suggestedMapping })); }
+    try {
+      const res = await runPreview(file, mp);
+      setData((d) => ({ ...d, ...res, suggestedMapping: d.suggestedMapping }));
+      const next = {};
+      (res.executivePrompts || []).forEach((p) => { next[p.key] = p.suggested || ""; });
+      setExecMap(next);
+    }
     catch { /* keep old */ } finally { setBusy(false); }
   };
 
@@ -47,17 +73,24 @@ export default function LeadImport({ onClose, onDone }) {
     if (!file) return;
     setBusy(true);
     const fd = new FormData(); fd.append("file", file); fd.append("mapping", JSON.stringify(mapping));
+    if (Object.keys(execMap).length) fd.append("executiveMap", JSON.stringify(execMap));
     try {
-      const res = await api.post("/leads/import/commit", fd, { headers: { "Content-Type": "multipart/form-data" } });
-      const { created, skipped } = res.data;
+      const res = await postForm("/leads/import/commit", fd);
+      const { created, skipped } = res;
+      const splitN = Object.keys(res.splitAssigned || {}).length;
+      const matchedN = Number(res.matchedExecutives || 0);
       if (created) {
-        toast.success(skipped ? `${created} leads imported · ${skipped} skipped` : `${created} leads imported`);
+        const bits = [`${created} lead${created === 1 ? "" : "s"} imported`];
+        if (matchedN) bits.push(`${matchedN} matched to executives`);
+        if (splitN) bits.push(`${splitN} assigned by lead split`);
+        if (skipped) bits.push(`${skipped} skipped`);
+        toast.success(bits.join(" · "));
       } else {
         toast.error("No leads imported — fix the listed rows and upload again");
       }
       if (created) onDone();
-      else setData((d) => ({ ...d, errors: res.data.errors || d.errors }));
-    } catch (e) { toast.error(e.response?.data?.detail || "Import failed"); }
+      else setData((d) => ({ ...d, errors: res.errors || d.errors }));
+    } catch (e) { toast.error(apiErrorMessage(e, "Import failed")); }
     finally { setBusy(false); }
   };
 
@@ -86,6 +119,7 @@ export default function LeadImport({ onClose, onDone }) {
             Download the template first — its Lead Source, Executive, Model, Variant, Priority and Status
             columns are dropdowns built from your Settings and Price Master, so uploaded values always match the app.
           </p>
+          <p className="text-xs text-ink-soft mt-2" data-testid="import-split-note">{splitNote}</p>
         </>
       )}
 
@@ -95,8 +129,45 @@ export default function LeadImport({ onClose, onDone }) {
             <CheckCircle2 size={16} className="text-emerald-500" />
             <span className="text-sm font-medium text-ink">{file?.name}</span>
             <Badge className="ml-auto">{data.detectedHeaders.length} columns · {data.rowCount} rows</Badge>
-            <button onClick={() => { setStep("upload"); setData(null); setFile(null); }} className="text-xs text-cobalt hover:underline">Change file</button>
+            <button onClick={() => { setStep("upload"); setData(null); setFile(null); setExecMap({}); }} className="text-xs text-cobalt hover:underline">Change file</button>
           </div>
+
+          <p className="text-xs text-ink-soft mb-4" data-testid="import-split-note-map">{splitNote}</p>
+
+          {(data.executivePrompts || []).length > 0 && (
+            <Card className="p-4 mb-5" data-testid="import-exec-match">
+              <h4 className="font-heading font-bold text-ink text-sm mb-1">Match executives</h4>
+              <p className="text-xs text-ink-soft mb-3">
+                These names in the sheet are not an exact match. Pick the executive in the app —
+                we transfer those leads to them. Leave as “lead split” to use the Owner / GM percentages.
+              </p>
+              <div className="space-y-2">
+                {(data.executivePrompts || []).map((p) => (
+                  <div key={p.key} className="flex flex-wrap items-center gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
+                    <div className="min-w-[8rem] flex-1">
+                      <div className="text-sm font-medium text-ink">{p.raw}</div>
+                      <div className="text-[11px] text-ink-faint">{p.count} row{p.count === 1 ? "" : "s"}
+                        {p.examples?.length > 1 ? ` · also ${p.examples.slice(1).join(", ")}` : ""}</div>
+                    </div>
+                    <Select
+                      data-testid={`exec-match-${p.key}`}
+                      value={execMap[p.key] ?? p.suggested ?? ""}
+                      onChange={(e) => setExecMap((m) => ({ ...m, [p.key]: e.target.value }))}
+                      className="w-56"
+                    >
+                      <option value="">Lead split (no named match)</option>
+                      {(p.candidates || []).length > 0
+                        ? p.candidates.map((n) => <option key={n} value={n}>{n}</option>)
+                        : (data.allowedValues?.executives || []).map((n) => <option key={n} value={n}>{n}</option>)}
+                      {(p.candidates || []).length > 0 && (data.allowedValues?.executives || [])
+                        .filter((n) => !(p.candidates || []).includes(n))
+                        .map((n) => <option key={n} value={n}>{n}</option>)}
+                    </Select>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
 
           <div className="grid grid-cols-2 gap-3 mb-5">
             <Card className="p-3">
@@ -110,7 +181,7 @@ export default function LeadImport({ onClose, onDone }) {
           </div>
 
           <h4 className="font-heading font-bold text-ink text-sm mb-2">Match your columns</h4>
-          <p className="text-xs text-ink-soft mb-3">We auto-matched by name. Adjust any that are wrong. "Customer Name" and "Mobile" are required.</p>
+          <p className="text-xs text-ink-soft mb-3">We auto-matched by name. Adjust any that are wrong. "Customer Name" and "Mobile" are required. Executive is optional.</p>
           <Card className="p-4 mb-5">
             <div className="grid grid-cols-2 gap-x-6 gap-y-3">
               {data.targetFields.map((t) => (
@@ -170,7 +241,14 @@ export default function LeadImport({ onClose, onDone }) {
                       <td className="px-3 py-1.5">{r.leadSource || "—"}</td>
                       <td className="px-3 py-1.5">{r.interestedModel || "—"}</td>
                       <td className="px-3 py-1.5">{r.variant || "—"}</td>
-                      <td className="px-3 py-1.5">{r.executive || "—"}</td>
+                      <td className="px-3 py-1.5">{(() => {
+                        const raw = r.__executiveRaw || r.executive || "";
+                        const fold = String(raw).trim().toLowerCase().replace(/\s+/g, " ");
+                        if (fold && Object.prototype.hasOwnProperty.call(execMap, fold)) {
+                          return execMap[fold] || <span className="text-ink-faint">split</span>;
+                        }
+                        return r.executive || "—";
+                      })()}</td>
                       <td className="px-3 py-1.5">{r.currentStatus || "—"}</td>
                     </tr>
                   ))}

@@ -1,4 +1,4 @@
-import { apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody } from "./api";
+import { apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -49,5 +49,21 @@ describe("isRetryableNetworkError", () => {
 
   test("HTML payload is retryable so we can try another host", () => {
     expect(isRetryableNetworkError({ code: "ERR_BAD_PAYLOAD" })).toBe(true);
+  });
+});
+
+describe("apiErrorMessage", () => {
+  test("uses a string FastAPI detail", () => {
+    expect(apiErrorMessage({ response: { data: { detail: "Pick an executive" } } })).toBe("Pick an executive");
+  });
+
+  test("joins a FastAPI 422 validation list so the toast is readable", () => {
+    expect(apiErrorMessage({
+      response: { data: { detail: [{ loc: ["body", "file"], msg: "Field required" }] } },
+    })).toBe("Field required");
+  });
+
+  test("falls back when detail is missing", () => {
+    expect(apiErrorMessage({ message: "Network Error" }, "Import failed")).toBe("Network Error");
   });
 });

@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { UserCheck, Users, AlertTriangle, RefreshCcw, Search } from "lucide-react";
+import { UserCheck, Users, AlertTriangle, RefreshCcw, Search, Percent } from "lucide-react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get, post, put, apiErrorMessage } from "../lib/api";
 import { fmtDate } from "../lib/format";
+import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, StatCard, Table, Badge, Button, Select, Input } from "../components/ui";
 
 /**
@@ -13,6 +14,7 @@ import { PageHeader, Card, StatCard, Table, Badge, Button, Select, Input } from 
  * and unnoticed. "Unassigned" is therefore the default filter.
  */
 export default function Allocation() {
+  const { canEditLeadSplit } = useAuth();
   const [summary, setSummary] = useState(null);
   const [leads, setLeads] = useState([]);
   const [execs, setExecs] = useState([]);
@@ -21,13 +23,26 @@ export default function Allocation() {
   const [picked, setPicked] = useState({});
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState([]);
+  const [splitBusy, setSplitBusy] = useState(false);
+  const [matchPick, setMatchPick] = useState({});
+  const [matchBusy, setMatchBusy] = useState("");
 
   const load = useCallback(() => {
-    get("/leads/allocation/summary").then(setSummary).catch(() => {});
+    get("/leads/allocation/summary").then((s) => {
+      setSummary(s);
+      setDraft((s.split?.shares || []).map((row) => ({ executive: row.executive, pct: row.pct })));
+      const picks = {};
+      (s.executiveMatches || []).forEach((row) => { picks[row.key] = row.suggested || ""; });
+      setMatchPick(picks);
+    }).catch(() => {});
     get("/leads").then(setLeads).catch(() => toast.error("Could not load leads"));
     get("/masters").then((m) => setExecs(m.executives || [])).catch(() => {});
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  const splitTotal = Math.round(draft.reduce((s, r) => s + (Number(r.pct) || 0), 0) * 100) / 100;
+  const splitOk = draft.length > 0 && Math.abs(splitTotal - 100) <= 0.05;
 
   const rows = useMemo(() => {
     let out = leads.filter((l) => (l.accountStatus || "Active") === "Active");
@@ -63,8 +78,45 @@ export default function Allocation() {
       setPicked({});
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Allocation failed");
+      toast.error(apiErrorMessage(e, "Allocation failed"));
     } finally { setBusy(false); }
+  };
+
+  const setShare = (name, pct) => {
+    setDraft((rows) => rows.map((r) => (r.executive === name ? { ...r, pct } : r)));
+  };
+
+  const evenSplit = () => {
+    const n = draft.length;
+    if (!n) return;
+    const base = Math.floor(10000 / n) / 100;
+    const first = +(100 - base * (n - 1)).toFixed(2);
+    setDraft((rows) => rows.map((r, i) => ({ ...r, pct: i === 0 ? first : base })));
+  };
+
+  const saveSplit = async () => {
+    if (!splitOk) return toast.error(`Shares must add up to 100% (now ${splitTotal}%)`);
+    setSplitBusy(true);
+    try {
+      await put("/leads/split", { shares: draft.map((r) => ({ executive: r.executive, pct: Number(r.pct) || 0 })) });
+      toast.success("Bulk-import split saved — new uploads use these percentages");
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not save the lead split"));
+    } finally { setSplitBusy(false); }
+  };
+
+  const transferMatch = async (row) => {
+    const to = matchPick[row.key] || row.suggested;
+    if (!to) return toast.error("Pick an executive in the app");
+    setMatchBusy(row.key);
+    try {
+      const r = await post("/leads/match-executive", { key: row.key, executive: to });
+      toast.success(`${r.movedCount} lead${r.movedCount === 1 ? "" : "s"} moved to ${to}`);
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not match that executive"));
+    } finally { setMatchBusy(""); }
   };
 
   return (
@@ -91,6 +143,101 @@ export default function Allocation() {
           </p>
         </Card>
       )}
+
+      {summary && (summary.executiveMatches || []).length > 0 && (
+        <Card className="p-4 mb-6" data-testid="exec-match-card">
+          <h3 className="font-heading font-bold text-ink mb-1">Match executives</h3>
+          <p className="text-xs text-ink-soft mb-3">
+            These leads already have an executive name, but it does not match the app list
+            (capital letters, extra words). Confirm the person and we transfer those leads to them.
+          </p>
+          <div className="space-y-2">
+            {summary.executiveMatches.map((row) => (
+              <div key={row.key} className="flex flex-wrap items-center gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
+                <div className="min-w-[8rem] flex-1">
+                  <div className="text-sm font-medium text-ink">{row.raw}</div>
+                  <div className="text-[11px] text-ink-faint">{row.count} lead{row.count === 1 ? "" : "s"}</div>
+                </div>
+                <Select
+                  data-testid={`alloc-match-${row.key}`}
+                  value={matchPick[row.key] ?? row.suggested ?? ""}
+                  onChange={(e) => setMatchPick((m) => ({ ...m, [row.key]: e.target.value }))}
+                  className="w-56"
+                >
+                  <option value="">Pick executive…</option>
+                  {(row.candidates || []).map((n) => <option key={n} value={n}>{n}</option>)}
+                  {execs.filter((n) => !(row.candidates || []).includes(n)).map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </Select>
+                <Button
+                  data-testid={`alloc-transfer-${row.key}`}
+                  onClick={() => transferMatch(row)}
+                  disabled={matchBusy === row.key || !(matchPick[row.key] || row.suggested)}
+                >
+                  <UserCheck size={15} />
+                  {matchBusy === row.key ? "Moving…" : "Transfer"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <Card className="p-4 mb-6" data-testid="lead-split-card">
+        <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+          <div>
+            <h3 className="font-heading font-bold text-ink flex items-center gap-2">
+              <Percent size={16} className="text-cobalt" /> Bulk import split
+            </h3>
+            <p className="text-xs text-ink-soft mt-1">
+              Owner and Sales GM set what % of a TL / Owner bulk upload each executive receives.
+              Named Executive cells in the sheet stay on that person. Each executive sees their share
+              on their dashboard and only their assigned leads.
+            </p>
+          </div>
+          {canEditLeadSplit && (
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" data-testid="split-even-btn" onClick={evenSplit} disabled={!draft.length}>
+                Split evenly
+              </Button>
+              <Button data-testid="split-save-btn" onClick={saveSplit} disabled={splitBusy || !draft.length}>
+                {splitBusy ? "Saving…" : "Save split"}
+              </Button>
+            </div>
+          )}
+        </div>
+        {!draft.length ? (
+          <p className="text-sm text-ink-faint">No executives on the staff / Settings list yet.</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {draft.map((row) => (
+                <label key={row.executive} className="flex items-center justify-between gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
+                  <span className="text-sm font-medium text-ink truncate">{row.executive}</span>
+                  {canEditLeadSplit ? (
+                    <span className="flex items-center gap-1 shrink-0">
+                      <Input
+                        data-testid={`split-pct-${row.executive}`}
+                        type="number" min="0" max="100" step="0.01"
+                        value={row.pct}
+                        onChange={(e) => setShare(row.executive, e.target.value)}
+                        className="w-20 text-right tabular" />
+                      <span className="text-xs text-ink-faint">%</span>
+                    </span>
+                  ) : (
+                    <span className="font-mono font-semibold tabular" data-testid={`split-pct-${row.executive}`}>{row.pct}%</span>
+                  )}
+                </label>
+              ))}
+            </div>
+            <p className={`text-xs mt-3 tabular ${splitOk ? "text-emerald-700" : "text-red-600"}`} data-testid="split-total">
+              Total {splitTotal}%{splitOk ? "" : " — must be 100% to save"}
+              {!canEditLeadSplit ? " · Owner / Sales GM can change this" : ""}
+            </p>
+          </>
+        )}
+      </Card>
 
       {summary && summary.executives.length > 0 && (
         <section className="mb-6" data-testid="allocation-load">

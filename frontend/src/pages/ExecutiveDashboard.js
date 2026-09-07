@@ -54,6 +54,24 @@ export default function ExecutiveDashboard() {
         <Link to="/inventory"><Button variant="secondary" data-testid="exec-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
       </div>
 
+      {d.leadSplit != null && (
+        <Card className="p-4 mt-5" data-testid="exec-lead-split">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="font-heading font-bold text-ink">My share of bulk leads</h3>
+              <p className="text-xs text-ink-soft mt-1">
+                Owner and Sales GM set this. New bulk uploads with a blank Executive land on you at this rate.
+                You only see leads assigned to you.
+              </p>
+            </div>
+            <div className="text-right shrink-0">
+              <div className="text-2xl font-bold tabular text-cobalt">{d.leadSplit.pct || 0}%</div>
+              <div className="text-[11px] uppercase tracking-wide text-ink-faint">of each import</div>
+            </div>
+          </div>
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
         <Card className="p-5 lg:col-span-2">
           <h3 className="font-heading font-bold text-ink mb-3">Today’s worklist</h3>
