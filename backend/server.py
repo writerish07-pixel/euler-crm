@@ -1628,11 +1628,18 @@ async def _load_lead_split():
 
 
 def _leads_for_executive(leads, user) -> list:
-    """Match lead.executive to the logged-in executive's name (or email local-part)."""
+    """Match lead.executive to the logged-in executive's name (or email local-part).
+
+    Split-assigned imported leads stay on the Owner register with a name, but
+    `assignmentPending` hides them from the executive until GM / Owner Approve
+    on the same Deal format + KYC path as a new enquiry.
+    """
     name = _norm_name(user.get("name"))
     email_local = _norm_name((user.get("email") or "").split("@")[0].replace(".", " ").replace("_", " "))
     out = []
     for l in leads:
+        if (l or {}).get("assignmentPending"):
+            continue
         ex = _norm_name(l.get("executive"))
         if not ex:
             continue
@@ -1640,6 +1647,41 @@ def _leads_for_executive(leads, user) -> list:
             out.append(l)
         elif email_local and (ex == email_local or email_local in ex or ex in email_local):
             out.append(l)
+    return out
+
+
+def _exec_request_filter(user) -> dict:
+    """Pending requests this executive submitted, or that the split assigned to them."""
+    fold = _norm_name((user or {}).get("name"))
+    clauses = [
+        {"submittedByUserId": (user or {}).get("userId")},
+        {"submittedBy": (user or {}).get("email")},
+    ]
+    if fold:
+        clauses.append({"assignedExecutiveFold": fold})
+    return {"$or": clauses}
+
+
+def _request_owned_by(req, user) -> bool:
+    if lead_docs._own_request(req, user):
+        return True
+    if str((user or {}).get("role") or "") != "executive":
+        return False
+    fold = _norm_name((user or {}).get("name"))
+    return bool(fold) and str(req.get("assignedExecutiveFold") or "") == fold
+
+
+def _lead_in_payload(lead: dict) -> dict:
+    keys = (
+        "customerName", "mobile", "altMobile", "village", "city", "leadSource",
+        "interestedModel", "variant", "executive", "currentStatus", "priority",
+        "budget", "remarks", "financeRequired", "exchangeRequired",
+        "nextFollowupDate", "createdDate", "customerType", "gstin",
+    )
+    out = {}
+    for k in keys:
+        if k in (lead or {}) and (lead or {}).get(k) is not None:
+            out[k] = lead[k]
     return out
 
 
@@ -3120,6 +3162,8 @@ def _request_out(doc):
     row["remarks"] = payload.get("remarks") or ""
     row["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
     row["gstin"] = payload.get("gstin") or ""
+    row["existingLeadId"] = row.get("existingLeadId") or ""
+    row["source"] = row.get("source") or ""
     return row
 
 
@@ -3129,10 +3173,7 @@ async def lead_request_summary(user=Depends(current_user)):
     if role == "executive":
         n = await db.lead_requests.count_documents({
             "status": "pending",
-            "$or": [
-                {"submittedByUserId": user.get("userId")},
-                {"submittedBy": user.get("email")},
-            ],
+            **_exec_request_filter(user),
         })
         return {"pending": n, "mine": n, "canApprove": False}
     if _can_approve_leads(user):
@@ -3149,13 +3190,10 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
     q = {} if st == "all" else {"status": st}
     role = str(user.get("role") or "")
     if role == "executive":
-        q["$or"] = [
-            {"submittedByUserId": user.get("userId")},
-            {"submittedBy": user.get("email")},
-        ]
+        q.update(_exec_request_filter(user))
     elif not _can_approve_leads(user):
         raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
-    rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(200)]
+    rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(2000)]
     req_ids = [r.get("requestId") for r in rows if r.get("requestId")]
     docs_by_req = {}
     if req_ids:
@@ -3165,7 +3203,7 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
     out = []
     for r in rows:
         row = _request_out(r)
-        own = lead_docs._own_request(r, user) or _can_approve_leads(user)
+        own = _request_owned_by(r, user) or _can_approve_leads(user)
         docs = [lead_docs.public_row(d) for d in docs_by_req.get(r.get("requestId"), [])
                 if lead_docs.can_read_kind(user, d.get("kind") or "", own=own)]
         row["documents"] = docs
@@ -3210,19 +3248,40 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
         labels = [lead_docs.KINDS.get(k, {}).get("label") or k for k in missing]
         raise HTTPException(422, "KYC is incomplete — " + ", ".join(labels) + ".")
+    existing_id = str(claimed.get("existingLeadId") or "").strip()
     try:
-        body = LeadIn(**payload)
-        lead = await _insert_live_lead(body, source_note="Lead created after GM / Owner approval")
+        if existing_id:
+            live = await db.leads.find_one({"leadId": existing_id})
+            if not live:
+                raise HTTPException(404, f"Lead {existing_id} is no longer on the register.")
+            if ce.num(payload.get("budget")) <= 0:
+                raise HTTPException(422, "Enter Cx Demand on the deal format before Approve.")
+            exec_name = str(payload.get("executive") or live.get("executive") or "").strip()
+            await db.leads.update_one({"leadId": existing_id}, {"$set": {
+                "assignmentPending": False,
+                "executive": exec_name,
+                "lastUpdated": now_iso(),
+                "lastUpdatedBy": user.get("email") or "",
+            }})
+            await _apply_quoted_deal(
+                existing_id, payload.get("interestedModel"), payload.get("variant"),
+                payload.get("budget"), payload.get("createdDate"))
+            lead = clean(await db.leads.find_one({"leadId": existing_id}))
+        else:
+            body = LeadIn(**payload)
+            lead = await _insert_live_lead(body, source_note="Lead created after GM / Owner approval")
     except HTTPException:
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
+        if existing_id:
+            await db.leads.update_one({"leadId": existing_id}, {"$set": {"assignmentPending": True}})
         raise
     await lead_docs.attach_request_docs_to_lead(db, request_id, lead["leadId"])
     await db.lead_requests.update_one(
         {"requestId": request_id},
         {"$set": {"status": "approved", "leadId": lead["leadId"]}},
     )
-    return {"ok": True, "leadId": lead["leadId"], "lead": lead}
+    return {"ok": True, "leadId": lead["leadId"], "lead": lead, "existing": bool(existing_id)}
 
 
 @api.post("/lead-requests/{request_id}/reject")
@@ -3242,6 +3301,23 @@ async def reject_lead_request(request_id: str, body: RejectRequestIn = RejectReq
         "rejectedAt": now_iso(),
         "rejectReason": str(body.reason or "").strip(),
     }})
+    existing_id = str(req.get("existingLeadId") or "").strip()
+    if existing_id:
+        live = await db.leads.find_one({"leadId": existing_id}) or {}
+        if live.get("assignmentPending"):
+            previous = str(live.get("executive") or "").strip()
+            await db.leads.update_one({"leadId": existing_id}, {
+                "$set": {
+                    "executive": "", "assignmentPending": False,
+                    "lastUpdated": now_iso(),
+                    "lastUpdatedBy": user.get("email") or "",
+                },
+                "$push": {"allocationHistory": {
+                    "from": previous, "to": "", "at": now_iso(),
+                    "by": user.get("email") or "",
+                    "remarks": "Assignment rejected — returned to unassigned",
+                }},
+            })
     return {"ok": True, "status": "rejected"}
 
 
@@ -3326,6 +3402,139 @@ async def save_lead_split(body: LeadSplitIn, act=Depends(actor)):
     }
     await db.lead_split.replace_one({"_id": "plan"}, doc, upsert=True)
     return await _load_lead_split()
+
+
+@api.post("/leads/split/apply-unassigned", dependencies=[Depends(sales_gm_only)])
+async def apply_split_to_unassigned(act=Depends(actor)):
+    """Assign already-imported Active leads that have no executive, using the saved %.
+
+    Names land on the Lead Register immediately so Owner / GM / TL can see who
+    received whom. The executive does not get a live book yet — each row becomes
+    a pending approval request and they complete Deal format + KYC the same way
+    as a new enquiry. GM / Owner Approve then opens the existing lead to them.
+    """
+    plan = await _load_lead_split()
+    if abs(float(plan.get("totalPct") or 0) - 100) > 0.05:
+        raise HTTPException(422, "Save a 100% split first")
+    unassigned = []
+    for l in await db.leads.find().to_list(5000):
+        if (l.get("accountStatus") or "Active") != "Active":
+            continue
+        if str(l.get("executive") or "").strip():
+            continue
+        unassigned.append(l)
+    if not unassigned:
+        return {"assigned": 0, "requests": 0, "byExecutive": {}, "leadIds": []}
+    names = distribute_by_share(len(unassigned), plan.get("shares") or [])
+    stamp = now_iso()
+    by_email = act.get("email") or ""
+    keep = [(lead, name) for lead, name in zip(unassigned, names) if str(name or "").strip()]
+    if not keep:
+        raise HTTPException(422, "The saved split has no executives with a share above 0%.")
+    req_ids = await next_ids("lead_request", "LR26", len(keep))
+    requests = []
+    synced = []
+    assigned_ids = []
+    by_exec = Counter()
+    for i, (lead, exec_name) in enumerate(keep):
+        lid = lead.get("leadId")
+        payload = _lead_in_payload(lead)
+        payload["executive"] = exec_name
+        deal_amount = ce.round2(ce.num(payload.get("budget")))
+        deal_format = await _deal_format_for(
+            payload.get("interestedModel"), payload.get("variant"), deal_amount,
+            payload.get("createdDate"))
+        entry = {"from": "", "to": exec_name, "at": stamp, "by": by_email,
+                 "remarks": "Assigned by bulk-import split — pending GM / Owner approval"}
+        await db.leads.update_one({"leadId": lid}, {
+            "$set": {
+                "executive": exec_name, "assignmentPending": True, "importedSplit": True,
+                "lastUpdated": stamp, "lastUpdatedBy": by_email,
+            },
+            "$push": {"allocationHistory": entry},
+        })
+        await write_audit(act, "allocate", "lead", leadId=lid,
+                          old={"executive": ""}, new={"executive": exec_name,
+                                                     "assignmentPending": True})
+        requests.append({
+            "requestId": req_ids[i],
+            "status": "pending",
+            "source": "split-assignment",
+            "existingLeadId": lid,
+            "payload": payload,
+            "submittedBy": "",
+            "submittedByName": exec_name,
+            "submittedByUserId": "",
+            "assignedExecutive": exec_name,
+            "assignedExecutiveFold": _norm_name(exec_name),
+            "createdAt": stamp,
+            "dealAmount": deal_amount,
+            "dealFormat": deal_format,
+            "cxDemand": deal_amount,
+        })
+        assigned_ids.append(lid)
+        by_exec[exec_name] += 1
+        synced.append(clean(await db.leads.find_one({"leadId": lid})) or {"leadId": lid, **payload})
+    if requests:
+        await db.lead_requests.insert_many(requests)
+    for doc in synced:
+        try:
+            await queue_sheet_sync("leads", doc, entity_id=doc.get("leadId") or "")
+        except Exception:
+            logger.exception("queue sheet sync failed for %s", (doc or {}).get("leadId"))
+    _schedule_sheet_syncs(synced)
+    return {
+        "assigned": len(assigned_ids),
+        "requests": len(requests),
+        "byExecutive": dict(by_exec),
+        "leadIds": assigned_ids,
+    }
+
+
+class LeadRequestUpdateIn(BaseModel):
+    budget: Optional[float] = None
+    interestedModel: Optional[str] = None
+    variant: Optional[str] = None
+    remarks: Optional[str] = None
+    customerType: Optional[str] = None
+    gstin: Optional[str] = None
+
+
+@api.put("/lead-requests/{request_id}")
+async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
+                              user=Depends(current_user)):
+    """Executive completes Deal format on a split-assigned imported lead."""
+    req = await db.lead_requests.find_one({"requestId": request_id})
+    if not req:
+        raise HTTPException(404, "Approval request not found")
+    if req.get("status") not in ("pending", "approving"):
+        raise HTTPException(409, f"This request is already {req.get('status')}.")
+    if not _request_owned_by(req, user) and not _can_approve_leads(user):
+        raise HTTPException(403, "You can only complete your own approval request.")
+    payload = dict(req.get("payload") or {})
+    patch = body.model_dump(exclude_unset=True)
+    if "budget" in patch:
+        amt = ce.round2(ce.num(patch.get("budget")))
+        if amt <= 0:
+            raise HTTPException(422, "Enter Cx Demand — the final amount given to the customer.")
+        payload["budget"] = amt
+    for k in ("interestedModel", "variant", "remarks", "customerType", "gstin"):
+        if k in patch and patch[k] is not None:
+            payload[k] = patch[k]
+    if payload.get("customerType"):
+        payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+    deal_amount = ce.round2(ce.num(payload.get("budget")))
+    deal_format = await _deal_format_for(
+        payload.get("interestedModel"), payload.get("variant"), deal_amount,
+        payload.get("createdDate"))
+    await db.lead_requests.update_one({"requestId": request_id}, {"$set": {
+        "payload": payload,
+        "dealAmount": deal_amount,
+        "dealFormat": deal_format,
+        "cxDemand": deal_amount,
+    }})
+    updated = await db.lead_requests.find_one({"requestId": request_id})
+    return _request_out(updated)
 
 
 @api.get("/leads/{lead_id}")
@@ -3414,7 +3623,7 @@ async def _document_own(doc, user) -> bool:
         return _is_own_lead(lead, user)
     if doc.get("requestId"):
         req = await db.lead_requests.find_one({"requestId": doc["requestId"]}) or {}
-        return lead_docs._own_request(req, user)
+        return _request_owned_by(req, user)
     return False
 
 
@@ -3455,7 +3664,7 @@ async def upload_request_document(request_id: str, kind: str = Form(...),
         raise HTTPException(404, "Approval request not found")
     if req.get("status") not in ("pending", "approving"):
         raise HTTPException(409, "KYC can only be added while the request is waiting.")
-    own = lead_docs._own_request(req, user)
+    own = _request_owned_by(req, user)
     if not own and not _can_approve_leads(user):
         raise HTTPException(403, "You can only attach KYC to your own request.")
     kind = lead_docs.require_kind(kind)
@@ -3474,7 +3683,7 @@ async def list_request_documents(request_id: str, user=Depends(current_user)):
     req = await db.lead_requests.find_one({"requestId": request_id})
     if not req:
         raise HTTPException(404, "Approval request not found")
-    own = lead_docs._own_request(req, user)
+    own = _request_owned_by(req, user)
     if not own and not _can_approve_leads(user):
         raise HTTPException(403, "You can only view KYC on your own request.")
     return await lead_docs.list_docs(db, user, request_id=request_id, own=own or _can_approve_leads(user))

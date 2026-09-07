@@ -4,6 +4,10 @@ import { X } from "lucide-react";
 
 export const cx = (...a) => a.filter(Boolean).join(" ");
 
+/** Shared cap for registers, dashboards, and any other list “window”. */
+export const PANEL_MAX_H = "min(28rem, calc(100dvh - 14rem))";
+export const panelScrollClass = "max-h-[min(28rem,calc(100dvh-14rem))] overflow-y-auto overflow-x-auto overscroll-contain";
+
 /**
  * Render an overlay into <body> instead of leaving it inside the page tree.
  *
@@ -108,14 +112,19 @@ export function Badge({ children, tone, className, ...rest }) {
 // rowClassName is optional and tints a row from its own data — used where a row's
 // state matters more than any single cell (a claim nobody filed with the OEM).
 // Callers that don't pass it get exactly the old markup.
-export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName }) {
+export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName, maxHeight = PANEL_MAX_H }) {
   const list = Array.isArray(rows) ? rows : [];
+  const capped = maxHeight !== false && maxHeight != null && maxHeight !== "";
   return (
     <Card className="overflow-hidden">
-      <div className="overflow-x-auto">
+      <div
+        data-testid="table-scroll"
+        className={cx("overflow-x-auto", capped && "overflow-y-auto overscroll-contain")}
+        style={capped ? { maxHeight: maxHeight === true ? PANEL_MAX_H : maxHeight } : undefined}
+      >
         <table className="w-full text-left">
           <thead>
-            <tr className="bg-zinc-50/80 border-b border-line">
+            <tr className={cx("bg-zinc-50 border-b border-line", capped && "sticky top-0 z-10")}>
               {columns.map((c) => (
                 <th key={c.key} className={cx("px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-ink-faint whitespace-nowrap", c.align === "right" && "text-right")}>
                   {c.label}

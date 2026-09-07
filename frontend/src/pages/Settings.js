@@ -565,7 +565,7 @@ function MastersListCard({ gsEnabled }) {
         {MASTER_LIST_CATEGORIES.map(([cat, label]) => (
           <div key={cat}>
             <div className="text-xs font-semibold text-ink-soft mb-2">{label}</div>
-            <div className="flex flex-wrap gap-2 mb-2">
+            <div className="flex flex-wrap gap-2 mb-2 max-h-40 overflow-y-auto overscroll-contain pr-1">
               {byCategory(cat).map((r) => (
                 <span key={r.id} data-testid={`master-value-${cat}-${r.value}`}
                   className="inline-flex items-center gap-1.5 text-xs bg-slate-50 ring-1 ring-slate-200 rounded-full px-2.5 py-1">
