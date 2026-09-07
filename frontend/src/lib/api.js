@@ -171,7 +171,13 @@ export const del = (url) => withFallback(() => api.delete(url).then((r) => r.dat
 
 /** Multipart POST. Let the browser set Content-Type with the boundary — a
  *  hardcoded `multipart/form-data` header has none, and FastAPI then 422s. */
-export const postForm = (url, formData) => withFallback(() => api.post(url, formData).then((r) => r.data));
+export const postForm = (url, formData, opts = {}) => {
+  const timeout = opts.timeout;
+  const retry = opts.retry !== false;
+  const run = () => api.post(url, formData, timeout ? { timeout } : {}).then((r) => r.data);
+  if (!retry) return run();
+  return withFallback(run);
+};
 
 export function apiErrorMessage(err, fallback = "Request failed") {
   const data = err?.response?.data;

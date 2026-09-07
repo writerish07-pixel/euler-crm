@@ -126,6 +126,42 @@ async def sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
     return res
 
 
+async def queue_sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
+    """Record a PENDING sheet write without waiting on Google (bulk import)."""
+    eid = entity_id or str(doc.get(gsheets.SYNC_MAP.get(entity, ("", "", []))[1], "") or "")
+    if not eid:
+        return
+    payload = {k: v for k, v in dict(doc).items() if not k.startswith("_")}
+    await db.sheet_sync_log.update_one(
+        {"entityType": entity, "entityId": eid},
+        {"$set": {
+            "entityType": entity, "entityId": eid, "tab": "",
+            "operation": "upsert", "status": "PENDING",
+            "error": "queued after bulk import", "missingHeaders": [],
+            "timestamp": now_iso(), "payload": payload, "attempt": 0,
+        }},
+        upsert=True,
+    )
+
+
+def _schedule_sheet_syncs(docs):
+    """Best-effort Google writes after the HTTP response — do not block Import."""
+    if not docs:
+        return
+
+    async def _run():
+        for doc in docs:
+            try:
+                await sheet_sync("leads", doc)
+            except Exception:
+                logger.exception("bulk import sheet sync failed for %s", (doc or {}).get("leadId"))
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        pass
+
+
 def today():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -241,6 +277,19 @@ async def next_id(kind, prefix, width=6):
         {"_id": kind}, {"$inc": {"seq": 1}}, upsert=True, return_document=True
     )
     return f"{prefix}{str(doc['seq']).zfill(width)}"
+
+
+async def next_ids(kind, prefix, n, width=6):
+    """Reserve `n` sequential ids in one counter bump (bulk import)."""
+    n = int(n or 0)
+    if n <= 0:
+        return []
+    doc = await db.counters.find_one_and_update(
+        {"_id": kind}, {"$inc": {"seq": n}}, upsert=True, return_document=True
+    )
+    end = int(doc["seq"])
+    start = end - n + 1
+    return [f"{prefix}{str(i).zfill(width)}" for i in range(start, end + 1)]
 
 
 async def get_lead_or_404(lead_id):
@@ -5358,20 +5407,41 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
     checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
     _apply_executive_map(checked, _parse_executive_map(executiveMap),
                          allowed.get("executives") or [])
-    created = 0
-    created_ids = []
-    created_exec = []
+    fresh = await _existing_lead_mobiles()
+    keep = []
     for d in checked:
         if d["__errors"] or d.get("__alreadyInApp"):
             continue
-        lead_id = await next_id("lead", "LD26")
+        mob = str(d.get("mobile") or "")
+        hit = fresh.get(mob)
+        if hit:
+            d["__alreadyInApp"] = hit
+            continue
+        keep.append(d)
+        fresh[mob] = {"leadId": "", "customerName": d.get("customerName") or ""}
+
+    ids = await next_ids("lead", "LD26", len(keep))
+    plan = await _load_lead_split()
+    blank_idxs = [i for i, d in enumerate(keep) if not str(d.get("executive") or "").strip()]
+    split_names = distribute_by_share(len(blank_idxs), plan.get("shares") or [])
+    split_at = {idx: name for idx, name in zip(blank_idxs, split_names) if name}
+
+    docs = []
+    created_ids = []
+    created_exec = []
+    assigned = {}
+    stamp = now_iso()
+    batch = today()
+    for i, d in enumerate(keep):
+        lead_id = ids[i]
+        exec_name = str(d.get("executive") or "").strip() or split_at.get(i) or ""
         doc = {
             "leadId": lead_id, "createdDate": d.get("createdDate") or today(),
             "customerName": d.get("customerName", ""), "mobile": d.get("mobile", ""),
             "altMobile": d.get("altMobile", ""), "village": d.get("village", ""), "city": d.get("city", ""),
             "leadSource": d.get("leadSource") or IMPORT_DEFAULTS["leadSource"],
             "interestedModel": d.get("interestedModel", ""),
-            "variant": d.get("variant", ""), "executive": d.get("executive", ""),
+            "variant": d.get("variant", ""), "executive": exec_name,
             "currentStatus": d.get("currentStatus") or IMPORT_DEFAULTS["currentStatus"],
             "priority": d.get("priority") or IMPORT_DEFAULTS["priority"],
             "nextFollowupDate": d.get("nextFollowupDate", ""),
@@ -5384,35 +5454,27 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
             "consumerDiscount": 0, "exchangeBonus": 0, "loyaltyBonus": 0, "referralBonus": 0,
             "dsaDiscount": 0, "additionalDiscount": 0, "exShowroom": 0, "rto": 0, "insuranceAmount": 0,
             "accessoriesAmount": 0, "handlingCharges": 0, "trc": 0, "fastag": 0, "extendedWarranty": 0,
-            "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(), "importedBatch": today(),
+            "otherCharges": 0, "bookingAmount": 0, "lastUpdated": stamp, "importedBatch": batch,
         }
-        await db.leads.insert_one(doc)
-        await sheet_sync("leads", doc)
-        created += 1
+        if i in split_at:
+            doc["importedSplit"] = True
+            assigned[lead_id] = exec_name
+        docs.append(doc)
         created_ids.append(lead_id)
-        created_exec.append(str(d.get("executive") or "").strip())
-    blanks = [lid for lid, ex in zip(created_ids, created_exec) if not ex]
-    assigned = {}
-    if blanks:
-        plan = await _load_lead_split()
-        names = distribute_by_share(len(blanks), plan.get("shares") or [])
-        for lid, name in zip(blanks, names):
-            if not name:
-                continue
-            await db.leads.update_one(
-                {"leadId": lid},
-                {"$set": {"executive": name, "lastUpdated": now_iso(),
-                          "importedSplit": True}},
-            )
-            assigned[lid] = name
-            updated = clean(await db.leads.find_one({"leadId": lid}))
-            if updated:
-                await sheet_sync("leads", updated)
+        created_exec.append(exec_name)
+    if docs:
+        await db.leads.insert_many(docs)
+        for doc in docs:
+            try:
+                await queue_sheet_sync("leads", doc, entity_id=doc["leadId"])
+            except Exception:
+                logger.exception("queue sheet sync failed for %s", doc.get("leadId"))
+        _schedule_sheet_syncs(docs)
     errors = _import_error_report(checked)
     already = _import_already_report(checked)
     matched = sum(1 for lid, ex in zip(created_ids, created_exec)
                   if ex and lid not in assigned)
-    return {"created": created, "skipped": len(errors), "alreadyExisted": len(already),
+    return {"created": len(docs), "skipped": len(errors), "alreadyExisted": len(already),
             "rowCount": len(checked),
             "leadIds": created_ids, "errors": errors[:100], "alreadyInApp": already[:100],
             "splitAssigned": assigned, "matchedExecutives": matched}

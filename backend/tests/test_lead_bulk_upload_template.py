@@ -63,7 +63,7 @@ async def client(monkeypatch):
     """
     isolated = server.client["lead_bulk_upload_isolated"]
     for name in ("leads", "price_master", "masters_list", "counters", "activities",
-                 "lead_split", "staff"):
+                 "lead_split", "staff", "sheet_sync_log"):
         await isolated[name].delete_many({})
     await isolated.price_master.insert_many([
         {"priceId": "PM1", "model": "Turbo Max", "variant": "Maxx (PV)", "exShowroom": 770000, "status": "Active"},
@@ -494,3 +494,48 @@ async def test_existing_wrong_case_executives_can_be_transferred(client):
     assert r.status_code == 200, r.text
     assert r.json()["movedCount"] == 1
     assert (await server.db.leads.find_one({"customerName": "Old Case"}))["executive"] == "Amit"
+
+
+@pytest.mark.asyncio
+async def test_next_ids_reserves_a_contiguous_block(client):
+    ids = await server.next_ids("lead", "LD26", 3)
+    assert ids == ["LD26000001", "LD26000002", "LD26000003"]
+    assert await server.next_id("lead", "LD26") == "LD26000004"
+    assert await server.next_ids("lead", "LD26", 0) == []
+
+
+@pytest.mark.asyncio
+async def test_import_commit_inserts_once_and_does_not_await_google(client, monkeypatch):
+    """A 168-row import used to await Google once per lead and blow the 25s
+    browser timeout. Leads already written stayed in the app, the toast said
+    Network Error, and a retry could race the first request. Commit must insert
+    the batch, queue sheet rows, and return without calling sheet_sync."""
+    scheduled = []
+    monkeypatch.setattr(server, "_schedule_sheet_syncs", lambda docs: scheduled.append(len(docs)))
+
+    awaited = {"n": 0}
+
+    async def boom(*_a, **_k):
+        awaited["n"] += 1
+        raise AssertionError("Google sync must run after the HTTP response")
+
+    monkeypatch.setattr(server, "sheet_sync", boom)
+
+    rows = [_row("One", "9860000001"), _row("Two", "9860000002"), _row("Three", "9860000003")]
+    r = await client.post("/api/leads/import/commit",
+                          files={"file": ("leads.csv", _csv(rows), "text/csv")})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 3
+    assert awaited["n"] == 0
+    assert scheduled == [3]
+    assert r.json()["leadIds"] == ["LD26000001", "LD26000002", "LD26000003"]
+    pending = await server.db.sheet_sync_log.find().to_list(10)
+    assert len(pending) == 3
+    assert all(p.get("status") == "PENDING" for p in pending)
+
+    r2 = await client.post("/api/leads/import/commit",
+                           files={"file": ("leads.csv", _csv(rows), "text/csv")})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["created"] == 0
+    assert r2.json()["alreadyExisted"] == 3
+    assert await server.db.leads.count_documents({}) == 3
