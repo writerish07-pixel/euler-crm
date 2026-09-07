@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { get } from "../lib/api";
-import { inr, compactInr, num, ytdCount, ytdMoney } from "../lib/format";
+import { inr, compactInr, num, ytdCount, ytdMoney, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import OwnerPriceEditor from "../components/OwnerPriceEditor";
 import YardStockCard from "../components/YardStockCard";
@@ -31,7 +31,7 @@ export default function Dashboard() {
       <PageHeader
         title="Operations Dashboard"
         subtitle={d?.lastUpdated
-          ? `MTD + YTD morning board · updated ${new Date(d.lastUpdated).toLocaleTimeString("en-IN")}`
+          ? `MTD + YTD morning board · updated ${fmtTime(d.lastUpdated)}`
           : "MTD + YTD morning board"}
         actions={<Link to="/monthly"><Button variant="secondary" data-testid="ops-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>}
       />

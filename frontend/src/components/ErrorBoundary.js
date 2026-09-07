@@ -18,8 +18,8 @@ export default class ErrorBoundary extends React.Component {
         <div>
           <p className="font-heading text-lg font-bold text-ink">Something went wrong</p>
           <p className="text-sm text-ink-soft mt-2 max-w-sm">
-            The page hit an error. Tap reload — on some Android phones a pull-down
-            refresh blanks the app.
+            The page hit an error. Tap Reload. If this is an installed app on
+            OPPO or vivo, close it and open Euler CRM in Chrome instead.
           </p>
           <button
             type="button"

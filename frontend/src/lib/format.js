@@ -1,14 +1,93 @@
-export const inr = (n, opts = {}) => {
-  const v = Number(n || 0);
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: opts.decimals ?? 0,
-    minimumFractionDigits: opts.decimals ?? 0,
-  }).format(v);
-};
+const NUMBER_LOCALES = ["en-IN", "en-GB", "en"];
+const DATE_LOCALES = ["en-IN", "en-GB", "en"];
 
-export const num = (n) => new Intl.NumberFormat("en-IN").format(Number(n || 0));
+/** ColorOS / OriginOS WebViews often ship without ICU for `en-IN` and throw
+ *  RangeError the moment the dashboard calls Intl.NumberFormat("en-IN"). */
+export function resolveNumberLocale(IntlImpl = globalThis.Intl) {
+  if (!IntlImpl || typeof IntlImpl.NumberFormat !== "function") return null;
+  for (const loc of NUMBER_LOCALES) {
+    try {
+      const fmt = new IntlImpl.NumberFormat(loc, { style: "currency", currency: "INR" });
+      fmt.format(1);
+      return loc;
+    } catch {
+      /* try the next locale */
+    }
+  }
+  try {
+    new IntlImpl.NumberFormat(undefined, { style: "currency", currency: "INR" }).format(1);
+    return undefined;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveDateLocale(probe = new Date("2026-09-07T10:00:00")) {
+  for (const loc of DATE_LOCALES) {
+    try {
+      probe.toLocaleString(loc);
+      return loc;
+    } catch {
+      /* try the next locale */
+    }
+  }
+  return undefined;
+}
+
+let _numberLocale;
+let _numberReady = false;
+function numberLocale() {
+  if (!_numberReady) {
+    _numberLocale = resolveNumberLocale();
+    _numberReady = true;
+  }
+  return _numberLocale;
+}
+
+let _dateLocale;
+let _dateReady = false;
+function dateLocale() {
+  if (!_dateReady) {
+    _dateLocale = resolveDateLocale();
+    _dateReady = true;
+  }
+  return _dateLocale;
+}
+
+function fallbackInr(v, decimals) {
+  const n = Number.isFinite(v) ? v : 0;
+  const digits = decimals ?? 0;
+  const body = digits > 0 ? n.toFixed(digits) : String(Math.round(n));
+  return `₹${body}`;
+}
+
+export function formatInr(n, opts = {}, locale = numberLocale()) {
+  const v = Number(n || 0);
+  if (locale === null) return fallbackInr(v, opts.decimals);
+  try {
+    return new Intl.NumberFormat(locale, {
+      style: "currency",
+      currency: "INR",
+      maximumFractionDigits: opts.decimals ?? 0,
+      minimumFractionDigits: opts.decimals ?? 0,
+    }).format(v);
+  } catch {
+    return fallbackInr(v, opts.decimals);
+  }
+}
+
+export const inr = (n, opts = {}) => formatInr(n, opts);
+
+export const num = (n) => {
+  const v = Number(n || 0);
+  const loc = numberLocale();
+  if (loc === null) return String(Math.round(v));
+  try {
+    return new Intl.NumberFormat(loc).format(v);
+  } catch {
+    return String(Math.round(v));
+  }
+};
 
 export const compactInr = (n) => {
   const v = Number(n || 0);
@@ -21,12 +100,50 @@ export const compactInr = (n) => {
 export const ytdCount = (n) => `YTD ${num(n)}`;
 export const ytdMoney = (n) => `YTD ${compactInr(n)}`;
 
-export const fmtDate = (d) => {
+function localeDate(dt, run, fallback) {
+  try {
+    return run(dateLocale());
+  } catch {
+    try {
+      return run(undefined);
+    } catch {
+      return fallback;
+    }
+  }
+}
+
+export const fmtDate = (d, opts = { day: "2-digit", month: "short", year: "numeric" }) => {
   if (!d) return "—";
   const s = String(d).split("T")[0];
   const dt = new Date(s);
   if (isNaN(dt)) return s;
-  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  return localeDate(
+    dt,
+    (loc) => dt.toLocaleDateString(loc, opts),
+    s,
+  );
+};
+
+export const fmtTime = (d, opts) => {
+  if (!d) return "—";
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt)) return "—";
+  return localeDate(
+    dt,
+    (loc) => (opts ? dt.toLocaleTimeString(loc, opts) : dt.toLocaleTimeString(loc)),
+    dt.toISOString().slice(11, 16),
+  );
+};
+
+export const fmtWhen = (d) => {
+  if (!d) return "—";
+  const dt = d instanceof Date ? d : new Date(d);
+  if (isNaN(dt)) return "—";
+  return localeDate(
+    dt,
+    (loc) => dt.toLocaleString(loc),
+    dt.toISOString().replace("T", " ").slice(0, 16),
+  );
 };
 
 /** Local calendar date as YYYY-MM-DD for `<input type="date">` defaults. */

@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { compactInr, inr, num, ytdCount } from "../lib/format";
+import { compactInr, inr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 
@@ -25,7 +25,7 @@ export default function SalesGmDashboard() {
     <div data-testid="sales-gm-dashboard">
       <PageHeader
         title="Sales GM Dashboard"
-        subtitle={`${scope.note || "Showroom-wide sales"} · MTD + YTD · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
+        subtitle={`${scope.note || "Showroom-wide sales"} · MTD + YTD · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="gm-period-kpis">

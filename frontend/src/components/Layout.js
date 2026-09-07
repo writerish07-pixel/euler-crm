@@ -14,6 +14,7 @@ import { useAuth } from "../context/AuthContext";
 import ConnectionBar from "./ConnectionBar";
 import { downloadFile, get } from "../lib/api";
 import LeadDrawer from "../pages/LeadDrawer";
+import { fmtWhen } from "../lib/format";
 
 const NAV = [
   { section: "Overview", items: [
@@ -180,7 +181,7 @@ function SyncBadge() {
     tone = "bg-emerald-50 text-emerald-700 ring-emerald-600/20"; dot = "bg-emerald-500 animate-pulse"; label = "Sheet Synced";
     title = s.health?.lastError && s.health?.lastErrorClass === "sheet_shape"
       ? `Connected. A side tab or pending column was skipped: ${s.health.lastError}`
-      : (s.health?.lastWriteAt ? `Last write ${new Date(s.health.lastWriteAt).toLocaleString("en-IN")}` : "Connected — writes flow to your Google Sheet");
+      : (s.health?.lastWriteAt ? `Last write ${fmtWhen(s.health.lastWriteAt)}` : "Connected — writes flow to your Google Sheet");
   } else {
     tone = "bg-amber-50 text-amber-700 ring-amber-600/20"; dot = "bg-amber-500"; label = "Sync Off";
     title = s.reason || "Google Sheet sync not enabled";

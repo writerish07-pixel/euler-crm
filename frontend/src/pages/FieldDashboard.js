@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { compactInr, num, ytdCount } from "../lib/format";
+import { compactInr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 
@@ -24,7 +24,7 @@ export default function FieldDashboard() {
     <div data-testid="field-dashboard">
       <PageHeader
         title="Field Dashboard"
-        subtitle={`ASM / RM · company retail · MTD + YTD · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
+        subtitle={`ASM / RM · company retail · MTD + YTD · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="field-period-kpis">
