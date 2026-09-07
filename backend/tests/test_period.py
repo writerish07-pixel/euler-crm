@@ -50,6 +50,23 @@ def test_february_end_on_leap_year():
     assert p.end == "2024-02-29"
 
 
+def test_lead_register_date_uses_event_date_for_status_tabs():
+    delivered = {
+        "createdDate": "2026-08-01",
+        "deliveryDate": "2026-09-07",
+        "currentStatus": "Delivered",
+    }
+    booked = {
+        "createdDate": "2026-07-01",
+        "bookingDate": "2026-09-02",
+        "currentStatus": "Booked",
+    }
+    raw = {"lastUpdated": "2026-09-07T10:00:00", "currentStatus": "New"}
+    assert periodmod.lead_register_date(delivered, "Delivered")[:7] == "2026-09"
+    assert periodmod.lead_register_date(booked, "Booked")[:7] == "2026-09"
+    assert periodmod.lead_register_date(raw, "")[:7] == "2026-09"
+
+
 def test_year_months_are_twelve():
     months = periodmod.year_months("2026")
     assert months[0] == "2026-01"

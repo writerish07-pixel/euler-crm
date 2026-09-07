@@ -409,14 +409,11 @@ export default function Layout({ children }) {
           </button>
         ) : null}
         <Topbar onMenuOpen={() => setNavOpen(true)} />
-        {/* NOTE: `animate-fade-up` uses `animation-fill-mode: both`, so this element
-            keeps a `transform` after the animation ends. A transformed element is the
-            containing block for `position: fixed` DESCENDANTS — so any overlay rendered
-            inside a page would size itself against <main> (as tall as the whole list)
-            instead of the viewport, pushing its footer buttons off screen.
-            Every drawer and modal therefore portals to <body> via ui.js `Portal`.
-            If you add a new overlay, portal it too. */}
-        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-4 sm:p-6 lg:p-8 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-fade-up min-w-0">{children}</main>
+        {/* NOTE: Drawers and modals portal to <body> via ui.js `Portal` so a
+            transform on an ancestor cannot trap `position: fixed`. Do not add
+            animate-fade-up (or any transform) on <main> — it used to pin overlays
+            to the page-tall box instead of the viewport. */}
+        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-4 sm:p-6 lg:p-8 pb-[calc(1rem+env(safe-area-inset-bottom))] min-w-0">{children}</main>
       </div>
     </div>
   );

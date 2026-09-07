@@ -1,4 +1,4 @@
-import { formatInr, num, resolveNumberLocale, resolveDateLocale, fmtDate, fmtTime } from "./format";
+import { formatInr, num, resolveNumberLocale, resolveDateLocale, fmtDate, fmtTime, telHref, digitsLast10 } from "./format";
 
 describe("resolveNumberLocale", () => {
   test("skips en-IN when the WebView throws RangeError", () => {
@@ -51,6 +51,15 @@ describe("fmtDate / fmtTime", () => {
     const s = fmtTime("2026-09-07T10:15:00");
     expect(s).toBeTruthy();
     expect(s).not.toBe("—");
+  });
+});
+
+describe("telHref", () => {
+  test("builds a +91 tel link from a 10-digit mobile", () => {
+    expect(digitsLast10("7014236242")).toBe("7014236242");
+    expect(telHref("7014236242")).toBe("tel:+917014236242");
+    expect(telHref("+91 70142 36242")).toBe("tel:+917014236242");
+    expect(telHref("")).toBe("");
   });
 });
 

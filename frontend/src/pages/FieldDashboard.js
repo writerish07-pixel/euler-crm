@@ -59,7 +59,7 @@ export default function FieldDashboard() {
             <Map size={16} className="text-ink-faint" />
             <h3 className="font-heading font-bold text-ink">Pipeline funnel</h3>
           </div>
-          <div className="space-y-2 max-h-64 overflow-y-auto overscroll-contain pr-1">
+          <div className="space-y-2">
             {(d.funnel || []).map((f) => (
               <div key={f.status} className="flex items-center justify-between text-sm">
                 <span className="text-ink-soft">{f.status}</span>

@@ -98,6 +98,28 @@ def in_period(raw, period: Period) -> bool:
     return d[:4] == period.year
 
 
+def lead_register_date(lead: dict, status_filter: str = "") -> str:
+    """Date the Lead Register uses for month / year filters.
+
+    Delivered / Close Won tabs use the retail date, Booked / Finance use the
+    booking date, otherwise createdDate. lastUpdated covers imported rows that
+    never got a createdDate so This month does not go blank.
+    """
+    row = lead or {}
+    st = (status_filter or row.get("currentStatus") or "").strip().lower()
+    if "deliver" in st or "close won" in st:
+        return str(
+            row.get("deliveryDate")
+            or row.get("closedDate")
+            or row.get("createdDate")
+            or row.get("lastUpdated")
+            or ""
+        )
+    if "book" in st or "finance" in st:
+        return str(row.get("bookingDate") or row.get("createdDate") or row.get("lastUpdated") or "")
+    return str(row.get("createdDate") or row.get("lastUpdated") or "")
+
+
 def as_dict(period: Period) -> dict:
     return {
         "kind": period.kind,

@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { get } from "../lib/api";
 import { inr, compactInr, num, fmtWhen } from "../lib/format";
-import { thisMonth, periodParams, periodLabel } from "../lib/period";
+import { thisMonth, thisYear, periodParams, periodLabel } from "../lib/period";
 import { Card, PageHeader, StatCard, Table } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
 import { useAuth } from "../context/AuthContext";
@@ -64,7 +64,7 @@ export default function MonthlyRegister() {
   const { isField, isExecutive } = useAuth();
   const volumeOnly = isField;
   const [month, setMonth] = useState(thisMonth());
-  const [year, setYear] = useState("");
+  const [year, setYear] = useState(thisYear());
   const [d, setD] = useState(null);
   const [err, setErr] = useState("");
 

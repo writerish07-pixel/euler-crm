@@ -425,7 +425,7 @@ async def test_bulk_import_assigns_blank_executives_by_saved_split(client):
         assert split.json()["myShare"] == 70
         dash = await exec_c.get("/api/executive/dashboard")
         assert dash.status_code == 200, dash.text
-        assert dash.json()["leadSplit"]["pct"] == 70
+        assert dash.json()["leadSplit"] is None or "leadSplit" not in dash.json()
         mine = await exec_c.get("/api/leads")
         assert mine.status_code == 200
         names = {d["customerName"] for d in mine.json()}
@@ -598,13 +598,18 @@ async def test_apply_split_names_unassigned_leads_pending_approval(client):
     exec_c = await _login("amit.apply@euler.com", "execPass#1")
     try:
         mine = (await exec_c.get("/api/leads")).json()
-        assert mine == []
+        assert len(mine) == 7
+        assert all(d.get("assignmentPending") is True for d in mine)
+        assert all(d.get("approvalRequestId") for d in mine)
+        assert all(d.get("executive") == "Amit" for d in mine)
         waiting = (await exec_c.get("/api/lead-requests", params={"status": "pending"})).json()
-        assert len(waiting) == 7
-        assert all(w.get("existingLeadId") for w in waiting)
-        rid = waiting[0]["requestId"]
-        lid = waiting[0]["existingLeadId"]
-        assert (await exec_c.get(f"/api/leads/{lid}")).status_code == 403
+        assert waiting == []
+        rid = mine[0]["approvalRequestId"]
+        lid = mine[0]["leadId"]
+        opened = await exec_c.get(f"/api/lead-requests/{rid}")
+        assert opened.status_code == 200, opened.text
+        assert opened.json()["existingLeadId"] == lid
+        assert (await exec_c.get(f"/api/leads/{lid}")).status_code == 200
 
         fmt = await exec_c.put(f"/api/lead-requests/{rid}", json={"budget": 185000})
         assert fmt.status_code == 200, fmt.text

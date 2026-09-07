@@ -155,3 +155,17 @@ export const todayISO = () => {
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 };
+
+/** Last 10 digits of a mobile, or empty if the value is not a real number. */
+export function digitsLast10(mobile) {
+  const digits = String(mobile || "").replace(/\D/g, "");
+  if (digits.length < 10) return "";
+  return digits.slice(-10);
+}
+
+/** `tel:` href for the device dialer. Indian mobiles are dialled as +91. */
+export function telHref(mobile) {
+  const last10 = digitsLast10(mobile);
+  if (!last10) return "";
+  return `tel:+91${last10}`;
+}

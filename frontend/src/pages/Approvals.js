@@ -1,13 +1,14 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put } from "../lib/api";
+import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { PageHeader, Table, Badge, Button, Field, Input, Drawer } from "../components/ui";
+import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
-import { RequestKycPreview, LocalKycBlock, kycReady, uploadKycFiles } from "../components/LeadDocuments";
-import DealFormatCard from "../components/DealFormatCard";
+import { RequestKycPreview } from "../components/LeadDocuments";
+import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
+import CallLink from "../components/CallLink";
 
 export default function Approvals() {
   const { canApproveLeads, isExecutive } = useAuth();
@@ -72,8 +73,8 @@ export default function Approvals() {
       <PageHeader
         title={canApproveLeads ? "Lead approvals" : "Waiting for approval"}
         subtitle={canApproveLeads
-          ? "A new enquiry is created only after Approve. Split-assigned imported leads stay on the register; Approve opens them to the executive."
-          : "Complete Deal format + KYC, then call GM or Owner. They tap Approve on this screen."}
+          ? "Approve new enquiries and split-assigned register leads after the executive sends Deal format + KYC."
+          : "New enquiries you requested wait here. Assigned bulk leads are on Lead Register — tap Proceed there."}
       />
       {canApproveLeads && (
         <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -110,7 +111,7 @@ export default function Approvals() {
           { key: "customerName", label: "Customer", render: (r) => (
             <div>
               <div className="font-semibold">{r.customerName}</div>
-              <div className="text-xs text-ink-faint">{r.mobile || "—"}</div>
+              <CallLink mobile={r.mobile} compact />
               {r.existingLeadId && (
                 <div className="text-[10px] text-cobalt mt-0.5">On register · {r.existingLeadId}</div>
               )}
@@ -169,73 +170,5 @@ export default function Approvals() {
         />
       )}
     </div>
-  );
-}
-
-function CompleteFormatDrawer({ row, onClose, onSaved }) {
-  const [budget, setBudget] = useState(Number(row.budget || row.dealAmount || 0) || "");
-  const [deal, setDeal] = useState(row.dealFormat || null);
-  const [dealLoading, setDealLoading] = useState(false);
-  const [kyc, setKyc] = useState({});
-  const [gstin, setGstin] = useState(row.gstin || "");
-  const [busy, setBusy] = useState(false);
-  const customerType = row.customerType || "Individual";
-
-  useEffect(() => {
-    if (!row.interestedModel || !row.variant) {
-      setDeal(row.dealFormat || null);
-      return undefined;
-    }
-    let alive = true;
-    setDealLoading(true);
-    get("/commercial/deal-preview", {
-      model: row.interestedModel, variant: row.variant, cxDemand: Number(budget) || 0,
-    }).then((d) => { if (alive) setDeal(d); })
-      .catch(() => { if (alive) setDeal(row.dealFormat || null); })
-      .finally(() => { if (alive) setDealLoading(false); });
-    return () => { alive = false; };
-  }, [row.interestedModel, row.variant, row.dealFormat, budget]);
-
-  const save = async () => {
-    if (!(Number(budget) > 0)) return toast.error("Enter Cx Demand — the final amount given to the customer");
-    const kycErr = kycReady(customerType, kyc, gstin);
-    if (kycErr) return toast.error(kycErr);
-    setBusy(true);
-    try {
-      await put(`/lead-requests/${row.requestId}`, { budget: Number(budget), gstin });
-      await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, kyc);
-      toast.success("Sent for GM / Owner Approve — the lead stays on the register until they tap Approve");
-      onSaved();
-    } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not save the approval format");
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <Drawer open onClose={onClose} width="max-w-2xl"
-      title="Complete approval format"
-      subtitle={`${row.customerName} · ${row.existingLeadId || row.requestId}`}
-      footer={<div className="flex justify-end gap-2">
-        <Button variant="secondary" onClick={onClose}>Cancel</Button>
-        <Button data-testid="save-approval-format-btn" onClick={save} disabled={busy}>
-          {busy ? "Saving…" : "Send for approval"}
-        </Button>
-      </div>}
-    >
-      <div className="space-y-4">
-        <p className="text-sm text-ink-soft">
-          This customer is already on the Lead Register under your name. Fill Deal format and KYC
-          the same way as a new enquiry. GM / Owner Approve then lets you work the lead.
-        </p>
-        <DealFormatCard
-          snapshot={deal}
-          cxDemand={budget}
-          onCxDemand={setBudget}
-          loading={dealLoading}
-          missingPrice={!row.interestedModel || !row.variant}
-        />
-        <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} />
-      </div>
-    </Drawer>
   );
 }
