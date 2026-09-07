@@ -1,13 +1,14 @@
-"""Bulk lead upload — template dropdowns and row validation.
+"""Bulk lead upload — template dropdowns, row validation, and Owner/GM split.
 
 The template's dropdown values and the upload's validation must come from the same
 live masters, so a downloaded template can never offer a value the upload rejects.
-Anything typed that is NOT in a master list is reported and skipped, never silently
-imported (that mismatch is what breaks Price Master lookups and executive reports).
+Unknown Lead Source / Model / Status values are reported and skipped. A blank or
+unknown Executive is not skipped — Owner/GM percentages assign those rows on commit.
 """
 import io
 import os
 import sys
+from collections import Counter
 
 import pytest
 import pytest_asyncio
@@ -60,7 +61,8 @@ async def client(monkeypatch):
     import time; seed_users is idempotent and never deletes.
     """
     isolated = server.client["lead_bulk_upload_isolated"]
-    for name in ("leads", "price_master", "masters_list", "counters", "activities"):
+    for name in ("leads", "price_master", "masters_list", "counters", "activities",
+                 "lead_split", "staff"):
         await isolated[name].delete_many({})
     await isolated.price_master.insert_many([
         {"priceId": "PM1", "model": "Turbo Max", "variant": "Maxx (PV)", "exShowroom": 770000, "status": "Active"},
@@ -203,19 +205,21 @@ async def test_values_outside_masters_are_skipped_not_imported(client):
         _row("Good Row", "9800000016"),
     ]
     body = await _preview(client, rows)
-    assert body["validCount"] == 1 and body["errorCount"] == 5
+    assert body["validCount"] == 2 and body["errorCount"] == 4
     problems = {e["customerName"]: " ".join(e["errors"]) for e in body["errors"]}
     assert "Lead Source" in problems["Bad Source"]
-    assert "Executive" in problems["Bad Exec"]
+    assert "Bad Exec" not in problems, "unknown Executive is blanked and split, not skipped"
     assert "Price Master" in problems["Bad Model"]
     assert "does not belong to Turbo Max" in problems["Wrong Variant"]
     assert "Current Status" in problems["Booked Status"]
 
     r = await client.post("/api/leads/import/commit",
                           files={"file": ("leads.csv", _csv(rows), "text/csv")})
-    assert r.json()["created"] == 1 and r.json()["skipped"] == 5
-    assert await server.db.leads.count_documents({}) == 1
-    assert (await server.db.leads.find_one({}))["customerName"] == "Good Row"
+    assert r.json()["created"] == 2 and r.json()["skipped"] == 4
+    names = {d["customerName"] for d in await server.db.leads.find().to_list(10)}
+    assert names == {"Bad Exec", "Good Row"}
+    bad = await server.db.leads.find_one({"customerName": "Bad Exec"})
+    assert not str(bad.get("executive") or "").strip()
 
 
 @pytest.mark.asyncio
@@ -270,3 +274,142 @@ async def test_dates_accept_indian_format_and_reject_junk(client):
     assert body["validCount"] == 1
     assert body["sample"][0]["createdDate"] == "2026-08-10"
     assert "is not a date" in " ".join(body["errors"][0]["errors"])
+
+
+# ------------------------------------------------------------------ split + TL
+def test_distribute_by_share_largest_remainder_interleaved():
+    names = server.distribute_by_share(10, [
+        {"executive": "Amit", "pct": 70}, {"executive": "Rahul", "pct": 30}])
+    assert names.count("Amit") == 7 and names.count("Rahul") == 3
+    assert names[0] == "Amit" and names[1] == "Rahul"
+    assert server.distribute_by_share(0, [{"executive": "Amit", "pct": 100}]) == []
+    assert server.distribute_by_share(3, []) == ["", "", ""]
+
+
+async def _login(email, password):
+    transport = httpx.ASGITransport(app=server.app)
+    c = httpx.AsyncClient(transport=transport, base_url="http://test")
+    r = await c.post("/api/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200, r.text
+    c.headers["Authorization"] = f"Bearer {r.json()['token']}"
+    return c
+
+
+async def _ensure_staff(*names):
+    await server.db.staff.delete_many({})
+    for i, name in enumerate(names, start=1):
+        await server.db.staff.insert_one({
+            "staffId": f"ST{i}", "name": name, "role": "executive", "status": "Active",
+        })
+
+
+@pytest.mark.asyncio
+async def test_tl_can_download_template_and_import(client):
+    """The TL bulk-upload path is what the floor uses; Owner rarely hits it."""
+    email = "tl.bulk@euler.com"
+    auth_db = server.client[os.environ["DB_NAME"]]
+    await auth_db.users.delete_many({"email": email})
+    created = await client.post("/api/auth/users", json={
+        "email": email, "password": "tlPass#1", "name": "Bulk TL",
+        "role": "tl", "loginId": "tl.bulk"})
+    assert created.status_code == 200, created.text
+    tl = await _login(email, "tlPass#1")
+    try:
+        tpl = await tl.get("/api/leads/import/template")
+        assert tpl.status_code == 200, tpl.text
+        assert "spreadsheetml" in tpl.headers["content-type"]
+        wb = openpyxl.load_workbook(io.BytesIO(tpl.content))
+        guide = "\n".join(str(c[0].value or "") for c in wb["How to use"].iter_rows(max_col=1))
+        assert "optional" in guide.lower()
+
+        rows = [_row("TL Import", "9830000001", **{"Executive": ""})]
+        preview = await tl.post("/api/leads/import/preview",
+                                files={"file": ("leads.csv", _csv(rows), "text/csv")})
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["validCount"] == 1
+
+        commit = await tl.post("/api/leads/import/commit",
+                               files={"file": ("leads.csv", _csv(rows), "text/csv")})
+        assert commit.status_code == 200, commit.text
+        assert commit.json()["created"] == 1
+        lead = await server.db.leads.find_one({"customerName": "TL Import"})
+        assert lead is not None
+    finally:
+        await tl.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tl_cannot_edit_lead_split_owner_and_gm_can(client):
+    await _ensure_staff("Amit", "Rahul")
+    email = "tl.bulk@euler.com"
+    auth_db = server.client[os.environ["DB_NAME"]]
+    await auth_db.users.delete_many({"email": email})
+    await client.post("/api/auth/users", json={
+        "email": email, "password": "tlPass#1", "name": "Bulk TL",
+        "role": "tl", "loginId": "tl.bulk"})
+    body = {"shares": [{"executive": "Amit", "pct": 70}, {"executive": "Rahul", "pct": 30}]}
+    tl = await _login(email, "tlPass#1")
+    gm = await _login("salesgm@euler.com", "euler@123")
+    try:
+        assert (await tl.get("/api/leads/split")).status_code == 200
+        assert (await tl.put("/api/leads/split", json=body)).status_code == 403
+        owner = await client.put("/api/leads/split", json=body)
+        assert owner.status_code == 200, owner.text
+        assert owner.json()["totalPct"] == 100
+        gm_save = await gm.put("/api/leads/split", json={
+            "shares": [{"executive": "Amit", "pct": 40}, {"executive": "Rahul", "pct": 60}]})
+        assert gm_save.status_code == 200, gm_save.text
+        assert gm_save.json()["totalPct"] == 100
+        bad = await client.put("/api/leads/split", json={
+            "shares": [{"executive": "Amit", "pct": 40}]})
+        assert bad.status_code == 422
+    finally:
+        await tl.aclose()
+        await gm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_assigns_blank_executives_by_saved_split(client):
+    await _ensure_staff("Amit", "Rahul")
+    saved = await client.put("/api/leads/split", json={
+        "shares": [{"executive": "Amit", "pct": 70}, {"executive": "Rahul", "pct": 30}]})
+    assert saved.status_code == 200, saved.text
+
+    rows = [_row(f"Split {i}", f"98400000{i:02d}", **{"Executive": ""}) for i in range(10)]
+    rows.append(_row("Keep Named", "9840000099", **{"Executive": "Amit"}))
+    r = await client.post("/api/leads/import/commit",
+                          files={"file": ("leads.csv", _csv(rows), "text/csv")})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 11
+    assigned = r.json()["splitAssigned"]
+    assert len(assigned) == 10
+    split_leads = await server.db.leads.find({"customerName": {"$regex": "^Split "}}).to_list(20)
+    counts = Counter(d["executive"] for d in split_leads)
+    assert counts["Amit"] == 7 and counts["Rahul"] == 3
+    keep = await server.db.leads.find_one({"customerName": "Keep Named"})
+    assert keep["executive"] == "Amit"
+    assert keep["leadId"] not in assigned
+
+    auth_db = server.client[os.environ["DB_NAME"]]
+    await auth_db.users.delete_many({"email": "amit.split@euler.com"})
+    created = await client.post("/api/auth/users", json={
+        "email": "amit.split@euler.com", "password": "execPass#1",
+        "name": "Amit", "role": "executive", "loginId": "amit.split"})
+    assert created.status_code == 200, created.text
+    exec_c = await _login("amit.split@euler.com", "execPass#1")
+    try:
+        split = await exec_c.get("/api/leads/split")
+        assert split.status_code == 200, split.text
+        assert split.json()["myShare"] == 70
+        dash = await exec_c.get("/api/executive/dashboard")
+        assert dash.status_code == 200, dash.text
+        assert dash.json()["leadSplit"]["pct"] == 70
+        mine = await exec_c.get("/api/leads")
+        assert mine.status_code == 200
+        names = {d["customerName"] for d in mine.json()}
+        assert "Keep Named" in names
+        assert any(n.startswith("Split ") for n in names)
+        for d in mine.json():
+            assert d["executive"] == "Amit"
+    finally:
+        await exec_c.aclose()

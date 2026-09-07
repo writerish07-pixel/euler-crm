@@ -169,21 +169,74 @@ export const post = (url, body) => withFallback(() => api.post(url, body).then((
 export const put = (url, body) => withFallback(() => api.put(url, body).then((r) => r.data));
 export const del = (url) => withFallback(() => api.delete(url).then((r) => r.data));
 
+/** Multipart POST. Let the browser set Content-Type with the boundary — a
+ *  hardcoded `multipart/form-data` header has none, and FastAPI then 422s. */
+export const postForm = (url, formData) => withFallback(() => api.post(url, formData).then((r) => r.data));
+
+export function apiErrorMessage(err, fallback = "Request failed") {
+  const data = err?.response?.data;
+  const detail = data && typeof data === "object" && !(typeof Blob !== "undefined" && data instanceof Blob)
+    ? data.detail
+    : (typeof data === "string" ? data : null);
+  if (typeof detail === "string" && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((x) => {
+      if (typeof x === "string") return x;
+      if (x && typeof x === "object") return x.msg || x.message || x.detail || "";
+      return "";
+    }).filter(Boolean);
+    if (parts.length) return parts.join(" · ");
+  }
+  if (detail && typeof detail === "object") {
+    return detail.msg || detail.message || fallback;
+  }
+  return err?.message || fallback;
+}
+
 export const uploadFile = (url, file, fields = {}) => {
   const fd = new FormData();
   fd.append("file", file);
   Object.entries(fields).forEach(([k, v]) => {
     if (v != null && v !== "") fd.append(k, String(v));
   });
-  return withFallback(() => api.post(url, fd).then((r) => r.data));
+  return postForm(url, fd);
 };
 
+async function messageFromBlobError(err, fallback) {
+  const data = err?.response?.data;
+  if (typeof Blob === "undefined" || !(data instanceof Blob)) {
+    return apiErrorMessage(err, fallback);
+  }
+  try {
+    const parsed = JSON.parse(await data.text());
+    return apiErrorMessage({ response: { data: parsed } }, fallback);
+  } catch {
+    return apiErrorMessage(err, fallback);
+  }
+}
+
 export async function downloadFile(url, filename) {
-  const data = await withFallback(() => api.get(url, { responseType: "blob" }).then((r) => r.data));
-  const blob = new Blob([data]);
-  const link = document.createElement("a");
-  link.href = window.URL.createObjectURL(blob);
-  link.download = filename;
-  link.click();
-  window.URL.revokeObjectURL(link.href);
+  try {
+    const data = await withFallback(() => api.get(url, { responseType: "blob" }).then((r) => r.data));
+    const type = String(data?.type || "");
+    if (type.includes("application/json") || type.includes("text/html")) {
+      let text = "";
+      try { text = await data.text(); } catch { /* empty */ }
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch { /* not json */ }
+      const msg = parsed
+        ? apiErrorMessage({ response: { data: parsed } }, "Download failed")
+        : "Could not download file";
+      throw Object.assign(new Error(msg), { response: { data: parsed || { detail: msg } } });
+    }
+    const blob = data instanceof Blob ? data : new Blob([data]);
+    const link = document.createElement("a");
+    link.href = window.URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+    window.URL.revokeObjectURL(link.href);
+  } catch (err) {
+    const msg = await messageFromBlobError(err, "Could not download file");
+    throw Object.assign(new Error(msg), { response: { data: { detail: msg } }, cause: err });
+  }
 }

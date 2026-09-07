@@ -1419,6 +1419,73 @@ def _norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def distribute_by_share(n, shares):
+    """Split `n` imported leads by Owner/GM percentages (largest remainder, interleaved)."""
+    n = int(n or 0)
+    if n <= 0:
+        return []
+    rows = []
+    for s in shares or []:
+        name = str((s or {}).get("executive") or "").strip()
+        try:
+            pct = float((s or {}).get("pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        if name and pct > 0:
+            rows.append((name, pct))
+    if not rows:
+        return [""] * n
+    total = sum(p for _, p in rows)
+    exact = [n * p / total for _, p in rows]
+    counts = [int(x) for x in exact]
+    leftover = n - sum(counts)
+    order = sorted(range(len(rows)), key=lambda i: (-(exact[i] - counts[i]), i))
+    for i in range(leftover):
+        counts[order[i % len(order)]] += 1
+    bags = [[rows[i][0]] * counts[i] for i in range(len(rows))]
+    out = []
+    while len(out) < n:
+        moved = False
+        for bag in bags:
+            if bag:
+                out.append(bag.pop(0))
+                moved = True
+                if len(out) >= n:
+                    break
+        if not moved:
+            break
+    while len(out) < n:
+        out.append(rows[len(out) % len(rows)][0])
+    return out[:n]
+
+
+async def _split_roster() -> list:
+    """Same executive names the bulk-upload template offers — staff, else Settings."""
+    allowed = await _import_allowed_values()
+    return [str(n).strip() for n in (allowed.get("executives") or []) if str(n).strip()]
+
+
+async def _load_lead_split():
+    names = await _split_roster()
+    doc = await db.lead_split.find_one({"_id": "plan"}) or {}
+    raw = {str(s.get("executive") or "").strip(): s
+           for s in (doc.get("shares") or []) if str(s.get("executive") or "").strip()}
+    shares = []
+    for n in names:
+        row = raw.get(n) or {}
+        try:
+            pct = float(row.get("pct") or 0)
+        except (TypeError, ValueError):
+            pct = 0.0
+        shares.append({"executive": n, "pct": round(max(0.0, pct), 2)})
+    return {
+        "shares": shares,
+        "totalPct": round(sum(s["pct"] for s in shares), 2),
+        "updatedAt": doc.get("updatedAt") or "",
+        "updatedBy": doc.get("updatedBy") or "",
+    }
+
+
 def _leads_for_executive(leads, user) -> list:
     """Match lead.executive to the logged-in executive's name (or email local-part)."""
     name = _norm_name(user.get("name"))
@@ -1872,6 +1939,10 @@ async def executive_dashboard(user=Depends(current_user)):
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
         "worklist": worklist[:25],
         "incentive": incentive,
+        "leadSplit": {
+            "pct": (next((s["pct"] for s in (await _load_lead_split())["shares"]
+                          if _norm_name(s["executive"]) == _norm_name(user.get("name") or "")), 0)),
+        },
         "lastUpdated": now_iso(),
     }
 
@@ -4507,12 +4578,68 @@ async def allocation_summary(_desk=Depends(deal_desk_only)):
             row["booked"] += 1
         else:
             row["open"] += 1
+    split = await _load_lead_split()
     return {
         "executives": sorted(rows.values(), key=lambda r: -r["total"]),
         "unassigned": unassigned,
         "activeLeads": len(active),
         "generatedAt": now_iso(),
+        "split": split,
     }
+
+
+class LeadSplitIn(BaseModel):
+    shares: list = []
+
+
+@api.get("/leads/split")
+async def get_lead_split(user=Depends(current_user)):
+    """Owner/GM set the bulk-import split; every sales login can read their share."""
+    role = str(user.get("role") or "")
+    if role not in (*authmod.SALES_ROLES,):
+        raise HTTPException(403, "Lead split is for Owner, Sales GM, TL and executives.")
+    plan = await _load_lead_split()
+    mine = _norm_name(user.get("name") or "")
+    my = next((s for s in plan["shares"] if _norm_name(s["executive"]) == mine), None)
+    plan["myShare"] = my["pct"] if my else 0
+    plan["myExecutive"] = (user.get("name") or "").strip()
+    plan["canEdit"] = role in ("owner", "sales_gm")
+    return plan
+
+
+@api.put("/leads/split", dependencies=[Depends(sales_gm_only)])
+async def save_lead_split(body: LeadSplitIn, act=Depends(actor)):
+    """Owner and Sales GM decide what % of a bulk upload each executive receives."""
+    names = set(await _split_roster())
+    shares = []
+    seen = set()
+    for s in body.shares or []:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("executive") or "").strip()
+        if not name or name in seen:
+            continue
+        if name not in names:
+            raise HTTPException(422, f"'{name}' is not an active executive on the staff master")
+        try:
+            pct = float(s.get("pct") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"Share for {name} must be a number")
+        if pct < 0 or pct > 100:
+            raise HTTPException(422, f"Share for {name} must be between 0 and 100")
+        seen.add(name)
+        shares.append({"executive": name, "pct": round(pct, 2)})
+    total = round(sum(s["pct"] for s in shares), 2)
+    if shares and abs(total - 100) > 0.05:
+        raise HTTPException(422, f"Shares must add up to 100% (now {total}%)")
+    doc = {
+        "_id": "plan",
+        "shares": shares,
+        "updatedAt": now_iso(),
+        "updatedBy": (act or {}).get("email") or "",
+    }
+    await db.lead_split.replace_one({"_id": "plan"}, doc, upsert=True)
+    return await _load_lead_split()
 
 
 @api.post("/leads/allocate")
@@ -4798,9 +4925,14 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
                 continue
             canonical = _import_match(raw, allowed[key])
             if canonical is None:
-                errors.append(f"{label} '{raw}' is not in the {label} list "
-                              f"(allowed: {', '.join(allowed[key]) or 'none configured'})")
-                row[field] = raw
+                # A typed executive that is not on staff is not a reason to drop
+                # the lead — Owner/GM split assigns blank executives on commit.
+                if field == "executive":
+                    row[field] = ""
+                else:
+                    errors.append(f"{label} '{raw}' is not in the {label} list "
+                                  f"(allowed: {', '.join(allowed[key]) or 'none configured'})")
+                    row[field] = raw
             else:
                 row[field] = canonical
 
@@ -4975,6 +5107,8 @@ async def import_template(_sales=Depends(sales_staff_only)):
         ("3. Required: Customer Name and Mobile (10 digits, not already in the CRM).", False),
         ("4. Lead Date / Next Follow-up: use YYYY-MM-DD. Blank Lead Date becomes today.", False),
         ("5. Variant must belong to the Interested Model — see 'Valid Model / Valid Variant' on Lists.", False),
+        ("5b. Executive is optional. Leave it blank to use the Owner / Sales GM lead split "
+         "(Lead Allocation page). A name that is not on staff is ignored and split the same way.", False),
         (f"6. Current Status can only be: {', '.join(IMPORT_STATUSES)}. "
          "Booking and delivery are done inside the app so the money side stays correct.", False),
         ("7. Blank Lead Source / Priority / Status / Finance / Exchange use the New Lead defaults "
@@ -5048,6 +5182,7 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
     checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
     created = 0
     created_ids = []
+    created_exec = []
     for d in checked:
         if d["__errors"]:
             continue
@@ -5077,9 +5212,28 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
         await sheet_sync("leads", doc)
         created += 1
         created_ids.append(lead_id)
+        created_exec.append(str(d.get("executive") or "").strip())
+    blanks = [lid for lid, ex in zip(created_ids, created_exec) if not ex]
+    assigned = {}
+    if blanks:
+        plan = await _load_lead_split()
+        names = distribute_by_share(len(blanks), plan.get("shares") or [])
+        for lid, name in zip(blanks, names):
+            if not name:
+                continue
+            await db.leads.update_one(
+                {"leadId": lid},
+                {"$set": {"executive": name, "lastUpdated": now_iso(),
+                          "importedSplit": True}},
+            )
+            assigned[lid] = name
+            updated = clean(await db.leads.find_one({"leadId": lid}))
+            if updated:
+                await sheet_sync("leads", updated)
     errors = _import_error_report(checked)
     return {"created": created, "skipped": len(errors), "rowCount": len(checked),
-            "leadIds": created_ids, "errors": errors[:100]}
+            "leadIds": created_ids, "errors": errors[:100],
+            "splitAssigned": assigned}
 
 
 # ---------------------------------------------------------------- payments
@@ -8100,7 +8254,8 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/dashboard"), ("GET", "/api/accounts/dashboard"),
     ("GET", "/api/executive/dashboard"), ("GET", "/api/field/dashboard"),
     ("GET", "/api/sales-gm/dashboard"),
-    ("GET", "/api/leads"), ("POST", "/api/leads"),
+    ("GET", "/api/leads/allocation/summary"), ("POST", "/api/leads/allocate"),
+    ("GET", "/api/leads/split"), ("PUT", "/api/leads/split"),
     ("GET", "/api/lead-requests"), ("POST", "/api/lead-requests/{request_id}/approve"),
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),

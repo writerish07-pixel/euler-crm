@@ -1,7 +1,7 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { UploadCloud, Download, CheckCircle2, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
-import { api, downloadFile } from "../lib/api";
+import { downloadFile, get, postForm, apiErrorMessage } from "../lib/api";
 import { Drawer, Button, Card, Badge, Select } from "../components/ui";
 
 export default function LeadImport({ onClose, onDone }) {
@@ -10,19 +10,33 @@ export default function LeadImport({ onClose, onDone }) {
   const [mapping, setMapping] = useState({});
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState("upload"); // upload -> map
+  const [split, setSplit] = useState(null);
+
+  useEffect(() => {
+    get("/leads/split").then(setSplit).catch(() => {});
+  }, []);
+
+  const splitNote = (() => {
+    const shares = (split?.shares || []).filter((s) => Number(s.pct) > 0);
+    if (!shares.length || Math.abs(Number(split?.totalPct || 0) - 100) > 0.05) {
+      return "Blank Executive cells stay unassigned until Owner or Sales GM save a 100% split on Lead Allocation.";
+    }
+    return `Blank Executive cells are split: ${shares.map((s) => `${s.executive} ${s.pct}%`).join(" · ")}.`;
+  })();
 
   const downloadTemplate = async () => {
     try {
       await downloadFile("/leads/import/template", "euler_lead_upload_template.xlsx");
-    } catch {
-      toast.error("Could not download template");
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not download template"));
     }
   };
 
   const runPreview = async (f, mp) => {
-    const fd = new FormData(); fd.append("file", f);
+    const fd = new FormData();
+    fd.append("file", f);
     if (mp) fd.append("mapping", JSON.stringify(mp));
-    return api.post("/leads/import/preview", fd, { headers: { "Content-Type": "multipart/form-data" } }).then((r) => r.data);
+    return postForm("/leads/import/preview", fd);
   };
 
   const onFile = async (f) => {
@@ -31,8 +45,10 @@ export default function LeadImport({ onClose, onDone }) {
     try {
       const res = await runPreview(f, null);
       setData(res); setMapping(res.suggestedMapping || {}); setStep("map");
-    } catch (e) { toast.error(e.response?.data?.detail || "Could not read file"); setFile(null); }
-    finally { setBusy(false); }
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not read file"));
+      setFile(null);
+    } finally { setBusy(false); }
   };
 
   const changeMap = async (field, header) => {
@@ -48,16 +64,20 @@ export default function LeadImport({ onClose, onDone }) {
     setBusy(true);
     const fd = new FormData(); fd.append("file", file); fd.append("mapping", JSON.stringify(mapping));
     try {
-      const res = await api.post("/leads/import/commit", fd, { headers: { "Content-Type": "multipart/form-data" } });
-      const { created, skipped } = res.data;
+      const res = await postForm("/leads/import/commit", fd);
+      const { created, skipped } = res;
+      const splitN = Object.keys(res.splitAssigned || {}).length;
       if (created) {
-        toast.success(skipped ? `${created} leads imported · ${skipped} skipped` : `${created} leads imported`);
+        const bits = [`${created} lead${created === 1 ? "" : "s"} imported`];
+        if (splitN) bits.push(`${splitN} assigned by lead split`);
+        if (skipped) bits.push(`${skipped} skipped`);
+        toast.success(bits.join(" · "));
       } else {
         toast.error("No leads imported — fix the listed rows and upload again");
       }
       if (created) onDone();
-      else setData((d) => ({ ...d, errors: res.data.errors || d.errors }));
-    } catch (e) { toast.error(e.response?.data?.detail || "Import failed"); }
+      else setData((d) => ({ ...d, errors: res.errors || d.errors }));
+    } catch (e) { toast.error(apiErrorMessage(e, "Import failed")); }
     finally { setBusy(false); }
   };
 
@@ -86,6 +106,7 @@ export default function LeadImport({ onClose, onDone }) {
             Download the template first — its Lead Source, Executive, Model, Variant, Priority and Status
             columns are dropdowns built from your Settings and Price Master, so uploaded values always match the app.
           </p>
+          <p className="text-xs text-ink-soft mt-2" data-testid="import-split-note">{splitNote}</p>
         </>
       )}
 
@@ -97,6 +118,8 @@ export default function LeadImport({ onClose, onDone }) {
             <Badge className="ml-auto">{data.detectedHeaders.length} columns · {data.rowCount} rows</Badge>
             <button onClick={() => { setStep("upload"); setData(null); setFile(null); }} className="text-xs text-cobalt hover:underline">Change file</button>
           </div>
+
+          <p className="text-xs text-ink-soft mb-4" data-testid="import-split-note-map">{splitNote}</p>
 
           <div className="grid grid-cols-2 gap-3 mb-5">
             <Card className="p-3">
@@ -110,7 +133,7 @@ export default function LeadImport({ onClose, onDone }) {
           </div>
 
           <h4 className="font-heading font-bold text-ink text-sm mb-2">Match your columns</h4>
-          <p className="text-xs text-ink-soft mb-3">We auto-matched by name. Adjust any that are wrong. "Customer Name" and "Mobile" are required.</p>
+          <p className="text-xs text-ink-soft mb-3">We auto-matched by name. Adjust any that are wrong. "Customer Name" and "Mobile" are required. Executive is optional.</p>
           <Card className="p-4 mb-5">
             <div className="grid grid-cols-2 gap-x-6 gap-y-3">
               {data.targetFields.map((t) => (
