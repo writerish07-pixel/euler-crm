@@ -3130,6 +3130,63 @@ async def push_unsubscribe(body: PushSubIn, user=Depends(current_user)):
     return await web_push.drop_subscription(db, user, body.endpoint)
 
 
+class LeadSplitIn(BaseModel):
+    shares: list = []
+
+
+@api.get("/leads/split")
+async def get_lead_split(user=Depends(current_user)):
+    """Owner/GM set the bulk-import split; every sales login can read their share.
+
+    Registered before `/leads/{lead_id}` so `split` is never treated as a lead id.
+    """
+    role = str(user.get("role") or "")
+    if role not in (*authmod.SALES_ROLES,):
+        raise HTTPException(403, "Lead split is for Owner, Sales GM, TL and executives.")
+    plan = await _load_lead_split()
+    mine = _norm_name(user.get("name") or "")
+    my = next((s for s in plan["shares"] if _norm_name(s["executive"]) == mine), None)
+    plan["myShare"] = my["pct"] if my else 0
+    plan["myExecutive"] = (user.get("name") or "").strip()
+    plan["canEdit"] = role in ("owner", "sales_gm")
+    return plan
+
+
+@api.put("/leads/split", dependencies=[Depends(sales_gm_only)])
+async def save_lead_split(body: LeadSplitIn, act=Depends(actor)):
+    """Owner and Sales GM decide what % of a bulk upload each executive receives."""
+    names = set(await _split_roster())
+    shares = []
+    seen = set()
+    for s in body.shares or []:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("executive") or "").strip()
+        if not name or name in seen:
+            continue
+        if name not in names:
+            raise HTTPException(422, f"'{name}' is not an active executive on the staff master")
+        try:
+            pct = float(s.get("pct") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"Share for {name} must be a number")
+        if pct < 0 or pct > 100:
+            raise HTTPException(422, f"Share for {name} must be between 0 and 100")
+        seen.add(name)
+        shares.append({"executive": name, "pct": round(pct, 2)})
+    total = round(sum(s["pct"] for s in shares), 2)
+    if shares and abs(total - 100) > 0.05:
+        raise HTTPException(422, f"Shares must add up to 100% (now {total}%)")
+    doc = {
+        "_id": "plan",
+        "shares": shares,
+        "updatedAt": now_iso(),
+        "updatedBy": (act or {}).get("email") or "",
+    }
+    await db.lead_split.replace_one({"_id": "plan"}, doc, upsert=True)
+    return await _load_lead_split()
+
+
 @api.get("/leads/{lead_id}")
 async def get_lead(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
@@ -4586,60 +4643,6 @@ async def allocation_summary(_desk=Depends(deal_desk_only)):
         "generatedAt": now_iso(),
         "split": split,
     }
-
-
-class LeadSplitIn(BaseModel):
-    shares: list = []
-
-
-@api.get("/leads/split")
-async def get_lead_split(user=Depends(current_user)):
-    """Owner/GM set the bulk-import split; every sales login can read their share."""
-    role = str(user.get("role") or "")
-    if role not in (*authmod.SALES_ROLES,):
-        raise HTTPException(403, "Lead split is for Owner, Sales GM, TL and executives.")
-    plan = await _load_lead_split()
-    mine = _norm_name(user.get("name") or "")
-    my = next((s for s in plan["shares"] if _norm_name(s["executive"]) == mine), None)
-    plan["myShare"] = my["pct"] if my else 0
-    plan["myExecutive"] = (user.get("name") or "").strip()
-    plan["canEdit"] = role in ("owner", "sales_gm")
-    return plan
-
-
-@api.put("/leads/split", dependencies=[Depends(sales_gm_only)])
-async def save_lead_split(body: LeadSplitIn, act=Depends(actor)):
-    """Owner and Sales GM decide what % of a bulk upload each executive receives."""
-    names = set(await _split_roster())
-    shares = []
-    seen = set()
-    for s in body.shares or []:
-        if not isinstance(s, dict):
-            continue
-        name = str(s.get("executive") or "").strip()
-        if not name or name in seen:
-            continue
-        if name not in names:
-            raise HTTPException(422, f"'{name}' is not an active executive on the staff master")
-        try:
-            pct = float(s.get("pct") or 0)
-        except (TypeError, ValueError):
-            raise HTTPException(422, f"Share for {name} must be a number")
-        if pct < 0 or pct > 100:
-            raise HTTPException(422, f"Share for {name} must be between 0 and 100")
-        seen.add(name)
-        shares.append({"executive": name, "pct": round(pct, 2)})
-    total = round(sum(s["pct"] for s in shares), 2)
-    if shares and abs(total - 100) > 0.05:
-        raise HTTPException(422, f"Shares must add up to 100% (now {total}%)")
-    doc = {
-        "_id": "plan",
-        "shares": shares,
-        "updatedAt": now_iso(),
-        "updatedBy": (act or {}).get("email") or "",
-    }
-    await db.lead_split.replace_one({"_id": "plan"}, doc, upsert=True)
-    return await _load_lead_split()
 
 
 @api.post("/leads/allocate")
