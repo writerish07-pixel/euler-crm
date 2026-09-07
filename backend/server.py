@@ -3648,8 +3648,12 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
     if payload.get("customerType"):
         payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
     deal_amount = ce.round2(ce.num(payload.get("budget")))
+    model = str(payload.get("interestedModel") or "").strip()
+    variant = str(payload.get("variant") or "").strip()
+    if deal_amount > 0 and (not model or not variant):
+        raise HTTPException(422, "Select model and variant so Deal format can load Price Master.")
     deal_format = await _deal_format_for(
-        payload.get("interestedModel"), payload.get("variant"), deal_amount,
+        model, variant, deal_amount,
         payload.get("createdDate"))
     await db.lead_requests.update_one({"requestId": request_id}, {"$set": {
         "payload": payload,
@@ -3659,6 +3663,13 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
         "askedForApproval": deal_amount > 0,
         "askedAt": now_iso() if deal_amount > 0 else "",
     }})
+    existing_id = str(req.get("existingLeadId") or "").strip()
+    if existing_id and (model or variant):
+        await db.leads.update_one({"leadId": existing_id}, {"$set": {
+            "interestedModel": model,
+            "variant": variant,
+            "lastUpdated": now_iso(),
+        }})
     updated = await db.lead_requests.find_one({"requestId": request_id})
     return _request_out(updated)
 
@@ -3690,7 +3701,12 @@ async def lead_approval_request(lead_id: str, user=Depends(current_user)):
             raise HTTPException(403, "You can only open your own approval request.")
     elif not _can_approve_leads(user):
         raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
-    return await _request_public(req, user)
+    row = await _request_public(req, user)
+    if not str(row.get("interestedModel") or "").strip():
+        row["interestedModel"] = lead.get("interestedModel") or ""
+    if not str(row.get("variant") or "").strip():
+        row["variant"] = lead.get("variant") or ""
+    return row
 
 
 @api.get("/leads/{lead_id}/360")
