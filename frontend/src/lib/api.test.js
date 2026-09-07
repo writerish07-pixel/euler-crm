@@ -1,4 +1,4 @@
-import { apiBases, isRetryableNetworkError } from "./api";
+import { apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -11,6 +11,22 @@ describe("apiBases", () => {
 
   test("does not duplicate when already on Railway", () => {
     expect(apiBases("https://host", "https://host")).toEqual(["https://host"]);
+  });
+
+  test("does not treat Render as an API proxy", () => {
+    expect(apiBases(
+      "https://euler-crm-production.up.railway.app",
+      "https://euler-crm.onrender.com",
+    )).toEqual(["https://euler-crm-production.up.railway.app"]);
+    expect(originCanProxyApi("https://crm.onrender.com")).toBe(false);
+    expect(originCanProxyApi("https://euler-crm.workers.dev")).toBe(true);
+  });
+});
+
+describe("isHtmlApiBody", () => {
+  test("detects an SPA index.html body", () => {
+    expect(isHtmlApiBody("<!DOCTYPE html><html><body>Euler CRM</body></html>")).toBe(true);
+    expect(isHtmlApiBody({ outstanding: { customer: 1 } })).toBe(false);
   });
 });
 
@@ -29,5 +45,9 @@ describe("isRetryableNetworkError", () => {
 
   test("502 is retryable", () => {
     expect(isRetryableNetworkError({ response: { status: 502 } })).toBe(true);
+  });
+
+  test("HTML payload is retryable so we can try another host", () => {
+    expect(isRetryableNetworkError({ code: "ERR_BAD_PAYLOAD" })).toBe(true);
   });
 });

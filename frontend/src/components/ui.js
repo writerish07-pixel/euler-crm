@@ -109,6 +109,7 @@ export function Badge({ children, tone, className, ...rest }) {
 // state matters more than any single cell (a claim nobody filed with the OEM).
 // Callers that don't pass it get exactly the old markup.
 export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName }) {
+  const list = Array.isArray(rows) ? rows : [];
   return (
     <Card className="overflow-hidden">
       <div className="overflow-x-auto">
@@ -123,12 +124,12 @@ export function Table({ columns, rows, onRowClick, empty = "No records", rowKey,
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 && (
+            {list.length === 0 && (
               <tr>
                 <td colSpan={columns.length} className="px-4 py-12 text-center text-sm text-ink-faint">{empty}</td>
               </tr>
             )}
-            {rows.map((row, i) => (
+            {list.map((row, i) => (
               <tr
                 key={rowKey ? row[rowKey] : i}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
