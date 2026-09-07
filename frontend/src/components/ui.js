@@ -108,14 +108,17 @@ export function Badge({ children, tone, className, ...rest }) {
 // rowClassName is optional and tints a row from its own data — used where a row's
 // state matters more than any single cell (a claim nobody filed with the OEM).
 // Callers that don't pass it get exactly the old markup.
-export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName }) {
+export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName, maxHeight }) {
   const list = Array.isArray(rows) ? rows : [];
   return (
     <Card className="overflow-hidden">
-      <div className="overflow-x-auto">
+      <div
+        className={cx("overflow-x-auto", maxHeight && "overflow-y-auto")}
+        style={maxHeight ? { maxHeight } : undefined}
+      >
         <table className="w-full text-left">
           <thead>
-            <tr className="bg-zinc-50/80 border-b border-line">
+            <tr className={cx("bg-zinc-50 border-b border-line", maxHeight && "sticky top-0 z-10")}>
               {columns.map((c) => (
                 <th key={c.key} className={cx("px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-ink-faint whitespace-nowrap", c.align === "right" && "text-right")}>
                   {c.label}

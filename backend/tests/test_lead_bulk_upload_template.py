@@ -63,7 +63,7 @@ async def client(monkeypatch):
     """
     isolated = server.client["lead_bulk_upload_isolated"]
     for name in ("leads", "price_master", "masters_list", "counters", "activities",
-                 "lead_split", "staff", "sheet_sync_log"):
+                 "lead_split", "staff", "sheet_sync_log", "lead_requests", "lead_documents"):
         await isolated[name].delete_many({})
     await isolated.price_master.insert_many([
         {"priceId": "PM1", "model": "Turbo Max", "variant": "Maxx (PV)", "exShowroom": 770000, "status": "Active"},
@@ -539,3 +539,115 @@ async def test_import_commit_inserts_once_and_does_not_await_google(client, monk
     assert r2.json()["created"] == 0
     assert r2.json()["alreadyExisted"] == 3
     assert await server.db.leads.count_documents({}) == 3
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"kyc-scan" * 8
+
+
+async def _attach_kyc(client, request_id):
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        r = await client.post(
+            f"/api/lead-requests/{request_id}/documents",
+            files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},
+            data={"kind": kind},
+        )
+        assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_apply_split_names_unassigned_leads_pending_approval(client):
+    """Already-imported blanks get executive names on the register, but the
+    executive cannot work them until Deal format + KYC and GM / Owner Approve."""
+    await _ensure_staff("Amit", "Rahul")
+    saved = await client.put("/api/leads/split", json={
+        "shares": [{"executive": "Amit", "pct": 70}, {"executive": "Rahul", "pct": 30}]})
+    assert saved.status_code == 200, saved.text
+
+    rows = [_row(f"Orphan {i}", f"98700000{i:02d}", **{"Executive": ""}) for i in range(10)]
+    imported = await client.post("/api/leads/import/commit",
+                                 files={"file": ("leads.csv", _csv(rows), "text/csv")})
+    assert imported.status_code == 200, imported.text
+    # No split was applied at import because... wait, split IS saved so import
+    # already assigns. Wipe executives to simulate the 400 already-uploaded blanks.
+    await server.db.leads.update_many({}, {"$set": {"executive": "", "assignmentPending": False},
+                                           "$unset": {"importedSplit": ""}})
+    assert await server.db.leads.count_documents({"executive": ""}) == 10
+
+    r = await client.post("/api/leads/split/apply-unassigned")
+    assert r.status_code == 200, r.text
+    assert r.json()["assigned"] == 10
+    assert r.json()["requests"] == 10
+    assert r.json()["byExecutive"]["Amit"] == 7
+    assert r.json()["byExecutive"]["Rahul"] == 3
+
+    leads = {d["customerName"]: d for d in await server.db.leads.find().to_list(20)}
+    assert all(d.get("executive") for d in leads.values())
+    assert all(d.get("assignmentPending") is True for d in leads.values())
+
+    listed = (await client.get("/api/leads")).json()
+    named = {d["customerName"]: d["executive"] for d in listed}
+    assert len(named) == 10
+    assert all(named.values())
+
+    auth_db = server.client[os.environ["DB_NAME"]]
+    await auth_db.users.delete_many({"email": "amit.apply@euler.com"})
+    created = await client.post("/api/auth/users", json={
+        "email": "amit.apply@euler.com", "password": "execPass#1",
+        "name": "Amit", "role": "executive", "loginId": "amit.apply"})
+    assert created.status_code == 200, created.text
+    exec_c = await _login("amit.apply@euler.com", "execPass#1")
+    try:
+        mine = (await exec_c.get("/api/leads")).json()
+        assert mine == []
+        waiting = (await exec_c.get("/api/lead-requests", params={"status": "pending"})).json()
+        assert len(waiting) == 7
+        assert all(w.get("existingLeadId") for w in waiting)
+        rid = waiting[0]["requestId"]
+        lid = waiting[0]["existingLeadId"]
+        assert (await exec_c.get(f"/api/leads/{lid}")).status_code == 403
+
+        fmt = await exec_c.put(f"/api/lead-requests/{rid}", json={"budget": 185000})
+        assert fmt.status_code == 200, fmt.text
+        await _attach_kyc(exec_c, rid)
+
+        ap = await client.post(f"/api/lead-requests/{rid}/approve")
+        assert ap.status_code == 200, ap.text
+        assert ap.json()["leadId"] == lid
+        assert ap.json().get("existing") is True
+        live = await server.db.leads.find_one({"leadId": lid})
+        assert live.get("assignmentPending") is False
+        assert live["executive"] == "Amit"
+        assert (await exec_c.get(f"/api/leads/{lid}")).status_code == 200
+        ids = {d["leadId"] for d in (await exec_c.get("/api/leads")).json()}
+        assert lid in ids
+    finally:
+        await exec_c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reject_split_assignment_returns_lead_to_unassigned(client):
+    await _ensure_staff("Amit", "Rahul")
+    await client.put("/api/leads/split", json={
+        "shares": [{"executive": "Amit", "pct": 100}]})
+    await client.post("/api/leads/import/commit", files={
+        "file": ("a.csv", _csv([_row("Send Back", "9871000001", **{"Executive": ""})]), "text/csv")})
+    await server.db.leads.update_many({}, {"$set": {"executive": "", "assignmentPending": False}})
+    r = await client.post("/api/leads/split/apply-unassigned")
+    assert r.status_code == 200, r.text
+    req = await server.db.lead_requests.find_one({"existingLeadId": r.json()["leadIds"][0]})
+    rej = await client.post(f"/api/lead-requests/{req['requestId']}/reject",
+                            json={"reason": "wrong book"})
+    assert rej.status_code == 200, rej.text
+    lead = await server.db.leads.find_one({"customerName": "Send Back"})
+    assert not str(lead.get("executive") or "").strip()
+    assert lead.get("assignmentPending") is False
+
+
+@pytest.mark.asyncio
+async def test_apply_split_requires_a_hundred_percent_plan(client):
+    await _ensure_staff("Amit")
+    await server.db.lead_split.replace_one({"_id": "plan"}, {
+        "_id": "plan", "shares": [{"executive": "Amit", "pct": 40}],
+    }, upsert=True)
+    r = await client.post("/api/leads/split/apply-unassigned")
+    assert r.status_code == 422

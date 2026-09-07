@@ -52,7 +52,16 @@ export default function Leads() {
       </div>
     )},
     { key: "vehicle", label: "Vehicle", render: (r) => <div className="text-sm"><div>{r.interestedModel || "—"}</div><div className="text-xs text-ink-faint">{r.variant}</div></div> },
-    { key: "executive", label: "Executive" },
+    { key: "executive", label: "Executive", render: (r) => (
+      r.executive ? (
+        <div>
+          <div className="font-medium">{r.executive}</div>
+          {r.assignmentPending && (
+            <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">Awaiting approval</Badge>
+          )}
+        </div>
+      ) : <span className="text-ink-faint">—</span>
+    ) },
     { key: "currentStatus", label: "Status", render: (r) => (
       <div className="flex flex-wrap items-center gap-1">
         <Badge>{r.currentStatus}</Badge>
@@ -119,6 +128,7 @@ export default function Leads() {
         columns={columns}
         rows={leads}
         empty="No leads match this filter"
+        maxHeight="28rem"
       />
 
       {active && (

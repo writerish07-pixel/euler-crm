@@ -99,10 +99,31 @@ export default function Allocation() {
     setSplitBusy(true);
     try {
       await put("/leads/split", { shares: draft.map((r) => ({ executive: r.executive, pct: Number(r.pct) || 0 })) });
-      toast.success("Bulk-import split saved — new uploads use these percentages");
+      toast.success("Split saved — new uploads and Apply to unassigned use these percentages");
       load();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not save the lead split"));
+    } finally { setSplitBusy(false); }
+  };
+
+  const applyToUnassigned = async () => {
+    if (!splitOk) return toast.error(`Shares must add up to 100% (now ${splitTotal}%)`);
+    if (!(summary?.unassigned)) return toast.error("There are no unassigned leads to apply the split to");
+    setSplitBusy(true);
+    try {
+      const r = await post("/leads/split/apply-unassigned", {});
+      const n = Number(r.assigned || 0);
+      if (!n) {
+        toast.success("No unassigned leads to apply");
+      } else {
+        toast.success(
+          `${n} lead${n === 1 ? "" : "s"} named on the register — executives complete Deal format + KYC, then GM / Owner Approve`,
+        );
+      }
+      setFilter("all");
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not apply the split to unassigned leads"));
     } finally { setSplitBusy(false); }
   };
 
@@ -140,6 +161,8 @@ export default function Allocation() {
           <p className="text-sm text-amber-900">
             <b>{summary.unassigned} active lead{summary.unassigned === 1 ? " has" : "s have"} no
             executive.</b> Executives only see leads assigned to them, so nobody is working these.
+            Save a 100% split, then <b>Apply to unassigned</b> — names go on the Lead Register,
+            and each executive completes the approval format before they can work the lead.
           </p>
         </Card>
       )}
@@ -151,7 +174,7 @@ export default function Allocation() {
             These leads already have an executive name, but it does not match the app list
             (capital letters, extra words). Confirm the person and we transfer those leads to them.
           </p>
-          <div className="space-y-2">
+          <div className="space-y-2 max-h-48 overflow-y-auto pr-1" data-testid="exec-match-scroll">
             {summary.executiveMatches.map((row) => (
               <div key={row.key} className="flex flex-wrap items-center gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
                 <div className="min-w-[8rem] flex-1">
@@ -191,9 +214,10 @@ export default function Allocation() {
               <Percent size={16} className="text-cobalt" /> Bulk import split
             </h3>
             <p className="text-xs text-ink-soft mt-1">
-              Owner and Sales GM set what % of a TL / Owner bulk upload each executive receives.
-              Named Executive cells in the sheet stay on that person. Each executive sees their share
-              on their dashboard and only their assigned leads.
+              Owner and Sales GM set what % of a TL / Owner bulk upload each executive receives,
+              and the same % for unassigned leads already on the register. Named Executive cells
+              in the sheet stay on that person. Split-assigned rows wait for Deal format + KYC
+              and GM / Owner Approve before the executive can work them.
             </p>
           </div>
           {canEditLeadSplit && (
@@ -204,6 +228,14 @@ export default function Allocation() {
               <Button data-testid="split-save-btn" onClick={saveSplit} disabled={splitBusy || !draft.length}>
                 {splitBusy ? "Saving…" : "Save split"}
               </Button>
+              <Button
+                data-testid="split-apply-btn"
+                variant="secondary"
+                onClick={applyToUnassigned}
+                disabled={splitBusy || !splitOk || !(summary?.unassigned)}
+              >
+                {splitBusy ? "Assigning…" : `Apply to ${summary?.unassigned || 0} unassigned`}
+              </Button>
             </div>
           )}
         </div>
@@ -211,7 +243,7 @@ export default function Allocation() {
           <p className="text-sm text-ink-faint">No executives on the staff / Settings list yet.</p>
         ) : (
           <>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-y-auto pr-1" data-testid="split-grid-scroll">
               {draft.map((row) => (
                 <label key={row.executive} className="flex items-center justify-between gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
                   <span className="text-sm font-medium text-ink truncate">{row.executive}</span>
@@ -244,6 +276,7 @@ export default function Allocation() {
           <h3 className="font-heading font-bold text-ink mb-1">Current load</h3>
           <p className="text-xs text-ink-soft mb-3">Active leads each executive is carrying</p>
           <Table rowKey="executive" rows={summary.executives} empty="Nobody has leads yet"
+            maxHeight="16rem"
             onRowClick={(r) => setFilter(r.executive)}
             columns={[
               { key: "executive", label: "Executive", render: (r) => <span className="font-medium">{r.executive}</span> },
@@ -284,7 +317,7 @@ export default function Allocation() {
         </div>
       </Card>
 
-      <Table rows={rows} empty="No leads match this filter"
+      <Table rows={rows} empty="No leads match this filter" maxHeight="28rem"
         columns={[
           { key: "pick", label: (
             <button onClick={toggleAll} className="text-cobalt hover:underline text-[11px]">
@@ -308,7 +341,14 @@ export default function Allocation() {
           { key: "currentStatus", label: "Status", render: (r) => <Badge>{r.currentStatus}</Badge> },
           { key: "executive", label: "Executive", render: (r) => (
             r.executive
-              ? r.executive
+              ? (
+                <div>
+                  <div>{r.executive}</div>
+                  {r.assignmentPending && (
+                    <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">Awaiting approval</Badge>
+                  )}
+                </div>
+              )
               : <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">Unassigned</Badge>
           ) },
           { key: "createdDate", label: "Created", align: "right",
