@@ -2,6 +2,7 @@ import React from "react";
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./context/AuthContext";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Layout from "./components/Layout";
 import Login from "./pages/Login";
 import Share from "./pages/Share";
@@ -57,9 +58,21 @@ function homePath(auth) {
 
 function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, gmHome, monthlyOk, oemClaimDesk }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canViewMonthly, canMatchOemClaims } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = auth;
   const loc = useLocation();
-  if (user === undefined) return <div className="min-h-screen grid place-items-center text-ink-faint">Loading…</div>;
+  if (user === undefined) {
+    return (
+      <div className="min-h-screen grid place-items-center p-6 text-center">
+        <div>
+          <div className="text-ink-faint">Signing you in…</div>
+          {sessionError ? <p className="text-sm text-amber-800 mt-2">{sessionError}</p> : null}
+          <button type="button" className="mt-4 text-sm text-cobalt underline" onClick={() => retrySession()}>
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (!user) return <Navigate to="/login" state={{ from: loc }} replace />;
   // An outside role reaches only the pages that name it. Everything else is a
   // redirect here and a 403 on the API — the browser is not the enforcement.
@@ -167,11 +180,13 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <Toaster richColors position="top-center" duration={4000} />
-      <AuthProvider>
-        <AppRoutes />
-      </AuthProvider>
-    </BrowserRouter>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <Toaster richColors position="top-center" duration={4000} />
+        <AuthProvider>
+          <AppRoutes />
+        </AuthProvider>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }

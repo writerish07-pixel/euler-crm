@@ -5,48 +5,111 @@ import {
   writeStoredToken,
   clearStoredToken,
   jwtExpired,
+  readCachedUser,
+  writeCachedUser,
+  clearCachedUser,
+  isTransientAuthError,
+  bootAuthUser,
 } from "../lib/authStorage";
 
 const AuthCtx = createContext(null);
 export const useAuth = () => useContext(AuthCtx);
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(undefined); // undefined = checking
+  const [user, setUser] = useState(() => bootAuthUser());
+  const [sessionError, setSessionError] = useState("");
+
+  const applyUser = (next) => {
+    setUser(next);
+    if (next) writeCachedUser(next);
+    else clearCachedUser();
+  };
 
   useEffect(() => {
+    let live = true;
     const token = readStoredToken();
     if (!token || jwtExpired(token)) {
       if (token) clearStoredToken();
-      setUser(null);
-      return undefined;
+      else clearCachedUser();
+      if (live) applyUser(null);
+      return () => { live = false; };
     }
-    const ac = new AbortController();
-    api.get("/auth/me", { signal: ac.signal, timeout: 12000 })
-      .then((r) => {
-        if (!ac.signal.aborted) setUser(r.data);
-      })
-      .catch((err) => {
-        if (ac.signal.aborted || err?.code === "ERR_CANCELED") return;
-        // Only drop the session we asked about — a login that landed while this
-        // request was in flight must keep its new token.
-        if (readStoredToken() === token) {
+
+    const refresh = async () => {
+      for (let attempt = 0; attempt < 4 && live; attempt += 1) {
+        try {
+          const r = await api.get("/auth/me", { timeout: 12000 });
+          if (!live) return;
+          // A login that landed while this request was in flight keeps its token.
+          if (readStoredToken() && readStoredToken() !== token) return;
+          applyUser(r.data);
+          setSessionError("");
+          return;
+        } catch (err) {
+          if (!live) return;
+          if (isTransientAuthError(err) && attempt < 3) {
+            await new Promise((ok) => setTimeout(ok, 400 * (attempt + 1)));
+            continue;
+          }
+          if (readStoredToken() !== token) return;
+          const cached = readCachedUser();
+          if (cached) {
+            // OPPO/vivo abort /auth/me on pull-to-refresh. Keep the shell.
+            setUser((cur) => (cur === undefined ? cached : cur));
+            setSessionError("Could not refresh the session. Tap retry, or pull down again.");
+            return;
+          }
           clearStoredToken();
-          setUser(null);
+          applyUser(null);
+          return;
         }
+      }
+    };
+    refresh();
+
+    // If ColorOS never resolves the XHR, do not sit on Loading… forever.
+    const watchdog = setTimeout(() => {
+      if (!live) return;
+      setUser((cur) => {
+        if (cur !== undefined) return cur;
+        return readCachedUser() || null;
       });
-    return () => ac.abort();
+    }, 16000);
+
+    return () => { live = false; clearTimeout(watchdog); };
   }, []);
 
   const login = async (email, password) => {
     const data = await post("/auth/login", { email, password });
     writeStoredToken(data.token);
-    setUser(data.user);
+    applyUser(data.user);
+    setSessionError("");
     return data.user;
+  };
+
+  const retrySession = () => {
+    setSessionError("");
+    const token = readStoredToken();
+    if (!token) {
+      applyUser(null);
+      return;
+    }
+    setUser((cur) => cur ?? readCachedUser() ?? undefined);
+    api.get("/auth/me", { timeout: 12000 })
+      .then((r) => { applyUser(r.data); setSessionError(""); })
+      .catch((err) => {
+        if (isTransientAuthError(err) && readCachedUser()) {
+          setSessionError("Still cannot reach the server.");
+          return;
+        }
+        clearStoredToken();
+        applyUser(null);
+      });
   };
 
   const logout = () => {
     clearStoredToken();
-    setUser(null);
+    applyUser(null);
     window.location.href = "/login";
   };
 
@@ -56,6 +119,8 @@ export function AuthProvider({ children }) {
       user,
       login,
       logout,
+      retrySession,
+      sessionError,
       isOwner: role === "owner",
       isAccounts: role === "accounts",
       isExecutive: role === "executive",

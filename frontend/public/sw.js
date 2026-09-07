@@ -9,7 +9,7 @@
  * fall back to a cached shell so the app opens offline instead of showing the
  * browser's error page, and data always comes from the network.
  */
-const VERSION = "euler-v4-staff-phone-login";
+const VERSION = "euler-v5-android-reload";
 const SHELL = `${VERSION}-shell`;
 const ASSETS = `${VERSION}-assets`;
 const OFFLINE_URL = "/index.html";
@@ -62,8 +62,11 @@ self.addEventListener("fetch", (event) => {
   if (isApi(url)) return;
 
   // 2. Navigations — network first so a deploy is picked up immediately;
-  //    fall back to the cached shell so the app still opens with no signal.
+  //    fall back to a cached shell so the app still opens with no signal.
+  //    Pull-to-refresh MUST bypass the worker: ColorOS and OriginOS abort a
+  //    SW-handled navigate and then paint a blank page.
   if (request.mode === "navigate") {
+    if (request.cache === "reload" || request.cache === "no-cache") return;
     event.respondWith(
       fetch(request).catch(() => caches.match(OFFLINE_URL).then(
         (r) => r || Response.error()

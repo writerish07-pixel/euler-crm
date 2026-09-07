@@ -5,6 +5,12 @@ import {
   readStoredToken,
   clearStoredToken,
   TOKEN_KEY,
+  USER_KEY,
+  readCachedUser,
+  writeCachedUser,
+  clearCachedUser,
+  isTransientAuthError,
+  bootAuthUser,
 } from "./authStorage";
 
 function tokenWithExp(expSeconds) {
@@ -62,5 +68,45 @@ describe("token storage", () => {
     expect(window.localStorage.getItem(TOKEN_KEY)).toBe("abc");
     clearStoredToken();
     expect(readStoredToken()).toBe(null);
+  });
+
+  test("clearing the token also drops the cached user", () => {
+    writeCachedUser({ role: "executive", name: "Amit" });
+    expect(readCachedUser().name).toBe("Amit");
+    clearStoredToken();
+    expect(readCachedUser()).toBe(null);
+    expect(window.sessionStorage.getItem(USER_KEY)).toBe(null);
+  });
+});
+
+describe("bootAuthUser", () => {
+  afterEach(() => { clearStoredToken(); clearCachedUser(); });
+
+  test("no token is logged out, not stuck checking", () => {
+    expect(bootAuthUser({ token: "", cached: { role: "executive" } })).toBe(null);
+  });
+
+  test("live token with a cached user paints the shell immediately", () => {
+    const token = tokenWithExp(2_000_000_000);
+    expect(bootAuthUser({
+      token, cached: { role: "executive", name: "Amit" }, nowMs: 1_800_000_000_000,
+    })).toEqual({ role: "executive", name: "Amit" });
+  });
+
+  test("live token without cache stays on checking", () => {
+    const token = tokenWithExp(2_000_000_000);
+    expect(bootAuthUser({ token, cached: null, nowMs: 1_800_000_000_000 })).toBe(undefined);
+  });
+});
+
+describe("isTransientAuthError", () => {
+  test("a canceled XHR is not a logout", () => {
+    expect(isTransientAuthError({ code: "ERR_CANCELED" })).toBe(true);
+    expect(isTransientAuthError({ name: "AbortError" })).toBe(true);
+    expect(isTransientAuthError({ code: "ECONNABORTED" })).toBe(true);
+  });
+
+  test("401 is a real auth failure", () => {
+    expect(isTransientAuthError({ response: { status: 401 } })).toBe(false);
   });
 });

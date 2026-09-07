@@ -10,6 +10,11 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* ColorOS / OriginOS turn overscroll into a full reload that blanks the PWA. */
+html, body, #root {
+  overscroll-behavior-y: none;
+}
+
 body {
   margin: 0;
   font-family: "IBM Plex Sans", system-ui, sans-serif;
