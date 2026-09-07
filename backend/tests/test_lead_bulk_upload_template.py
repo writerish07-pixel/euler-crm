@@ -308,6 +308,14 @@ def test_executive_suggestions_are_case_and_token_aware():
     assert server._executive_suggestions("Someone Else", names) == []
 
 
+def test_executive_name_matches_login_vs_staff_name():
+    user = {"name": "Sudhakar Sharma", "email": "sudhakar@euler.com", "role": "executive"}
+    assert server._executive_name_matches(user, "Sudhakar")
+    assert server._executive_name_matches(user, "sudhakar sharma")
+    other = {"name": "Prerna", "email": "prerna@euler.com", "role": "executive"}
+    assert not server._executive_name_matches(other, "Sudhakar")
+
+
 async def _login(email, password):
     transport = httpx.ASGITransport(app=server.app)
     c = httpx.AsyncClient(transport=transport, base_url="http://test")
@@ -610,9 +618,17 @@ async def test_apply_split_names_unassigned_leads_pending_approval(client):
         assert opened.status_code == 200, opened.text
         assert opened.json()["existingLeadId"] == lid
         assert (await exec_c.get(f"/api/leads/{lid}")).status_code == 200
+        by_lead = await exec_c.get(f"/api/leads/{lid}/approval-request")
+        assert by_lead.status_code == 200, by_lead.text
+        assert by_lead.json()["requestId"] == rid
+        # Owner / GM Approve queue stays empty until the executive asks.
+        owner_q = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+        assert not any(x.get("existingLeadId") == lid for x in owner_q)
 
         fmt = await exec_c.put(f"/api/lead-requests/{rid}", json={"budget": 185000})
         assert fmt.status_code == 200, fmt.text
+        asked = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+        assert any(x.get("existingLeadId") == lid for x in asked)
         await _attach_kyc(exec_c, rid)
 
         ap = await client.post(f"/api/lead-requests/{rid}/approve")

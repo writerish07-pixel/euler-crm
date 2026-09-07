@@ -120,7 +120,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
-        {lead.assignmentPending && (
+        {isExecutive && lead.assignmentPending && (
           <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="assignment-pending-badge">Awaiting approval</Badge>
         )}
         {leadLocked && <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="lead-locked-badge">Locked</Badge>}
@@ -148,22 +148,20 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         )}
       </div>
 
-      {lead.assignmentPending && (
+      {isExecutive && lead.assignmentPending && (
         <div className="mb-4 rounded-lg bg-amber-50 ring-1 ring-inset ring-amber-600/20 p-3 flex flex-wrap items-center gap-2" data-testid="assignment-pending-banner">
           <p className="text-sm text-amber-900 flex-1 min-w-[12rem]">
-            Tap Proceed to complete Deal format + KYC. GM / Owner Approve then opens the live journey.
+            Tap Proceed to send Deal format + KYC for GM / Owner Approve. Until then this stays a New lead.
           </p>
-          {lead.approvalRequestId && (
-            <Button data-testid="drawer-proceed-btn" onClick={async () => {
-              try {
-                setProceedRow(await get(`/lead-requests/${lead.approvalRequestId}`));
-              } catch (e) {
-                toast.error(e?.response?.data?.detail || "Could not open approval format");
-              }
-            }}>
-              Proceed
-            </Button>
-          )}
+          <Button data-testid="drawer-proceed-btn" onClick={async () => {
+            try {
+              setProceedRow(await get(`/leads/${lead.leadId}/approval-request`));
+            } catch (e) {
+              toast.error(e?.response?.data?.detail || "Could not start approval");
+            }
+          }}>
+            Proceed
+          </Button>
         </div>
       )}
       {proceedRow && (

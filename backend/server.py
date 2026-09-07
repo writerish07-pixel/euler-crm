@@ -1655,6 +1655,21 @@ async def _load_lead_split():
     }
 
 
+def _executive_name_matches(user, executive) -> bool:
+    """Same fuzzy match as the executive lead book (login name vs staff name)."""
+    name = _norm_name((user or {}).get("name"))
+    email_local = _norm_name(
+        (((user or {}).get("email") or "").split("@")[0]).replace(".", " ").replace("_", " "))
+    ex = _norm_name(executive)
+    if not ex:
+        return False
+    if name and (ex == name or name in ex or ex in name):
+        return True
+    if email_local and (ex == email_local or email_local in ex or ex in email_local):
+        return True
+    return False
+
+
 def _leads_for_executive(leads, user) -> list:
     """Match lead.executive to the logged-in executive's name (or email local-part).
 
@@ -1662,18 +1677,7 @@ def _leads_for_executive(leads, user) -> list:
     name (including `assignmentPending`). They work them after tapping Proceed
     and GM / Owner Approve — they are not hidden from the register.
     """
-    name = _norm_name(user.get("name"))
-    email_local = _norm_name((user.get("email") or "").split("@")[0].replace(".", " ").replace("_", " "))
-    out = []
-    for l in leads:
-        ex = _norm_name(l.get("executive"))
-        if not ex:
-            continue
-        if name and (ex == name or name in ex or ex in name):
-            out.append(l)
-        elif email_local and (ex == email_local or email_local in ex or ex in email_local):
-            out.append(l)
-    return out
+    return [l for l in leads if _executive_name_matches(user, (l or {}).get("executive"))]
 
 
 def _exec_request_filter(user) -> dict:
@@ -1704,8 +1708,25 @@ def _request_owned_by(req, user) -> bool:
         return True
     if str((user or {}).get("role") or "") != "executive":
         return False
-    fold = _norm_name((user or {}).get("name"))
-    return bool(fold) and str(req.get("assignedExecutiveFold") or "") == fold
+    payload = (req or {}).get("payload") or {}
+    for raw in (
+        req.get("assignedExecutive"),
+        req.get("assignedExecutiveFold"),
+        payload.get("executive"),
+    ):
+        if _executive_name_matches(user, raw):
+            return True
+    return False
+
+
+async def _exec_may_open_request(req, user) -> bool:
+    if _request_owned_by(req, user):
+        return True
+    lid = str((req or {}).get("existingLeadId") or "").strip()
+    if not lid:
+        return False
+    live = await db.leads.find_one({"leadId": lid})
+    return _is_own_lead(live, user)
 
 
 def _lead_in_payload(lead: dict) -> dict:
@@ -3221,7 +3242,19 @@ def _request_out(doc):
     row["gstin"] = payload.get("gstin") or ""
     row["existingLeadId"] = row.get("existingLeadId") or ""
     row["source"] = row.get("source") or ""
+    row["askedForApproval"] = bool(row.get("askedForApproval"))
     return row
+
+
+def _approver_pending_query() -> dict:
+    """Owner / GM Approve queue: new enquiries, plus split assignments the executive has asked for."""
+    return {
+        "status": "pending",
+        "$or": [
+            {"source": {"$ne": "split-assignment"}},
+            {"askedForApproval": True},
+        ],
+    }
 
 
 @api.get("/lead-requests/summary")
@@ -3234,7 +3267,7 @@ async def lead_request_summary(user=Depends(current_user)):
         })
         return {"pending": n, "mine": n, "canApprove": False}
     if _can_approve_leads(user):
-        n = await db.lead_requests.count_documents({"status": "pending"})
+        n = await db.lead_requests.count_documents(_approver_pending_query())
         return {"pending": n, "mine": n, "canApprove": True}
     return {"pending": 0, "mine": 0, "canApprove": False}
 
@@ -3250,6 +3283,8 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
         q.update(_exec_approval_queue_filter(user))
     elif not _can_approve_leads(user):
         raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
+    elif st == "pending":
+        q = _approver_pending_query()
     rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(2000)]
     req_ids = [r.get("requestId") for r in rows if r.get("requestId")]
     docs_by_req = {}
@@ -3582,7 +3617,7 @@ async def get_lead_request(request_id: str, user=Depends(current_user)):
         raise HTTPException(404, "Approval request not found")
     role = str(user.get("role") or "")
     if role == "executive":
-        if not _request_owned_by(req, user):
+        if not await _exec_may_open_request(req, user):
             raise HTTPException(403, "You can only open your own approval request.")
     elif not _can_approve_leads(user):
         raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
@@ -3598,7 +3633,7 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
         raise HTTPException(404, "Approval request not found")
     if req.get("status") not in ("pending", "approving"):
         raise HTTPException(409, f"This request is already {req.get('status')}.")
-    if not _request_owned_by(req, user) and not _can_approve_leads(user):
+    if not await _exec_may_open_request(req, user) and not _can_approve_leads(user):
         raise HTTPException(403, "You can only complete your own approval request.")
     payload = dict(req.get("payload") or {})
     patch = body.model_dump(exclude_unset=True)
@@ -3621,6 +3656,8 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
         "dealAmount": deal_amount,
         "dealFormat": deal_format,
         "cxDemand": deal_amount,
+        "askedForApproval": deal_amount > 0,
+        "askedAt": now_iso() if deal_amount > 0 else "",
     }})
     updated = await db.lead_requests.find_one({"requestId": request_id})
     return _request_out(updated)
@@ -3634,6 +3671,26 @@ async def get_lead(lead_id: str, user=Depends(current_user)):
     if user.get("role") in authmod.FIELD_ROLES:
         return _field_safe_lead(lead)
     return lead
+
+
+@api.get("/leads/{lead_id}/approval-request")
+async def lead_approval_request(lead_id: str, user=Depends(current_user)):
+    """The pending Deal-format request for a split-assigned register lead."""
+    lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
+    req = await db.lead_requests.find_one({
+        "existingLeadId": lead_id,
+        "status": {"$in": ["pending", "approving"]},
+    })
+    if not req:
+        raise HTTPException(404, "No approval request for this lead")
+    role = str(user.get("role") or "")
+    if role == "executive":
+        if not await _exec_may_open_request(req, user):
+            raise HTTPException(403, "You can only open your own approval request.")
+    elif not _can_approve_leads(user):
+        raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
+    return await _request_public(req, user)
 
 
 @api.get("/leads/{lead_id}/360")

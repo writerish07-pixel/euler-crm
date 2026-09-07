@@ -46,22 +46,15 @@ export default function Leads() {
     return undefined;
   }, [searchParams, setSearchParams]);
 
-  const openLead = async (r) => {
-    if (r.assignmentPending) {
-      const rid = r.approvalRequestId;
-      if (!rid) {
-        toast.error("Approval request missing — ask Owner / GM to apply the split again");
-        return;
-      }
-      try {
-        const row = await get(`/lead-requests/${rid}`);
-        setProceed(row);
-      } catch (e) {
-        toast.error(e?.response?.data?.detail || "Could not open approval format");
-      }
-      return;
+  const openLead = (r) => { setActive(r.leadId); };
+
+  const startApproval = async (r) => {
+    try {
+      const row = await get(`/leads/${r.leadId}/approval-request`);
+      setProceed(row);
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || "Could not start approval");
     }
-    setActive(r.leadId);
   };
 
   const columns = [
@@ -77,7 +70,7 @@ export default function Leads() {
       r.executive ? (
         <div>
           <div className="font-medium">{r.executive}</div>
-          {r.assignmentPending && (
+          {isExecutive && r.assignmentPending && (
             <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">Awaiting approval</Badge>
           )}
         </div>
@@ -108,10 +101,10 @@ export default function Leads() {
       )},
     ] : []),
     { key: "go", label: "", align: "right", render: (r) => (
-      r.assignmentPending
+      isExecutive && r.assignmentPending
         ? (
           <Button data-testid={`proceed-${r.leadId}`} className="!py-1 !px-2.5 text-xs"
-            onClick={(e) => { e.stopPropagation(); openLead(r); }}>
+            onClick={(e) => { e.stopPropagation(); startApproval(r); }}>
             Proceed
           </Button>
         )
@@ -119,7 +112,7 @@ export default function Leads() {
     ) },
   ];
 
-  const pendingN = leads.filter((l) => l.assignmentPending).length;
+  const pendingN = isExecutive ? leads.filter((l) => l.assignmentPending).length : 0;
 
   return (
     <div>
