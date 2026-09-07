@@ -9,6 +9,8 @@ import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card } from "
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
 import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
+import CallLink from "../components/CallLink";
+import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 
 const CHARGE_FIELDS = [
   ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
@@ -27,6 +29,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
+  const [proceedRow, setProceedRow] = useState(null);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -94,7 +97,12 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   return (
     <Drawer open onClose={onClose} width="max-w-3xl"
       title={lead.customerName}
-      subtitle={`${lead.leadId} · ${lead.interestedModel} ${lead.variant} · ${lead.mobile}`}
+      subtitle={(
+        <span className="flex flex-wrap items-center gap-2">
+          <span>{`${lead.leadId} · ${lead.interestedModel || ""} ${lead.variant || ""}`.trim()}</span>
+          <CallLink mobile={lead.mobile} />
+        </span>
+      )}
       footer={fieldView
         ? <div className="flex items-center gap-2 text-sm text-ink-soft">
             {(!actions.isActive || String(lead.accountStatus || "").toLowerCase() === "closed")
@@ -112,6 +120,9 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       <div className="flex items-center gap-2 mb-4">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
+        {lead.assignmentPending && (
+          <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="assignment-pending-badge">Awaiting approval</Badge>
+        )}
         {leadLocked && <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="lead-locked-badge">Locked</Badge>}
         {!fieldView && !leadLocked && actions.canEditLead && (
           <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
@@ -136,6 +147,32 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           </div>
         )}
       </div>
+
+      {lead.assignmentPending && (
+        <div className="mb-4 rounded-lg bg-amber-50 ring-1 ring-inset ring-amber-600/20 p-3 flex flex-wrap items-center gap-2" data-testid="assignment-pending-banner">
+          <p className="text-sm text-amber-900 flex-1 min-w-[12rem]">
+            Tap Proceed to complete Deal format + KYC. GM / Owner Approve then opens the live journey.
+          </p>
+          {lead.approvalRequestId && (
+            <Button data-testid="drawer-proceed-btn" onClick={async () => {
+              try {
+                setProceedRow(await get(`/lead-requests/${lead.approvalRequestId}`));
+              } catch (e) {
+                toast.error(e?.response?.data?.detail || "Could not open approval format");
+              }
+            }}>
+              Proceed
+            </Button>
+          )}
+        </div>
+      )}
+      {proceedRow && (
+        <CompleteFormatDrawer
+          row={proceedRow}
+          onClose={() => setProceedRow(null)}
+          onSaved={() => { setProceedRow(null); refresh(); }}
+        />
+      )}
 
       {editing && !leadLocked && !fieldView && (
         <EditLeadModal
@@ -354,6 +391,10 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
         <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6">
           <KV label="Executive" value={lead.executive || "—"} />
+          <div className="flex items-center justify-between py-1.5 border-b border-zinc-100">
+            <span className="text-sm text-ink-soft">Mobile</span>
+            <CallLink mobile={lead.mobile} compact />
+          </div>
           <KV label="Priority" value={lead.priority} />
           <KV label="Created" value={fmtDate(lead.createdDate)} />
           <KV label="Booking Date" value={fmtDate(lead.bookingDate)} />

@@ -23,7 +23,7 @@ export default function PeriodBar({ month = "", year = "", onChange, showAll = t
         </Button>
       )}
       <Button type="button" variant={month === mtd ? "primary" : "secondary"}
-        data-testid="period-mtd" onClick={() => set({ month: mtd, year: "" })}>
+        data-testid="period-mtd" onClick={() => set({ month: mtd, year: mtd.slice(0, 4) })}>
         This month
       </Button>
       <Button type="button" variant={!month && year === ytd ? "primary" : "secondary"}
@@ -32,11 +32,14 @@ export default function PeriodBar({ month = "", year = "", onChange, showAll = t
       </Button>
       <Field label="Month">
         <Input type="month" data-testid="period-month" value={month}
-          onChange={(e) => set({ month: e.target.value, year: "" })} />
+          onChange={(e) => {
+            const next = e.target.value;
+            set({ month: next, year: next ? next.slice(0, 4) : "" });
+          }} />
       </Field>
       <Field label="Year">
         <Input type="number" data-testid="period-year" min="2020" max="2099"
-          placeholder="YYYY" value={year} className="w-[7rem]"
+          placeholder="YYYY" value={year || (month ? month.slice(0, 4) : "")} className="w-[7rem]"
           onChange={(e) => set({ month: "", year: e.target.value })} />
       </Field>
     </div>

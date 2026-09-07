@@ -112,7 +112,7 @@ export function Badge({ children, tone, className, ...rest }) {
 // rowClassName is optional and tints a row from its own data — used where a row's
 // state matters more than any single cell (a claim nobody filed with the OEM).
 // Callers that don't pass it get exactly the old markup.
-export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName, maxHeight = PANEL_MAX_H }) {
+export function Table({ columns, rows, onRowClick, empty = "No records", rowKey, rowClassName, maxHeight = false }) {
   const list = Array.isArray(rows) ? rows : [];
   const capped = maxHeight !== false && maxHeight != null && maxHeight !== "";
   return (
@@ -172,7 +172,7 @@ export function Drawer({ open, onClose, title, subtitle, children, width = "max-
           <div className="flex items-start justify-between gap-3 px-4 sm:px-6 py-4 border-b border-line shrink-0">
             <div className="min-w-0">
               <h2 className="font-heading text-base sm:text-lg font-bold text-ink truncate">{title}</h2>
-              {subtitle && <p className="text-xs text-ink-soft mt-0.5 break-words">{subtitle}</p>}
+              {subtitle && <div className="text-xs text-ink-soft mt-0.5 break-words">{subtitle}</div>}
             </div>
             <button onClick={onClose} data-testid="drawer-close" className="rounded-lg p-1.5 text-ink-faint hover:bg-zinc-100 hover:text-ink transition-colors shrink-0">
               <X size={18} />

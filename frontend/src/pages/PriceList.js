@@ -3,7 +3,7 @@ import { Search, Copy, ChevronDown, AlertTriangle, RefreshCcw } from "lucide-rea
 import { toast } from "sonner";
 import { get } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { PageHeader, Card, Badge, Button, Input, Select, panelScrollClass } from "../components/ui";
+import { PageHeader, Card, Badge, Button, Input, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import OemPriceSyncButton from "../components/OemPriceSyncButton";
 
@@ -108,8 +108,7 @@ export default function PriceList() {
             <span className="text-xs text-ink-faint">{g.count} variant{g.count === 1 ? "" : "s"}</span>
           </div>
 
-          <Card className="overflow-hidden">
-            <div className={panelScrollClass} data-testid={`price-group-scroll-${g.model}`}>
+          <Card className="overflow-hidden" data-testid={`price-group-scroll-${g.model}`}>
             {g.rows.map((r) => {
               const isOpen = !!open[r.priceId];
               return (
@@ -152,7 +151,6 @@ export default function PriceList() {
                 </div>
               );
             })}
-            </div>
           </Card>
         </section>
       ))}

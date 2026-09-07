@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Plus, Phone, ChevronRight, Upload } from "lucide-react";
+import { Plus, ChevronRight, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, put } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
@@ -12,6 +12,8 @@ import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
 import { LocalKycBlock, kycReady, uploadKycFiles } from "../components/LeadDocuments";
 import DealFormatCard from "../components/DealFormatCard";
+import CallLink from "../components/CallLink";
+import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
@@ -21,6 +23,7 @@ export default function Leads() {
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
   const [active, setActive] = useState(null);
+  const [proceed, setProceed] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
   const [showImport, setShowImport] = useState(false);
@@ -43,12 +46,30 @@ export default function Leads() {
     return undefined;
   }, [searchParams, setSearchParams]);
 
+  const openLead = async (r) => {
+    if (r.assignmentPending) {
+      const rid = r.approvalRequestId;
+      if (!rid) {
+        toast.error("Approval request missing — ask Owner / GM to apply the split again");
+        return;
+      }
+      try {
+        const row = await get(`/lead-requests/${rid}`);
+        setProceed(row);
+      } catch (e) {
+        toast.error(e?.response?.data?.detail || "Could not open approval format");
+      }
+      return;
+    }
+    setActive(r.leadId);
+  };
+
   const columns = [
     { key: "leadId", label: "Lead ID", mono: true, render: (r) => <span className="font-semibold text-cobalt">{r.leadId}</span> },
     { key: "customerName", label: "Customer", render: (r) => (
       <div>
         <div className="font-semibold text-ink">{r.customerName}</div>
-        <div className="text-xs text-ink-faint flex items-center gap-1"><Phone size={10} />{r.mobile || "—"}</div>
+        <CallLink mobile={r.mobile} compact />
       </div>
     )},
     { key: "vehicle", label: "Vehicle", render: (r) => <div className="text-sm"><div>{r.interestedModel || "—"}</div><div className="text-xs text-ink-faint">{r.variant}</div></div> },
@@ -86,14 +107,25 @@ export default function Leads() {
         </div>
       )},
     ] : []),
-    { key: "go", label: "", align: "right", render: () => <ChevronRight size={16} className="text-ink-faint inline" /> },
+    { key: "go", label: "", align: "right", render: (r) => (
+      r.assignmentPending
+        ? (
+          <Button data-testid={`proceed-${r.leadId}`} className="!py-1 !px-2.5 text-xs"
+            onClick={(e) => { e.stopPropagation(); openLead(r); }}>
+            Proceed
+          </Button>
+        )
+        : <ChevronRight size={16} className="text-ink-faint inline" />
+    ) },
   ];
+
+  const pendingN = leads.filter((l) => l.assignmentPending).length;
 
   return (
     <div>
       <PageHeader
         title="Lead Register"
-        subtitle={`${leads.length} leads in pipeline${isField ? " · field view" : ""}`}
+        subtitle={`${leads.length} leads in pipeline${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}`}
         actions={!isField ? <div className="flex gap-2">
           {!isExecutive && (
             <Button variant="secondary" data-testid="import-leads-btn" onClick={() => setShowImport(true)}><Upload size={16} /> Import</Button>
@@ -124,7 +156,7 @@ export default function Leads() {
 
       <Table
         rowKey="leadId"
-        onRowClick={(r) => setActive(r.leadId)}
+        onRowClick={(r) => openLead(r)}
         columns={columns}
         rows={leads}
         empty="No leads match this filter"
@@ -132,6 +164,13 @@ export default function Leads() {
 
       {active && (
         <LeadDrawer leadId={active} masters={masters} onClose={() => setActive(null)} onChanged={load} />
+      )}
+      {proceed && (
+        <CompleteFormatDrawer
+          row={proceed}
+          onClose={() => setProceed(null)}
+          onSaved={() => { setProceed(null); load(); }}
+        />
       )}
       {showNew && (
         <NewLeadDrawer masters={masters} onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); load(); if (id) setActive(id); }} />

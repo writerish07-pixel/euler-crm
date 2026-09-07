@@ -428,6 +428,28 @@ def lead_actions(lead, act=None):
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
     is_exec = role == "executive"
+    if is_exec and (lead or {}).get("assignmentPending"):
+        return {
+            "canBook": False,
+            "canPrice": False,
+            "canScheme": False,
+            "canPayment": False,
+            "canFinanceReceipt": False,
+            "canDeliver": False,
+            "canClose": False,
+            "canCancel": False,
+            "cancelNeedsOwner": False,
+            "canEditLead": False,
+            "isBooked": booked,
+            "isDelivered": delivered,
+            "isActive": active,
+            "isLocked": True,
+            "priceCompleted": priced,
+            "schemeCompleted": schemed,
+            "deliveryCompleted": delivered,
+            "execPipelineOnly": True,
+            "assignmentPending": True,
+        }
     return {
         "canBook": mutable and not booked,
         "canPrice": mutable and not is_exec,
@@ -478,6 +500,12 @@ def _require_mutable_lead(lead, verb="edits", act=None):
             f"Only Active leads can be changed.",
         )
     role = ((act or {}).get("role") or "").strip().lower()
+    if role == "executive" and (lead or {}).get("assignmentPending"):
+        raise HTTPException(
+            403,
+            "Tap Proceed on the Lead Register, complete Deal format + KYC, "
+            "then wait for GM / Owner Approve before working this lead.",
+        )
     if role != "owner" and _is_delivered(lead):
         raise HTTPException(
             409,
@@ -1630,16 +1658,14 @@ async def _load_lead_split():
 def _leads_for_executive(leads, user) -> list:
     """Match lead.executive to the logged-in executive's name (or email local-part).
 
-    Split-assigned imported leads stay on the Owner register with a name, but
-    `assignmentPending` hides them from the executive until GM / Owner Approve
-    on the same Deal format + KYC path as a new enquiry.
+    Split-assigned imported leads stay on the Lead Register under the executive
+    name (including `assignmentPending`). They work them after tapping Proceed
+    and GM / Owner Approve — they are not hidden from the register.
     """
     name = _norm_name(user.get("name"))
     email_local = _norm_name((user.get("email") or "").split("@")[0].replace(".", " ").replace("_", " "))
     out = []
     for l in leads:
-        if (l or {}).get("assignmentPending"):
-            continue
         ex = _norm_name(l.get("executive"))
         if not ex:
             continue
@@ -1660,6 +1686,17 @@ def _exec_request_filter(user) -> dict:
     if fold:
         clauses.append({"assignedExecutiveFold": fold})
     return {"$or": clauses}
+
+
+def _exec_approval_queue_filter(user) -> dict:
+    """Approvals tab for executives: new enquiries they submitted.
+
+    Split-assigned imported leads belong on the Lead Register (Proceed), not
+    this queue — otherwise a bulk apply floods Waiting for approval.
+    """
+    q = dict(_exec_request_filter(user))
+    q["source"] = {"$ne": "split-assignment"}
+    return q
 
 
 def _request_owned_by(req, user) -> bool:
@@ -2122,10 +2159,6 @@ async def executive_dashboard(user=Depends(current_user)):
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
         "worklist": worklist[:25],
         "incentive": incentive,
-        "leadSplit": {
-            "pct": (next((s["pct"] for s in (await _load_lead_split())["shares"]
-                          if _norm_name(s["executive"]) == _norm_name(user.get("name") or "")), 0)),
-        },
         "lastUpdated": now_iso(),
     }
 
@@ -3001,10 +3034,34 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
     period = _parse_period(month, year)
-    leads = _rows_in_period(leads, period, lambda l: l.get("createdDate"))
+    leads = _rows_in_period(
+        leads, period, lambda l: periodmod.lead_register_date(l, status or ""))
     rows = [clean(l) for l in leads]
+    rows = await _attach_approval_request_ids(rows)
     if user.get("role") in authmod.FIELD_ROLES:
         return [_field_safe_lead(l) for l in rows]
+    return rows
+
+
+async def _attach_approval_request_ids(rows: list) -> list:
+    """Stamp pending split-assignment request ids so the register can open Proceed."""
+    pending_ids = [r.get("leadId") for r in rows
+                   if r.get("assignmentPending") and r.get("leadId")]
+    if not pending_ids:
+        return rows
+    found = await db.lead_requests.find({
+        "existingLeadId": {"$in": pending_ids},
+        "status": "pending",
+    }).to_list(len(pending_ids) + 50)
+    by_lead = {}
+    for req in found:
+        lid = req.get("existingLeadId")
+        if lid and lid not in by_lead:
+            by_lead[lid] = req.get("requestId")
+    for r in rows:
+        rid = by_lead.get(r.get("leadId"))
+        if rid:
+            r["approvalRequestId"] = rid
     return rows
 
 
@@ -3173,7 +3230,7 @@ async def lead_request_summary(user=Depends(current_user)):
     if role == "executive":
         n = await db.lead_requests.count_documents({
             "status": "pending",
-            **_exec_request_filter(user),
+            **_exec_approval_queue_filter(user),
         })
         return {"pending": n, "mine": n, "canApprove": False}
     if _can_approve_leads(user):
@@ -3190,7 +3247,7 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
     q = {} if st == "all" else {"status": st}
     role = str(user.get("role") or "")
     if role == "executive":
-        q.update(_exec_request_filter(user))
+        q.update(_exec_approval_queue_filter(user))
     elif not _can_approve_leads(user):
         raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
     rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(2000)]
@@ -3408,10 +3465,9 @@ async def save_lead_split(body: LeadSplitIn, act=Depends(actor)):
 async def apply_split_to_unassigned(act=Depends(actor)):
     """Assign already-imported Active leads that have no executive, using the saved %.
 
-    Names land on the Lead Register immediately so Owner / GM / TL can see who
-    received whom. The executive does not get a live book yet — each row becomes
-    a pending approval request and they complete Deal format + KYC the same way
-    as a new enquiry. GM / Owner Approve then opens the existing lead to them.
+    Names land on the Lead Register immediately for Owner / GM / TL and for the
+    assigned executive. The executive taps Proceed to complete Deal format + KYC.
+    GM / Owner Approve on Approvals then opens the live journey.
     """
     plan = await _load_lead_split()
     if abs(float(plan.get("totalPct") or 0) - 100) > 0.05:
@@ -3500,6 +3556,39 @@ class LeadRequestUpdateIn(BaseModel):
     gstin: Optional[str] = None
 
 
+async def _request_public(req, user):
+    row = _request_out(req)
+    own = _request_owned_by(req, user) or _can_approve_leads(user)
+    docs = []
+    rid = req.get("requestId")
+    if rid:
+        found = await db[lead_docs.COLLECTION].find(
+            {"requestId": rid}, {"data": 0}).to_list(100)
+        docs = [lead_docs.public_row(d) for d in found
+                if lead_docs.can_read_kind(user, d.get("kind") or "", own=own)]
+    row["documents"] = docs
+    missing = await lead_docs.missing_kyc(
+        db, request_id=rid or "",
+        customer_type=row.get("customerType"), gstin=row.get("gstin"))
+    row["kycMissing"] = missing
+    row["kycComplete"] = not missing
+    return row
+
+
+@api.get("/lead-requests/{request_id}")
+async def get_lead_request(request_id: str, user=Depends(current_user)):
+    req = await db.lead_requests.find_one({"requestId": request_id})
+    if not req:
+        raise HTTPException(404, "Approval request not found")
+    role = str(user.get("role") or "")
+    if role == "executive":
+        if not _request_owned_by(req, user):
+            raise HTTPException(403, "You can only open your own approval request.")
+    elif not _can_approve_leads(user):
+        raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
+    return await _request_public(req, user)
+
+
 @api.put("/lead-requests/{request_id}")
 async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
                               user=Depends(current_user)):
@@ -3541,6 +3630,7 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
 async def get_lead(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     _require_own_lead(lead, user)
+    lead = (await _attach_approval_request_ids([clean(lead)]))[0]
     if user.get("role") in authmod.FIELD_ROLES:
         return _field_safe_lead(lead)
     return lead
@@ -3550,6 +3640,7 @@ async def get_lead(lead_id: str, user=Depends(current_user)):
 async def customer_360(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     _require_own_lead(lead, user)
+    lead = (await _attach_approval_request_ids([clean(dict(lead))]))[0]
     # ASM / RM — pipeline snapshot only (no commercials, payments, claims)
     if user.get("role") in authmod.FIELD_ROLES:
         delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})

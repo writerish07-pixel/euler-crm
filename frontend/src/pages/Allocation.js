@@ -5,6 +5,7 @@ import { get, post, put, apiErrorMessage } from "../lib/api";
 import { fmtDate } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, StatCard, Table, Badge, Button, Select, Input } from "../components/ui";
+import CallLink from "../components/CallLink";
 
 /**
  * Allocate leads to executives.
@@ -117,7 +118,7 @@ export default function Allocation() {
         toast.success("No unassigned leads to apply");
       } else {
         toast.success(
-          `${n} lead${n === 1 ? "" : "s"} named on the register — executives complete Deal format + KYC, then GM / Owner Approve`,
+          `${n} lead${n === 1 ? "" : "s"} named on the Lead Register — executive taps Proceed, then GM / Owner Approve`,
         );
       }
       setFilter("all");
@@ -161,8 +162,8 @@ export default function Allocation() {
           <p className="text-sm text-amber-900">
             <b>{summary.unassigned} active lead{summary.unassigned === 1 ? " has" : "s have"} no
             executive.</b> Executives only see leads assigned to them, so nobody is working these.
-            Save a 100% split, then <b>Apply to unassigned</b> — names go on the Lead Register,
-            and each executive completes the approval format before they can work the lead.
+            Save a 100% split, then <b>Apply to unassigned</b> — names go on the Lead Register.
+            The executive taps <b>Proceed</b> there to start Deal format + KYC, then GM / Owner Approve.
           </p>
         </Card>
       )}
@@ -174,7 +175,7 @@ export default function Allocation() {
             These leads already have an executive name, but it does not match the app list
             (capital letters, extra words). Confirm the person and we transfer those leads to them.
           </p>
-          <div className="space-y-2 max-h-48 overflow-y-auto pr-1" data-testid="exec-match-scroll">
+          <div className="space-y-2" data-testid="exec-match-scroll">
             {summary.executiveMatches.map((row) => (
               <div key={row.key} className="flex flex-wrap items-center gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
                 <div className="min-w-[8rem] flex-1">
@@ -243,7 +244,7 @@ export default function Allocation() {
           <p className="text-sm text-ink-faint">No executives on the staff / Settings list yet.</p>
         ) : (
           <>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-y-auto pr-1" data-testid="split-grid-scroll">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" data-testid="split-grid-scroll">
               {draft.map((row) => (
                 <label key={row.executive} className="flex items-center justify-between gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
                   <span className="text-sm font-medium text-ink truncate">{row.executive}</span>
@@ -334,7 +335,7 @@ export default function Allocation() {
             render: (r) => (
               <div>
                 <div className="font-medium">{r.customerName}</div>
-                <div className="text-xs text-ink-faint">{r.mobile}</div>
+                <CallLink mobile={r.mobile} compact />
               </div>
             ) },
           { key: "interestedModel", label: "Vehicle", render: (r) => r.interestedModel || "—" },
