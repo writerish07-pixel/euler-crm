@@ -128,7 +128,6 @@ export default function Leads() {
         columns={columns}
         rows={leads}
         empty="No leads match this filter"
-        maxHeight="28rem"
       />
 
       {active && (

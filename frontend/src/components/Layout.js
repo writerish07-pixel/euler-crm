@@ -291,7 +291,7 @@ function Topbar({ onMenuOpen }) {
   };
   const initials = (user?.name || user?.email || "U").slice(0, 2).toUpperCase();
   return (
-    <header className="sticky top-0 z-30 flex h-14 sm:h-16 items-center gap-2 sm:gap-4 border-b border-line bg-white/80 backdrop-blur px-3 sm:px-6">
+    <header className="shrink-0 z-30 flex h-14 sm:h-16 items-center gap-2 sm:gap-4 border-b border-line bg-white/80 backdrop-blur px-3 sm:px-6">
       <button
         type="button"
         data-testid="mobile-menu-btn"
@@ -367,7 +367,7 @@ export default function Layout({ children }) {
   }, [navOpen]);
 
   return (
-    <div className="min-h-screen bg-app" data-testid="app-shell">
+    <div className="h-[100dvh] bg-app overflow-hidden" data-testid="app-shell">
       {/* Mobile backdrop */}
       {navOpen && (
         <button
@@ -399,12 +399,12 @@ export default function Layout({ children }) {
         onNavigate={() => setNavOpen(false)}
       />
 
-      <div className="lg:ml-64 flex flex-col min-h-screen min-w-0">
-        <ConnectionBar />
+      <div className="lg:ml-64 flex flex-col h-[100dvh] min-w-0">
+        <div className="shrink-0"><ConnectionBar /></div>
         {sessionError ? (
           <button type="button" data-testid="session-retry-bar"
             onClick={retrySession}
-            className="sticky top-0 z-40 w-full bg-amber-50 text-amber-900 text-xs font-semibold px-3 py-2 text-center">
+            className="shrink-0 z-40 w-full bg-amber-50 text-amber-900 text-xs font-semibold px-3 py-2 text-center">
             {sessionError} — tap to retry
           </button>
         ) : null}
@@ -416,7 +416,7 @@ export default function Layout({ children }) {
             instead of the viewport, pushing its footer buttons off screen.
             Every drawer and modal therefore portals to <body> via ui.js `Portal`.
             If you add a new overlay, portal it too. */}
-        <main className="flex-1 p-4 sm:p-6 lg:p-8 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-fade-up min-w-0 overflow-x-hidden">{children}</main>
+        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-4 sm:p-6 lg:p-8 pb-[calc(1rem+env(safe-area-inset-bottom))] animate-fade-up min-w-0">{children}</main>
       </div>
     </div>
   );

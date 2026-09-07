@@ -105,7 +105,6 @@ export default function Approvals() {
       )}
       <Table
         rowKey="requestId"
-        maxHeight="28rem"
         empty={isExecutive ? "Nothing waiting" : "No pending requests"}
         columns={[
           { key: "customerName", label: "Customer", render: (r) => (

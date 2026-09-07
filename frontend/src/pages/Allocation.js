@@ -317,7 +317,7 @@ export default function Allocation() {
         </div>
       </Card>
 
-      <Table rows={rows} empty="No leads match this filter" maxHeight="28rem"
+      <Table rows={rows} empty="No leads match this filter"
         columns={[
           { key: "pick", label: (
             <button onClick={toggleAll} className="text-cobalt hover:underline text-[11px]">

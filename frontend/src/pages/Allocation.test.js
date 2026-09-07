@@ -51,4 +51,5 @@ test("allocation split grid and lead table are capped with internal scroll", asy
   expect(document.querySelector('[data-testid="split-apply-btn"]')?.textContent).toMatch(/Apply to 400 unassigned/);
   expect(document.querySelector('[data-testid="split-grid-scroll"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="unassigned-note"]')?.textContent).toMatch(/Apply to unassigned/);
+  expect(document.querySelector('[data-testid="table-scroll"]')).toBeTruthy();
 });

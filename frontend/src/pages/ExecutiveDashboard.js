@@ -96,7 +96,7 @@ export default function ExecutiveDashboard() {
 
         <Card className="p-5">
           <h3 className="font-heading font-bold text-ink mb-3">My funnel</h3>
-          <div className="space-y-2">
+          <div className="space-y-2 max-h-64 overflow-y-auto overscroll-contain pr-1">
             {(d.funnel || []).map((f) => (
               <div key={f.status} className="flex items-center justify-between text-sm">
                 <span className="text-ink-soft">{f.status}</span>
