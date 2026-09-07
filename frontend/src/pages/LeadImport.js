@@ -10,6 +10,7 @@ export default function LeadImport({ onClose, onDone }) {
   const [mapping, setMapping] = useState({});
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState("upload"); // upload -> map
+  const [split, setSplit] = useState(null);
   const [execMap, setExecMap] = useState({});
 
   useEffect(() => {
