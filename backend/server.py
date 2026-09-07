@@ -1455,7 +1455,7 @@ def _import_executive_prompts(checked, names):
     """Unique sheet spellings that are not already the canonical executive name."""
     groups = {}
     for r in checked:
-        if r.get("__errors"):
+        if r.get("__errors") or r.get("__alreadyInApp"):
             continue
         raw = str(r.get("__executiveRaw") or "").strip()
         if not raw:
@@ -5003,12 +5003,15 @@ async def _import_allowed_values():
 
 
 async def _existing_lead_mobiles():
-    """last-10-digits -> leadId, for the same duplicate guard POST /leads applies."""
+    """last-10-digits -> {leadId, customerName}, same unique key POST /leads uses."""
     out = {}
     for l in await db.leads.find().to_list(5000):
         digits = re.sub(r"\D", "", str(l.get("mobile") or ""))
         if len(digits) >= 10:
-            out[digits[-10:]] = l.get("leadId")
+            out[digits[-10:]] = {
+                "leadId": l.get("leadId"),
+                "customerName": l.get("customerName") or "",
+            }
     return out
 
 
@@ -5049,9 +5052,16 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
             errors.append("Mobile must be at least 10 digits")
         else:
             mob = mob[-10:]
-            if mob in existing_mobiles:
-                errors.append(f"Mobile already used by lead {existing_mobiles[mob]}")
-            elif mob in seen_mobiles:
+            hit = existing_mobiles.get(mob)
+            if hit:
+                # Already in the CRM — skip on commit, not an error to fix in the sheet.
+                row["mobile"] = mob
+                row["__alreadyInApp"] = hit
+                row["__row"] = row_no
+                row["__errors"] = []
+                out.append(row)
+                continue
+            if mob in seen_mobiles:
                 errors.append(f"Duplicate mobile — same number as row {seen_mobiles[mob]}")
             else:
                 seen_mobiles[mob] = row_no
@@ -5134,6 +5144,22 @@ def _import_error_report(rows):
     return [{"row": r.get("__row"), "customerName": r.get("customerName", ""),
              "mobile": r.get("mobile", ""), "errors": r.get("__errors", [])}
             for r in rows if r.get("__errors")]
+
+
+def _import_already_report(rows):
+    out = []
+    for r in rows:
+        hit = r.get("__alreadyInApp")
+        if not hit:
+            continue
+        out.append({
+            "row": r.get("__row"),
+            "customerName": r.get("customerName", ""),
+            "mobile": r.get("mobile", ""),
+            "leadId": (hit or {}).get("leadId") or "",
+            "existingName": (hit or {}).get("customerName") or "",
+        })
+    return out
 
 
 @api.get("/leads/import/template")
@@ -5247,7 +5273,8 @@ async def import_template(_sales=Depends(sales_staff_only)):
         ("", False),
         ("1. Type one lead per row on the 'Leads' sheet. Do not rename or reorder the header row.", False),
         ("2. Grey-list columns have dropdowns. Pick a value — typing your own is rejected on upload.", False),
-        ("3. Required: Customer Name and Mobile (10 digits, not already in the CRM).", False),
+        ("3. Required: Customer Name and Mobile (10 digits). A mobile already in the CRM "
+         "is skipped automatically — it is not imported again.", False),
         ("4. Lead Date / Next Follow-up: use YYYY-MM-DD. Blank Lead Date becomes today.", False),
         ("5. Variant must belong to the Interested Model — see 'Valid Model / Valid Variant' on Lists.", False),
         ("5b. Executive is optional. Leave it blank to use the Owner / Sales GM lead split "
@@ -5294,15 +5321,18 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
         raise HTTPException(400, f"Could not parse file: {e}")
     allowed = await _import_allowed_values()
     checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
-    valid = [r for r in checked if not r["__errors"]]
+    valid = [r for r in checked if not r["__errors"] and not r.get("__alreadyInApp")]
+    already = _import_already_report(checked)
     return {"detectedHeaders": [h for h in headers if h],
             "targetFields": [{"label": lbl, "field": fld} for lbl, fld in IMPORT_COLUMNS],
             "suggestedMapping": mp, "rowCount": len(checked),
-            "validCount": len(valid), "errorCount": len(checked) - len(valid),
+            "validCount": len(valid), "errorCount": len(checked) - len(valid) - len(already),
+            "alreadyCount": len(already),
             "allowedValues": allowed,
             "requiredFields": list(IMPORT_REQUIRED_FIELDS),
             "errors": _import_error_report(checked)[:100],
-            "sample": checked[:12],
+            "alreadyInApp": already[:100],
+            "sample": valid[:12],
             "executivePrompts": _import_executive_prompts(checked, allowed.get("executives") or [])}
 
 
@@ -5332,7 +5362,7 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
     created_ids = []
     created_exec = []
     for d in checked:
-        if d["__errors"]:
+        if d["__errors"] or d.get("__alreadyInApp"):
             continue
         lead_id = await next_id("lead", "LD26")
         doc = {
@@ -5379,10 +5409,12 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
             if updated:
                 await sheet_sync("leads", updated)
     errors = _import_error_report(checked)
+    already = _import_already_report(checked)
     matched = sum(1 for lid, ex in zip(created_ids, created_exec)
                   if ex and lid not in assigned)
-    return {"created": created, "skipped": len(errors), "rowCount": len(checked),
-            "leadIds": created_ids, "errors": errors[:100],
+    return {"created": created, "skipped": len(errors), "alreadyExisted": len(already),
+            "rowCount": len(checked),
+            "leadIds": created_ids, "errors": errors[:100], "alreadyInApp": already[:100],
             "splitAssigned": assigned, "matchedExecutives": matched}
 
 

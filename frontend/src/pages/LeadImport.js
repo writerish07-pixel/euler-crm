@@ -80,22 +80,26 @@ export default function LeadImport({ onClose, onDone }) {
       const { created, skipped } = res;
       const splitN = Object.keys(res.splitAssigned || {}).length;
       const matchedN = Number(res.matchedExecutives || 0);
-      if (created) {
-        const bits = [`${created} lead${created === 1 ? "" : "s"} imported`];
+      const alreadyN = Number(res.alreadyExisted || 0);
+      if (created || alreadyN) {
+        const bits = [];
+        if (created) bits.push(`${created} lead${created === 1 ? "" : "s"} imported`);
         if (matchedN) bits.push(`${matchedN} matched to executives`);
         if (splitN) bits.push(`${splitN} assigned by lead split`);
-        if (skipped) bits.push(`${skipped} skipped`);
-        toast.success(bits.join(" · "));
+        if (alreadyN) bits.push(`${alreadyN} already in the app (skipped)`);
+        if (skipped) bits.push(`${skipped} need correction`);
+        toast.success(bits.join(" · ") || "Nothing new to import");
+        onDone();
       } else {
         toast.error("No leads imported — fix the listed rows and upload again");
+        setData((d) => ({ ...d, errors: res.errors || d.errors }));
       }
-      if (created) onDone();
-      else setData((d) => ({ ...d, errors: res.errors || d.errors }));
     } catch (e) { toast.error(apiErrorMessage(e, "Import failed")); }
     finally { setBusy(false); }
   };
 
   const validCount = data?.validCount ?? 0;
+  const alreadyCount = data?.alreadyCount ?? 0;
 
   return (
     <Drawer open onClose={onClose} width="max-w-3xl" title="Import Leads" subtitle="Bulk upload from the Euler template (.xlsx) or any spreadsheet (.csv)"
@@ -103,8 +107,10 @@ export default function LeadImport({ onClose, onDone }) {
         <Button variant="ghost" data-testid="download-template-btn" onClick={downloadTemplate}><Download size={15} /> Download template</Button>
         <div className="flex gap-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button data-testid="commit-import-btn" onClick={commit} disabled={step !== "map" || busy || !validCount}>
-            {busy ? "Working…" : `Import ${validCount} lead${validCount === 1 ? "" : "s"}`}
+          <Button data-testid="commit-import-btn" onClick={commit} disabled={step !== "map" || busy || (!validCount && !alreadyCount)}>
+            {busy ? "Working…" : validCount
+              ? `Import ${validCount} lead${validCount === 1 ? "" : "s"}`
+              : `Skip ${alreadyCount} already in app`}
           </Button>
         </div>
       </div>}>
@@ -119,6 +125,7 @@ export default function LeadImport({ onClose, onDone }) {
           <p className="text-xs text-ink-soft mt-4">
             Download the template first — its Lead Source, Executive, Model, Variant, Priority and Status
             columns are dropdowns built from your Settings and Price Master, so uploaded values always match the app.
+            Mobiles already in Euler are skipped automatically.
           </p>
           <p className="text-xs text-ink-soft mt-2" data-testid="import-split-note">{splitNote}</p>
         </>
@@ -170,10 +177,14 @@ export default function LeadImport({ onClose, onDone }) {
             </Card>
           )}
 
-          <div className="grid grid-cols-2 gap-3 mb-5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-5">
             <Card className="p-3">
               <div className="text-[11px] uppercase tracking-wide text-ink-faint">Ready to import</div>
               <div className="text-xl font-bold text-emerald-600 tabular">{data.validCount}</div>
+            </Card>
+            <Card className="p-3">
+              <div className="text-[11px] uppercase tracking-wide text-ink-faint">Already in app</div>
+              <div className={`text-xl font-bold tabular ${data.alreadyCount ? "text-cobalt" : "text-ink-faint"}`} data-testid="import-already-count">{data.alreadyCount || 0}</div>
             </Card>
             <Card className="p-3">
               <div className="text-[11px] uppercase tracking-wide text-ink-faint">Needs correction</div>
@@ -198,6 +209,31 @@ export default function LeadImport({ onClose, onDone }) {
               ))}
             </div>
           </Card>
+
+          {(data.alreadyInApp || []).length > 0 && (
+            <>
+              <h4 className="font-heading font-bold text-ink text-sm mb-2">Already in Euler — skipped</h4>
+              <p className="text-xs text-ink-soft mb-2">Same mobile is already a lead. These rows will not be imported again.</p>
+              <Card className="overflow-hidden mb-5" data-testid="import-already">
+                <div className="overflow-x-auto max-h-40">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-zinc-50 sticky top-0">
+                      <tr>{["Row", "In sheet", "Existing lead"].map((h) => <th key={h} className="px-3 py-2 text-[11px] uppercase tracking-wide text-ink-faint">{h}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {data.alreadyInApp.map((e) => (
+                        <tr key={`${e.row}-${e.mobile}`} className="border-t border-zinc-100">
+                          <td className="px-3 py-1.5 font-mono text-xs">{e.row}</td>
+                          <td className="px-3 py-1.5">{e.customerName || "—"} · {e.mobile}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs text-cobalt">{e.leadId}{e.existingName ? ` · ${e.existingName}` : ""}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            </>
+          )}
 
           {(data.errors || []).length > 0 && (
             <>
