@@ -73,8 +73,8 @@ export default function Approvals() {
       <PageHeader
         title={canApproveLeads ? "Lead approvals" : "Waiting for approval"}
         subtitle={canApproveLeads
-          ? "Approve new enquiries and split-assigned register leads after the executive sends Deal format + KYC."
-          : "New enquiries you requested wait here. Assigned bulk leads are on Lead Register — tap Proceed there."}
+          ? "Owner and Sales GM Approve here. Executives send Deal format + KYC from the Lead Register (Proceed) — you do not ask for approval."
+          : "New enquiries you requested wait here. Assigned bulk leads are on Lead Register — tap Proceed there to ask Owner / GM to Approve."}
       />
       {canApproveLeads && (
         <div className="flex flex-wrap items-center gap-2 mb-3">

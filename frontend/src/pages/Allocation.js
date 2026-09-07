@@ -342,14 +342,7 @@ export default function Allocation() {
           { key: "currentStatus", label: "Status", render: (r) => <Badge>{r.currentStatus}</Badge> },
           { key: "executive", label: "Executive", render: (r) => (
             r.executive
-              ? (
-                <div>
-                  <div>{r.executive}</div>
-                  {r.assignmentPending && (
-                    <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">Awaiting approval</Badge>
-                  )}
-                </div>
-              )
+              ? <div>{r.executive}</div>
               : <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">Unassigned</Badge>
           ) },
           { key: "createdDate", label: "Created", align: "right",
