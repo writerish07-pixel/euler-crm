@@ -30,7 +30,17 @@ export function pageOrigin() {
   }
 }
 
-/** Railway first, then same-origin (Cloudflare Worker proxies /api). */
+/** Railway first, then same-origin only when that host actually proxies /api
+ *  (Cloudflare Worker). Render's SPA rewrite serves index.html for /api/* and
+ *  OPPO/vivo then crash reading dashboard.outstanding.customer on a string. */
+export function originCanProxyApi(origin = "") {
+  const o = String(origin || "").toLowerCase();
+  if (!o) return false;
+  if (o.includes("onrender.com")) return false;
+  if (o.includes("github.io")) return false;
+  return true;
+}
+
 export function apiBases(configured = CONFIGURED, origin = pageOrigin()) {
   const out = [];
   const add = (b) => {
@@ -38,13 +48,20 @@ export function apiBases(configured = CONFIGURED, origin = pageOrigin()) {
     if (n && !out.includes(n)) out.push(n);
   };
   add(configured);
-  add(origin);
+  if (originCanProxyApi(origin)) add(origin);
   return out.length ? out : [""];
+}
+
+export function isHtmlApiBody(data) {
+  if (typeof data !== "string") return false;
+  const s = data.trimStart().slice(0, 32).toLowerCase();
+  return s.startsWith("<!doctype") || s.startsWith("<html") || s.startsWith("<");
 }
 
 export function isRetryableNetworkError(err) {
   if (!err) return false;
   const code = err.code || err.cause?.code;
+  if (code === "ERR_BAD_PAYLOAD") return true;
   if (code === "ECONNABORTED" || code === "ERR_NETWORK" || code === "ERR_CANCELED") {
     return err.code !== "ERR_CANCELED";
   }
@@ -94,7 +111,17 @@ api.interceptors.request.use((config) => {
 });
 
 api.interceptors.response.use(
-  (r) => r,
+  (r) => {
+    if (r?.config?.responseType === "blob") return r;
+    const type = String(r?.headers?.["content-type"] || r?.headers?.["Content-Type"] || "");
+    if (type.includes("text/html") || isHtmlApiBody(r.data)) {
+      const err = new Error("API returned a web page instead of data");
+      err.code = "ERR_BAD_PAYLOAD";
+      err.config = r.config;
+      return Promise.reject(err);
+    }
+    return r;
+  },
   (err) => {
     if (err.response?.status === 401) {
       const url = String(err.config?.url || "");

@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 import { get } from "../lib/api";
+import { toast } from "sonner";
 import { inr, compactInr, num, ytdCount, ytdMoney, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ErrorBoundary from "../components/ErrorBoundary";
@@ -18,12 +19,13 @@ export default function Dashboard() {
   const [d, setD] = useState(null);
 
   useEffect(() => {
-    get("/dashboard").then(setD).catch(() => {});
+    get("/dashboard").then(setD).catch(() => toast.error("Could not load dashboard"));
   }, []);
 
   const k = d?.kpis || {};
   const mtd = d?.period?.mtd || {};
   const ytd = d?.period?.ytd || {};
+  const os = (d && d.outstanding && typeof d.outstanding === "object") ? d.outstanding : {};
   const payColors = { Cash: "#059669", UPI: "#1D4ED8", Finance: "#7C3AED", Other: "#A1A1AA" };
   const payData = Object.entries(d?.payments || {}).map(([name, value]) => ({ name, value }));
 
@@ -88,14 +90,14 @@ export default function Dashboard() {
               <h3 className="font-heading font-bold text-ink text-sm">Outstanding</h3>
             </div>
             <div className="space-y-3">
-              <Row label="Customer Outstanding" value={d.outstanding.customer} tone="text-red-600" />
-              <Row label="Company Outstanding (OEM)" value={d.outstanding.company} tone="text-amber-600" />
+              <Row label="Customer Outstanding" value={os.customer} tone="text-red-600" />
+              <Row label="Company Outstanding (OEM)" value={os.company} tone="text-amber-600" />
               <Row label="Finance Outstanding" value={k.financeOutstanding || 0} tone="text-violet-600" />
               {k.financeOverdueCount > 0 && (
                 <Row label={`Finance Overdue (>2d, ${k.financeOverdueCount} files)`} value={k.financeOverdueAmount || 0} tone="text-red-600" />
               )}
               <div className="border-t border-line pt-3">
-                <Row label="Total Outstanding" value={d.outstanding.total} tone="text-ink" bold />
+                <Row label="Total Outstanding" value={os.total} tone="text-ink" bold />
               </div>
             </div>
           </Card>
@@ -121,7 +123,7 @@ export default function Dashboard() {
             { key: "customerOs", label: "Customer OS", align: "right", mono: true, render: (r) => inr(r.customerOs) },
             { key: "revenue", label: "Collected", align: "right", mono: true, render: (r) => inr(r.revenue) },
           ]}
-          rows={d.modelPerformance}
+          rows={d.modelPerformance || []}
           rowKey="model"
         />
       </div>
