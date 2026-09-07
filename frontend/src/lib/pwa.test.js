@@ -1,4 +1,4 @@
-import { shouldBypassSwNavigation, shouldReloadOnControllerChange } from "./pwa";
+import { shouldBypassSwNavigation, shouldReloadOnControllerChange, dropFragileAndroidWorker } from "./pwa";
 
 describe("shouldBypassSwNavigation", () => {
   test("pull-to-refresh navigations are not intercepted", () => {
@@ -33,5 +33,11 @@ describe("shouldReloadOnControllerChange", () => {
     expect(shouldReloadOnControllerChange({
       flagged: true, alreadyReloaded: true, pathname: "/login",
     })).toBe(false);
+  });
+});
+
+describe("dropFragileAndroidWorker", () => {
+  test("no-ops on desktop user agents", async () => {
+    expect(await dropFragileAndroidWorker({ reload: false })).toBe(false);
   });
 });

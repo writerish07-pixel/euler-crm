@@ -91,7 +91,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   if (salesOnly && !isSalesStaff && !(fieldOk && isField)) {
     return <Navigate to={homePath(auth)} replace />;
   }
-  return <Layout>{children}</Layout>;
+  return <Layout><ErrorBoundary compact>{children}</ErrorBoundary></Layout>;
 }
 
 function HomeRedirect() {

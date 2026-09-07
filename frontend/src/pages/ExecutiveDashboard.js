@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { inr, compactInr, num, ytdCount } from "../lib/format";
+import { inr, compactInr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 
@@ -24,7 +24,7 @@ export default function ExecutiveDashboard() {
       <PageHeader
         title="Executive Dashboard"
         subtitle={d
-          ? `${scope.note || "My pipeline"} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`
+          ? `${scope.note || "My pipeline"} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`
           : "My pipeline"}
       />
 
@@ -147,7 +147,7 @@ export default function ExecutiveDashboard() {
           {d.incentive.next && (
             <p className="text-sm text-ink-soft mt-3">
               {d.incentive.next.unitsNeeded > 0
-                ? `${d.incentive.next.unitsNeeded} more deliver${d.incentive.next.unitsNeeded === 1 ? "y" : "ies"} to ₹${Number(d.incentive.next.amount).toLocaleString("en-IN")}/unit`
+                ? `${d.incentive.next.unitsNeeded} more deliver${d.incentive.next.unitsNeeded === 1 ? "y" : "ies"} to ${inr(d.incentive.next.amount)}/unit`
                 : `Next level from ${d.incentive.next.fromUnits} units at ${inr(d.incentive.next.amount)}/unit`}
             </p>
           )}

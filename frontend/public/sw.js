@@ -9,7 +9,7 @@
  * fall back to a cached shell so the app opens offline instead of showing the
  * browser's error page, and data always comes from the network.
  */
-const VERSION = "euler-v5-android-reload";
+const VERSION = "euler-v7-oppo-nosw";
 const SHELL = `${VERSION}-shell`;
 const ASSETS = `${VERSION}-assets`;
 const OFFLINE_URL = "/index.html";

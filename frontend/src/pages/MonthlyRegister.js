@@ -4,7 +4,7 @@ import {
   ShieldCheck, Coins, Ban, CalendarDays,
 } from "lucide-react";
 import { get } from "../lib/api";
-import { inr, compactInr, num } from "../lib/format";
+import { inr, compactInr, num, fmtWhen } from "../lib/format";
 import { thisMonth, periodParams, periodLabel } from "../lib/period";
 import { Card, PageHeader, StatCard, Table } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
@@ -109,7 +109,7 @@ export default function MonthlyRegister() {
       <PageHeader
         title="Monthly Register"
         subtitle={d?.scope?.note ? `${subtitle} · ${d.scope.note}` : subtitle}
-        actions={<span className="text-xs text-ink-faint inline-flex items-center gap-1"><CalendarDays size={14} /> {d?.generatedAt ? `as of ${new Date(d.generatedAt).toLocaleString("en-IN")}` : ""}</span>}
+        actions={<span className="text-xs text-ink-faint inline-flex items-center gap-1"><CalendarDays size={14} /> {d?.generatedAt ? `as of ${fmtWhen(d.generatedAt)}` : ""}</span>}
       />
       <PeriodBar month={month} year={year} onChange={onChange} />
       {err && <Card className="p-4 mb-4 text-sm text-red-700">{err}</Card>}

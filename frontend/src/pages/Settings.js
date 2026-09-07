@@ -3,6 +3,7 @@ import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw
 import { toast } from "sonner";
 import { get, post, del, put, api } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
+import { fmtWhen } from "../lib/format";
 import { PageHeader, Card, Button, Field, Input, Select, Badge, Table } from "../components/ui";
 import ChangePasswordCard from "../components/ChangePasswordCard";
 
@@ -896,7 +897,7 @@ function PasswordCell({ row, onSaved }) {
       </div>
       {row.passwordChangedAt ? (
         <span className="text-[10px] text-ink-faint">
-          updated {new Date(row.passwordChangedAt).toLocaleString("en-IN")}
+          updated {fmtWhen(row.passwordChangedAt)}
         </span>
       ) : null}
     </div>
