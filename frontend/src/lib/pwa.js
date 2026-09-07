@@ -40,6 +40,10 @@ export function dropFragileAndroidWorker({ reload = true } = {}) {
 
 export async function clearSiteDataAndReload() {
   try {
+    try {
+      sessionStorage.removeItem("euler_api_base");
+      sessionStorage.removeItem(FRAGILE_SW_CLEARED);
+    } catch { /* ignore */ }
     if ("serviceWorker" in navigator) {
       const list = await navigator.serviceWorker.getRegistrations();
       await Promise.all(list.map((r) => r.unregister()));
@@ -49,7 +53,19 @@ export async function clearSiteDataAndReload() {
       await Promise.all(keys.map((k) => caches.delete(k)));
     }
   } catch { /* ignore */ }
-  window.location.reload();
+  window.location.replace(cacheBustHref());
+}
+
+/** ColorOS `location.reload()` often keeps the crashing JS. A new query string
+ *  forces Chrome to fetch index.html again. */
+export function cacheBustHref(href = typeof window !== "undefined" ? window.location.href : "/", now = Date.now()) {
+  try {
+    const u = new URL(href, "https://euler.local");
+    u.searchParams.set("euler", String(now));
+    return `${u.pathname}${u.search}${u.hash}`;
+  } catch {
+    return `/?euler=${now}`;
+  }
 }
 
 function markUpdateReady() {

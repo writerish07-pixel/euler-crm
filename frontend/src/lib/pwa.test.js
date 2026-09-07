@@ -1,4 +1,4 @@
-import { shouldBypassSwNavigation, shouldReloadOnControllerChange, dropFragileAndroidWorker } from "./pwa";
+import { shouldBypassSwNavigation, shouldReloadOnControllerChange, dropFragileAndroidWorker, cacheBustHref } from "./pwa";
 
 describe("shouldBypassSwNavigation", () => {
   test("pull-to-refresh navigations are not intercepted", () => {
@@ -39,5 +39,12 @@ describe("shouldReloadOnControllerChange", () => {
 describe("dropFragileAndroidWorker", () => {
   test("no-ops on desktop user agents", async () => {
     expect(await dropFragileAndroidWorker({ reload: false })).toBe(false);
+  });
+});
+
+describe("cacheBustHref", () => {
+  test("adds a query so ColorOS cannot reuse the crashing document", () => {
+    expect(cacheBustHref("https://euler-crm.onrender.com/", 9)).toBe("/?euler=9");
+    expect(cacheBustHref("https://euler-crm.onrender.com/leads", 9)).toBe("/leads?euler=9");
   });
 });

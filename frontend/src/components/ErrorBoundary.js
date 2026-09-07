@@ -25,8 +25,8 @@ export default class ErrorBoundary extends React.Component {
         <div>
           <p className="font-heading text-lg font-bold text-ink">Something went wrong</p>
           <p className="text-sm text-ink-soft mt-2 max-w-sm mx-auto">
-            Tap Reload. On OPPO or vivo, use Clear cache — then open Euler CRM in Chrome,
-            not the home-screen icon.
+            Tap Clear cache — that loads a fresh copy, not the old crashing page.
+            Then sign in again in Chrome, not from the home-screen icon.
           </p>
           <pre className="mt-3 max-w-sm mx-auto text-left text-[11px] leading-snug text-ink-faint whitespace-pre-wrap break-words bg-zinc-50 ring-1 ring-line rounded-lg p-3">
             {detail}
