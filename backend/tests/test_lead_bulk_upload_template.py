@@ -627,6 +627,14 @@ async def test_apply_split_names_unassigned_leads_pending_approval(client):
 
         fmt = await exec_c.put(f"/api/lead-requests/{rid}", json={"budget": 185000})
         assert fmt.status_code == 200, fmt.text
+        live_pre = await server.db.leads.find_one({"leadId": lid})
+        assert live_pre.get("interestedModel") == "Turbo Max"
+        blank = await exec_c.put(f"/api/lead-requests/{rid}", json={
+            "budget": 185000, "interestedModel": "", "variant": ""})
+        assert blank.status_code == 422
+        named = await exec_c.put(f"/api/lead-requests/{rid}", json={
+            "budget": 185000, "interestedModel": "Turbo Max", "variant": "Maxx (PV)"})
+        assert named.status_code == 200, named.text
         asked = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
         assert any(x.get("existingLeadId") == lid for x in asked)
         await _attach_kyc(exec_c, rid)
