@@ -338,7 +338,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, canMatchOemClaims } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const location = useLocation();
@@ -400,6 +400,13 @@ export default function Layout({ children }) {
 
       <div className="lg:ml-64 flex flex-col min-h-screen min-w-0">
         <ConnectionBar />
+        {sessionError ? (
+          <button type="button" data-testid="session-retry-bar"
+            onClick={retrySession}
+            className="sticky top-0 z-40 w-full bg-amber-50 text-amber-900 text-xs font-semibold px-3 py-2 text-center">
+            {sessionError} — tap to retry
+          </button>
+        ) : null}
         <Topbar onMenuOpen={() => setNavOpen(true)} />
         {/* NOTE: `animate-fade-up` uses `animation-fill-mode: both`, so this element
             keeps a `transform` after the animation ends. A transformed element is the

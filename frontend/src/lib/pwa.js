@@ -57,6 +57,21 @@ export function applyUpdate() {
   });
 }
 
+/** Pull-to-refresh / explicit reload. ColorOS and OriginOS abort a
+ *  service-worker-handled navigate and then paint a blank document. */
+export function shouldBypassSwNavigation(request) {
+  if (!request || request.method !== "GET") return false;
+  if (request.mode !== "navigate") return false;
+  return request.cache === "reload" || request.cache === "no-cache";
+}
+
+/** Only reload on the login screen. Reloading after Sign In blanks OPPO/vivo. */
+export function shouldReloadOnControllerChange({ flagged, alreadyReloaded, pathname } = {}) {
+  if (!flagged || alreadyReloaded) return false;
+  const path = String(pathname || "");
+  return path === "/login" || path === "/login/";
+}
+
 /** On the login screen, take a waiting worker immediately so staff phones
  *  are not stuck on last week's sign-in code. */
 export function primeLoginApp() {
@@ -71,7 +86,11 @@ export function primeLoginApp() {
     reg.update().catch(() => undefined);
   });
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (!window.__eulerReloadOnController || window.__eulerReloadedOnce) return;
+    if (!shouldReloadOnControllerChange({
+      flagged: window.__eulerReloadOnController,
+      alreadyReloaded: window.__eulerReloadedOnce,
+      pathname: window.location.pathname,
+    })) return;
     window.__eulerReloadedOnce = true;
     window.location.reload();
   });
