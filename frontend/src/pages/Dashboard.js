@@ -8,6 +8,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 
 import { get } from "../lib/api";
 import { inr, compactInr, num, ytdCount, ytdMoney, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import ErrorBoundary from "../components/ErrorBoundary";
 import OwnerPriceEditor from "../components/OwnerPriceEditor";
 import YardStockCard from "../components/YardStockCard";
 import { useAuth } from "../context/AuthContext";
@@ -65,6 +66,7 @@ export default function Dashboard() {
             <Wallet size={18} className="text-ink-faint" />
           </div>
           <div className="h-56">
+            <ErrorBoundary compact>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={payData} margin={{ top: 8, right: 8, left: 8, bottom: 0 }}>
                 <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 12, fill: "#52525B" }} />
@@ -75,6 +77,7 @@ export default function Dashboard() {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
+            </ErrorBoundary>
           </div>
         </Card>
 

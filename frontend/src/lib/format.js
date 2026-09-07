@@ -1,11 +1,12 @@
-const NUMBER_LOCALES = ["en-IN", "en-GB", "en"];
-const DATE_LOCALES = ["en-IN", "en-GB", "en"];
+import { formatLocales } from "./device";
 
 /** ColorOS / OriginOS WebViews often ship without ICU for `en-IN` and throw
- *  RangeError the moment the dashboard calls Intl.NumberFormat("en-IN"). */
-export function resolveNumberLocale(IntlImpl = globalThis.Intl) {
+ *  RangeError the moment the dashboard calls Intl.NumberFormat("en-IN").
+ *  On those phones skip `en-IN` entirely — some WebViews accept the tag then
+ *  throw later on format() / toLocaleTimeString. */
+export function resolveNumberLocale(IntlImpl = globalThis.Intl, ua) {
   if (!IntlImpl || typeof IntlImpl.NumberFormat !== "function") return null;
-  for (const loc of NUMBER_LOCALES) {
+  for (const loc of formatLocales(ua)) {
     try {
       const fmt = new IntlImpl.NumberFormat(loc, { style: "currency", currency: "INR" });
       fmt.format(1);
@@ -22,8 +23,8 @@ export function resolveNumberLocale(IntlImpl = globalThis.Intl) {
   }
 }
 
-export function resolveDateLocale(probe = new Date("2026-09-07T10:00:00")) {
-  for (const loc of DATE_LOCALES) {
+export function resolveDateLocale(probe = new Date("2026-09-07T10:00:00"), ua) {
+  for (const loc of formatLocales(ua)) {
     try {
       probe.toLocaleString(loc);
       return loc;

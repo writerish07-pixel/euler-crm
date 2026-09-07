@@ -9,6 +9,19 @@ describe("resolveNumberLocale", () => {
     expect(resolveNumberLocale({ NumberFormat: FakeNumberFormat })).toBe("en-GB");
   });
 
+  test("OPPO UA never probes en-IN even if NumberFormat would accept it", () => {
+    const seen = [];
+    function FakeNumberFormat(loc) {
+      seen.push(loc);
+      return { format: (n) => String(n) };
+    }
+    expect(resolveNumberLocale(
+      { NumberFormat: FakeNumberFormat },
+      "Mozilla/5.0 (Linux; Android 15; CPH2827) AppleWebKit/537.36 Chrome/131.0.0.0 Mobile Safari/537.36",
+    )).toBe("en-GB");
+    expect(seen).not.toContain("en-IN");
+  });
+
   test("returns null when currency formatting is unavailable", () => {
     function Boom() {
       throw new RangeError("no ICU");

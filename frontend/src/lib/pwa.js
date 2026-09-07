@@ -1,9 +1,57 @@
+import { isFragileAndroid } from "./device";
+
+const FRAGILE_SW_CLEARED = "euler_cleared_sw_v7";
+
 /**
  * Service-worker registration and the online/offline signal.
  *
  * Registered in production only — in development a cached shell fights the dev
  * server and produces "why is my change not showing" confusion.
  */
+
+/** Drop a stale worker/shell on OPPO/vivo so they cannot keep last week's
+ *  crashing dashboard. Returns a promise that reloads once if a controller was live. */
+export function dropFragileAndroidWorker({ reload = true } = {}) {
+  if (typeof window === "undefined") return Promise.resolve(false);
+  if (!isFragileAndroid()) return Promise.resolve(false);
+  if (!("serviceWorker" in navigator)) return Promise.resolve(false);
+  let already = false;
+  try { already = Boolean(sessionStorage.getItem(FRAGILE_SW_CLEARED)); } catch { /* ignore */ }
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  const mark = () => {
+    try { sessionStorage.setItem(FRAGILE_SW_CLEARED, "1"); } catch { /* ignore */ }
+  };
+  const regs = navigator.serviceWorker.getRegistrations()
+    .then((list) => Promise.all(list.map((r) => r.unregister())))
+    .catch(() => undefined);
+  const cache = (typeof caches !== "undefined"
+    ? caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+    : Promise.resolve())
+    .catch(() => undefined);
+  return Promise.all([regs, cache]).then(() => {
+    mark();
+    if (reload && !already && hadController) {
+      window.location.reload();
+      return true;
+    }
+    return false;
+  });
+}
+
+export async function clearSiteDataAndReload() {
+  try {
+    if ("serviceWorker" in navigator) {
+      const list = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(list.map((r) => r.unregister()));
+    }
+    if (typeof caches !== "undefined") {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch { /* ignore */ }
+  window.location.reload();
+}
+
 function markUpdateReady() {
   window.__eulerUpdateReady = true;
   window.dispatchEvent(new Event("euler:update-ready"));
@@ -25,6 +73,13 @@ function watchRegistration(reg) {
 export function registerServiceWorker() {
   if (process.env.NODE_ENV !== "production") return;
   if (!("serviceWorker" in navigator)) return;
+
+  // Installed ColorOS/OriginOS shells keep a cached index.html that still
+  // crashes on en-IN. Do not register a worker on those phones.
+  if (isFragileAndroid()) {
+    dropFragileAndroidWorker();
+    return;
+  }
 
   const check = () => {
     navigator.serviceWorker.getRegistration().then((reg) => {
