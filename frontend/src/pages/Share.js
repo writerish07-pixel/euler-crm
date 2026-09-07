@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { get } from "../lib/api";
-import { fmtDate } from "../lib/format";
+import { fmtDate, fmtTime } from "../lib/format";
 
 const SHARE_CSS = `
 .share-page{--ink:#07111f;--panel:rgba(12,24,42,0.72);--line:rgba(180,210,230,0.14);--text:#e8f0f7;--muted:#8aa0b5;--lime:#b8f24a;--cyan:#3ecfcf;--warm:#ffb454;position:fixed;inset:0;overflow-y:auto;background:var(--ink);color:var(--text);font-family:"Instrument Sans",system-ui,sans-serif;}
@@ -57,12 +57,7 @@ const SHARE_CSS = `
 @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
 `;
 
-const shortDate = (d) => {
-  if (!d) return "—";
-  const dt = new Date(String(d).split("T")[0]);
-  if (isNaN(dt)) return String(d);
-  return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
-};
+const shortDate = (d) => fmtDate(d, { day: "2-digit", month: "short" });
 
 export default function Share() {
   const [d, setD] = useState(null);
@@ -98,7 +93,7 @@ export default function Share() {
                 <span className="share-pill"><span className="share-dot" /> Live</span>
                 <span><strong>{d.month}</strong></span>
                 <span><strong>{d.totalLeads}</strong> total leads</span>
-                <span>Updated {new Date(d.lastUpdated).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}</span>
+                <span>Updated {fmtTime(d.lastUpdated, { hour: "2-digit", minute: "2-digit" })}</span>
               </div>
             </header>
 

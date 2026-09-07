@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { get, post } from "../lib/api";
-import { inr, compactInr, fmtDate, todayISO, num, ytdCount, ytdMoney } from "../lib/format";
+import { inr, compactInr, fmtDate, fmtTime, todayISO, num, ytdCount, ytdMoney } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Portal, Field, Input, Select } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
 import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
@@ -56,7 +56,7 @@ export default function AccountsDashboard() {
     <div data-testid="accounts-dashboard">
       <PageHeader
         title="Accounts Dashboard"
-        subtitle={`Tally cross-check · MTD + YTD · updated ${d.lastUpdated ? new Date(d.lastUpdated).toLocaleTimeString("en-IN") : "—"}`}
+        subtitle={`Tally cross-check · MTD + YTD · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="acct-period-kpis">
