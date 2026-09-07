@@ -25,11 +25,16 @@ export default function Allocation() {
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState([]);
   const [splitBusy, setSplitBusy] = useState(false);
+  const [matchPick, setMatchPick] = useState({});
+  const [matchBusy, setMatchBusy] = useState("");
 
   const load = useCallback(() => {
     get("/leads/allocation/summary").then((s) => {
       setSummary(s);
       setDraft((s.split?.shares || []).map((row) => ({ executive: row.executive, pct: row.pct })));
+      const picks = {};
+      (s.executiveMatches || []).forEach((row) => { picks[row.key] = row.suggested || ""; });
+      setMatchPick(picks);
     }).catch(() => {});
     get("/leads").then(setLeads).catch(() => toast.error("Could not load leads"));
     get("/masters").then((m) => setExecs(m.executives || [])).catch(() => {});
@@ -101,6 +106,19 @@ export default function Allocation() {
     } finally { setSplitBusy(false); }
   };
 
+  const transferMatch = async (row) => {
+    const to = matchPick[row.key] || row.suggested;
+    if (!to) return toast.error("Pick an executive in the app");
+    setMatchBusy(row.key);
+    try {
+      const r = await post("/leads/match-executive", { key: row.key, executive: to });
+      toast.success(`${r.movedCount} lead${r.movedCount === 1 ? "" : "s"} moved to ${to}`);
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not match that executive"));
+    } finally { setMatchBusy(""); }
+  };
+
   return (
     <div data-testid="allocation-page">
       <PageHeader
@@ -123,6 +141,46 @@ export default function Allocation() {
             <b>{summary.unassigned} active lead{summary.unassigned === 1 ? " has" : "s have"} no
             executive.</b> Executives only see leads assigned to them, so nobody is working these.
           </p>
+        </Card>
+      )}
+
+      {summary && (summary.executiveMatches || []).length > 0 && (
+        <Card className="p-4 mb-6" data-testid="exec-match-card">
+          <h3 className="font-heading font-bold text-ink mb-1">Match executives</h3>
+          <p className="text-xs text-ink-soft mb-3">
+            These leads already have an executive name, but it does not match the app list
+            (capital letters, extra words). Confirm the person and we transfer those leads to them.
+          </p>
+          <div className="space-y-2">
+            {summary.executiveMatches.map((row) => (
+              <div key={row.key} className="flex flex-wrap items-center gap-3 rounded-lg ring-1 ring-inset ring-line px-3 py-2">
+                <div className="min-w-[8rem] flex-1">
+                  <div className="text-sm font-medium text-ink">{row.raw}</div>
+                  <div className="text-[11px] text-ink-faint">{row.count} lead{row.count === 1 ? "" : "s"}</div>
+                </div>
+                <Select
+                  data-testid={`alloc-match-${row.key}`}
+                  value={matchPick[row.key] ?? row.suggested ?? ""}
+                  onChange={(e) => setMatchPick((m) => ({ ...m, [row.key]: e.target.value }))}
+                  className="w-56"
+                >
+                  <option value="">Pick executive…</option>
+                  {(row.candidates || []).map((n) => <option key={n} value={n}>{n}</option>)}
+                  {execs.filter((n) => !(row.candidates || []).includes(n)).map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </Select>
+                <Button
+                  data-testid={`alloc-transfer-${row.key}`}
+                  onClick={() => transferMatch(row)}
+                  disabled={matchBusy === row.key || !(matchPick[row.key] || row.suggested)}
+                >
+                  <UserCheck size={15} />
+                  {matchBusy === row.key ? "Moving…" : "Transfer"}
+                </Button>
+              </div>
+            ))}
+          </div>
         </Card>
       )}
 

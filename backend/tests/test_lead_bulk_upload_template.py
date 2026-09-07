@@ -6,6 +6,7 @@ Unknown Lead Source / Model / Status values are reported and skipped. A blank or
 unknown Executive is not skipped — Owner/GM percentages assign those rows on commit.
 """
 import io
+import json
 import os
 import sys
 from collections import Counter
@@ -286,6 +287,15 @@ def test_distribute_by_share_largest_remainder_interleaved():
     assert server.distribute_by_share(3, []) == ["", "", ""]
 
 
+def test_executive_suggestions_are_case_and_token_aware():
+    names = ["Amit", "Rahul", "Harish Bhatnagar"]
+    assert server._executive_suggestions("amit", names) == ["Amit"]
+    assert server._executive_suggestions("AMIT", names) == ["Amit"]
+    assert server._executive_suggestions("Amit Kumar", names) == ["Amit"]
+    assert server._executive_suggestions("harish", names) == ["Harish Bhatnagar"]
+    assert server._executive_suggestions("Someone Else", names) == []
+
+
 async def _login(email, password):
     transport = httpx.ASGITransport(app=server.app)
     c = httpx.AsyncClient(transport=transport, base_url="http://test")
@@ -413,3 +423,62 @@ async def test_bulk_import_assigns_blank_executives_by_saved_split(client):
             assert d["executive"] == "Amit"
     finally:
         await exec_c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_import_prompts_case_mismatch_and_transfers_on_commit(client):
+    await _ensure_staff("Amit", "Rahul")
+    rows = [
+        _row("Case Amit", "9850000001", **{"Executive": "AMIT"}),
+        _row("Token Amit", "9850000002", **{"Executive": "Amit Kumar"}),
+    ]
+    body = await _preview(client, rows)
+    keys = {p["key"]: p for p in body["executivePrompts"]}
+    assert keys["amit"]["suggested"] == "Amit"
+    assert keys["amit kumar"]["suggested"] == "Amit"
+
+    r = await client.post(
+        "/api/leads/import/commit",
+        data={"executiveMap": json.dumps({"amit": "Amit", "amit kumar": "Amit"})},
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["matchedExecutives"] == 2
+    assert (await server.db.leads.find_one({"customerName": "Case Amit"}))["executive"] == "Amit"
+    assert (await server.db.leads.find_one({"customerName": "Token Amit"}))["executive"] == "Amit"
+
+
+@pytest.mark.asyncio
+async def test_declining_a_case_match_uses_the_lead_split(client):
+    await _ensure_staff("Amit", "Rahul")
+    saved = await client.put("/api/leads/split", json={
+        "shares": [{"executive": "Amit", "pct": 0}, {"executive": "Rahul", "pct": 100}]})
+    assert saved.status_code == 200, saved.text
+    rows = [_row("Skip Match", "9850000011", **{"Executive": "amit"})]
+    r = await client.post(
+        "/api/leads/import/commit",
+        data={"executiveMap": json.dumps({"amit": ""})},
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+    )
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"customerName": "Skip Match"})
+    assert lead["executive"] == "Rahul"
+    assert lead.get("importedSplit") is True
+
+
+@pytest.mark.asyncio
+async def test_existing_wrong_case_executives_can_be_transferred(client):
+    await _ensure_staff("Amit", "Rahul")
+    await client.post("/api/leads/import/commit", files={
+        "file": ("a.csv", _csv([_row("Old Case", "9850000021", **{"Executive": "Amit"})]),
+                 "text/csv")})
+    await server.db.leads.update_one({"customerName": "Old Case"}, {"$set": {"executive": "AMIT"}})
+    summary = await client.get("/api/leads/allocation/summary")
+    assert summary.status_code == 200, summary.text
+    matches = summary.json()["executiveMatches"]
+    assert any(m["key"] == "amit" and m["suggested"] == "Amit" for m in matches)
+    r = await client.post("/api/leads/match-executive",
+                          json={"key": "amit", "executive": "Amit"})
+    assert r.status_code == 200, r.text
+    assert r.json()["movedCount"] == 1
+    assert (await server.db.leads.find_one({"customerName": "Old Case"}))["executive"] == "Amit"

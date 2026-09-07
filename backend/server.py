@@ -1419,6 +1419,98 @@ def _norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def _executive_suggestions(raw, names):
+    """Case-insensitive and token/prefix matches against the app executive list.
+
+    Exact fold match wins. Otherwise a shared 3+ letter token, or one name
+    contained in the other (min 4 chars), so 'amit' → Amit and 'Amit Kumar' → Amit
+    without treating every substring as a hit.
+    """
+    raw_n = _norm_name(raw)
+    if not raw_n:
+        return []
+    names = [str(n).strip() for n in (names or []) if str(n).strip()]
+    exact = [n for n in names if _norm_name(n) == raw_n]
+    if exact:
+        return exact
+    raw_tokens = {t for t in raw_n.split() if len(t) >= 3}
+    out, seen = [], set()
+    for n in names:
+        nn = _norm_name(n)
+        hit = False
+        name_tokens = {t for t in nn.split() if len(t) >= 3}
+        if raw_tokens and name_tokens and (raw_tokens & name_tokens):
+            hit = True
+        elif len(raw_n) >= 4 and len(nn) >= 4 and (raw_n in nn or nn in raw_n):
+            hit = True
+        if not hit:
+            continue
+        if nn not in seen:
+            seen.add(nn)
+            out.append(n)
+    return out
+
+
+def _import_executive_prompts(checked, names):
+    """Unique sheet spellings that are not already the canonical executive name."""
+    groups = {}
+    for r in checked:
+        if r.get("__errors"):
+            continue
+        raw = str(r.get("__executiveRaw") or "").strip()
+        if not raw:
+            continue
+        fold = _norm_name(raw)
+        g = groups.get(fold)
+        if not g:
+            suggs = _executive_suggestions(raw, names)
+            canon = str(r.get("executive") or "").strip()
+            suggested = suggs[0] if len(suggs) == 1 else (canon or "")
+            g = {"key": fold, "raw": raw, "examples": [raw], "count": 0,
+                 "suggested": suggested, "candidates": suggs}
+            groups[fold] = g
+        g["count"] += 1
+        if raw not in g["examples"] and len(g["examples"]) < 3:
+            g["examples"].append(raw)
+    out = []
+    for g in groups.values():
+        if g["suggested"] and g["raw"] == g["suggested"]:
+            continue
+        out.append(g)
+    return sorted(out, key=lambda x: (-x["count"], x["raw"]))
+
+
+def _parse_executive_map(raw):
+    if not raw:
+        return {}
+    import json as _json
+    data = _json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for k, v in data.items():
+        fold = _norm_name(k)
+        if fold:
+            out[fold] = str(v or "").strip()
+    return out
+
+
+def _apply_executive_map(checked, exec_map, allowed_names):
+    if not exec_map:
+        return
+    for r in checked:
+        if r.get("__errors"):
+            continue
+        fold = _norm_name(r.get("__executiveRaw") or "")
+        if fold not in exec_map:
+            continue
+        chosen = exec_map[fold]
+        if not chosen:
+            r["executive"] = ""
+            continue
+        r["executive"] = _import_match(chosen, allowed_names) or ""
+
+
 def distribute_by_share(n, shares):
     """Split `n` imported leads by Owner/GM percentages (largest remainder, interleaved)."""
     n = int(n or 0)
@@ -4636,12 +4728,28 @@ async def allocation_summary(_desk=Depends(deal_desk_only)):
         else:
             row["open"] += 1
     split = await _load_lead_split()
+    roster = await _split_roster()
+    matches = {}
+    for l in active:
+        ex = str(l.get("executive") or "").strip()
+        if not ex or ex in roster:
+            continue
+        fold = _norm_name(ex)
+        g = matches.get(fold)
+        if not g:
+            suggs = _executive_suggestions(ex, roster)
+            g = {"key": fold, "raw": ex, "count": 0,
+                 "suggested": suggs[0] if len(suggs) == 1 else "",
+                 "candidates": suggs}
+            matches[fold] = g
+        g["count"] += 1
     return {
         "executives": sorted(rows.values(), key=lambda r: -r["total"]),
         "unassigned": unassigned,
         "activeLeads": len(active),
         "generatedAt": now_iso(),
         "split": split,
+        "executiveMatches": sorted(matches.values(), key=lambda x: (-x["count"], x["raw"])),
     }
 
 
@@ -4656,8 +4764,11 @@ async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(dea
     name = str(body.executive or "").strip()
     if not name:
         raise HTTPException(422, "Pick an executive to allocate to")
-    if name not in await _executive_names():
+    roster = await _split_roster()
+    canonical = _import_match(name, roster)
+    if not canonical:
         raise HTTPException(422, f"'{name}' is not an active executive on the staff master")
+    name = canonical
     lead_ids = [str(x).strip() for x in (body.leadIds or []) if str(x).strip()]
     if not lead_ids:
         raise HTTPException(422, "Select at least one lead")
@@ -4691,6 +4802,33 @@ async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(dea
         moved.append(lid)
     return {"ok": True, "executive": name, "moved": moved,
             "movedCount": len(moved), "skipped": skipped}
+
+
+class MatchExecutiveIn(BaseModel):
+    key: str = ""
+    executive: str = ""
+
+
+@api.post("/leads/match-executive")
+async def match_executive(body: MatchExecutiveIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
+    """Move every active lead whose executive spelling folds to `key` onto `executive`."""
+    fold = _norm_name(body.key)
+    if not fold:
+        raise HTTPException(422, "Pick the name from the sheet to match")
+    target = str(body.executive or "").strip()
+    if not target:
+        raise HTTPException(422, "Pick an executive in the app")
+    ids = []
+    for l in await db.leads.find().to_list(5000):
+        if (l.get("accountStatus") or "Active") != "Active":
+            continue
+        if _norm_name(l.get("executive")) == fold:
+            ids.append(l.get("leadId"))
+    if not ids:
+        raise HTTPException(404, "No active leads use that executive spelling")
+    return await allocate_leads(
+        AllocateIn(leadIds=ids, executive=target, remarks="Matched to staff executive"),
+        act=act, _desk=True)
 
 
 # ---------------------------------------------------------------- lead bulk import
@@ -4888,7 +5026,6 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
         variants_by_model.setdefault(v["model"].lower(), []).append(v["variant"])
     list_fields = [
         ("leadSource", "leadSources", "Lead Source"),
-        ("executive", "executives", "Executive"),
         ("priority", "priorities", "Priority"),
         ("currentStatus", "statuses", "Current Status"),
         ("financeRequired", "yesNo", "Finance Required"),
@@ -4921,6 +5058,14 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
         row["mobile"] = mob
         row["altMobile"] = re.sub(r"\D", "", str(row.get("altMobile") or ""))
 
+        exec_raw = str(row.get("executive") or "").strip()
+        row["__executiveRaw"] = exec_raw
+        if not exec_raw:
+            row["executive"] = ""
+        else:
+            canonical = _import_match(exec_raw, allowed.get("executives") or [])
+            row["executive"] = canonical or ""
+
         for field, key, label in list_fields:
             raw = str(row.get(field) or "").strip()
             if not raw:
@@ -4928,14 +5073,9 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
                 continue
             canonical = _import_match(raw, allowed[key])
             if canonical is None:
-                # A typed executive that is not on staff is not a reason to drop
-                # the lead — Owner/GM split assigns blank executives on commit.
-                if field == "executive":
-                    row[field] = ""
-                else:
-                    errors.append(f"{label} '{raw}' is not in the {label} list "
-                                  f"(allowed: {', '.join(allowed[key]) or 'none configured'})")
-                    row[field] = raw
+                errors.append(f"{label} '{raw}' is not in the {label} list "
+                              f"(allowed: {', '.join(allowed[key]) or 'none configured'})")
+                row[field] = raw
             else:
                 row[field] = canonical
 
@@ -5111,7 +5251,8 @@ async def import_template(_sales=Depends(sales_staff_only)):
         ("4. Lead Date / Next Follow-up: use YYYY-MM-DD. Blank Lead Date becomes today.", False),
         ("5. Variant must belong to the Interested Model — see 'Valid Model / Valid Variant' on Lists.", False),
         ("5b. Executive is optional. Leave it blank to use the Owner / Sales GM lead split "
-         "(Lead Allocation page). A name that is not on staff is ignored and split the same way.", False),
+         "(Lead Allocation page). A name that only differs by capital letters is offered as "
+         "a match in the app — confirm it to send those leads to that executive.", False),
         (f"6. Current Status can only be: {', '.join(IMPORT_STATUSES)}. "
          "Booking and delivery are done inside the app so the money side stays correct.", False),
         ("7. Blank Lead Source / Priority / Status / Finance / Exchange use the New Lead defaults "
@@ -5161,11 +5302,13 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
             "allowedValues": allowed,
             "requiredFields": list(IMPORT_REQUIRED_FIELDS),
             "errors": _import_error_report(checked)[:100],
-            "sample": checked[:12]}
+            "sample": checked[:12],
+            "executivePrompts": _import_executive_prompts(checked, allowed.get("executives") or [])}
 
 
 @api.post("/leads/import/commit")
 async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
+                        executiveMap: Optional[str] = Form(None),
                         user=Depends(sales_staff_only)):
     """Insert only the rows that pass validation; report the rest untouched."""
     if str(user.get("role") or "") == "executive":
@@ -5183,6 +5326,8 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
         raise HTTPException(400, f"Could not parse file: {e}")
     allowed = await _import_allowed_values()
     checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
+    _apply_executive_map(checked, _parse_executive_map(executiveMap),
+                         allowed.get("executives") or [])
     created = 0
     created_ids = []
     created_exec = []
@@ -5234,9 +5379,11 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
             if updated:
                 await sheet_sync("leads", updated)
     errors = _import_error_report(checked)
+    matched = sum(1 for lid, ex in zip(created_ids, created_exec)
+                  if ex and lid not in assigned)
     return {"created": created, "skipped": len(errors), "rowCount": len(checked),
             "leadIds": created_ids, "errors": errors[:100],
-            "splitAssigned": assigned}
+            "splitAssigned": assigned, "matchedExecutives": matched}
 
 
 # ---------------------------------------------------------------- payments
@@ -8259,6 +8406,7 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/sales-gm/dashboard"),
     ("GET", "/api/leads/allocation/summary"), ("POST", "/api/leads/allocate"),
     ("GET", "/api/leads/split"), ("PUT", "/api/leads/split"),
+    ("POST", "/api/leads/match-executive"),
     ("GET", "/api/lead-requests"), ("POST", "/api/lead-requests/{request_id}/approve"),
     ("GET", "/api/leads/{lead_id}/360"), ("POST", "/api/leads/{lead_id}/convert-booking"),
     ("PUT", "/api/leads/{lead_id}/price-structure"), ("GET", "/api/leads/{lead_id}/scheme-rules"),
