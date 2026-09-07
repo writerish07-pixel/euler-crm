@@ -1,4 +1,4 @@
-import { apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, postForm } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -65,5 +65,25 @@ describe("apiErrorMessage", () => {
 
   test("falls back when detail is missing", () => {
     expect(apiErrorMessage({ message: "Network Error" }, "Import failed")).toBe("Network Error");
+  });
+});
+
+describe("postForm", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test("import commit can skip fallback retry and use a long timeout", async () => {
+    const spy = jest.spyOn(api, "post").mockResolvedValue({ data: { created: 1 } });
+    await postForm("/leads/import/commit", { fake: true }, { timeout: 180000, retry: false });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][2]).toEqual({ timeout: 180000 });
+  });
+
+  test("retry false does not re-post on network error", async () => {
+    const err = Object.assign(new Error("Network Error"), { code: "ERR_NETWORK" });
+    const spy = jest.spyOn(api, "post").mockRejectedValue(err);
+    await expect(postForm("/leads/import/commit", {}, { retry: false })).rejects.toBe(err);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

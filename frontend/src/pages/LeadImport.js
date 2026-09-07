@@ -76,7 +76,7 @@ export default function LeadImport({ onClose, onDone }) {
     const fd = new FormData(); fd.append("file", file); fd.append("mapping", JSON.stringify(mapping));
     if (Object.keys(execMap).length) fd.append("executiveMap", JSON.stringify(execMap));
     try {
-      const res = await postForm("/leads/import/commit", fd);
+      const res = await postForm("/leads/import/commit", fd, { timeout: 180000, retry: false });
       const { created, skipped } = res;
       const splitN = Object.keys(res.splitAssigned || {}).length;
       const matchedN = Number(res.matchedExecutives || 0);
@@ -94,7 +94,15 @@ export default function LeadImport({ onClose, onDone }) {
         toast.error("No leads imported — fix the listed rows and upload again");
         setData((d) => ({ ...d, errors: res.errors || d.errors }));
       }
-    } catch (e) { toast.error(apiErrorMessage(e, "Import failed")); }
+    } catch (e) {
+      const code = String(e?.code || "");
+      const msg = apiErrorMessage(e, "Import failed");
+      if (!e?.response && (code === "ECONNABORTED" || code === "ERR_NETWORK" || /network|timeout/i.test(msg))) {
+        toast.error("The import is still saving on the server. Wait a minute, then Import again — numbers already saved are skipped.");
+      } else {
+        toast.error(msg);
+      }
+    }
     finally { setBusy(false); }
   };
 
