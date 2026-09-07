@@ -425,7 +425,7 @@ async def test_bulk_import_assigns_blank_executives_by_saved_split(client):
         assert split.json()["myShare"] == 70
         dash = await exec_c.get("/api/executive/dashboard")
         assert dash.status_code == 200, dash.text
-        assert dash.json()["leadSplit"] is None or "leadSplit" not in dash.json()
+        assert "leadSplit" not in dash.json()
         mine = await exec_c.get("/api/leads")
         assert mine.status_code == 200
         names = {d["customerName"] for d in mine.json()}

@@ -17,9 +17,10 @@ test("tables scroll horizontally and grow with the page by default", async () =>
       />,
     );
   });
-  const pane = document.querySelector('[data-testid="table-scroll"]');
+  const pane = host.querySelector('[data-testid="table-scroll"]');
   expect(pane).toBeTruthy();
   expect(pane.style.maxHeight).toBe("");
+  host.remove();
 });
 
 test("tables can opt into an internal height cap", async () => {
@@ -35,6 +36,7 @@ test("tables can opt into an internal height cap", async () => {
       />,
     );
   });
-  const pane = document.querySelector('[data-testid="table-scroll"]');
+  const pane = host.querySelector('[data-testid="table-scroll"]');
   expect(pane.style.maxHeight).toBe(PANEL_MAX_H);
+  host.remove();
 });
