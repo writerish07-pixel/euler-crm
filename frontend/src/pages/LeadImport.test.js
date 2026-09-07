@@ -1,9 +1,8 @@
 /**
  * @jest-environment jsdom
  */
-import React from "react";
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { act } from "react-dom/test-utils";
 
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
 jest.mock("../lib/api", () => ({
