@@ -260,11 +260,23 @@ async def test_duplicate_mobiles_blocked_in_file_and_against_crm(client):
     rows = [_row("Same File A", "9800000042"), _row("Same File B", "9800000042"),
             _row("Already There", "9800000041"), _row("No Mobile", "")]
     body = await _preview(client, rows)
-    assert body["validCount"] == 1
+    assert (body["validCount"], body["alreadyCount"], body["errorCount"]) == (1, 1, 2)
     problems = {e["customerName"]: " ".join(e["errors"]) for e in body["errors"]}
+    assert "Already There" not in problems
     assert "Duplicate mobile" in problems["Same File B"]
-    assert "already used by lead" in problems["Already There"]
     assert "Mobile is required" in problems["No Mobile"]
+    already = {e["customerName"]: e["leadId"] for e in body["alreadyInApp"]}
+    assert "Already There" in already
+    first = await server.db.leads.find_one({"customerName": "First In"})
+    assert already["Already There"] == first["leadId"]
+
+    r = await client.post("/api/leads/import/commit",
+                          files={"file": ("leads.csv", _csv(rows), "text/csv")})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 1
+    assert r.json()["alreadyExisted"] == 1
+    assert r.json()["skipped"] == 2
+    assert await server.db.leads.count_documents({"mobile": "9800000041"}) == 1
 
 
 @pytest.mark.asyncio
