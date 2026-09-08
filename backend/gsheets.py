@@ -1530,6 +1530,8 @@ async def sync(entity: str, doc: dict):
     blocked = _write_blocked()
     if blocked:
         return {"ok": False, "operation": "blocked", "error": blocked}
+    if entity in INTENTIONALLY_UNMAPPED:
+        return {"ok": True, "operation": "skipped", "reason": INTENTIONALLY_UNMAPPED[entity]}
     if entity not in SYNC_MAP:
         return {"ok": False, "operation": "error", "error": f"unknown entity '{entity}'"}
     try:

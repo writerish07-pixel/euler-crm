@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalLink, RotateCcw, Link2, Plus } from "lucide-react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, looksCombinedSupport, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
@@ -100,7 +100,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
       }
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not reach Coulson");
+      toast.error(apiErrorMessage(e, "Could not reach Coulson"));
     } finally {
       setSyncing(false);
     }
@@ -503,7 +503,7 @@ function CreateOemButton({ row, line, onDone }) {
         : `${name} is already on the scheme register`);
       onDone();
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Could not create the register row");
+      toast.error(apiErrorMessage(err, "Could not create the register row"));
     } finally { setBusy(false); }
   };
   return (
@@ -536,7 +536,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
     get("/claims/match-options")
       .then((rows) => setRegister(Array.isArray(rows) ? rows : []))
       .catch((e) => {
-        toast.error(e?.response?.data?.detail || "Could not load the scheme register");
+        toast.error(apiErrorMessage(e, "Could not load the scheme register"));
         setRegister([]);
       })
       .finally(() => setLoading(false));
@@ -579,7 +579,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
         : `Matched ${row.claimNumber} to the scheme register`);
       onDone();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Could not save match");
+      toast.error(apiErrorMessage(e, "Could not save match"));
     } finally { setBusy(false); }
   };
 
@@ -591,7 +591,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
       toast.success("Manual match cleared");
       onDone();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Could not clear match");
+      toast.error(apiErrorMessage(e, "Could not clear match"));
     } finally { setBusy(false); }
   };
 

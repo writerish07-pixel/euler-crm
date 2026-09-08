@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { Button, Card, Field, Input } from "../components/ui";
 
 export default function LeadWhatsApp({ leadId }) {
@@ -24,7 +24,7 @@ export default function LeadWhatsApp({ leadId }) {
       setText("");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Reply failed");
+      toast.error(apiErrorMessage(e, "Reply failed"));
     } finally {
       setBusy(false);
     }
@@ -38,7 +38,7 @@ export default function LeadWhatsApp({ leadId }) {
       else toast.success("Booking confirmation WhatsApp sent");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not send booking WhatsApp");
+      toast.error(apiErrorMessage(e, "Could not send booking WhatsApp"));
     } finally {
       setBookingBusy(false);
     }
@@ -52,7 +52,7 @@ export default function LeadWhatsApp({ leadId }) {
       else toast.success("Google review WhatsApp sent");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not send Google review WhatsApp");
+      toast.error(apiErrorMessage(e, "Could not send Google review WhatsApp"));
     } finally {
       setReviewBusy(false);
     }

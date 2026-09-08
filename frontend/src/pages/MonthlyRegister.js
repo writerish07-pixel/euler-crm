@@ -3,7 +3,7 @@ import {
   Users, ClipboardList, Truck, Wallet, Landmark, ReceiptText,
   ShieldCheck, Coins, Ban, CalendarDays,
 } from "lucide-react";
-import { get } from "../lib/api";
+import { get, apiErrorMessage } from "../lib/api";
 import { inr, compactInr, num, fmtWhen } from "../lib/format";
 import { thisMonth, thisYear, periodParams, periodLabel } from "../lib/period";
 import { Card, PageHeader, StatCard, Table } from "../components/ui";
@@ -71,7 +71,7 @@ export default function MonthlyRegister() {
   const load = useCallback(() => {
     get("/reports/monthly", periodParams({ month, year }))
       .then((r) => { setD(r); setErr(""); })
-      .catch((e) => setErr(e?.response?.data?.detail || "Could not load the monthly register"));
+      .catch((e) => setErr(apiErrorMessage(e, "Could not load the monthly register")));
   }, [month, year]);
 
   useEffect(() => { load(); }, [load]);

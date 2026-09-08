@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Camera, FileUp, Download, Trash2, FileText, Image as ImageIcon } from "lucide-react";
 import { toast } from "sonner";
-import { api, del, get, uploadFile } from "../lib/api";
+import { api, del, get, uploadFile, apiErrorMessage } from "../lib/api";
 
 export const DOC_LABELS = {
   kyc_aadhaar_front: "Aadhaar front",
@@ -92,7 +92,7 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
       toast.success(`${label} saved`);
       onChanged && onChanged();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Upload failed");
+      toast.error(apiErrorMessage(e, "Upload failed"));
     } finally { setBusy(false); }
   };
   const remove = async () => {
@@ -103,7 +103,7 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
       toast.success("Removed");
       onChanged && onChanged();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not remove");
+      toast.error(apiErrorMessage(e, "Could not remove"));
     }
   };
   return (
@@ -233,7 +233,7 @@ export function RefundChequePick({ leadId, documentId, onUploaded }) {
       toast.success("Cheque scan saved");
       onUploaded(row.documentId);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Cheque upload failed");
+      toast.error(apiErrorMessage(e, "Cheque upload failed"));
     } finally { setBusy(false); }
   };
   return (

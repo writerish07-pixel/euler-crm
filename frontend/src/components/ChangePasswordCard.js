@@ -1,19 +1,12 @@
 import React, { useState } from "react";
 import { KeyRound } from "lucide-react";
 import { toast } from "sonner";
-import { post } from "../lib/api";
+import { post, apiErrorMessage } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { Card, Button, Field, Input } from "./ui";
 
-function fmtErr(detail) {
-  if (!detail) return "Could not change password";
-  if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) return detail.map((e) => e?.msg || JSON.stringify(e)).join(" ");
-  return String(detail);
-}
-
 export default function ChangePasswordCard({ compact = false, onSaved }) {
-  const { user, isOwner } = useAuth();
+  const { user } = useAuth();
   const [pwForm, setPwForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
   const [pwBusy, setPwBusy] = useState(false);
 
@@ -33,13 +26,11 @@ export default function ChangePasswordCard({ compact = false, onSaved }) {
         currentPassword: pwForm.currentPassword,
         newPassword: pwForm.newPassword,
       });
-      toast.success(isOwner
-        ? "Password updated — User Accounts now shows this password"
-        : "Password updated — use it next time you sign in. The owner dashboard now shows this password.");
+      toast.success("Password updated");
       setPwForm({ currentPassword: "", newPassword: "", confirmPassword: "" });
       if (onSaved) onSaved();
     } catch (e) {
-      toast.error(fmtErr(e?.response?.data?.detail));
+      toast.error(apiErrorMessage(e, "Could not change password"));
     } finally {
       setPwBusy(false);
     }
@@ -52,9 +43,7 @@ export default function ChangePasswordCard({ compact = false, onSaved }) {
         <h3 className="font-heading font-bold text-ink">Change password</h3>
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        Signed in as <span className="font-mono text-ink">{user?.loginId || user?.email}</span>
-        {user?.role ? ` (${user.role})` : ""}. This overwrites the password on your
-        login and on the owner User Accounts list.
+        Signed in as <span className="font-mono text-ink">{user?.loginId || user?.email}</span>.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
         <Field label="Current password">

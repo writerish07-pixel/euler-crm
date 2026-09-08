@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge, Select, Button, Card } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -31,7 +31,7 @@ export default function Inventory() {
       else toast.error(r.reason === "not_configured" ? "Save Coulson login in Settings first" : "Sync did not run");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Coulson sync failed");
+      toast.error(apiErrorMessage(e, "Coulson sync failed"));
     } finally { setBusy(false); }
   };
 

@@ -6,7 +6,6 @@ export const cx = (...a) => a.filter(Boolean).join(" ");
 
 /** Shared cap for registers, dashboards, and any other list “window”. */
 export const PANEL_MAX_H = "min(28rem, calc(100dvh - 14rem))";
-export const panelScrollClass = "max-h-[min(28rem,calc(100dvh-14rem))] overflow-y-auto overflow-x-auto overscroll-contain";
 
 /**
  * Render an overlay into <body> instead of leaving it inside the page tree.
@@ -135,7 +134,9 @@ export function Table({ columns, rows, onRowClick, empty = "No records", rowKey,
           <tbody>
             {list.length === 0 && (
               <tr>
-                <td colSpan={columns.length} className="px-4 py-12 text-center text-sm text-ink-faint">{empty}</td>
+                <td colSpan={columns.length} className="px-4 py-12 text-center text-sm text-ink-faint whitespace-normal">
+                  <span className="sticky left-4 right-4 inline-block">{empty}</span>
+                </td>
               </tr>
             )}
             {list.map((row, i) => (
@@ -262,7 +263,3 @@ export function Tabs({ tabs, active, onChange }) {
   );
 }
 
-export function Money({ value, className }) {
-  const { inr } = require("../lib/format");
-  return <span className={cx("font-mono tabular", className)}>{inr(value)}</span>;
-}

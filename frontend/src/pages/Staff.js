@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Plus, Pencil, Trash2, Save, Send, BarChart3, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put, del } from "../lib/api";
+import { get, post, put, del, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
 
@@ -40,7 +40,7 @@ export default function Staff() {
       await del(`/staff/${r.staffId}`);
       toast.success("Removed");
       load();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Could not remove"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Could not remove")); }
   };
 
   const sendNow = async (slot) => {
@@ -50,7 +50,7 @@ export default function Staff() {
       if (r.alreadySent) toast.success(`${slot} report already went out today`);
       else if (r.ok) toast.success(`Sent to ${r.sent} recipient${r.sent === 1 ? "" : "s"}${r.failed ? ` · ${r.failed} failed` : ""}`);
       else toast.error(r.reason || "Could not send");
-    } catch (e) { toast.error(e?.response?.data?.detail || "Send failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Send failed")); }
     finally { setBusy(""); }
   };
 
@@ -157,7 +157,7 @@ function StaffDrawer({ row, onClose, onSaved }) {
       if (isNew) await post("/staff", body); else await put(`/staff/${row.staffId}`, body);
       toast.success(isNew ? "Person added" : "Saved");
       onSaved();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Save failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Save failed")); }
   };
 
   return (

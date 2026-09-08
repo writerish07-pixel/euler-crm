@@ -100,7 +100,7 @@ export default function Allocation() {
     setSplitBusy(true);
     try {
       await put("/leads/split", { shares: draft.map((r) => ({ executive: r.executive, pct: Number(r.pct) || 0 })) });
-      toast.success("Split saved — new uploads and Apply to unassigned use these percentages");
+      toast.success("Split saved");
       load();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not save the lead split"));
@@ -118,7 +118,7 @@ export default function Allocation() {
         toast.success("No unassigned leads to apply");
       } else {
         toast.success(
-          `${n} lead${n === 1 ? "" : "s"} named on the Lead Register — executive taps Proceed, then GM / Owner Approve`,
+          `${n} lead${n === 1 ? "" : "s"} assigned — executives complete deal format, then approval`,
         );
       }
       setFilter("all");
@@ -162,8 +162,8 @@ export default function Allocation() {
           <p className="text-sm text-amber-900">
             <b>{summary.unassigned} active lead{summary.unassigned === 1 ? " has" : "s have"} no
             executive.</b> Executives only see leads assigned to them, so nobody is working these.
-            Save a 100% split, then <b>Apply to unassigned</b> — names go on the Lead Register.
-            The executive taps <b>Proceed</b> there to start Deal format + KYC, then GM / Owner Approve.
+            Save a 100% split, then <b>Apply to unassigned</b>. Executives then complete deal format
+            and send for approval.
           </p>
         </Card>
       )}
@@ -215,10 +215,7 @@ export default function Allocation() {
               <Percent size={16} className="text-cobalt" /> Bulk import split
             </h3>
             <p className="text-xs text-ink-soft mt-1">
-              Owner and Sales GM set what % of a TL / Owner bulk upload each executive receives,
-              and the same % for unassigned leads already on the register. Named Executive cells
-              in the sheet stay on that person. Split-assigned rows wait for Deal format + KYC
-              and GM / Owner Approve before the executive can work them.
+              Share of bulk imports and unassigned leads. Named executives in the sheet stay on that person.
             </p>
           </div>
           {canEditLeadSplit && (

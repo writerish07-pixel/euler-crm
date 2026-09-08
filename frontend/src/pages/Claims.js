@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink, Link2 } from "lucide-react";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
@@ -222,7 +222,7 @@ export default function Claims() {
                     if (!window.confirm("Drop this OEM Extra Support? It leaves the claim register, is recorded on Dropped Extra Support, and is taken out of dealer earnings.")) return;
                     post("/claims/drop-extra-support", { claimId: r.claimId, leadId: r.leadId })
                       .then(() => { toast.success("Extra Support dropped"); load(); })
-                      .catch((err) => toast.error(err?.response?.data?.detail || "Could not drop"));
+                      .catch((err) => toast.error(apiErrorMessage(err, "Could not drop")));
                   }}
                   className="text-[10px] font-semibold text-rose-700 hover:underline">
                   Drop
@@ -341,7 +341,7 @@ function OemOnlyCreate({ row, onDone }) {
         : `${name} is already on the scheme register`);
       onDone();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not create the register row");
+      toast.error(apiErrorMessage(e, "Could not create the register row"));
     } finally { setBusy(false); }
   };
   return (
@@ -368,7 +368,7 @@ function ManualClaimModal({ leads, onClose, onDone }) {
       await post("/claims/manual", { ...form, claimAmount: +form.claimAmount });
       toast.success("Manual claim added to register");
       onDone();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Failed")); }
   };
   return (
     <Modal onClose={onClose} width="max-w-xl">
@@ -411,7 +411,7 @@ function ClaimReceiptModal({ rows, onClose, onDone }) {
       await post("/claims/receipt", { leadId: sel.leadId, componentKey: sel.componentKey, amount: +form.amount, date: form.date, reference: form.reference });
       toast.success("Claim receipt recorded");
       onDone();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Failed")); }
   };
   return (
     <Modal onClose={onClose} width="max-w-lg">
@@ -513,7 +513,7 @@ function MatchOemModal({ claim, onClose, onDone }) {
       toast.success(`Matched ${claim.component} to ${claimNumber.trim()}`);
       onDone();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Could not save match");
+      toast.error(apiErrorMessage(e, "Could not save match"));
     } finally { setBusy(false); }
   };
 
@@ -526,7 +526,7 @@ function MatchOemModal({ claim, onClose, onDone }) {
       toast.success("Manual match cleared");
       onDone();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Could not clear match");
+      toast.error(apiErrorMessage(e, "Could not clear match"));
     } finally { setBusy(false); }
   };
 

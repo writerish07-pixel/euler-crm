@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { get, put } from "../lib/api";
+import { get, put, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Card, Table, Button, Field, Input, Select, Badge } from "../components/ui";
 
@@ -91,7 +91,7 @@ export default function ExecutiveIncentive() {
       const plan = await get("/executive-incentive/plan", { executive });
       applyPlan(plan);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not save");
+      toast.error(apiErrorMessage(e, "Could not save"));
     } finally { setBusy(false); }
   };
 

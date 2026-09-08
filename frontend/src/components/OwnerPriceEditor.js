@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { IndianRupee, Save } from "lucide-react";
 import { toast } from "sonner";
-import { get, put } from "../lib/api";
+import { get, put, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { Button, Card, Field, Input, Select } from "./ui";
 import { PRICE_MONEY_FIELDS, priceBodyFromForm, priceFormFromRow } from "./PriceRowDrawer";
@@ -79,7 +79,7 @@ export default function OwnerPriceEditor() {
       const fresh = list.find((r) => r.priceId === selected.priceId) || updated;
       if (fresh) pick(fresh);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not save price");
+      toast.error(apiErrorMessage(e, "Could not save price"));
     } finally {
       setSaving(false);
     }

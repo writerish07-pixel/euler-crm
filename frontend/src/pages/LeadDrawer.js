@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink } from "lucide-react";
 import { Link } from "react-router-dom";
-import { get, post, put, del } from "../lib/api";
+import { get, post, put, del, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
@@ -36,8 +36,8 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
     get(`/leads/${leadId}/360`)
       .then(setData)
       .catch((e) => {
-        const msg = e?.response?.data?.detail || e?.message || "Failed to load lead";
-        setLoadError(typeof msg === "string" ? msg : "Failed to load lead");
+        const msg = apiErrorMessage(e, "Failed to load lead");
+        setLoadError(msg);
         toast.error("Could not open this lead");
       });
   }, [leadId]);
@@ -136,7 +136,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
                 toast.success(`Lead ${lead.leadId} deleted`);
                 onClose();
                 onChanged && onChanged();
-              } catch (e) { toast.error(e?.response?.data?.detail || "Delete failed"); }
+              } catch (e) { toast.error(apiErrorMessage(e, "Delete failed")); }
             }}
             className="!py-1 !px-2.5 text-xs !text-red-600 hover:!bg-red-50"><Trash2 size={13} /> Delete</Button>
         )}
@@ -151,13 +151,13 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       {isExecutive && lead.assignmentPending && (
         <div className="mb-4 rounded-lg bg-amber-50 ring-1 ring-inset ring-amber-600/20 p-3 flex flex-wrap items-center gap-2" data-testid="assignment-pending-banner">
           <p className="text-sm text-amber-900 flex-1 min-w-[12rem]">
-            Tap Proceed to send Deal format + KYC for GM / Owner Approve. Until then this stays a New lead.
+            Tap Proceed to send deal format and KYC for approval.
           </p>
           <Button data-testid="drawer-proceed-btn" onClick={async () => {
             try {
               setProceedRow(await get(`/leads/${lead.leadId}/approval-request`));
             } catch (e) {
-              toast.error(e?.response?.data?.detail || "Could not start approval");
+              toast.error(apiErrorMessage(e, "Could not start approval"));
             }
           }}>
             Proceed
@@ -321,7 +321,7 @@ function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
             await post(`/leads/${lead.leadId}/revive`);
             toast.success("Lead is back in the funnel");
             refresh();
-          } catch (e) { toast.error(e?.response?.data?.detail || "Could not revive"); }
+          } catch (e) { toast.error(apiErrorMessage(e, "Could not revive")); }
         }}><RotateCcw size={15} /> Revive Lead</Button>
       )}
       <div className="w-full sm:w-auto sm:ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
@@ -490,7 +490,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
       toast.success("Price structure saved — continue with Scheme");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Price save failed");
+      toast.error(apiErrorMessage(e, "Price save failed"));
     }
   };
 
@@ -690,7 +690,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       toast.success("Scheme updated — continue with Payments");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Scheme validation failed");
+      toast.error(apiErrorMessage(e, "Scheme validation failed"));
     }
   };
 
@@ -882,7 +882,7 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
       toast.success("Dealer extra income saved");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Save failed");
+      toast.error(apiErrorMessage(e, "Save failed"));
     }
   };
   return (
@@ -930,7 +930,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
       setForm({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
       onSaved();
     } catch (e) {
-      const detail = e?.response?.data?.detail || "Could not add receipt";
+      const detail = apiErrorMessage(e, "Could not add receipt");
       // Over-payment is allowed, but only once staff confirm it is deliberate.
       if (!allowExcess && /excess payment/i.test(detail)) {
         if (window.confirm(`${detail}\n\nRecord ₹${+form.amount} anyway and hold the surplus as excess?`)) {
@@ -950,7 +950,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
       toast.success(`${p.receiptNumber} deleted`);
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Delete failed");
+      toast.error(apiErrorMessage(e, "Delete failed"));
     }
   };
   return (
@@ -1050,7 +1050,7 @@ function RefundForm({ lead, excess, dealCancelled = false, onSaved }) {
       setChequeId("");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Refund failed");
+      toast.error(apiErrorMessage(e, "Refund failed"));
     } finally { setBusy(false); }
   };
   return (
@@ -1091,7 +1091,7 @@ function BookingConfirmSend({ leadId, already, onSent }) {
       else toast.success("Booking confirmation WhatsApp sent");
       if (onSent) onSent();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not send booking WhatsApp");
+      toast.error(apiErrorMessage(e, "Could not send booking WhatsApp"));
     } finally {
       setBusy(false);
     }
@@ -1122,7 +1122,7 @@ function GoogleReviewSend({ leadId, already, onSent }) {
       else toast.success("Google review WhatsApp sent");
       if (onSent) onSent();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not send Google review WhatsApp");
+      toast.error(apiErrorMessage(e, "Could not send Google review WhatsApp"));
     } finally {
       setBusy(false);
     }
@@ -1376,7 +1376,7 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
         : "Delivery status updated");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Delivery update failed");
+      toast.error(apiErrorMessage(e, "Delivery update failed"));
     }
   };
   return (
@@ -1670,7 +1670,7 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
         : "Lead updated");
       onSaved({ vehicleChanged });
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Update failed");
+      toast.error(apiErrorMessage(e, "Update failed"));
     }
   };
   const m = masters || {};
@@ -1869,7 +1869,7 @@ function BookingModal({ lead, onClose, onDone }) {
     let alive = true;
     get(`/leads/${lead.leadId}/price-preview`)
       .then((d) => { if (alive) setPreview(d); })
-      .catch((e) => { if (alive) { setPreview(null); setPreviewError(e?.response?.data?.detail || "Could not reach the pricing service."); } });
+      .catch((e) => { if (alive) { setPreview(null); setPreviewError(apiErrorMessage(e, "Could not reach the pricing service.")); } });
     return () => { alive = false; };
   }, [lead.leadId]);
 
@@ -1906,7 +1906,7 @@ function BookingModal({ lead, onClose, onDone }) {
       setResult({ booking: res, lead: res.lead || {}, sync });
       toast.success("Booking confirmed");
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Booking failed");
+      toast.error(apiErrorMessage(e, "Booking failed"));
       setBusy(false);
     }
   };
@@ -1997,7 +1997,7 @@ function CloseModal({ lead, onClose, onDone }) {
       toast.success("Lead closed");
       onDone();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Close failed");
+      toast.error(apiErrorMessage(e, "Close failed"));
     }
   };
   return (
@@ -2059,7 +2059,7 @@ function CancelModal({ lead, actions, amend = false, onClose, onDone }) {
           : amend ? "Cancellation updated" : "Lead cancelled");
       onDone();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || (amend ? "Amend failed" : "Cancel failed"));
+      toast.error(apiErrorMessage(e, amend ? "Amend failed" : "Cancel failed"));
     } finally {
       setBusy(false);
     }

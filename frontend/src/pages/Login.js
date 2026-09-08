@@ -6,14 +6,7 @@ import { useAuth } from "../context/AuthContext";
 import { Button, Input, Field } from "../components/ui";
 import ConnectionBar from "../components/ConnectionBar";
 import { primeLoginApp } from "../lib/pwa";
-
-function fmtErr(detail) {
-  if (!detail) return "";
-  if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) return detail.map((e) => e?.msg || JSON.stringify(e)).join(" ");
-  if (typeof detail === "object" && detail.msg) return String(detail.msg);
-  return String(detail);
-}
+import { apiErrorMessage } from "../lib/api";
 
 function homeFor(user) {
   const role = user?.role;
@@ -60,18 +53,19 @@ export default function Login() {
       nav(homeFor(u), { replace: true });
     } catch (err) {
       const status = err.response?.status;
-      const fromApi = fmtErr(err.response?.data?.detail);
-      let msg = "Could not sign in. Ask the owner to reset this password in Settings.";
+      const fromApi = apiErrorMessage(err, "");
+      const axiosGeneric = /^Request failed with status code \d+$/i.test(fromApi) || fromApi === "Request failed";
+      let msg = "Could not sign in";
       if (err.code === "ECONNABORTED") {
-        msg = "The server took too long. Tap Sign In again.";
+        msg = "The server took too long. Try again.";
       } else if (!err.response) {
-        msg = "Could not reach the server. Stay on this page and tap Sign In again — do not use an old Home Screen icon.";
-      } else if (fromApi) {
-        msg = fromApi;
+        msg = "Could not reach the server. Try again.";
       } else if (status === 401) {
         msg = "Invalid user ID or password";
+      } else if (fromApi && !axiosGeneric) {
+        msg = fromApi;
       } else if (status === 502 || status === 503 || status === 504) {
-        msg = "The server is waking up. Tap Sign In again.";
+        msg = "The server is starting. Try again.";
       }
       setFormError(msg);
       toast.error(msg);
@@ -90,10 +84,10 @@ export default function Login() {
           <span className="font-heading text-xl font-extrabold">Euler CRM</span>
         </div>
         <div className="relative">
-          <h1 className="font-heading text-4xl font-extrabold leading-tight">EV Dealership<br />Operations Console</h1>
-          <p className="text-zinc-400 mt-4 max-w-sm">Leads, bookings, commercial pricing, schemes, claims, finance & dealer earnings — one fast database, synced to your Google Sheet.</p>
+          <h1 className="font-heading text-4xl font-extrabold leading-tight">Dealership<br />operations</h1>
+          <p className="text-zinc-400 mt-4 max-w-sm">Leads, bookings, finance, claims, and earnings in one place.</p>
         </div>
-        <div className="text-zinc-500 text-sm relative">Full-stack migration · v2.4</div>
+        <div className="text-zinc-500 text-sm relative">Euler Motors · Euler CRM</div>
       </div>
 
       <div className="flex items-center justify-center p-8 pb-[max(2rem,env(safe-area-inset-bottom))]">
@@ -124,7 +118,7 @@ export default function Login() {
                 className="text-base py-3"
                 value={email}
                 onChange={(e) => { setEmail(e.target.value); setFormError(""); }}
-                placeholder="your user ID (e.g. amit)"
+                placeholder="User ID or email"
               />
             </Field>
             <Field label="Password">
@@ -149,9 +143,7 @@ export default function Login() {
             </Button>
           </div>
           <p className="text-xs text-ink-faint mt-6 text-center">
-            Email (owner@euler.com) or the User ID from Settings. You can also type
-            your name if it is unique. Ask the owner to reset the password if sign-in
-            still fails.
+            Need an account? Ask the owner.
           </p>
         </form>
       </div>

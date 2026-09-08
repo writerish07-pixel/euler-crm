@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { Landmark } from "lucide-react";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -182,7 +182,7 @@ function FinanceReceiptModal({ files, onClose, onDone }) {
       await post(`/finance/${encodeURIComponent(sel.fileNumber)}/receipt`, { amount: +form.amount, date: form.date, reference: form.reference });
       toast.success("Financer receipt recorded");
       onDone();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Failed")); }
   };
   return (
     <Modal onClose={onClose} width="max-w-lg">

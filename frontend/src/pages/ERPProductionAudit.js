@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { ShieldCheck, CheckCircle2, AlertTriangle, XCircle, RefreshCw, ChevronDown, ChevronRight, Wrench, Eraser } from "lucide-react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { Card, PageHeader, Button } from "../components/ui";
 
 const ICON = { PASS: CheckCircle2, WARNING: AlertTriangle, FAIL: XCircle };
@@ -93,7 +93,7 @@ export default function ERPProductionAudit() {
       const total = Object.values(r.cleared || {}).reduce((s, n) => s + n, 0);
       toast.success(`Go-live reset done — cleared ${total} records. CRM now starts fresh.`);
       run();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Reset failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Reset failed")); }
   };
   if (!d) return <div className="text-ink-faint text-sm">Running production audit…</div>;
 

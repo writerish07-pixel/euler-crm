@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Plus, Pencil, Trash2, Save, Users } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put, del } from "../lib/api";
+import { get, post, put, del, apiErrorMessage } from "../lib/api";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
 
 // Same family vocabulary the Scheme Master uses. "*" is the catch-all every
@@ -34,7 +34,7 @@ export default function InsuranceAgents() {
       toast.success("Agent deleted");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Delete failed");
+      toast.error(apiErrorMessage(e, "Delete failed"));
     }
   };
 
@@ -122,7 +122,7 @@ function AgentDrawer({ row, onClose, onSaved }) {
       toast.success(isNew ? "Agent added" : "Agent updated");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Save failed");
+      toast.error(apiErrorMessage(e, "Save failed"));
     }
   };
 

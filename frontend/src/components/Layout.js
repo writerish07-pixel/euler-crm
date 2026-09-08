@@ -48,7 +48,7 @@ const NAV = [
     // own scheme entitlement, the second is Euler's claim workflow mirrored in.
     { to: "/claims", label: "Scheme Claim Register", icon: ReceiptText, oemClaimDesk: true },
     { to: "/oem-claims", label: "OEM Claim Settlements", icon: FileCheck, oemClaimDesk: true },
-    { to: "/oem-claims/no-vehicle", label: "OEM claims — no chassis", icon: FileCheck, oemClaimDesk: true },
+    { to: "/oem-claims/no-vehicle", label: "Missing chassis", icon: FileCheck, oemClaimDesk: true },
     { to: "/dropped-extra-support", label: "Dropped Extra Support", icon: Ban, oemClaimDesk: true },
     { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },
@@ -145,7 +145,6 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
                     {item.approvals && pendingApprovals > 0 && (
                       <span className="ml-auto text-[10px] font-bold tabular bg-red-50 text-red-700 px-1.5 py-0.5 rounded-full">{pendingApprovals}</span>
                     )}
-                    {item.ownerOnly && <span className="ml-auto text-[9px] font-bold uppercase text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Owner</span>}
                   </NavLink>
                 ))}
               </div>
@@ -280,6 +279,17 @@ function GlobalLeadSearch() {
   );
 }
 
+const ROLE_LABEL = {
+  owner: "Owner",
+  sales_gm: "Sales GM",
+  tl: "Team Leader",
+  executive: "Executive",
+  accounts: "Accounts",
+  asm: "ASM",
+  rm: "RM",
+  oem_finance: "OEM Finance",
+};
+
 function Topbar({ onMenuOpen }) {
   const { user, logout, canExport } = useAuth();
   const [menu, setMenu] = useState(false);
@@ -323,7 +333,7 @@ function Topbar({ onMenuOpen }) {
               <div className="px-3 py-2 border-b border-line">
                 <div className="text-sm font-semibold text-ink truncate">{user?.name || "User"}</div>
                 <div className="text-xs text-ink-faint truncate">{user?.loginId || user?.email}</div>
-                <div className="text-[10px] uppercase font-bold text-cobalt mt-1">{user?.role}</div>
+                <div className="text-[10px] uppercase font-bold text-cobalt mt-1">{ROLE_LABEL[user?.role] || user?.role}</div>
               </div>
               <Link to="/settings" data-testid="change-password-menu" onClick={() => setMenu(false)}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm text-ink hover:bg-zinc-50 transition-colors">
@@ -405,7 +415,7 @@ export default function Layout({ children }) {
           <button type="button" data-testid="session-retry-bar"
             onClick={retrySession}
             className="shrink-0 z-40 w-full bg-amber-50 text-amber-900 text-xs font-semibold px-3 py-2 text-center">
-            {sessionError} — tap to retry
+            {sessionError} — Retry
           </button>
         ) : null}
         <Topbar onMenuOpen={() => setNavOpen(true)} />

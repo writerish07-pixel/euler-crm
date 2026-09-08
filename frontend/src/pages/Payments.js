@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Trash2, Wallet, X } from "lucide-react";
-import { del, get, post } from "../lib/api";
+import { del, get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Table, Badge, Card, Field, Input, Select, Button } from "../components/ui";
@@ -43,7 +43,7 @@ export default function Payments() {
       toast.success(`${r.receiptNumber} deleted`);
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Delete failed");
+      toast.error(apiErrorMessage(e, "Delete failed"));
     }
   };
 
@@ -108,7 +108,7 @@ function AddReceiptForm({ leadId, masters, onSaved }) {
       setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
       onSaved();
     } catch (e) {
-      const detail = e?.response?.data?.detail || "Could not add receipt";
+      const detail = apiErrorMessage(e, "Could not add receipt");
       if (!allowExcess && /excess payment/i.test(detail)) {
         if (window.confirm(`${detail}\n\nRecord ₹${+form.amount} anyway and hold the surplus as excess?`)) {
           return add(true);
