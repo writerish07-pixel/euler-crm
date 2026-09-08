@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { UploadCloud, Download, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
-import { api, downloadFile } from "../lib/api";
+import { api, downloadFile, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { Drawer, Button, Card, Badge, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -45,7 +45,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
       setPicked(next);
       setStep("review");
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Could not read file");
+      toast.error(apiErrorMessage(e, "Could not read file"));
       setFile(null);
     } finally { setBusy(false); }
   };
@@ -81,7 +81,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
       toast.success(`MIS filled on ${r.data.filled} payout${r.data.filled === 1 ? "" : "s"}`);
       onDone();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Could not save MIS");
+      toast.error(apiErrorMessage(e, "Could not save MIS"));
     } finally { setBusy(false); }
   };
 
@@ -100,7 +100,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
       toast.success(`${r.data.approved} payout${r.data.approved === 1 ? "" : "s"} marked as mapped. Next on the register: Replace with MIS amount.`);
       onDone();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Approve failed");
+      toast.error(apiErrorMessage(e, "Approve failed"));
     } finally { setBusy(false); }
   };
 

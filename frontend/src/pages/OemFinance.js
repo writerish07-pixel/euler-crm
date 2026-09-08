@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Landmark, AlertTriangle, IndianRupee, Clock, RefreshCcw, Users, ClipboardList, Truck } from "lucide-react";
-import { get } from "../lib/api";
+import { get, apiErrorMessage } from "../lib/api";
 import { inr, compactInr, fmtDate, num } from "../lib/format";
 import { PageHeader, Card, StatCard, Table, Badge, Select, Button } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
@@ -32,7 +32,7 @@ export default function OemFinance() {
     const p = periodParams(period);
     get("/reports/oem-finance", { view, ...(financer ? { financer } : {}), ...p })
       .then((r) => { setD(r); setErr(""); })
-      .catch((e) => setErr(e?.response?.data?.detail || "Could not load the report"));
+      .catch((e) => setErr(apiErrorMessage(e, "Could not load the report")));
     get("/reports/oem-monthly", p)
       .then(setVol)
       .catch(() => setVol(null));

@@ -5,7 +5,7 @@ import {
   IndianRupee, Printer, FileText, ExternalLink, Warehouse, CalendarDays,
 } from "lucide-react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, compactInr, fmtDate, fmtTime, todayISO, num, ytdCount, ytdMoney } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Portal, Field, Input, Select } from "../components/ui";
 import YardStockCard from "../components/YardStockCard";
@@ -26,7 +26,7 @@ export default function AccountsDashboard() {
       const s = await get(`/leads/${leadId}/billing-summary`);
       setSummary(s);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Billing summary not available");
+      toast.error(apiErrorMessage(e, "Billing summary not available"));
     }
   };
 
@@ -280,7 +280,7 @@ function RefundSummaryModal({ row, canRefunded, onClose, onDone }) {
       toast.success(`Refunded ${inr(+form.amount)} — Payment Ledger and the lead are updated`);
       onDone();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Refund failed");
+      toast.error(apiErrorMessage(e, "Refund failed"));
     } finally { setBusy(false); }
   };
   return (

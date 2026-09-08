@@ -441,7 +441,7 @@ async def test_exchange_is_intentionally_unmapped_no_tab_created(sheet):
     assert "exchange" in gsheets.INTENTIONALLY_UNMAPPED
     assert "exchange" not in gsheets.SYNC_MAP
     res = await gsheets.sync("exchange", {"leadId": "LD1"})
-    assert res["ok"] is False and res["operation"] == "error"
+    assert res["ok"] is True and res["operation"] == "skipped"
     assert "Exchange Register" not in tabs
 
 

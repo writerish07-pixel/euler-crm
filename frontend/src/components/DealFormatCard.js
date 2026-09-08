@@ -29,7 +29,7 @@ export default function DealFormatCard({
       {loading && <p className="text-xs text-ink-faint">Loading Price Master…</p>}
       {missingPrice && (
         <p className="text-xs text-amber-700" data-testid="deal-format-no-price">
-          Select model and variant to load RTO, insurance and transport from Price Master.
+          Select a vehicle to load prices.
         </p>
       )}
       <Line k="Ex-showroom" v={d.exShowroom} testid="deal-ex" />

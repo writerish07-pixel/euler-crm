@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Plus, ChevronRight, Upload } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put } from "../lib/api";
+import { get, post, put, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
@@ -53,7 +53,7 @@ export default function Leads() {
       const row = await get(`/leads/${r.leadId}/approval-request`);
       setProceed(row);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not start approval");
+      toast.error(apiErrorMessage(e, "Could not start approval"));
     }
   };
 
@@ -212,7 +212,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const submit = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
-    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand — the final amount given to the customer");
+    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
     const kycErr = kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
     setBusy(true);
@@ -225,17 +225,17 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
           await uploadKycFiles(`/leads/${lead.leadId}/documents`, kyc);
         }
       } catch (ue) {
-        toast.error(ue?.response?.data?.detail || "Lead saved but a KYC file failed — attach it again.");
+        toast.error(apiErrorMessage(ue, "Lead saved but a KYC file failed — attach it again."));
       }
       if (lead.pending) {
-        toast.success("Sent for approval — call GM or Owner. Nothing is on the Lead Register until they Approve.");
+        toast.success("Sent for approval");
         onCreated(null);
         return;
       }
       toast.success(`Lead ${lead.leadId} created`);
       onCreated(lead.leadId);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to create lead");
+      toast.error(apiErrorMessage(e, "Failed to create lead"));
     } finally { setBusy(false); }
   };
 
@@ -244,7 +244,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
   return (
     <Drawer open onClose={onClose} width="max-w-2xl" title={isExecutive ? "Request a lead" : "New Lead"}
-      subtitle={isExecutive ? "GM or Owner must Approve before this becomes a live lead" : "Capture a fresh enquiry"}
+      subtitle={isExecutive ? "Sent for owner or GM approval" : "Capture a fresh enquiry"}
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : (isExecutive ? "Send for approval" : "Create Lead")}</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, del, put, api } from "../lib/api";
+import { get, post, del, put, api, apiErrorMessage } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { fmtWhen } from "../lib/format";
 import { PageHeader, Card, Button, Field, Input, Select, Badge, Table } from "../components/ui";
@@ -63,7 +63,7 @@ export default function Settings() {
         toast.success(`Backfill done — ${appended} new row(s), ${updated} updated${headerNote}`);
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || e?.message || "Backfill failed");
+      toast.error(apiErrorMessage(e, "Backfill failed"));
     } finally { setBackfilling(false); }
   };
 
@@ -82,7 +82,7 @@ export default function Settings() {
         toast.success("OEM Extra Support columns already present on all related tabs");
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to add OEM Extra Support columns");
+      toast.error(apiErrorMessage(e, "Failed to add OEM Extra Support columns"));
     } finally { setEnsuringOem(false); }
   };
 
@@ -101,7 +101,7 @@ export default function Settings() {
         toast.success("Insurance Agent columns are already present");
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to add Insurance Agent columns");
+      toast.error(apiErrorMessage(e, "Failed to add Insurance Agent columns"));
     } finally { setEnsuringIns(false); }
   };
 
@@ -120,7 +120,7 @@ export default function Settings() {
         toast.success("Cancellation columns are already present");
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to add Cancellation columns");
+      toast.error(apiErrorMessage(e, "Failed to add Cancellation columns"));
     } finally { setEnsuringCancel(false); }
   };
 
@@ -139,7 +139,7 @@ export default function Settings() {
         toast.success("TCS / RSA / Exchange columns are already present");
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to add TCS / RSA / Exchange columns");
+      toast.error(apiErrorMessage(e, "Failed to add TCS / RSA / Exchange columns"));
     } finally { setEnsuringCommercial(false); }
   };
 
@@ -158,7 +158,7 @@ export default function Settings() {
         toast.success("Euler filing columns are already present on Scheme Claim Register");
       }
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to add Scheme Claim Euler columns");
+      toast.error(apiErrorMessage(e, "Failed to add Scheme Claim Euler columns"));
     } finally { setEnsuringClaimOem(false); }
   };
 
@@ -188,7 +188,7 @@ export default function Settings() {
       toast.success("User created");
       setForm({ email: "", password: "", name: "", role: "executive", loginId: "", staffId: "" });
       loadUsers();
-    } catch (e) { toast.error(e.response?.data?.detail || "Failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Failed")); }
   };
   const removeUser = async (id) => { await del(`/auth/users/${id}`); toast.success("User removed"); loadUsers(); };
 
@@ -437,14 +437,14 @@ function CancelReasonsCard() {
       toast.success("Cancel reason added");
       setForm({ reason: "", revive: "now", reviveAfterDays: 30 });
       load();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Could not add reason"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Could not add reason")); }
   };
 
   const patch = async (row, changes) => {
     try {
       await put(`/cancel-reasons/${row.reasonId}`, { ...row, ...changes });
       load();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Could not update"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Could not update")); }
   };
 
   const remove = async (row) => {
@@ -452,7 +452,7 @@ function CancelReasonsCard() {
       await del(`/cancel-reasons/${row.reasonId}`);
       toast.success("Reason removed");
       load();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Could not remove"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Could not remove")); }
   };
 
   return (
@@ -543,12 +543,12 @@ function MastersListCard({ gsEnabled }) {
       toast.success(`Added to ${cat}`);
       load();
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Failed to add");
+      toast.error(apiErrorMessage(e, "Failed to add"));
     }
   };
   const removeValue = async (id) => {
     try { await del(`/masters-list/${id}`); toast.success("Removed"); load(); }
-    catch (e) { toast.error(e.response?.data?.detail || "Failed to remove"); }
+    catch (e) { toast.error(apiErrorMessage(e, "Failed to remove")); }
   };
 
   return (
@@ -636,7 +636,7 @@ function BotspaceCard() {
       toast.success("WhatsApp settings saved");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Save failed");
+      toast.error(apiErrorMessage(e, "Save failed"));
     } finally { setBusy(false); }
   };
 
@@ -645,7 +645,7 @@ function BotspaceCard() {
       const r = await post("/integrations/botspace/run-jobs", {});
       toast.success(`Jobs ran — follow-ups ${r.follow?.sent || 0}, finance ${r.finance?.sent || 0}`);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Job failed");
+      toast.error(apiErrorMessage(e, "Job failed"));
     }
   };
 
@@ -656,7 +656,7 @@ function BotspaceCard() {
       const r = await post("/integrations/botspace/send-delivery-reviews", { force: false });
       toast.success(`Google review WhatsApp: sent ${r.sent || 0}, already sent ${r.skipped || 0}, failed ${r.failed || 0}`);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not send Google review messages");
+      toast.error(apiErrorMessage(e, "Could not send Google review messages"));
     } finally {
       setReviewBusy(false);
     }
@@ -669,7 +669,7 @@ function BotspaceCard() {
       const r = await post("/integrations/botspace/send-booking-confirms", { force: false });
       toast.success(`Booking WhatsApp: sent ${r.sent || 0}, already sent ${r.skipped || 0}, failed ${r.failed || 0}`);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not send booking WhatsApp");
+      toast.error(apiErrorMessage(e, "Could not send booking WhatsApp"));
     } finally {
       setBookingBusy(false);
     }
@@ -763,7 +763,7 @@ function ModelAskCampaign() {
     try {
       setPreview(await get("/integrations/botspace/model-ask/preview"));
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not build the preview");
+      toast.error(apiErrorMessage(e, "Could not build the preview"));
     } finally { setBusy(false); }
   };
 
@@ -777,7 +777,7 @@ function ModelAskCampaign() {
       toast.success(`Sent ${r.sent || 0}, queued for morning ${r.queued || 0}, failed ${r.failed || 0}`);
       setPreview(null);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Campaign failed");
+      toast.error(apiErrorMessage(e, "Campaign failed"));
     } finally { setSending(false); }
   };
 
@@ -842,7 +842,7 @@ function LoginIdCell({ row, onSaved }) {
       toast.success(value.trim() ? `User ID set to ${value.trim()}` : "User ID cleared");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not set the user ID");
+      toast.error(apiErrorMessage(e, "Could not set the user ID"));
       setValue(row.loginId || "");
     } finally { setBusy(false); }
   };
@@ -875,7 +875,7 @@ function PasswordCell({ row, onSaved }) {
       toast.success("Password updated — they can sign in with this now");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not set the password");
+      toast.error(apiErrorMessage(e, "Could not set the password"));
       setValue(row.password || "");
     } finally { setBusy(false); }
   };
@@ -963,7 +963,7 @@ function CoulsonCard() {
       if (st.loginOk) toast.success("Euler OEM login works — you can Sync now");
       else toast.error(st.lastError || "Coulson rejected this username/password");
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not save Coulson login");
+      toast.error(apiErrorMessage(e, "Could not save Coulson login"));
     } finally { setBusy(false); }
   };
 
@@ -984,7 +984,7 @@ function CoulsonCard() {
       if (st.loginOk) toast.success("Coulson session saved — you can Sync now");
       else toast.error(st.lastError || "Coulson did not accept that session");
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not save Coulson session");
+      toast.error(apiErrorMessage(e, "Could not save Coulson session"));
     } finally { setSavingSession(false); }
   };
 
@@ -1008,7 +1008,7 @@ function CoulsonCard() {
         else toast.error(r.reason === "not_configured" ? "Save the Coulson session first" : "Sync did not run");
         load();
       } catch (e) {
-        toast.error(e?.response?.data?.detail || "Coulson sync failed");
+        toast.error(apiErrorMessage(e, "Coulson sync failed"));
       } finally { setSyncing(false); }
       return;
     }
@@ -1020,7 +1020,7 @@ function CoulsonCard() {
         else toast.error(r.reason === "not_configured" ? "Save the Coulson session first" : "Sync did not run");
         load();
       } catch (e) {
-        toast.error(e?.response?.data?.detail || "Coulson sync failed");
+        toast.error(apiErrorMessage(e, "Coulson sync failed"));
       } finally { setSyncing(false); }
       return;
     }
@@ -1039,7 +1039,7 @@ function CoulsonCard() {
       else toast.error(r.reason === "not_configured" ? "Save the Coulson login first" : "Sync did not run");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Coulson sync failed");
+      toast.error(apiErrorMessage(e, "Coulson sync failed"));
     } finally { setSyncing(false); }
   };
 
@@ -1148,7 +1148,7 @@ function CoulsonCard() {
                 if (server.ok) toast.success("Euler accepted this login");
                 else toast.error(server.coulsonSaid || "Coulson rejected this username/password");
               } catch (e) {
-                toast.error(e?.response?.data?.detail || "Could not run the test");
+                toast.error(apiErrorMessage(e, "Could not run the test"));
               } finally { setTesting(false); }
             }}>
             {testing ? "Testing…" : "Test login"}

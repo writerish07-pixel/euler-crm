@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { toast } from "sonner";
 import { AlertTriangle, Users } from "lucide-react";
-import { get, post, put } from "../lib/api";
+import { get, post, put, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { Button, Card, Drawer, Field, Input, Select, Table } from "./ui";
 
@@ -46,7 +46,7 @@ export function PriceRowDrawer({ row, onClose, onSaved }) {
       setPreview(r);
       if (!r.wouldRepriceCount) toast.success("No live leads would change");
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not check impact");
+      toast.error(apiErrorMessage(e, "Could not check impact"));
     } finally { setBusy(false); }
   };
 
@@ -71,7 +71,7 @@ export function PriceRowDrawer({ row, onClose, onSaved }) {
       }
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Save failed");
+      toast.error(apiErrorMessage(e, "Save failed"));
     } finally { setBusy(false); }
   };
 

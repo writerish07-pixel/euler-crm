@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { get, put } from "../lib/api";
+import { get, put, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -44,7 +44,7 @@ function IncentiveRegister() {
       toast.success("Marked paid — OEM claim opened as outstanding");
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Failed to update");
+      toast.error(apiErrorMessage(e, "Failed to update"));
     }
   };
 

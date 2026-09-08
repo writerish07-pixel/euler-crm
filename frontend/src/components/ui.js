@@ -6,7 +6,6 @@ export const cx = (...a) => a.filter(Boolean).join(" ");
 
 /** Shared cap for registers, dashboards, and any other list “window”. */
 export const PANEL_MAX_H = "min(28rem, calc(100dvh - 14rem))";
-export const panelScrollClass = "max-h-[min(28rem,calc(100dvh-14rem))] overflow-y-auto overflow-x-auto overscroll-contain";
 
 /**
  * Render an overlay into <body> instead of leaving it inside the page tree.
@@ -262,7 +261,3 @@ export function Tabs({ tabs, active, onChange }) {
   );
 }
 
-export function Money({ value, className }) {
-  const { inr } = require("../lib/format");
-  return <span className={cx("font-mono tabular", className)}>{inr(value)}</span>;
-}

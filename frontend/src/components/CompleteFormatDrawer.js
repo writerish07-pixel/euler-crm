@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { get, put } from "../lib/api";
+import { get, put, apiErrorMessage } from "../lib/api";
 import { Drawer, Button, Field, Select } from "./ui";
 import { LocalKycBlock, kycReady, uploadKycFiles } from "./LeadDocuments";
 import DealFormatCard from "./DealFormatCard";
@@ -51,8 +51,8 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
   }, [model, variant, row.dealFormat, budget]);
 
   const save = async () => {
-    if (!model || !variant) return toast.error("Select model and variant — Price Master fills RTO, insurance and transport");
-    if (!(Number(budget) > 0)) return toast.error("Enter Cx Demand — the final amount given to the customer");
+    if (!model || !variant) return toast.error("Select model and variant");
+    if (!(Number(budget) > 0)) return toast.error("Enter Cx Demand");
     const kycErr = kycReady(customerType, kyc, gstin);
     if (kycErr) return toast.error(kycErr);
     setBusy(true);
@@ -61,10 +61,10 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         budget: Number(budget), gstin, interestedModel: model, variant,
       });
       await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, kyc);
-      toast.success("Sent for GM / Owner Approve — the lead stays on your register until they tap Approve");
+      toast.success("Sent for approval");
       onSaved();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not save the approval format");
+      toast.error(apiErrorMessage(e, "Could not save the approval format"));
     } finally { setBusy(false); }
   };
 
@@ -88,8 +88,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     >
       <div className="space-y-4">
         <p className="text-sm text-ink-soft">
-          Pick the vehicle first (same lists as New Lead). Price Master then fills RTO, insurance
-          and transport. Enter Cx Demand and KYC, then send for GM / Owner Approve.
+          Select the vehicle, enter Cx Demand, attach KYC, then send for approval.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Model *">

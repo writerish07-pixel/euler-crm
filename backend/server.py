@@ -3219,7 +3219,7 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             "requestId": request_id,
             "status": "pending",
             "dealAmount": req["dealAmount"],
-            "message": "Sent to GM / Owner. The lead is created only after they tap Approve.",
+            "message": "Sent for approval. The lead is created after it is approved.",
         }
     return await _insert_live_lead(body)
 

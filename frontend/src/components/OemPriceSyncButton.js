@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
-import { post } from "../lib/api";
+import { post, apiErrorMessage } from "../lib/api";
 import { Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
 
@@ -26,7 +26,7 @@ export default function OemPriceSyncButton({ onDone, testId = "oem-price-sync" }
       }
       if (onDone) onDone(r);
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Coulson sync failed");
+      toast.error(apiErrorMessage(e, "Coulson sync failed"));
     } finally { setBusy(false); }
   };
 

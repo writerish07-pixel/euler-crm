@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { Plus, Pencil, Trash2, Banknote, HandCoins, ShieldCheck, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put, del } from "../lib/api";
+import { get, post, put, del, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -71,7 +71,7 @@ export default function Insurance() {
       const r = await post("/insurance/mis/approve", { entryIds: ids });
       toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped — next: Replace with MIS amount`);
       load();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Approve failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Approve failed")); }
   };
 
   const adoptMisAmount = async () => {
@@ -107,9 +107,7 @@ export default function Insurance() {
       setSelected(Object.fromEntries(ids.filter((id) => failed.has(id)).map((id) => [id, true])));
       load();
     } catch (e) {
-      toast.error(typeof e?.response?.data?.detail === "string"
-        ? e.response.data.detail
-        : "Could not apply MIS amount — retry the remaining rows");
+      toast.error(apiErrorMessage(e, "Could not apply MIS amount — retry the remaining rows"));
       load();
     }
   };
@@ -340,7 +338,7 @@ function PayoutReceiptModal({ rows, isOwner, onClose, onDone }) {
       await post(`/insurance/${sel.entryId}/receipt`, { amount: +form.amount, date: form.date, reference: form.reference });
       toast.success("Payout recorded");
       onDone();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Failed")); }
   };
   return (
     <Modal onClose={onClose} width="max-w-lg">
@@ -424,7 +422,7 @@ function EntryDrawer({ row, isOwner, masters, agents = [], delivered = [], onClo
     try {
       if (isNew) await post("/insurance", body); else await put(`/insurance/${row.entryId}`, body);
       toast.success(isNew ? "Entry added" : "Entry updated"); onSaved();
-    } catch (e) { toast.error(e?.response?.data?.detail || "Save failed"); }
+    } catch (e) { toast.error(apiErrorMessage(e, "Save failed")); }
   };
 
   return (

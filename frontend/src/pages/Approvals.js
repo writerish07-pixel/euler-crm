@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { toast } from "sonner";
-import { get, post } from "../lib/api";
+import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -64,7 +64,7 @@ export default function Approvals() {
       }
       load();
     } catch (e) {
-      toast.error(e?.response?.data?.detail || "Could not update request");
+      toast.error(apiErrorMessage(e, "Could not update request"));
     } finally { setBusy(""); }
   };
 
@@ -73,8 +73,8 @@ export default function Approvals() {
       <PageHeader
         title={canApproveLeads ? "Lead approvals" : "Waiting for approval"}
         subtitle={canApproveLeads
-          ? "Owner and Sales GM Approve here. Executives send Deal format + KYC from the Lead Register (Proceed) — you do not ask for approval."
-          : "New enquiries you requested wait here. Assigned bulk leads are on Lead Register — tap Proceed there to ask Owner / GM to Approve."}
+          ? "Approve or reject deal format and KYC"
+          : "New enquiries waiting for approval"}
       />
       {canApproveLeads && (
         <div className="flex flex-wrap items-center gap-2 mb-3">
@@ -86,7 +86,7 @@ export default function Approvals() {
                 Turn on phone alerts
               </Button>
               <p className="text-xs text-ink-soft">
-                Optional. Works when Euler CRM is installed on the phone (Home Screen). Approve here either way.
+                Optional. Available when Euler CRM is installed on the phone.
               </p>
             </>
           )}
@@ -95,7 +95,7 @@ export default function Approvals() {
       <div className="flex gap-2 mb-4">
         {["pending", "approved", "rejected"].map((s) => (
           <Button key={s} variant={status === s ? "primary" : "secondary"} onClick={() => setStatus(s)}>
-            {s}
+            {s[0].toUpperCase() + s.slice(1)}
           </Button>
         ))}
       </div>
