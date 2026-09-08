@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import json
 import logging
 import io
@@ -6,6 +7,7 @@ import os
 import re
 import uuid
 from collections import Counter
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 from typing import Optional, List
@@ -94,6 +96,37 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# Bulk HTTP handlers must not wait on Google. When this is set, sheet_sync()
+# records PENDING rows and the real writes run after the response.
+_defer_sheets = contextvars.ContextVar("euler_defer_sheets", default=False)
+_deferred_sheets = contextvars.ContextVar("euler_deferred_sheets", default=None)
+
+
+@asynccontextmanager
+async def defer_sheet_writes():
+    """Queue Google writes until the block finishes, then sync in the background."""
+    bucket = []
+    t1 = _defer_sheets.set(True)
+    t2 = _deferred_sheets.set(bucket)
+    try:
+        yield bucket
+    finally:
+        _defer_sheets.reset(t1)
+        _deferred_sheets.reset(t2)
+        by_entity = {}
+        for entity, doc, eid in bucket:
+            by_entity.setdefault(entity, []).append((doc, eid))
+        for entity, pairs in by_entity.items():
+            docs = []
+            for doc, eid in pairs:
+                try:
+                    await queue_sheet_sync(entity, doc, entity_id=eid)
+                except Exception:
+                    logger.exception("queue sheet sync failed for %s", eid)
+                docs.append(doc)
+            _schedule_sheet_syncs(docs, entity=entity)
+
+
 async def sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
     """Upsert one record into the existing Google Sheet and durably record the
     outcome (GS-4). A failed write becomes a PENDING sheet_sync_log entry that
@@ -103,6 +136,11 @@ async def sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
     actually succeeded but whose response timed out finds the existing row and
     updates it instead of appending a duplicate.
     """
+    if _defer_sheets.get():
+        bucket = _deferred_sheets.get()
+        if bucket is not None:
+            bucket.append((entity, dict(doc or {}), entity_id))
+            return {"ok": True, "operation": "queued"}
     res = await gsheets.sync(entity, doc)
     if res.get("operation") in ("skipped", "blocked"):
         return res  # sync disabled or env-write-blocked — nothing to log/retry
@@ -137,24 +175,25 @@ async def queue_sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
         {"$set": {
             "entityType": entity, "entityId": eid, "tab": "",
             "operation": "upsert", "status": "PENDING",
-            "error": "queued after bulk import", "missingHeaders": [],
+            "error": "queued after bulk action", "missingHeaders": [],
             "timestamp": now_iso(), "payload": payload, "attempt": 0,
         }},
         upsert=True,
     )
 
 
-def _schedule_sheet_syncs(docs):
-    """Best-effort Google writes after the HTTP response — do not block Import."""
+def _schedule_sheet_syncs(docs, entity="leads"):
+    """Best-effort Google writes after the HTTP response — do not block the desk."""
     if not docs:
         return
+    id_field = gsheets.SYNC_MAP.get(entity, ("", "", []))[1]
 
     async def _run():
         for doc in docs:
             try:
-                await sheet_sync("leads", doc)
+                await sheet_sync(entity, doc)
             except Exception:
-                logger.exception("bulk import sheet sync failed for %s", (doc or {}).get("leadId"))
+                logger.exception("bulk sheet sync failed for %s", (doc or {}).get(id_field) or (doc or {}).get("leadId"))
 
     try:
         asyncio.get_running_loop().create_task(_run())
@@ -5182,6 +5221,9 @@ async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(dea
     The previous owner is kept in an allocation history rather than overwritten.
     Cancellations and bookings are already attributed to whoever held the lead at
     the time, so moving a lead must not quietly move that record with it.
+
+    Google Sheet writes are queued and run after the HTTP response so a desk
+    reallocating dozens or hundreds of leads is not blocked on Sheets.
     """
     name = str(body.executive or "").strip()
     if not name:
@@ -5195,9 +5237,15 @@ async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(dea
     if not lead_ids:
         raise HTTPException(422, "Select at least one lead")
 
-    moved, skipped = [], []
+    found = await db.leads.find({"leadId": {"$in": lead_ids}}).to_list(len(lead_ids) + 10)
+    by_id = {str(l.get("leadId")): l for l in found}
+    stamp = now_iso()
+    by_email = act.get("email", "")
+    remarks = str(body.remarks or "").strip()
+    updates, moved, skipped, synced = [], [], [], []
+    history = []
     for lid in lead_ids:
-        lead = await db.leads.find_one({"leadId": lid})
+        lead = by_id.get(lid)
         if not lead:
             skipped.append({"leadId": lid, "reason": "not found"})
             continue
@@ -5208,20 +5256,47 @@ async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(dea
         if previous == name:
             skipped.append({"leadId": lid, "reason": "already theirs"})
             continue
-        entry = {"from": previous, "to": name, "at": now_iso(),
-                 "by": act.get("email", ""), "remarks": str(body.remarks or "").strip()}
-        await db.leads.update_one({"leadId": lid}, {
-            "$set": {"executive": name, "lastUpdated": now_iso(),
-                     "lastUpdatedBy": act.get("email", "")},
-            "$push": {"allocationHistory": entry}})
-        await write_audit(act, "allocate", "lead", leadId=lid,
-                          old={"executive": previous}, new={"executive": name})
-        await _log_activity_safe(lead, "Note",
-                                 f"Lead allocated to {name}"
-                                 + (f" (was {previous})" if previous else " (was unassigned)"))
-        updated = clean(await db.leads.find_one({"leadId": lid}))
-        await sheet_sync("leads", updated)
+        entry = {"from": previous, "to": name, "at": stamp, "by": by_email, "remarks": remarks}
+        note = f"Lead allocated to {name}" + (f" (was {previous})" if previous else " (was unassigned)")
+        updates.append((lid, {
+            "$set": {"executive": name, "lastUpdated": stamp, "lastUpdatedBy": by_email,
+                     "lastActivity": f"Note · {note}"[:200]},
+            "$push": {"allocationHistory": entry}}))
         moved.append(lid)
+        history.append((lead, previous, note))
+        synced.append({**clean(dict(lead)), "executive": name, "lastUpdated": stamp,
+                       "lastUpdatedBy": by_email})
+    if updates:
+        await asyncio.gather(*[
+            db.leads.update_one({"leadId": lid}, spec) for lid, spec in updates
+        ])
+    for lead, previous, note in history:
+        await write_audit(act, "allocate", "lead", leadId=lead.get("leadId"),
+                          old={"executive": previous}, new={"executive": name})
+    if history:
+        act_ids = await next_ids("activity", "AC26", len(history))
+        act_docs = []
+        for i, (lead, previous, note) in enumerate(history):
+            act_docs.append({
+                "activityId": act_ids[i], "leadId": lead.get("leadId"),
+                "date": today(), "time": datetime.now(timezone.utc).strftime("%H:%M"),
+                "activityType": "Note", "discussion": note,
+                "customerName": lead.get("customerName"), "mobile": lead.get("mobile"),
+                "model": lead.get("interestedModel"),
+            })
+        await db.activities.insert_many(act_docs)
+        for doc in act_docs:
+            try:
+                await queue_sheet_sync("activities", doc, entity_id=doc["activityId"])
+            except Exception:
+                logger.exception("queue activity sheet sync failed for %s", doc.get("activityId"))
+        _schedule_sheet_syncs(act_docs, entity="activities")
+    for doc in synced:
+        try:
+            await queue_sheet_sync("leads", doc, entity_id=doc.get("leadId") or "")
+        except Exception:
+            logger.exception("queue sheet sync failed for %s", (doc or {}).get("leadId"))
+    _schedule_sheet_syncs(synced)
     return {"ok": True, "executive": name, "moved": moved,
             "movedCount": len(moved), "skipped": skipped}
 
@@ -8439,15 +8514,16 @@ async def _repair_mis_only_received():
 async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depends(money_desk_only)):
     """Stamp MIS amount onto matched entries and mark them mapped. Does not book cash."""
     filled, errors = 0, []
-    for item in body.items or []:
-        eid = str(item.get("entryId") or "").strip()
-        entry = await db.insurance.find_one({"entryId": eid}) if eid else None
-        if not entry:
-            errors.append({"entryId": eid, "error": "not_found"})
-            continue
-        await _fill_mis_item(entry, item.get("misAmount"),
-                             item.get("reference") or "", item.get("policyNumber") or "")
-        filled += 1
+    async with defer_sheet_writes():
+        for item in body.items or []:
+            eid = str(item.get("entryId") or "").strip()
+            entry = await db.insurance.find_one({"entryId": eid}) if eid else None
+            if not entry:
+                errors.append({"entryId": eid, "error": "not_found"})
+                continue
+            await _fill_mis_item(entry, item.get("misAmount"),
+                                 item.get("reference") or "", item.get("policyNumber") or "")
+            filled += 1
     await write_audit(act, "mis-apply", "insurance", new={"filled": filled, "errors": len(errors)})
     return {"ok": True, "filled": filled, "errors": errors}
 
@@ -8464,36 +8540,37 @@ async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=D
         if eid and eid not in seen:
             seen.add(eid)
             ordered.append(eid)
-    for eid in ordered:
-        entry = await db.insurance.find_one({"entryId": eid})
-        if not entry:
-            errors.append({"entryId": eid, "error": "not_found"})
-            continue
-        if str(entry.get("status") or "").startswith("N/A"):
-            errors.append({"entryId": eid, "error": "not_applicable"})
-            continue
-        item = by_id.get(eid) or {}
-        amount = item.get("misAmount")
-        if amount in (None, ""):
-            amount = entry.get("misAmount")
-        if _insurance_mis_money(amount) <= 0:
-            amount = entry.get("expectedPayout")
-        if _insurance_mis_money(amount) <= 0:
-            errors.append({"entryId": eid, "error": "no_amount"})
-            continue
-        updated = await _map_insurance_mis(
-            entry, amount=amount,
-            reference=item.get("reference") or entry.get("misReference") or "",
-            act=act)
-        approved.append({
-            "entryId": eid,
-            "mapped": True,
-            "receivedPayout": ce.num(updated.get("receivedPayout")),
-            "expectedPayout": ce.num(updated.get("expectedPayout")),
-            "difference": ce.num(updated.get("misDifference")),
-            "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
-            "status": updated.get("status"),
-        })
+    async with defer_sheet_writes():
+        for eid in ordered:
+            entry = await db.insurance.find_one({"entryId": eid})
+            if not entry:
+                errors.append({"entryId": eid, "error": "not_found"})
+                continue
+            if str(entry.get("status") or "").startswith("N/A"):
+                errors.append({"entryId": eid, "error": "not_applicable"})
+                continue
+            item = by_id.get(eid) or {}
+            amount = item.get("misAmount")
+            if amount in (None, ""):
+                amount = entry.get("misAmount")
+            if _insurance_mis_money(amount) <= 0:
+                amount = entry.get("expectedPayout")
+            if _insurance_mis_money(amount) <= 0:
+                errors.append({"entryId": eid, "error": "no_amount"})
+                continue
+            updated = await _map_insurance_mis(
+                entry, amount=amount,
+                reference=item.get("reference") or entry.get("misReference") or "",
+                act=act)
+            approved.append({
+                "entryId": eid,
+                "mapped": True,
+                "receivedPayout": ce.num(updated.get("receivedPayout")),
+                "expectedPayout": ce.num(updated.get("expectedPayout")),
+                "difference": ce.num(updated.get("misDifference")),
+                "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
+                "status": updated.get("status"),
+            })
     return {"ok": True, "approved": len(approved), "mapped": len(approved),
             "rows": approved, "errors": errors}
 
@@ -8572,41 +8649,42 @@ async def insurance_mis_adopt_amount(body: MisApproveIn, act=Depends(actor),
             ids.append(eid)
     seen = set()
     lead_ids = set()
-    for eid in ids:
-        if not eid or eid in seen:
-            continue
-        seen.add(eid)
-        try:
-            entry = await db.insurance.find_one({"entryId": eid})
-            if not entry:
-                errors.append({"entryId": eid, "error": "not_found"})
+    async with defer_sheet_writes():
+        for eid in ids:
+            if not eid or eid in seen:
                 continue
-            if str(entry.get("status") or "").startswith("N/A"):
-                errors.append({"entryId": eid, "error": "not_applicable"})
-                continue
-            if not entry.get("misApproved"):
-                errors.append({"entryId": eid, "error": "not_mapped"})
-                continue
-            if _insurance_mis_money(entry.get("misAmount")) <= 0:
-                errors.append({"entryId": eid, "error": "no_mis_amount"})
-                continue
-            updated = await _adopt_mis_expected(entry, act=act)
-            if updated.get("leadId"):
-                lead_ids.add(updated["leadId"])
-            adopted.append({
-                "entryId": eid,
-                "leadId": updated.get("leadId") or "",
-                "previousExpected": ce.num(entry.get("expectedPayout")),
-                "expectedPayout": ce.num(updated.get("expectedPayout")),
-                "misAmount": ce.num(updated.get("misAmount")),
-                "payoutOutstanding": ce.num(updated.get("payoutOutstanding")),
-                "receivedPayout": ce.num(updated.get("receivedPayout")),
-                "status": updated.get("status"),
-                "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
-            })
-        except Exception as exc:
-            errors.append({"entryId": eid, "error": "failed",
-                           "detail": str(exc)[:240]})
+            seen.add(eid)
+            try:
+                entry = await db.insurance.find_one({"entryId": eid})
+                if not entry:
+                    errors.append({"entryId": eid, "error": "not_found"})
+                    continue
+                if str(entry.get("status") or "").startswith("N/A"):
+                    errors.append({"entryId": eid, "error": "not_applicable"})
+                    continue
+                if not entry.get("misApproved"):
+                    errors.append({"entryId": eid, "error": "not_mapped"})
+                    continue
+                if _insurance_mis_money(entry.get("misAmount")) <= 0:
+                    errors.append({"entryId": eid, "error": "no_mis_amount"})
+                    continue
+                updated = await _adopt_mis_expected(entry, act=act)
+                if updated.get("leadId"):
+                    lead_ids.add(updated["leadId"])
+                adopted.append({
+                    "entryId": eid,
+                    "leadId": updated.get("leadId") or "",
+                    "previousExpected": ce.num(entry.get("expectedPayout")),
+                    "expectedPayout": ce.num(updated.get("expectedPayout")),
+                    "misAmount": ce.num(updated.get("misAmount")),
+                    "payoutOutstanding": ce.num(updated.get("payoutOutstanding")),
+                    "receivedPayout": ce.num(updated.get("receivedPayout")),
+                    "status": updated.get("status"),
+                    "dealerInsuranceIncome": ce.insurance_dealer_income(updated),
+                })
+            except Exception as exc:
+                errors.append({"entryId": eid, "error": "failed",
+                               "detail": str(exc)[:240]})
     for lid in lead_ids:
         try:
             await recompute_lead(lid)

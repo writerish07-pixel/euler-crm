@@ -58,6 +58,7 @@ jest.mock("../lib/api", () => ({
   post: jest.fn(() => Promise.resolve({ movedCount: 1, skipped: [] })),
   put: () => Promise.resolve({}),
   apiErrorMessage: (err, fallback) => err?.message || fallback || "err",
+  bulkStallMessage: (err, fallback) => err?.message || fallback || "err",
 }));
 
 jest.mock("../context/AuthContext", () => ({

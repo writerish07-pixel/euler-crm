@@ -96,6 +96,37 @@ function orderBases() {
 
 export const api = axios.create({ timeout: 25000 });
 
+/** Mutations that can touch dozens/hundreds of rows. Never auto-retry: the
+ *  first request may still be running on the server. */
+export const BULK_TIMEOUT_MS = 60000;
+
+export function isBulkMutationPath(url) {
+  const p = String(url || "").split("?")[0];
+  return (
+    p === "/leads/allocate"
+    || p === "/leads/match-executive"
+    || p === "/leads/split/apply-unassigned"
+    || p.indexOf("/leads/import/") === 0
+    || p.indexOf("/insurance/mis/") === 0
+    || p.indexOf("/integrations/gsheets/backfill") === 0
+    || p.indexOf("/integrations/coulson/sync") === 0
+    || p === "/admin/reset-transactions"
+  );
+}
+
+function mutationOpts(url, opts = {}) {
+  const bulk = isBulkMutationPath(url);
+  const retry = opts.retry !== undefined ? opts.retry !== false : !bulk;
+  let timeout = opts.timeout;
+  if (timeout === undefined && bulk) {
+    const p = String(url || "").split("?")[0];
+    timeout = p.indexOf("/leads/import/") === 0 || p.indexOf("/integrations/gsheets/backfill") === 0
+      ? 180000
+      : BULK_TIMEOUT_MS;
+  }
+  return { retry, timeout };
+}
+
 function applyBase(base) {
   api.defaults.baseURL = `${base || ""}/api`;
 }
@@ -165,15 +196,24 @@ async function withFallback(run) {
 }
 
 export const get = (url, params) => withFallback(() => api.get(url, { params }).then((r) => r.data));
-export const post = (url, body) => withFallback(() => api.post(url, body).then((r) => r.data));
-export const put = (url, body) => withFallback(() => api.put(url, body).then((r) => r.data));
+export const post = (url, body, opts = {}) => {
+  const { retry, timeout } = mutationOpts(url, opts);
+  const run = () => api.post(url, body, timeout ? { timeout } : {}).then((r) => r.data);
+  if (!retry) return run();
+  return withFallback(run);
+};
+export const put = (url, body, opts = {}) => {
+  const { retry, timeout } = mutationOpts(url, opts);
+  const run = () => api.put(url, body, timeout ? { timeout } : {}).then((r) => r.data);
+  if (!retry) return run();
+  return withFallback(run);
+};
 export const del = (url) => withFallback(() => api.delete(url).then((r) => r.data));
 
 /** Multipart POST. Let the browser set Content-Type with the boundary — a
  *  hardcoded `multipart/form-data` header has none, and FastAPI then 422s. */
 export const postForm = (url, formData, opts = {}) => {
-  const timeout = opts.timeout;
-  const retry = opts.retry !== false;
+  const { retry, timeout } = mutationOpts(url, opts);
   const run = () => api.post(url, formData, timeout ? { timeout } : {}).then((r) => r.data);
   if (!retry) return run();
   return withFallback(run);
@@ -197,6 +237,13 @@ export function apiErrorMessage(err, fallback = "Request failed") {
     return detail.msg || detail.message || fallback;
   }
   return err?.message || fallback;
+}
+
+export function bulkStallMessage(err, fallback = "Request failed") {
+  if (err && !err.response && isRetryableNetworkError(err)) {
+    return "The server may still be finishing this bulk job. Wait, tap Refresh, and do not send the same action again.";
+  }
+  return apiErrorMessage(err, fallback);
 }
 
 export const uploadFile = (url, file, fields = {}) => {
