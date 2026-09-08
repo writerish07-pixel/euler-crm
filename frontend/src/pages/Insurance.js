@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { Plus, Pencil, Trash2, Banknote, HandCoins, ShieldCheck, UploadCloud } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put, del, apiErrorMessage } from "../lib/api";
+import { get, post, put, del, apiErrorMessage, bulkStallMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -71,7 +71,7 @@ export default function Insurance() {
       const r = await post("/insurance/mis/approve", { entryIds: ids });
       toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped — next: Replace with MIS amount`);
       load();
-    } catch (e) { toast.error(apiErrorMessage(e, "Approve failed")); }
+    } catch (e) { toast.error(bulkStallMessage(e, "Approve failed")); }
   };
 
   const adoptMisAmount = async () => {
@@ -107,7 +107,7 @@ export default function Insurance() {
       setSelected(Object.fromEntries(ids.filter((id) => failed.has(id)).map((id) => [id, true])));
       load();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Could not apply MIS amount — retry the remaining rows"));
+      toast.error(bulkStallMessage(e, "Could not apply MIS amount — wait, then retry only the remaining rows"));
       load();
     }
   };

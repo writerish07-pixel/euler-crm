@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { UploadCloud, Download, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
-import { api, downloadFile, apiErrorMessage } from "../lib/api";
+import { api, downloadFile, post, apiErrorMessage, bulkStallMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { Drawer, Button, Card, Badge, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -70,7 +70,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
     if (!selected.length) return toast.error("Tick the rows to save");
     setBusy(true);
     try {
-      const r = await api.post("/insurance/mis/apply", {
+      const r = await post("/insurance/mis/apply", {
         items: selected.map((row) => ({
           entryId: row.entryId,
           misAmount: row.misAmount,
@@ -78,10 +78,10 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           policyNumber: row.policyNumber,
         })),
       });
-      toast.success(`MIS filled on ${r.data.filled} payout${r.data.filled === 1 ? "" : "s"}`);
+      toast.success(`MIS filled on ${r.filled} payout${r.filled === 1 ? "" : "s"}`);
       onDone();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Could not save MIS"));
+      toast.error(bulkStallMessage(e, "Could not save MIS"));
     } finally { setBusy(false); }
   };
 
@@ -89,7 +89,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
     if (!selected.length) return toast.error("Tick the payouts to approve");
     setBusy(true);
     try {
-      const r = await api.post("/insurance/mis/approve", {
+      const r = await post("/insurance/mis/approve", {
         entryIds: selected.map((row) => row.entryId),
         items: selected.map((row) => ({
           entryId: row.entryId,
@@ -97,10 +97,10 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           reference: row.reference,
         })),
       });
-      toast.success(`${r.data.approved} payout${r.data.approved === 1 ? "" : "s"} marked as mapped. Next on the register: Replace with MIS amount.`);
+      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped. Next on the register: Replace with MIS amount.`);
       onDone();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Approve failed"));
+      toast.error(bulkStallMessage(e, "Approve failed"));
     } finally { setBusy(false); }
   };
 

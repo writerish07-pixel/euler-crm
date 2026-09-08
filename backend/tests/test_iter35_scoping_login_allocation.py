@@ -376,6 +376,29 @@ async def test_the_allocate_route_is_not_swallowed_by_the_lead_id_route(client):
     assert "at least one lead" in r.json()["detail"]
 
 
+@pytest.mark.asyncio
+async def test_bulk_allocate_does_not_wait_on_google_sheets(client, monkeypatch):
+    """A desk reallocating dozens of leads must not sit on Sheets inside the HTTP call."""
+    monkeypatch.setattr(server, "_schedule_sheet_syncs", lambda *a, **k: None)
+
+    async def boom(*_a, **_k):
+        raise AssertionError("gsheets.sync must not run during allocate")
+
+    monkeypatch.setattr(server.gsheets, "sync", boom)
+    a = await make_lead(client, "NoSheet A", executive="")
+    b = await make_lead(client, "NoSheet B", executive="Sanjay")
+    r = await client.post("/api/leads/allocate",
+                          json={"leadIds": [a, b], "executive": "Amit"})
+    assert r.status_code == 200, r.text
+    assert r.json()["movedCount"] == 2
+    assert (await server.db.leads.find_one({"leadId": a}))["executive"] == "Amit"
+    assert (await server.db.leads.find_one({"leadId": b}))["executive"] == "Amit"
+    pending = await server.db.sheet_sync_log.find(
+        {"entityType": "leads", "entityId": {"$in": [a, b]}}).to_list(10)
+    assert len(pending) == 2
+    assert all(row.get("status") == "PENDING" for row in pending)
+
+
 # ======================================== the morning template
 def test_the_morning_report_is_no_longer_exec_day_ahead():
     """It was Marketing all along — it just spent the allowance before the EOD

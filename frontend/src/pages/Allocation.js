@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { UserCheck, Users, AlertTriangle, RefreshCcw, Search, Percent } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put, apiErrorMessage } from "../lib/api";
+import { get, post, put, apiErrorMessage, bulkStallMessage } from "../lib/api";
+import { postInChunks } from "../lib/bulk";
 import { fmtDate } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, StatCard, Table, Badge, Button, Select, Input } from "../components/ui";
@@ -84,15 +85,22 @@ export default function Allocation() {
     if (!chosen.length) return toast.error("Select at least one lead");
     setBusy(true);
     try {
-      const r = await post("/leads/allocate", { leadIds: chosen, executive: target });
+      const r = await postInChunks("/leads/allocate", {
+        items: chosen,
+        itemsKey: "leadIds",
+        extra: { executive: target },
+        onProgress: ({ done, total }) => {
+          if (total > 50) toast.loading(`${reallocating ? "Reallocating" : "Allocating"} ${done} / ${total}…`, { id: "alloc-bulk" });
+        },
+      });
       const skipped = (r.skipped || []).length;
       const verb = reallocating ? "reallocated" : "allocated";
       toast.success(`${r.movedCount} lead${r.movedCount === 1 ? "" : "s"} ${verb} to ${target}`
-        + (skipped ? ` · ${skipped} skipped` : ""));
+        + (skipped ? ` · ${skipped} skipped` : ""), { id: "alloc-bulk" });
       setPicked({});
       load();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Allocation failed"));
+      toast.error(bulkStallMessage(e, "Allocation failed"));
     } finally { setBusy(false); }
   };
 
@@ -137,7 +145,7 @@ export default function Allocation() {
       setFilter("all");
       load();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Could not apply the split to unassigned leads"));
+      toast.error(bulkStallMessage(e, "Could not apply the split to unassigned leads"));
     } finally { setSplitBusy(false); }
   };
 
@@ -150,7 +158,7 @@ export default function Allocation() {
       toast.success(`${r.movedCount} lead${r.movedCount === 1 ? "" : "s"} moved to ${to}`);
       load();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Could not match that executive"));
+      toast.error(bulkStallMessage(e, "Could not match that executive"));
     } finally { setMatchBusy(""); }
   };
 

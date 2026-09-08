@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, postForm } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, postForm, post, isBulkMutationPath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -85,5 +85,30 @@ describe("postForm", () => {
     const spy = jest.spyOn(api, "post").mockRejectedValue(err);
     await expect(postForm("/leads/import/commit", {}, { retry: false })).rejects.toBe(err);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("bulk mutations", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  test("allocate and import are bulk paths", () => {
+    expect(isBulkMutationPath("/leads/allocate")).toBe(true);
+    expect(isBulkMutationPath("/leads/import/commit")).toBe(true);
+    expect(isBulkMutationPath("/insurance/mis/apply")).toBe(true);
+    expect(isBulkMutationPath("/leads")).toBe(false);
+  });
+
+  test("allocate does not retry a dropped connection", async () => {
+    const err = Object.assign(new Error("Network Error"), { code: "ERR_NETWORK" });
+    const spy = jest.spyOn(api, "post").mockRejectedValue(err);
+    await expect(post("/leads/allocate", { leadIds: ["L1"], executive: "Amit" })).rejects.toBe(err);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  test("a dropped bulk call tells the desk not to tap again", () => {
+    expect(bulkStallMessage({ message: "Network Error", code: "ERR_NETWORK" }))
+      .toMatch(/still be finishing/i);
   });
 });
