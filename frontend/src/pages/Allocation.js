@@ -7,12 +7,18 @@ import { useAuth } from "../context/AuthContext";
 import { PageHeader, Card, StatCard, Table, Badge, Button, Select, Input } from "../components/ui";
 import CallLink from "../components/CallLink";
 
+const STATUS_FILTERS = [
+  "all", "New", "Contacted", "Follow-up", "In Progress", "Booked",
+  "Finance Process", "Delivered", "Close Won", "Lost",
+];
+
 /**
  * Allocate leads to executives.
  *
  * This page matters more since executives were scoped to their own leads: a lead
  * with nobody on it is now invisible to every executive, so it would sit unworked
- * and unnoticed. "Unassigned" is therefore the default filter.
+ * and unnoticed. "Unassigned" is therefore the default filter. Assigned leads can
+ * still be ticked and moved to someone else (reallocate) without losing history.
  */
 export default function Allocation() {
   const { canEditLeadSplit } = useAuth();
@@ -20,6 +26,7 @@ export default function Allocation() {
   const [leads, setLeads] = useState([]);
   const [execs, setExecs] = useState([]);
   const [filter, setFilter] = useState("unassigned");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [q, setQ] = useState("");
   const [picked, setPicked] = useState({});
   const [target, setTarget] = useState("");
@@ -49,15 +56,20 @@ export default function Allocation() {
     let out = leads.filter((l) => (l.accountStatus || "Active") === "Active");
     if (filter === "unassigned") out = out.filter((l) => !String(l.executive || "").trim());
     else if (filter !== "all") out = out.filter((l) => l.executive === filter);
+    if (statusFilter !== "all") {
+      out = out.filter((l) => String(l.currentStatus || "") === statusFilter);
+    }
     const needle = q.trim().toLowerCase();
     if (needle) {
       out = out.filter((l) => [l.customerName, l.leadId, l.mobile, l.interestedModel]
         .some((v) => String(v || "").toLowerCase().includes(needle)));
     }
     return out;
-  }, [leads, filter, q]);
+  }, [leads, filter, statusFilter, q]);
 
   const chosen = Object.keys(picked).filter((k) => picked[k]);
+  const selectedRows = rows.filter((r) => picked[r.leadId]);
+  const reallocating = selectedRows.some((r) => String(r.executive || "").trim());
   const allShown = rows.length > 0 && rows.every((r) => picked[r.leadId]);
 
   const toggleAll = () => {
@@ -74,7 +86,8 @@ export default function Allocation() {
     try {
       const r = await post("/leads/allocate", { leadIds: chosen, executive: target });
       const skipped = (r.skipped || []).length;
-      toast.success(`${r.movedCount} lead${r.movedCount === 1 ? "" : "s"} allocated to ${target}`
+      const verb = reallocating ? "reallocated" : "allocated";
+      toast.success(`${r.movedCount} lead${r.movedCount === 1 ? "" : "s"} ${verb} to ${target}`
         + (skipped ? ` · ${skipped} skipped` : ""));
       setPicked({});
       load();
@@ -145,7 +158,7 @@ export default function Allocation() {
     <div data-testid="allocation-page">
       <PageHeader
         title="Lead Allocation"
-        subtitle="Who is working which customer — and which leads nobody has yet"
+        subtitle="Assign unassigned leads, or tick assigned ones and reallocate them to another executive"
         actions={<Button variant="secondary" onClick={load}><RefreshCcw size={15} /> Refresh</Button>} />
 
       {summary && (
@@ -295,6 +308,14 @@ export default function Allocation() {
               {execs.map((n) => <option key={n} value={n}>{n}</option>)}
             </Select>
           </div>
+          <div className="min-w-[10rem]">
+            <label className="block text-xs text-ink-faint mb-1">Status</label>
+            <Select data-testid="alloc-status" value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPicked({}); }}>
+              {STATUS_FILTERS.map((s) => (
+                <option key={s} value={s}>{s === "all" ? "All statuses" : s}</option>
+              ))}
+            </Select>
+          </div>
           <div className="relative flex-1 min-w-[12rem] max-w-sm">
             <label className="block text-xs text-ink-faint mb-1">Search</label>
             <Search size={14} className="absolute left-2.5 bottom-2.5 text-ink-faint" />
@@ -302,7 +323,7 @@ export default function Allocation() {
               placeholder="Name, mobile, lead ID" className="pl-8" />
           </div>
           <div className="min-w-[12rem]">
-            <label className="block text-xs text-ink-faint mb-1">Allocate to</label>
+            <label className="block text-xs text-ink-faint mb-1">{reallocating ? "Reallocate to" : "Allocate to"}</label>
             <Select data-testid="alloc-target" value={target} onChange={(e) => setTarget(e.target.value)}>
               <option value="">Select executive…</option>
               {execs.map((n) => <option key={n}>{n}</option>)}
@@ -310,9 +331,15 @@ export default function Allocation() {
           </div>
           <Button data-testid="alloc-btn" onClick={allocate} disabled={busy || !chosen.length || !target}>
             <UserCheck size={15} />
-            {busy ? "Allocating…" : `Allocate ${chosen.length || ""}`.trim()}
+            {busy
+              ? (reallocating ? "Reallocating…" : "Allocating…")
+              : `${reallocating ? "Reallocate" : "Allocate"}${chosen.length ? ` ${chosen.length}` : ""}`}
           </Button>
         </div>
+        <p className="text-xs text-ink-soft mt-3" data-testid="alloc-hint">
+          Tick one or more rows, pick an executive, then Allocate (new) or Reallocate (already assigned).
+          Status filter applies to the list you are selecting from.
+        </p>
       </Card>
 
       <Table rows={rows} empty="No leads match this filter"
@@ -347,7 +374,7 @@ export default function Allocation() {
         ]} />
 
       <p className="text-xs text-ink-faint mt-3">
-        Reallocating moves who works the lead from now on. It does not move history —
+        Reallocating selected leads moves who works them from now on. It does not move history —
         a booking or cancellation stays credited to whoever held the lead at the time.
       </p>
     </div>
