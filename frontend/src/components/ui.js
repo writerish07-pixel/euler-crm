@@ -134,7 +134,9 @@ export function Table({ columns, rows, onRowClick, empty = "No records", rowKey,
           <tbody>
             {list.length === 0 && (
               <tr>
-                <td colSpan={columns.length} className="px-4 py-12 text-center text-sm text-ink-faint">{empty}</td>
+                <td colSpan={columns.length} className="px-4 py-12 text-center text-sm text-ink-faint whitespace-normal">
+                  <span className="sticky left-4 right-4 inline-block">{empty}</span>
+                </td>
               </tr>
             )}
             {list.map((row, i) => (
