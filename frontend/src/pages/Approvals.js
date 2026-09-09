@@ -124,6 +124,11 @@ export default function Approvals() {
           { key: "deal", label: "Deal format", render: (r) => (
             <span className="font-mono">{inr(r.budget || r.dealAmount)}</span>
           ) },
+          { key: "oemExtra", label: "OEM Extra Support", render: (r) => (
+            <span className="font-mono" data-testid={`oem-extra-${r.requestId}`}>
+              {Number(r.oemExtraSupportReceived) > 0 ? inr(r.oemExtraSupportReceived) : "—"}
+            </span>
+          ) },
           { key: "kyc", label: "KYC", render: (r) => (
             <div>
               <RequestKycPreview documents={r.documents || []} />

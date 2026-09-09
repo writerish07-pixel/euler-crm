@@ -15,7 +15,8 @@ jest.mock("../lib/api", () => ({
     }
     return Promise.resolve({});
   },
-  put: () => Promise.resolve({}),
+  put: jest.fn(() => Promise.resolve({})),
+  apiErrorMessage: (e, fallback) => fallback,
 }));
 jest.mock("./LeadDocuments", () => ({
   LocalKycBlock: () => <div data-testid="kyc-block" />,
@@ -23,6 +24,7 @@ jest.mock("./LeadDocuments", () => ({
   uploadKycFiles: () => Promise.resolve(),
 }));
 
+import { put } from "../lib/api";
 import CompleteFormatDrawer from "./CompleteFormatDrawer";
 
 test("approval drawer has model and variant selects above Deal format", async () => {
@@ -47,6 +49,44 @@ test("approval drawer has model and variant selects above Deal format", async ()
   const labels = Array.from(drawer.querySelectorAll("label")).map((el) => el.textContent);
   expect(labels.some((t) => /Model/.test(t))).toBe(true);
   expect(labels.some((t) => /Variant/.test(t))).toBe(true);
+  expect(labels.some((t) => /OEM Extra Support/.test(t))).toBe(true);
+  expect(drawer.querySelector('[data-testid="approval-oem-extra"]')).toBeTruthy();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("approval drawer prefills OEM extra support and saves it on the request", async () => {
+  put.mockClear();
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <CompleteFormatDrawer
+        row={{
+          requestId: "LR1", customerName: "Jitendra", existingLeadId: "LD1",
+          mobile: "9636959028", interestedModel: "Turbo Max", variant: "Maxx (PV)",
+          budget: 185000, oemExtraSupportReceived: 7000,
+        }}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
+    );
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  const extra = document.querySelector('[data-testid="approval-oem-extra"]');
+  expect(extra).toBeTruthy();
+  expect(extra.value).toBe("7000");
+  await act(async () => {
+    document.querySelector('[data-testid="save-approval-format-btn"]').click();
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(put).toHaveBeenCalledWith("/lead-requests/LR1", expect.objectContaining({
+    budget: 185000,
+    interestedModel: "Turbo Max",
+    variant: "Maxx (PV)",
+    oemExtraSupportReceived: 7000,
+  }));
   await act(async () => { root.unmount(); });
   host.remove();
 });

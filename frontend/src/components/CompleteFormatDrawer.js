@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { get, put, apiErrorMessage } from "../lib/api";
-import { Drawer, Button, Field, Select } from "./ui";
+import { Drawer, Button, Field, Input, Select } from "./ui";
 import { LocalKycBlock, kycReady, uploadKycFiles } from "./LeadDocuments";
 import DealFormatCard from "./DealFormatCard";
 import CallLink from "./CallLink";
@@ -14,6 +14,8 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
   const [dealLoading, setDealLoading] = useState(false);
   const [kyc, setKyc] = useState({});
   const [gstin, setGstin] = useState(row.gstin || "");
+  const [oemExtra, setOemExtra] = useState(
+    Number(row.oemExtraSupportReceived) > 0 ? Number(row.oemExtraSupportReceived) : "");
   const [busy, setBusy] = useState(false);
   const [masters, setMasters] = useState(null);
   const [variants, setVariants] = useState([]);
@@ -59,6 +61,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     try {
       await put(`/lead-requests/${row.requestId}`, {
         budget: Number(budget), gstin, interestedModel: model, variant,
+        oemExtraSupportReceived: Number(oemExtra) || 0,
       });
       await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, kyc);
       toast.success("Sent for approval");
@@ -120,6 +123,13 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           loading={dealLoading}
           missingPrice={!model || !variant}
         />
+        <Field label="OEM Extra Support">
+          <Input data-testid="approval-oem-extra" type="number" min="0" step="1"
+            value={oemExtra} onChange={(e) => setOemExtra(e.target.value)} />
+          <p className="text-[11px] text-ink-faint mt-1">
+            Filled if extra support already exists against this lead. On Approve it becomes Scheme · OEM Extra Support Received.
+          </p>
+        </Field>
         <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} />
       </div>
     </Drawer>
