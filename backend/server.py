@@ -1095,6 +1095,7 @@ class LeadIn(BaseModel):
     createdDate: Optional[str] = None
     customerType: str = "Individual"
     gstin: str = ""
+    oemExtraSupportReceived: float = 0
 
 
 class LeadUpdateIn(BaseModel):
@@ -3167,6 +3168,8 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
         "dsaDiscount": 0, "additionalDiscount": 0, "exShowroom": 0, "rto": 0, "insuranceAmount": 0,
         "accessoriesAmount": 0, "handlingCharges": 0, "trc": 0, "fastag": 0, "extendedWarranty": 0,
         "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(),
+        "oemExtraSupportReceived": ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived")))),
+        "oemExtraSupportPassed": 0,
     }
     await db.leads.insert_one(doc)
     _act_doc = {
@@ -3179,10 +3182,11 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     await sheet_sync("activities", _act_doc)
     await sheet_sync("leads", doc)
     cx = ce.round2(ce.num(payload.get("budget")))
+    extra = ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived"))))
     if cx > 0:
         return await _apply_quoted_deal(
             lead_id, payload.get("interestedModel"), payload.get("variant"), cx,
-            created_date)
+            created_date, oem_extra_received=extra if extra > 0 else None)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -3282,7 +3286,73 @@ def _request_out(doc):
     row["existingLeadId"] = row.get("existingLeadId") or ""
     row["source"] = row.get("source") or ""
     row["askedForApproval"] = bool(row.get("askedForApproval"))
+    row["oemExtraSupportReceived"] = ce.round2(ce.num(
+        payload.get("oemExtraSupportReceived") or row.get("oemExtraSupportReceived") or 0))
     return row
+
+
+def _oem_extra_amount_from_docs(*docs):
+    """Read OEM Extra Support from a request payload, live lead, or extra-support claim.
+
+    Lead / request docs only contribute oemExtraSupportReceived. Claim amount
+    fields are used only on OEM Extra Support claim rows — never from a lead's
+    other money columns.
+    """
+    amt = 0.0
+    for src in docs:
+        if not src:
+            continue
+        amt = max(amt, ce.num(src.get("oemExtraSupportReceived")))
+        key = str(src.get("componentKey") or "")
+        if key == ce.OEM_EXTRA_SUPPORT_KEY or str(src.get("component") or "") == "OEM Extra Support":
+            amt = max(amt, ce.num(src.get("claimAmount")), ce.num(src.get("eligibleClaim")))
+    return ce.round2(max(0.0, amt))
+
+
+async def _oem_extra_against_lead(lead=None, payload=None):
+    """Best known OEM Extra Support for a lead / approval payload.
+
+    Approval is early — use what is already on the request, the register lead,
+    or an OEM Extra Support claim against that lead. Do not invent an amount.
+    """
+    amt = _oem_extra_amount_from_docs(payload, lead)
+    lid = str((lead or {}).get("leadId") or "").strip()
+    if lid:
+        claim = await db.claims.find_one({
+            "leadId": lid,
+            "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+            "claimStatus": {"$nin": ["Dropped", "Cancelled"]},
+        })
+        amt = max(amt, _oem_extra_amount_from_docs(claim))
+    return amt
+
+
+async def _attach_oem_extra_to_requests(rows):
+    """Fill OEM Extra Support on approval rows when the lead already has it."""
+    need = [r.get("existingLeadId") for r in rows if r.get("existingLeadId")]
+    need = [x for x in need if x]
+    if not need:
+        return rows
+    leads = {l.get("leadId"): l for l in await db.leads.find(
+        {"leadId": {"$in": need}}).to_list(len(need) + 10)}
+    by_claim = {}
+    for c in await db.claims.find({
+        "leadId": {"$in": need},
+        "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+        "claimStatus": {"$nin": ["Dropped", "Cancelled"]},
+    }).to_list(len(need) + 50):
+        lid = c.get("leadId")
+        by_claim[lid] = max(ce.num(by_claim.get(lid)), _oem_extra_amount_from_docs(c))
+    for r in rows:
+        lid = r.get("existingLeadId")
+        if not lid:
+            continue
+        r["oemExtraSupportReceived"] = ce.round2(max(
+            ce.num(r.get("oemExtraSupportReceived")),
+            _oem_extra_amount_from_docs(leads.get(lid)),
+            ce.num(by_claim.get(lid)),
+        ))
+    return rows
 
 
 def _approver_pending_query() -> dict:
@@ -3344,7 +3414,7 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
         row["kycMissing"] = missing
         row["kycComplete"] = not missing
         out.append(row)
-    return out
+    return await _attach_oem_extra_to_requests(out)
 
 
 @api.post("/lead-requests/{request_id}/approve")
@@ -3387,20 +3457,29 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
                 raise HTTPException(404, f"Lead {existing_id} is no longer on the register.")
             if ce.num(payload.get("budget")) <= 0:
                 raise HTTPException(422, "Enter Cx Demand on the deal format before Approve.")
+            extra = await _oem_extra_against_lead(live, payload)
             exec_name = str(payload.get("executive") or live.get("executive") or "").strip()
             await db.leads.update_one({"leadId": existing_id}, {"$set": {
                 "assignmentPending": False,
                 "executive": exec_name,
                 "lastUpdated": now_iso(),
                 "lastUpdatedBy": user.get("email") or "",
+                **({"oemExtraSupportReceived": extra} if extra > 0 else {}),
             }})
             await _apply_quoted_deal(
                 existing_id, payload.get("interestedModel"), payload.get("variant"),
-                payload.get("budget"), payload.get("createdDate"))
+                payload.get("budget"), payload.get("createdDate"),
+                oem_extra_received=extra if extra > 0 else None)
             lead = clean(await db.leads.find_one({"leadId": existing_id}))
         else:
             body = LeadIn(**payload)
             lead = await _insert_live_lead(body, source_note="Lead created after GM / Owner approval")
+            extra = await _oem_extra_against_lead(lead, payload)
+            if extra > 0:
+                await db.leads.update_one({"leadId": lead["leadId"]}, {
+                    "$set": {"oemExtraSupportReceived": extra}})
+                await recompute_lead(lead["leadId"])
+                lead = clean(await db.leads.find_one({"leadId": lead["leadId"]}))
     except HTTPException:
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
@@ -3628,6 +3707,7 @@ class LeadRequestUpdateIn(BaseModel):
     remarks: Optional[str] = None
     customerType: Optional[str] = None
     gstin: Optional[str] = None
+    oemExtraSupportReceived: Optional[float] = None
 
 
 async def _request_public(req, user):
@@ -3646,6 +3726,10 @@ async def _request_public(req, user):
         customer_type=row.get("customerType"), gstin=row.get("gstin"))
     row["kycMissing"] = missing
     row["kycComplete"] = not missing
+    if ce.num(row.get("oemExtraSupportReceived")) <= 0:
+        existing_id = str(row.get("existingLeadId") or "").strip()
+        lead = await db.leads.find_one({"leadId": existing_id}) if existing_id else None
+        row["oemExtraSupportReceived"] = await _oem_extra_against_lead(lead, req.get("payload"))
     return row
 
 
@@ -3684,6 +3768,8 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
     for k in ("interestedModel", "variant", "remarks", "customerType", "gstin"):
         if k in patch and patch[k] is not None:
             payload[k] = patch[k]
+    if "oemExtraSupportReceived" in patch and patch["oemExtraSupportReceived"] is not None:
+        payload["oemExtraSupportReceived"] = ce.round2(max(0.0, ce.num(patch["oemExtraSupportReceived"])))
     if payload.get("customerType"):
         payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
     deal_amount = ce.round2(ce.num(payload.get("budget")))
@@ -3745,6 +3831,8 @@ async def lead_approval_request(lead_id: str, user=Depends(current_user)):
         row["interestedModel"] = lead.get("interestedModel") or ""
     if not str(row.get("variant") or "").strip():
         row["variant"] = lead.get("variant") or ""
+    if ce.num(row.get("oemExtraSupportReceived")) <= 0:
+        row["oemExtraSupportReceived"] = await _oem_extra_against_lead(lead, req.get("payload"))
     return row
 
 
@@ -4229,7 +4317,8 @@ async def _deal_format_for(model, variant, cx_demand, on=None):
     return deal
 
 
-async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None):
+async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None,
+                             oem_extra_received=None):
     """Persist the scheme-free deal card and lock customer payable to Cx Demand."""
     cx = ce.round2(ce.num(cx_demand))
     deal = await _deal_format_for(model, variant, cx, on)
@@ -4240,6 +4329,12 @@ async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None):
         "useDealPrice": cx > 0,
         "lastUpdated": now_iso(),
     }
+    if oem_extra_received is not None:
+        recv = ce.round2(max(0.0, ce.num(oem_extra_received)))
+        live = await db.leads.find_one({"leadId": lead_id}) or {}
+        passed = ce.round2(min(ce.num(live.get("oemExtraSupportPassed")), recv))
+        patch["oemExtraSupportReceived"] = recv
+        patch["oemExtraSupportPassed"] = passed
     if deal.get("priceFound"):
         row = await _price_master_row(model, variant)
         if row:

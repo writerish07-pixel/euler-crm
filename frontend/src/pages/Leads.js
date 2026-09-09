@@ -181,6 +181,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     customerName: "", mobile: "", city: "", leadSource: "Walk-in", interestedModel: "",
     variant: "", executive: isExecutive ? (user?.name || "") : "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
     createdDate: todayISO(), nextFollowupDate: "", customerType: "Individual", gstin: "",
+    oemExtraSupportReceived: "",
   });
   const [kyc, setKyc] = useState({});
   const [busy, setBusy] = useState(false);
@@ -217,7 +218,11 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     if (kycErr) return toast.error(kycErr);
     setBusy(true);
     try {
-      const lead = await post("/leads", { ...form, budget: Number(form.budget) });
+      const lead = await post("/leads", {
+        ...form,
+        budget: Number(form.budget),
+        oemExtraSupportReceived: Number(form.oemExtraSupportReceived) || 0,
+      });
       try {
         if (lead.pending && lead.requestId) {
           await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, kyc);
@@ -272,6 +277,12 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
             missingPrice={!form.interestedModel || !form.variant}
           />
         </div>
+        {isExecutive && (
+          <Field label="OEM Extra Support">
+            <Input data-testid="lead-oem-extra" type="number" min="0" step="1"
+              value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} />
+          </Field>
+        )}
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} />
       </div>

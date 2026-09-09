@@ -38,6 +38,7 @@ async def client():
     await server.db.leads.delete_many({})
     await server.db.lead_requests.delete_many({})
     await server.db.activities.delete_many({})
+    await server.db.claims.delete_many({})
     await server.db.push_subscriptions.delete_many({})
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -240,3 +241,117 @@ async def test_notify_never_breaks_submit(exec_client, monkeypatch):
     assert r.status_code == 200, r.text
     assert r.json()["pending"] is True
     assert await server.db.leads.count_documents({"customerName": "Push Fail"}) == 0
+
+
+@pytest.mark.asyncio
+async def test_approval_oem_extra_support_lands_on_scheme(exec_client, client):
+    r = await exec_client.post("/api/leads", json=_enquiry(
+        "Extra Cust", oemExtraSupportReceived=7000))
+    assert r.status_code == 200, r.text
+    rid = r.json()["requestId"]
+    waiting = (await exec_client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in waiting if x["requestId"] == rid)
+    assert row["oemExtraSupportReceived"] == 7000
+
+    upd = await exec_client.put(f"/api/lead-requests/{rid}", json={
+        "budget": 185000, "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "oemExtraSupportReceived": 8500,
+    })
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["oemExtraSupportReceived"] == 8500
+
+    await attach_kyc(exec_client, rid)
+    ap = await client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 200, ap.text
+    lid = ap.json()["leadId"]
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead["oemExtraSupportReceived"] == 8500
+    assert server.ce.num(lead.get("oemExtraSupportPassed")) == 0
+    got = (await client.get(f"/api/leads/{lid}")).json()
+    assert got["oemExtraSupportReceived"] == 8500
+
+
+@pytest.mark.asyncio
+async def test_gm_approve_copies_lead_oem_extra_onto_scheme(gm_client, client):
+    live = await client.post("/api/leads", json=_enquiry(
+        "Already Extra", executive="Amit", oemExtraSupportReceived=5000))
+    assert live.status_code == 200, live.text
+    lid = live.json()["leadId"]
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert server.ce.num(lead.get("oemExtraSupportReceived")) == 5000
+
+    rid = "LR26OEMX1"
+    await server.db.lead_requests.insert_one({
+        "requestId": rid,
+        "status": "pending",
+        "askedForApproval": True,
+        "existingLeadId": lid,
+        "payload": {
+            "customerName": "Already Extra",
+            "mobile": lead["mobile"],
+            "interestedModel": "Turbo Max",
+            "variant": "Maxx (PV)",
+            "executive": "Amit",
+            "budget": 185000,
+        },
+        "dealAmount": 185000,
+        "createdAt": "2026-09-09T00:00:00+00:00",
+        "submittedBy": "executive@euler.com",
+        "submittedByName": "Executive",
+    })
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == rid)
+    assert row["oemExtraSupportReceived"] == 5000
+    opened = await client.get(f"/api/lead-requests/{rid}")
+    assert opened.json()["oemExtraSupportReceived"] == 5000
+
+    await attach_kyc(client, rid)
+    ap = await gm_client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 200, ap.text
+    assert ap.json()["leadId"] == lid
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["oemExtraSupportReceived"] == 5000
+
+
+@pytest.mark.asyncio
+async def test_approval_autofills_oem_extra_from_existing_claim(client):
+    live = await client.post("/api/leads", json=_enquiry("Claim Extra", executive="Amit"))
+    assert live.status_code == 200, live.text
+    lid = live.json()["leadId"]
+    await server.db.claims.insert_one({
+        "claimId": f"CLM-{lid}-oemExtraSupport",
+        "leadId": lid,
+        "componentKey": "oemExtraSupport",
+        "component": "OEM Extra Support",
+        "claimAmount": 4000,
+        "eligibleClaim": 4000,
+        "claimStatus": "Pending",
+    })
+    rid = "LR26OEMX2"
+    await server.db.lead_requests.insert_one({
+        "requestId": rid,
+        "status": "pending",
+        "askedForApproval": True,
+        "existingLeadId": lid,
+        "payload": {
+            "customerName": "Claim Extra",
+            "mobile": (await server.db.leads.find_one({"leadId": lid}))["mobile"],
+            "interestedModel": "Turbo Max",
+            "variant": "Maxx (PV)",
+            "executive": "Amit",
+            "budget": 185000,
+        },
+        "dealAmount": 185000,
+        "createdAt": "2026-09-09T00:00:00+00:00",
+        "submittedBy": "executive@euler.com",
+        "submittedByName": "Executive",
+    })
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == rid)
+    assert row["oemExtraSupportReceived"] == 4000
+
+    await attach_kyc(client, rid)
+    ap = await client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 200, ap.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["oemExtraSupportReceived"] == 4000
