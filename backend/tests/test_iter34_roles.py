@@ -293,8 +293,10 @@ async def test_an_executive_still_feeds_leads_and_booking_amount(client, exec_cl
     assert ap.status_code == 200, ap.text
     lid = ap.json()["leadId"]
     assert lid.startswith("LD26")
+    acts = (await exec_client.get(f"/api/leads/{lid}/360")).json()["actions"]
+    assert acts["canEditLead"] is False
     assert (await exec_client.put(f"/api/leads/{lid}",
-                                  json={"remarks": "called, interested"})).status_code == 200
+                                  json={"remarks": "called, interested"})).status_code == 403
     r = await exec_client.post(f"/api/leads/{lid}/convert-booking",
                                json={"bookingAmount": 10000, "executive": "Executive"})
     assert r.status_code == 200, r.text
@@ -411,6 +413,7 @@ async def test_an_executive_hands_over_and_a_tl_completes_it(client, exec_client
     lid = await make_lead(client, "ITER34 Handover", executive="Executive")
     before = (await exec_client.get(f"/api/leads/{lid}/360")).json()["actions"]
     assert before["canBook"] is True
+    assert before["canEditLead"] is False
     assert before["execPipelineOnly"] is True
     assert before["canPrice"] is False
     assert before["canScheme"] is False
@@ -453,6 +456,31 @@ async def test_an_executive_hands_over_and_a_tl_completes_it(client, exec_client
     doc = await server.db.leads.find_one({"leadId": lid})
     assert server._is_delivered(doc) is True
     assert server.ce.num(doc["customerOutstanding"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_tl_creates_a_lead_under_any_executive(tl):
+    """A TL is not tied to one executive — pick anyone on the floor, attach KYC."""
+    missing = await tl.post("/api/leads", json={
+        "customerName": "ITER34 TL no exec", "mobile": next_mobile(),
+        "interestedModel": TURBO[0], "variant": TURBO[1]})
+    assert missing.status_code == 422, missing.text
+    r = await tl.post("/api/leads", json={
+        "customerName": "ITER34 TL for Sanjay", "mobile": next_mobile(),
+        "interestedModel": TURBO[0], "variant": TURBO[1], "executive": "Sanjay"})
+    assert r.status_code == 200, r.text
+    lid = r.json()["leadId"]
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead["executive"] == "Sanjay"
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        up = await tl.post(
+            f"/api/leads/{lid}/documents",
+            files={"file": ("scan.png", io.BytesIO(b"\x89PNG kyc"), "image/png")},
+            data={"kind": kind},
+        )
+        assert up.status_code == 200, up.text
+    docs = (await tl.get(f"/api/leads/{lid}/documents")).json()
+    assert {d["kind"] for d in docs} >= {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"}
 
 
 @pytest.mark.asyncio

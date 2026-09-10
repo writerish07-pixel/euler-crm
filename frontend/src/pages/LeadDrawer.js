@@ -351,12 +351,12 @@ function KV({ label, value, tone }) {
 }
 
 function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
-  const { isOwner, isSalesGm, isAccounts, isExecutive } = useAuth();
+  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl } = useAuth();
   const booked = !!actions.isBooked;
   const kycKinds = lead.customerType === "B2B"
     ? ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst"]
     : ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"];
-  const canUploadKyc = isOwner || isSalesGm || isExecutive;
+  const canUploadKyc = isOwner || isSalesGm || isTl || isExecutive;
   const canSeeKyc = canUploadKyc || isAccounts;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
