@@ -78,7 +78,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           policyNumber: row.policyNumber,
         })),
       });
-      toast.success(`MIS filled on ${r.filled} payout${r.filled === 1 ? "" : "s"}`);
+      toast.success(`MIS filled on ${r.filled} payout${r.filled === 1 ? "" : "s"} — dealer earnings now use this amount`);
       onDone();
     } catch (e) {
       toast.error(bulkStallMessage(e, "Could not save MIS"));
@@ -97,7 +97,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           reference: row.reference,
         })),
       });
-      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped. Next on the register: Replace with MIS amount.`);
+      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped — dealer earnings now use the MIS amount`);
       onDone();
     } catch (e) {
       toast.error(bulkStallMessage(e, "Approve failed"));

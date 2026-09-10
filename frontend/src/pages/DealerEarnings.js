@@ -57,8 +57,8 @@ export default function DealerEarnings() {
         rows={rows}
       />
       <p className="text-xs text-ink-faint mt-3">
-        Total Earnings = Margin + Scheme Retained + OEM Extra Retained + insurance cash + extras
-        − Dealer-Funded Benefit − unpayable / dropped OEM claims. Insurance income is cash received, not expected. OEM Extra that was dropped or rejected with no refile is out of retained.
+        Total Earnings = Margin + Scheme Retained + OEM Extra Retained + insurance expected + extras
+        − Dealer-Funded Benefit − unpayable / dropped OEM claims. Insurance is the delivery expected payout until an agent MIS is uploaded, which overwrites that amount. OEM Extra that was dropped or rejected with no refile is out of retained.
       </p>
     </div>
   );

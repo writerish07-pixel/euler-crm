@@ -35,16 +35,13 @@ async def client():
         yield c
 
 
-def test_insurance_income_is_cash_only():
+def test_insurance_income_is_expected_until_mis():
     pending = {"expectedPayout": 9310, "receivedPayout": 0, "status": "Pending"}
-    assert ce.insurance_dealer_income(pending) == 0
-    mapped = {"expectedPayout": 9310, "receivedPayout": 0, "status": "Pending",
-              "misApproved": True, "misAmount": 8500}
-    assert ce.insurance_dealer_income(mapped) == 0
-    adopted = {"expectedPayout": 8500, "receivedPayout": 0, "status": "Pending",
-               "misApproved": True, "misAmount": 8500, "misAmountAdopted": True}
-    assert ce.insurance_dealer_income(adopted) == 8500
-    paid = {"expectedPayout": 9310, "receivedPayout": 8500, "status": "Received"}
+    assert ce.insurance_dealer_income(pending) == 9310
+    mapped = {"expectedPayout": 8500, "receivedPayout": 0, "status": "Pending",
+              "misApproved": True, "misAmount": 8500, "misAmountAdopted": True}
+    assert ce.insurance_dealer_income(mapped) == 8500
+    paid = {"expectedPayout": 8500, "receivedPayout": 8500, "status": "Received"}
     assert ce.insurance_dealer_income(paid) == 8500
     assert ce.insurance_dealer_income({"status": "N/A — customer arranged"}) == 0
 
@@ -90,7 +87,7 @@ async def test_mis_approve_maps_without_receiving(client):
     assert doc["misAmount"] == 8000
     assert doc["receivedPayout"] == 0
     assert doc["status"] == "Pending"
-    assert ce.insurance_dealer_income(doc) == 0
+    assert ce.insurance_dealer_income(doc) == 8000
 
 
 @pytest.mark.asyncio

@@ -338,8 +338,8 @@ async def test_same_vehicle_two_agents_two_earnings(client):
     assert eb["expectedPayout"] > ea["expectedPayout"]
     assert eb["expectedPayout"] - ea["expectedPayout"] == ce.round2(
         ea["insuranceAmount"] * 0.03)
-    assert a["dealerInsuranceIncome"] == 0
-    assert b["dealerInsuranceIncome"] == 0
+    assert a["dealerInsuranceIncome"] == ea["expectedPayout"]
+    assert b["dealerInsuranceIncome"] == eb["expectedPayout"]
 
 
 @pytest.mark.asyncio

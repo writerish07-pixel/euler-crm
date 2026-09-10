@@ -69,7 +69,7 @@ export default function Insurance() {
     try {
       const ids = unmappedSelected.map((r) => r.entryId);
       const r = await post("/insurance/mis/approve", { entryIds: ids });
-      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped — next: Replace with MIS amount`);
+      toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped — dealer earnings now use the MIS amount`);
       load();
     } catch (e) { toast.error(bulkStallMessage(e, "Approve failed")); }
   };
