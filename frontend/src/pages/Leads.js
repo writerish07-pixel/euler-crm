@@ -265,8 +265,8 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
           </Select>
         </Field>
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label={isTl || isExecutive ? "Executive *" : "Executive"}>
-          <Select data-testid="lead-executive" value={form.executive} onChange={set("executive")} disabled={isExecutive}>
+        <Field label={isTl ? "Executive *" : "Executive"}>
+          <Select data-testid="lead-executive" value={form.executive} onChange={set("executive")}>
             <option value="">—</option>
             {execOptions.map((s) => <option key={s}>{s}</option>)}
           </Select>
