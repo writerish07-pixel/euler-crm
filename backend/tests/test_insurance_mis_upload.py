@@ -148,17 +148,14 @@ def test_unmatched_and_ambiguous_policy():
     assert out["unmatchedMis"][0]["reason"] == "ambiguous_policy"
 
 
-def test_dealer_income_is_cash_only():
+def test_dealer_income_is_expected_until_mis_overwrites():
     pending = {"expectedPayout": 9310, "receivedPayout": 0, "status": "Pending"}
-    assert ce.insurance_dealer_income(pending) == 0
-    mapped = {"expectedPayout": 9310, "receivedPayout": 0,
-              "status": "Pending", "misApproved": True}
-    assert ce.insurance_dealer_income(mapped) == 0
-    adopted = {"expectedPayout": 8500, "receivedPayout": 0,
-               "status": "Pending", "misApproved": True,
-               "misAmount": 8500, "misAmountAdopted": True}
-    assert ce.insurance_dealer_income(adopted) == 8500
-    received = {"expectedPayout": 9310, "receivedPayout": 8500,
+    assert ce.insurance_dealer_income(pending) == 9310
+    mapped = {"expectedPayout": 8500, "receivedPayout": 0,
+              "status": "Pending", "misApproved": True,
+              "misAmount": 8500, "misAmountAdopted": True}
+    assert ce.insurance_dealer_income(mapped) == 8500
+    received = {"expectedPayout": 8500, "receivedPayout": 8500,
                 "status": "Received", "misApproved": True}
     assert ce.insurance_dealer_income(received) == 8500
     self_arr = {"expectedPayout": 0, "status": "N/A — customer arranged"}
@@ -248,6 +245,8 @@ async def test_apply_fills_mis_without_booking_received(client):
     assert doc["receivedPayout"] == 0
     assert doc["status"] == "Pending"
     assert doc.get("misApproved") is True
+    assert doc["expectedPayout"] == 8100
+    assert doc.get("misAmountAdopted") is True
 
 
 @pytest.mark.asyncio
@@ -273,7 +272,9 @@ async def test_approve_short_payout_closes_and_recasts_earnings(client):
     assert d.status_code == 200, d.text
     entry = await server.db.insurance.find_one({"leadId": lid})
     before = await server.db.leads.find_one({"leadId": lid})
-    assert before["dealerInsuranceIncome"] == 0
+    expected_before = ce.round2(entry["expectedPayout"])
+    assert before["dealerInsuranceIncome"] == expected_before
+    assert expected_before > 0
 
     short = ce.round2(entry["expectedPayout"] - 500)
     ap = await client.post("/api/insurance/mis/approve", json={
@@ -287,17 +288,16 @@ async def test_approve_short_payout_closes_and_recasts_earnings(client):
     assert doc["status"] == "Pending"
     assert doc["receivedPayout"] == 0
     after = await server.db.leads.find_one({"leadId": lid})
-    assert after["dealerInsuranceIncome"] == 0
-    assert after["dealerTotalEarnings"] == before["dealerTotalEarnings"]
+    assert after["dealerInsuranceIncome"] == short
+    assert after["dealerTotalEarnings"] == ce.round2(
+        before["dealerTotalEarnings"] - expected_before + short)
     ad = await client.post("/api/insurance/mis/adopt-amount", json={
         "entryIds": [entry["entryId"]],
     })
     assert ad.status_code == 200, ad.text
-    assert ad.json()["adopted"] == 1
     adopted_lead = await server.db.leads.find_one({"leadId": lid})
     assert adopted_lead["dealerInsuranceIncome"] == short
-    assert adopted_lead["dealerTotalEarnings"] == ce.round2(
-        before["dealerTotalEarnings"] + short)
+    assert adopted_lead["dealerTotalEarnings"] == after["dealerTotalEarnings"]
     rec = await client.post(f"/api/insurance/{entry['entryId']}/receipt", json={
         "amount": short, "date": "2026-09-10", "reference": "BANK-1"})
     assert rec.status_code == 200, rec.text
@@ -320,6 +320,8 @@ async def test_approve_over_expected_is_allowed(client):
     assert doc["receivedPayout"] == 0
     assert doc["status"] == "Pending"
     assert doc["misApproved"] is True
+    assert doc["expectedPayout"] == over
+    assert ce.insurance_dealer_income(doc) == over
 
 
 @pytest.mark.asyncio
@@ -359,8 +361,9 @@ async def test_adopt_amount_replaces_expected_on_mapped_only(client):
     })
     assert ap.status_code == 200, ap.text
     still_lead = await server.db.insurance.find_one({"entryId": mapped["entryId"]})
-    assert still_lead["expectedPayout"] == lead_expected
+    assert still_lead["expectedPayout"] == 8000
     assert still_lead["misAmount"] == 8000
+    assert still_lead.get("misAmountAdopted") is True
 
     mixed = await client.post("/api/insurance/mis/adopt-amount", json={
         "entryIds": [mapped["entryId"], pending["entryId"]],
@@ -447,7 +450,9 @@ async def test_adopt_skips_unmapped_and_continues_after_failure(client, monkeypa
     assert saved["misAmountAdopted"] is True
     assert saved["expectedPayout"] == 3100
     stuck = await server.db.insurance.find_one({"entryId": boom["entryId"]})
-    assert not stuck.get("misAmountAdopted")
+    # Mapping already overwrote expected. A failed later adopt must not clear it.
+    assert stuck.get("misAmountAdopted") is True
+    assert stuck["expectedPayout"] == 3200
 
     await client.post("/api/insurance/mis/approve", json={
         "items": [{"entryId": e["entryId"], "misAmount": "3,000"}],
@@ -463,3 +468,57 @@ async def test_adopt_skips_unmapped_and_continues_after_failure(client, monkeypa
     rec = await server.db.insurance.find_one({"entryId": e["entryId"]})
     assert rec["expectedPayout"] == 3000
     assert ce.insurance_dealer_income(rec) == 3000
+
+
+@pytest.mark.asyncio
+async def test_dealer_earnings_uses_live_expected_until_mis(client):
+    """Delivered leads show slab expected even if lead.dealerInsuranceIncome is stale 0.
+
+    MIS approve overwrites expected and recasts the Dealer Earnings total.
+    """
+    r = await client.post("/api/leads", json={
+        "customerName": "Stale Ins", "mobile": "9000099993",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    lid = r.json()["leadId"]
+    ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    await client.put(f"/api/leads/{lid}/price-structure", json=ps)
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+    lead = await server.db.leads.find_one({"leadId": lid})
+    await client.post(f"/api/leads/{lid}/payments",
+                      json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
+    agents = (await client.get("/api/insurance-agents")).json()
+    aid = agents[0]["agentId"]
+    d = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
+        "insurerName": "ICICI Lombard", "insuranceAgentId": aid,
+        "invoiceNumber": "INV-STALE1", "chassisNumber": "CH-STALE1",
+        "numberPlate": "RJ-STALE1", "delivered": "Yes"})
+    assert d.status_code == 200, d.text
+    entry = await server.db.insurance.find_one({"leadId": lid})
+    expected = ce.round2(entry["expectedPayout"])
+    assert expected > 0
+    fresh = await server.db.leads.find_one({"leadId": lid})
+    assert fresh["dealerInsuranceIncome"] == expected
+    original_total = ce.round2(fresh["dealerTotalEarnings"])
+
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"dealerInsuranceIncome": 0}})
+    de = (await client.get("/api/dealer-earnings")).json()
+    row = next(x for x in de["rows"] if x["leadId"] == lid)
+    assert row["dealerInsuranceIncome"] == expected
+    assert row["totalDealerEarnings"] == original_total
+    stale = await server.db.leads.find_one({"leadId": lid})
+    assert stale["dealerInsuranceIncome"] == 0
+
+    short = ce.round2(expected - 400)
+    ap = await client.post("/api/insurance/mis/approve", json={
+        "entryIds": [entry["entryId"]],
+        "items": [{"entryId": entry["entryId"], "misAmount": short}],
+    })
+    assert ap.status_code == 200, ap.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["dealerInsuranceIncome"] == short
+    de2 = (await client.get("/api/dealer-earnings")).json()
+    row2 = next(x for x in de2["rows"] if x["leadId"] == lid)
+    assert row2["dealerInsuranceIncome"] == short
+    assert row2["totalDealerEarnings"] == ce.round2(original_total - expected + short)

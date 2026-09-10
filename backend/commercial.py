@@ -1225,18 +1225,15 @@ def insurance_payout_due_by(basis_date, due_day=INSURANCE_PAYOUT_DUE_DAY,
 def insurance_dealer_income(entry):
     """Dealer earnings from the insurer payout on one register row.
 
-    Mapped-only (agent MIS matched) is ₹0. After the owner replaces the
-    lead expected with the MIS amount, that adopted figure is the earnings
-    amount. Cash receipts still count when MIS has not been adopted.
+    On delivery this is the lead expected (premium × agent slab). After an
+    agent MIS amount is stamped, expected follows that figure and so does
+    this total. Customer-arranged insurance is ₹0.
     """
     if not entry:
         return 0.0
     if str(entry.get("status") or "").startswith("N/A"):
         return 0.0
-    if entry.get("misAmountAdopted"):
-        adopted = max(0.0, num(entry.get("expectedPayout")) or num(entry.get("misAmount")))
-        return round2(adopted)
-    return round2(max(0.0, num(entry.get("receivedPayout"))))
+    return round2(max(0.0, num(entry.get("expectedPayout"))))
 
 
 def claim_is_unpayable(claim):

@@ -797,10 +797,11 @@ async def recompute_lead(lead_id):
         ce.num(lead.get("otherIncome")) +
         ce.num(lead.get("financeIncentive")) + ce.num(lead.get("accessoriesMargin")) +
         ce.num(lead.get("exchangeMargin")) + ce.num(lead.get("campaignIncentive")))
-    # Insurance PAYOUT income — cash booked only. Mapped / Pending is ₹0.
+    # Insurance PAYOUT income — delivery expected (premium × slab). MIS overwrites
+    # expected, so this follows the agent figure after upload. Not cash received.
     # Do NOT subtract scheme customerInsuranceBenefitPassed (customer discount).
-    _ins = await db.insurance.find_one({"leadId": lead_id}) or {}
-    _ins_payout = ce.insurance_dealer_income(_ins)
+    _ins_docs = await db.insurance.find({"leadId": lead_id}).to_list(50)
+    _ins_payout = ce.round2(sum(ce.insurance_dealer_income(e) for e in _ins_docs))
     _dealer_ins_income = ce.round2(max(0.0, _ins_payout))
     _claim_docs = await db.claims.find(
         {"leadId": lead_id, "manual": {"$ne": True}}).to_list(200)
@@ -8520,59 +8521,73 @@ async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[
     }
 
 
+def _mis_overwrite_expected_fields(entry, amount):
+    """Replace lead expected with the agent MIS figure. Does not book cash."""
+    amount = _insurance_mis_money(amount)
+    prior = ce.round2(ce.num(entry.get("expectedPayout")))
+    original = entry.get("leadExpectedPayout")
+    if original in (None, ""):
+        original = prior
+    else:
+        original = ce.round2(ce.num(original))
+    premium = ce.num(entry.get("insuranceAmount"))
+    received = ce.num(entry.get("receivedPayout"))
+    rate = round(amount / premium, 6) if premium > 0 else ce.num(entry.get("payoutRate"))
+    outstanding = ce.round2(max(0.0, amount - received))
+    if amount > 0 and received >= amount - 0.01:
+        status = "Received"
+    elif received > 0.01:
+        status = "Partial"
+    else:
+        status = "Pending"
+    return {
+        "misAmount": amount,
+        "misApproved": True,
+        "misAmountAdopted": True,
+        "misDifference": 0.0,
+        "expectedPayout": amount,
+        "leadExpectedPayout": original,
+        "payoutRate": rate,
+        "payoutRateSource": "mis",
+        "payoutOutstanding": outstanding,
+        "status": status,
+        "lastUpdated": now_iso(),
+    }
+
+
 async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
     amount = _insurance_mis_money(mis_amount)
-    expected = ce.round2(ce.num(entry.get("expectedPayout")))
     patch = {
-        "misAmount": amount,
-        "misDifference": ce.round2(amount - expected),
         "misReference": reference or entry.get("misReference") or "",
-        "misApproved": True,
         "misMappedAt": now_iso(),
-        "lastUpdated": now_iso(),
+        **_mis_overwrite_expected_fields(entry, amount),
     }
     if policy_number and not (entry.get("policyNumber") or "").strip():
         patch["policyNumber"] = policy_number
-    if entry.get("misAmountAdopted"):
-        patch["misDifference"] = 0.0
-        patch["expectedPayout"] = amount
-        premium = ce.num(entry.get("insuranceAmount"))
-        received = ce.num(entry.get("receivedPayout"))
-        patch["payoutRate"] = round(amount / premium, 6) if premium > 0 else ce.num(entry.get("payoutRate"))
-        patch["payoutRateSource"] = "mis"
-        patch["payoutOutstanding"] = ce.round2(max(0.0, amount - received))
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     return patch
 
 
 async def _map_insurance_mis(entry, *, amount, reference="", act=None):
-    """Stamp the agent's MIS figure as mapped. Does not book cash or flip Received."""
+    """Stamp the agent's MIS figure and overwrite expected. Does not book cash."""
     amount = _insurance_mis_money(amount)
-    expected = ce.round2(ce.num(entry.get("expectedPayout")))
     patch = {
-        "misAmount": amount,
-        "misDifference": ce.round2(amount - expected),
-        "misApproved": True,
         "misMappedAt": now_iso(),
-        "lastUpdated": now_iso(),
+        **_mis_overwrite_expected_fields(entry, amount),
     }
     if reference:
         patch["misReference"] = reference
-    if entry.get("misAmountAdopted"):
-        patch["misDifference"] = 0.0
-        patch["expectedPayout"] = amount
-        premium = ce.num(entry.get("insuranceAmount"))
-        received = ce.num(entry.get("receivedPayout"))
-        patch["payoutRate"] = round(amount / premium, 6) if premium > 0 else ce.num(entry.get("payoutRate"))
-        patch["payoutRateSource"] = "mis"
-        patch["payoutOutstanding"] = ce.round2(max(0.0, amount - received))
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     updated = await db.insurance.find_one({"entryId": entry["entryId"]})
     await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
     if act:
         await write_audit(act, "mis-map", "insurance", leadId=entry.get("leadId") or "",
-                          old={"misAmount": entry.get("misAmount")},
-                          new={"misAmount": amount, "misApproved": True})
+                          old={"misAmount": entry.get("misAmount"),
+                               "expectedPayout": entry.get("expectedPayout")},
+                          new={"misAmount": amount, "misApproved": True,
+                               "expectedPayout": amount})
+    if updated.get("leadId"):
+        await recompute_lead(updated["leadId"])
     return updated
 
 
@@ -8622,8 +8637,9 @@ async def _repair_mis_only_received():
 
 @api.post("/insurance/mis/apply")
 async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depends(money_desk_only)):
-    """Stamp MIS amount onto matched entries and mark them mapped. Does not book cash."""
+    """Stamp MIS amount, overwrite expected payout, recast dealer earnings. No cash."""
     filled, errors = 0, []
+    lead_ids = set()
     async with defer_sheet_writes():
         for item in body.items or []:
             eid = str(item.get("entryId") or "").strip()
@@ -8634,6 +8650,10 @@ async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depend
             await _fill_mis_item(entry, item.get("misAmount"),
                                  item.get("reference") or "", item.get("policyNumber") or "")
             filled += 1
+            if entry.get("leadId"):
+                lead_ids.add(entry["leadId"])
+    for lid in lead_ids:
+        await recompute_lead(lid)
     await write_audit(act, "mis-apply", "insurance", new={"filled": filled, "errors": len(errors)})
     return {"ok": True, "filled": filled, "errors": errors}
 
@@ -8693,39 +8713,10 @@ def _insurance_mis_money(v):
 
 
 async def _adopt_mis_expected(entry, act=None):
-    """Replace Euler (lead) expected payout with the mapped MIS amount.
-
-    Mapping only stamps the agent figure. This next step makes the register
-    expected follow that figure and counts it in dealer earnings.
-    """
+    """Replace Euler (lead) expected payout with the mapped MIS amount."""
     amount = _insurance_mis_money(entry.get("misAmount"))
     prior_expected = ce.round2(ce.num(entry.get("expectedPayout")))
-    original = entry.get("leadExpectedPayout")
-    if original in (None, ""):
-        original = prior_expected
-    else:
-        original = ce.round2(ce.num(original))
-    premium = ce.num(entry.get("insuranceAmount"))
-    received = ce.num(entry.get("receivedPayout"))
-    rate = round(amount / premium, 6) if premium > 0 else ce.num(entry.get("payoutRate"))
-    outstanding = ce.round2(max(0.0, amount - received))
-    if amount > 0 and received >= amount - 0.01:
-        status = "Received"
-    elif received > 0.01:
-        status = "Partial"
-    else:
-        status = "Pending"
-    patch = {
-        "expectedPayout": amount,
-        "payoutOutstanding": outstanding,
-        "payoutRate": rate,
-        "payoutRateSource": "mis",
-        "misDifference": 0.0,
-        "misAmountAdopted": True,
-        "leadExpectedPayout": original,
-        "status": status,
-        "lastUpdated": now_iso(),
-    }
+    patch = _mis_overwrite_expected_fields(entry, amount)
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     updated = await db.insurance.find_one({"entryId": entry["entryId"]})
     try:
@@ -10267,11 +10258,18 @@ async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] 
     """Owner Dealer Earnings grid — live from leads so OEM Extra Retained is always in total.
 
     total = margin + scheme retained + OEM Extra Retained + insurance
-            (adopted MIS or cash) + extras − dealer-funded benefit − unpayable OEM.
+            (delivery expected; MIS overwrites) + extras − dealer-funded
+            benefit − unpayable OEM.
     """
     leads = await _commercial_leads()
     # Fallback extras from dealer_earnings docs when lead mirror is thin.
     de_by = {r.get("leadId"): r for r in await db.dealer_earnings.find().to_list(5000)}
+    ins_by_lead = {}
+    for e in await db.insurance.find().to_list(8000):
+        lid = e.get("leadId")
+        if lid:
+            ins_by_lead[lid] = ce.round2(
+                ins_by_lead.get(lid, 0) + ce.insurance_dealer_income(e))
     claims_by = {}
     for c in await db.claims.find({"manual": {"$ne": True}}).to_list(8000):
         claims_by.setdefault(c.get("leadId"), []).append(c)
@@ -10286,8 +10284,11 @@ async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] 
                         else de.get("dealerMarginNetExGst"))
         scheme = ce.num(l.get("dealerSchemeRetained") if l.get("dealerSchemeRetained") is not None
                         else de.get("dealerSchemeRetained"))
-        ins = ce.num(l.get("dealerInsuranceIncome") if l.get("dealerInsuranceIncome") is not None
-                     else de.get("dealerInsuranceIncome"))
+        if lid in ins_by_lead:
+            ins = ins_by_lead[lid]
+        else:
+            ins = ce.num(l.get("dealerInsuranceIncome") if l.get("dealerInsuranceIncome") is not None
+                         else de.get("dealerInsuranceIncome"))
         extra = ce.num(l.get("extraDealerIncomeTotal") if l.get("extraDealerIncomeTotal") is not None
                        else de.get("extraDealerIncomeTotal"))
         funded = ce.num(l.get("dealerFundedBenefit") if l.get("dealerFundedBenefit") is not None
