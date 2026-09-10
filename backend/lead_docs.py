@@ -73,7 +73,7 @@ def can_read_kind(user, kind: str, *, own: bool = False) -> bool:
         return False
     group = info["group"]
     if group == "kyc":
-        if role in ("owner", "sales_gm", "accounts"):
+        if role in ("owner", "sales_gm", "tl", "accounts"):
             return True
         return role == "executive" and own
     if group == "delivery":
@@ -94,7 +94,7 @@ def can_upload_kind(user, kind: str, *, own: bool = False) -> bool:
         return False
     group = info["group"]
     if group == "kyc":
-        if role in ("owner", "sales_gm"):
+        if role in ("owner", "sales_gm", "tl"):
             return True
         return role == "executive" and own
     if group == "delivery":

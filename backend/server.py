@@ -515,8 +515,8 @@ def lead_actions(lead, act=None):
         # Owner-only once the customer has paid: cancelling a funded booking is a
         # refund decision, not a sales-desk one.
         "cancelNeedsOwner": _cancel_money(lead)["hasMoney"],
-        # After Convert Booking the executive hands the file to the Team Leader.
-        "canEditLead": mutable and not (is_exec and booked),
+        # Executives request + book. Name / mobile / vehicle edits are TL / Owner / GM.
+        "canEditLead": mutable and not is_exec,
         "isBooked": booked, "isDelivered": delivered, "isActive": active,
         "isLocked": not mutable,
         # Step completion — staff may complete a step once; only owner re-edits (while mutable).
@@ -3210,7 +3210,10 @@ def _can_approve_leads(user) -> bool:
 async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
     """Owner / GM / TL create a live lead. An executive submits a request until
     GM or Owner taps Approve — nothing is written to the Lead Register until then."""
-    if str(user.get("role") or "") == "executive":
+    role = str(user.get("role") or "")
+    if role == "tl" and not str(body.executive or "").strip():
+        raise HTTPException(422, "Pick the executive this lead belongs to.")
+    if role == "executive":
         if ce.num(body.budget) <= 0:
             raise HTTPException(422, "Enter the deal amount before sending for GM / Owner approval.")
         existing = await _mobile_taken_by_lead(body.mobile)
@@ -4097,10 +4100,10 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
     part of this model) is left exactly as it was. See LEAD_SYSTEM_FIELDS."""
     lead = await get_lead_or_404(lead_id)
     _require_mutable_lead(lead, "lead edits", act)
-    if str((act or {}).get("role") or "").strip().lower() == "executive" and _is_booked(lead):
+    if str((act or {}).get("role") or "").strip().lower() == "executive":
         raise HTTPException(
             403,
-            "After Convert Booking, the Team Leader completes Price, Scheme, Payments and Delivery.",
+            "Executives cannot edit lead details. Ask the Team Leader or Owner.",
         )
     _require_action(lead, "canEditLead", "lead edits", act)
     payload = body.model_dump(exclude_unset=True)

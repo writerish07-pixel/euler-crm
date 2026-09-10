@@ -176,7 +176,7 @@ export default function Leads() {
 }
 
 function NewLeadDrawer({ masters, onClose, onCreated }) {
-  const { isExecutive, user } = useAuth();
+  const { isExecutive, isTl, user } = useAuth();
   const [form, setForm] = useState({
     customerName: "", mobile: "", city: "", leadSource: "Walk-in", interestedModel: "",
     variant: "", executive: isExecutive ? (user?.name || "") : "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
@@ -213,6 +213,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const submit = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
+    if (isTl && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
     if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
     const kycErr = kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
@@ -249,7 +250,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
   return (
     <Drawer open onClose={onClose} width="max-w-2xl" title={isExecutive ? "Request a lead" : "New Lead"}
-      subtitle={isExecutive ? "Sent for owner or GM approval" : "Capture a fresh enquiry"}
+      subtitle={isExecutive ? "Sent for owner or GM approval" : isTl ? "Live lead assigned to any executive" : "Capture a fresh enquiry"}
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : (isExecutive ? "Send for approval" : "Create Lead")}</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
@@ -264,7 +265,12 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
           </Select>
         </Field>
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{execOptions.map((s) => <option key={s}>{s}</option>)}</Select></Field>
+        <Field label={isTl || isExecutive ? "Executive *" : "Executive"}>
+          <Select data-testid="lead-executive" value={form.executive} onChange={set("executive")} disabled={isExecutive}>
+            <option value="">—</option>
+            {execOptions.map((s) => <option key={s}>{s}</option>)}
+          </Select>
+        </Field>
         <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{masters.models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Variant"><Select data-testid="lead-variant" value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>

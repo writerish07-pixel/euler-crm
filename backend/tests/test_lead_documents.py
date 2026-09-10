@@ -64,6 +64,17 @@ async def exec_client(client):
 
 
 @pytest_asyncio.fixture
+async def tl_client(client):
+    email = "docs.tl@euler.com"
+    await server.db.users.delete_many({"email": email})
+    r = await client.post("/api/auth/users", json={
+        "email": email, "password": "desk#441", "name": "Docs TL", "role": "tl"})
+    assert r.status_code == 200, r.text
+    async for c in _as(email, "desk#441"):
+        yield c
+
+
+@pytest_asyncio.fixture
 async def accounts_client(client):
     if not await server.db.users.find_one({"email": "accounts@euler.com"}):
         await server.db.users.insert_one({
@@ -276,3 +287,27 @@ async def test_delivery_upload_is_deal_desk(client, exec_client, accounts_client
     assert acc_up.status_code == 403
     listed = (await accounts_client.get(f"/api/leads/{lid}/documents")).json()
     assert any(d["kind"] == "delivery_rto" for d in listed)
+
+
+@pytest.mark.asyncio
+async def test_tl_uploads_kyc_on_a_lead_for_any_executive(tl_client):
+    r = await tl_client.post("/api/leads", json={
+        "customerName": "TL KYC Other Exec", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Sanjay"})
+    assert r.status_code == 200, r.text
+    lid = r.json()["leadId"]
+    assert r.json()["executive"] == "Sanjay"
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        up = await upload(tl_client, f"/api/leads/{lid}/documents", kind)
+        assert up.status_code == 200, up.text
+    docs = (await tl_client.get(f"/api/leads/{lid}/documents")).json()
+    assert {d["kind"] for d in docs} == {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"}
+
+
+def test_tl_kyc_permissions_do_not_need_own_lead():
+    tl = {"role": "tl", "name": "Docs TL"}
+    exec_u = {"role": "executive", "name": "Amit"}
+    assert server.lead_docs.can_upload_kind(tl, "kyc_pan", own=False) is True
+    assert server.lead_docs.can_read_kind(tl, "kyc_pan", own=False) is True
+    assert server.lead_docs.can_upload_kind(exec_u, "kyc_pan", own=False) is False
+    assert server.lead_docs.can_upload_kind(exec_u, "kyc_pan", own=True) is True
