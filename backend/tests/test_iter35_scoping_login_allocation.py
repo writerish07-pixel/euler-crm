@@ -395,8 +395,7 @@ async def test_bulk_allocate_does_not_wait_on_google_sheets(client, monkeypatch)
     assert (await server.db.leads.find_one({"leadId": b}))["executive"] == "Amit"
     pending = await server.db.sheet_sync_log.find(
         {"entityType": "leads", "entityId": {"$in": [a, b]}}).to_list(10)
-    assert len(pending) == 2
-    assert all(row.get("status") == "PENDING" for row in pending)
+    assert pending == []
 
 
 # ======================================== the morning template

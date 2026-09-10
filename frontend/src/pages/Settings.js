@@ -225,7 +225,7 @@ export default function Settings() {
             {gs.email && <div>Service account: <span className="font-mono text-xs break-all">{gs.email}</span></div>}
             {!gs.enabled && gs.canRead && gs.canWrite === false && (
               <div className="text-xs text-ink mt-2 bg-amber-50 rounded-lg p-3 ring-1 ring-amber-200">
-                The sheet is shared as <b>Viewer</b>. Open your Euler Master sheet → <b>Share</b> → find <span className="font-mono">{gs.email}</span> → change its access to <b>Editor</b>. Sync then appends every new Lead, Booking, Payment, Delivery & Claim automatically.
+                The sheet is shared as <b>Viewer</b>. Open your Euler Master sheet → <b>Share</b> → find <span className="font-mono">{gs.email}</span> → change its access to <b>Editor</b>. Sync then writes Scheme Claim Register rows in the background.
               </div>
             )}
             {!gs.enabled && !gs.canRead && (
@@ -238,7 +238,7 @@ export default function Settings() {
             )}
             {gs.enabled && (
               <div className="text-xs text-emerald-700 mt-2 bg-emerald-50 rounded-lg p-3 ring-1 ring-emerald-200">
-                Live — new Leads, Bookings, Payments, Deliveries & Claims are appended to your Euler Master sheet automatically.
+                Live — only Scheme Claim Register writes to Euler Master. Other registers stay in the app so desk saves stay fast.
               </div>
             )}
             {isOwner && (
@@ -292,7 +292,7 @@ export default function Settings() {
                   <Button variant="secondary" data-testid="backfill-btn" onClick={runBackfill} disabled={backfilling}>
                     <RefreshCcw size={14} /> {backfilling ? "Backfilling…" : "Backfill existing data to sheet"}
                   </Button>
-                  <span className="text-xs text-ink-faint ml-2">Adds any waiting columns, then pushes every register (leads, bookings, payments, deliveries, claims, finance, insurance, earnings, incentives, activities). Existing rows update; new IDs append</span>
+                    <span className="text-xs text-ink-faint ml-2">Pushes Scheme Claim Register only. Lead, booking, payment and other tabs are not updated</span>
                 </div>
               </div>
             )}

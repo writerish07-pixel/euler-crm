@@ -515,11 +515,10 @@ async def test_next_ids_reserves_a_contiguous_block(client):
 @pytest.mark.asyncio
 async def test_import_commit_inserts_once_and_does_not_await_google(client, monkeypatch):
     """A 168-row import used to await Google once per lead and blow the 25s
-    browser timeout. Leads already written stayed in the app, the toast said
-    Network Error, and a retry could race the first request. Commit must insert
-    the batch, queue sheet rows, and return without calling sheet_sync."""
+    browser timeout. Leads stay in Mongo; Lead Register is not a live sheet tab.
+    Commit must insert the batch and return without calling sheet_sync."""
     scheduled = []
-    monkeypatch.setattr(server, "_schedule_sheet_syncs", lambda docs: scheduled.append(len(docs)))
+    monkeypatch.setattr(server, "_schedule_sheet_syncs", lambda docs, **_k: scheduled.append(len(docs)))
 
     awaited = {"n": 0}
 
@@ -535,11 +534,9 @@ async def test_import_commit_inserts_once_and_does_not_await_google(client, monk
     assert r.status_code == 200, r.text
     assert r.json()["created"] == 3
     assert awaited["n"] == 0
-    assert scheduled == [3]
     assert r.json()["leadIds"] == ["LD26000001", "LD26000002", "LD26000003"]
     pending = await server.db.sheet_sync_log.find().to_list(10)
-    assert len(pending) == 3
-    assert all(p.get("status") == "PENDING" for p in pending)
+    assert pending == []
 
     r2 = await client.post("/api/leads/import/commit",
                            files={"file": ("leads.csv", _csv(rows), "text/csv")})

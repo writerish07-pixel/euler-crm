@@ -11,13 +11,13 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _block_live_google_sheet_writes(monkeypatch):
+def _block_live_google_sheet_writes(monkeypatch, request):
     # Force test environment flags even when the host exported production GSHEET_ID.
     monkeypatch.setenv("ENVIRONMENT", "test")
     # Keep whatever GSHEET_ID the host has — env_safety + mocks below stop writes.
     monkeypatch.delenv("GSHEET_ALLOW_TEST_WRITES", raising=False)
 
-    async def _no_sync(entity, doc, *, entity_id=""):
+    async def _no_sync(entity, doc, *, entity_id="", flush=False):
         return {"ok": True, "skipped": True, "operation": "skipped",
                 "reason": "pytest-autouse-mock", "entity": entity}
 
@@ -35,7 +35,8 @@ def _block_live_google_sheet_writes(monkeypatch):
     # Import inside fixture so each test module's server/gsheets binding is patched.
     try:
         import server
-        monkeypatch.setattr(server, "sheet_sync", _no_sync, raising=False)
+        if not request.node.get_closest_marker("real_sheet_sync"):
+            monkeypatch.setattr(server, "sheet_sync", _no_sync, raising=False)
     except Exception:
         pass
     try:
@@ -47,3 +48,8 @@ def _block_live_google_sheet_writes(monkeypatch):
     except Exception:
         pass
     yield
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "real_sheet_sync: use live server.sheet_sync (Google still mocked)")
