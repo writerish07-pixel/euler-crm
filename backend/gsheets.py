@@ -178,6 +178,14 @@ INTENTIONALLY_UNMAPPED = {
                 "(Exchange Margin). No tab is created.",
 }
 
+# Live Google writes: Scheme Claim Register only. Mongo is the live save for
+# every other register — Lead, Booking, Payment, Delivery, Insurance, earnings.
+LIVE_SHEET_ENTITIES = frozenset({"claims"})
+
+
+def lives_on_sheet(entity: str) -> bool:
+    return str(entity or "") in LIVE_SHEET_ENTITIES
+
 # Operational columns that exist in the workbook but have NO source of truth anywhere
 # in the CRM — no Mongo field, no computation, no frontend input. These are declared
 # explicitly rather than left silently blank, so nobody has to re-derive the finding.
@@ -647,13 +655,20 @@ def classify_google_error(e):
             f"status {status_code if status_code is not None else 'n/a'}.")
 
 
+def _live_sheet_status():
+    return {
+        "liveEntities": sorted(LIVE_SHEET_ENTITIES),
+        "liveTabs": [SYNC_MAP[e][0] for e in sorted(LIVE_SHEET_ENTITIES) if e in SYNC_MAP],
+    }
+
+
 def status():
     global _status
     if _service is None:
         _init()
     if _service is None:
         return {**_status, "spreadsheetId": os.environ.get("GSHEET_ID", ""),
-                **credential_diagnostics(), "health": _health}
+                **credential_diagnostics(), "health": _health, **_live_sheet_status()}
     sheet_id = os.environ.get("GSHEET_ID", "")
     try:
         meta = _service.spreadsheets().get(spreadsheetId=sheet_id, fields="properties.title").execute()
@@ -664,7 +679,8 @@ def status():
         code, reason = classify_google_error(e)
         _status.update({"enabled": False, "canRead": False, "canWrite": False,
                         "errorCode": code, "reason": reason})
-        return {**_status, "spreadsheetId": sheet_id, **credential_diagnostics(), "health": _health}
+        return {**_status, "spreadsheetId": sheet_id, **credential_diagnostics(), "health": _health,
+                **_live_sheet_status()}
     try:
         _service.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": []}).execute()
         _status.update({"enabled": True, "canWrite": True, "reason": "connected (read + write)"})
@@ -688,7 +704,7 @@ def status():
     if _es["writeBlocked"]:
         _status.update({"canWrite": False, "reason": _es["blockReason"], "errorCode": "env_write_blocked"})
     return {**_status, "spreadsheetId": sheet_id, "envSafety": _es,
-            **credential_diagnostics(), "health": _health}
+            **credential_diagnostics(), "health": _health, **_live_sheet_status()}
 
 
 # ---------------------------------------------------------------- header mapping (GS-1)

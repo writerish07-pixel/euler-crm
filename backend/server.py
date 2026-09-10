@@ -117,6 +117,8 @@ async def defer_sheet_writes():
         for entity, doc, eid in bucket:
             by_entity.setdefault(entity, []).append((doc, eid))
         for entity, pairs in by_entity.items():
+            if not gsheets.lives_on_sheet(entity):
+                continue
             docs = []
             for doc, eid in pairs:
                 try:
@@ -127,20 +129,28 @@ async def defer_sheet_writes():
             _schedule_sheet_syncs(docs, entity=entity)
 
 
-async def sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
-    """Upsert one record into the existing Google Sheet and durably record the
-    outcome (GS-4). A failed write becomes a PENDING sheet_sync_log entry that
-    /integrations/gsheets/retry can replay — it is never silently lost.
+async def sheet_sync(entity: str, doc: dict, *, entity_id: str = "", flush: bool = False):
+    """Upsert one Scheme Claim Register row. Every other register stays in Mongo.
+
+    Claims are queued and written after the HTTP response so Google cannot hang
+    the desk. A failed write becomes a PENDING sheet_sync_log entry that
+    /integrations/gsheets/retry can replay.
 
     Safe to retry: gsheets.sync() is an ID-keyed upsert, so replaying a write that
     actually succeeded but whose response timed out finds the existing row and
     updates it instead of appending a duplicate.
     """
-    if _defer_sheets.get():
+    if not gsheets.lives_on_sheet(entity):
+        return {"ok": True, "operation": "skipped", "reason": "claims-only"}
+    if (not flush) and _defer_sheets.get():
         bucket = _deferred_sheets.get()
         if bucket is not None:
             bucket.append((entity, dict(doc or {}), entity_id))
             return {"ok": True, "operation": "queued"}
+    if not flush:
+        await queue_sheet_sync(entity, doc, entity_id=entity_id)
+        _schedule_sheet_syncs([doc], entity=entity)
+        return {"ok": True, "operation": "queued"}
     res = await gsheets.sync(entity, doc)
     if res.get("operation") in ("skipped", "blocked"):
         return res  # sync disabled or env-write-blocked — nothing to log/retry
@@ -165,7 +175,9 @@ async def sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
 
 
 async def queue_sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
-    """Record a PENDING sheet write without waiting on Google (bulk import)."""
+    """Record a PENDING claim write without waiting on Google."""
+    if not gsheets.lives_on_sheet(entity):
+        return
     eid = entity_id or str(doc.get(gsheets.SYNC_MAP.get(entity, ("", "", []))[1], "") or "")
     if not eid:
         return
@@ -184,14 +196,14 @@ async def queue_sheet_sync(entity: str, doc: dict, *, entity_id: str = ""):
 
 def _schedule_sheet_syncs(docs, entity="leads"):
     """Best-effort Google writes after the HTTP response — do not block the desk."""
-    if not docs:
+    if not docs or not gsheets.lives_on_sheet(entity):
         return
     id_field = gsheets.SYNC_MAP.get(entity, ("", "", []))[1]
 
     async def _run():
         for doc in docs:
             try:
-                await sheet_sync(entity, doc)
+                await sheet_sync(entity, doc, flush=True)
             except Exception:
                 logger.exception("bulk sheet sync failed for %s", (doc or {}).get(id_field) or (doc or {}).get("leadId"))
 
@@ -10444,17 +10456,24 @@ async def gsheets_sync_log(status: Optional[str] = None, limit: int = 200):
 
 @api.post("/integrations/gsheets/retry", dependencies=[Depends(owner_only)])
 async def gsheets_retry(limit: int = 100):
-    """GS-4: replay failed Sheet writes. Safe because every write is an ID-keyed
-    upsert — replaying a write that actually succeeded (but whose response timed out)
-    finds the existing row and updates it instead of appending a duplicate."""
+    """Replay failed Scheme Claim Register writes. Other PENDING log rows are
+    marked skipped — those tabs are no longer live."""
     pending = await db.sheet_sync_log.find({"status": "PENDING"}).to_list(min(limit, 500))
-    retried, recovered, still_failing = 0, 0, 0
+    retried, recovered, still_failing, skipped = 0, 0, 0, 0
     for row in pending:
         entity, payload = row.get("entityType"), row.get("payload") or {}
-        if not entity or not payload:
+        if not entity:
+            continue
+        if not gsheets.lives_on_sheet(entity):
+            skipped += 1
+            await db.sheet_sync_log.update_one(
+                {"entityType": entity, "entityId": row.get("entityId", "")},
+                {"$set": {"status": "SKIPPED", "error": "claims-only", "timestamp": now_iso()}})
+            continue
+        if not payload:
             continue
         retried += 1
-        res = await sheet_sync(entity, payload, entity_id=row.get("entityId", ""))
+        res = await sheet_sync(entity, payload, entity_id=row.get("entityId", ""), flush=True)
         if res.get("ok"):
             recovered += 1
         else:
@@ -10462,7 +10481,8 @@ async def gsheets_retry(limit: int = 100):
             await db.sheet_sync_log.update_one(
                 {"entityType": entity, "entityId": row.get("entityId", "")},
                 {"$set": {"status": "FAILED" if int(row.get("attempt", 0)) >= 4 else "RETRYING"}})
-    return {"ok": True, "retried": retried, "recovered": recovered, "stillFailing": still_failing}
+    return {"ok": True, "retried": retried, "recovered": recovered,
+            "stillFailing": still_failing, "skipped": skipped}
 
 
 @api.get("/integrations/gsheets/inventory", dependencies=[Depends(owner_only)])
@@ -10553,97 +10573,12 @@ async def gsheets_reconcile():
 
 @api.post("/integrations/gsheets/backfill", dependencies=[Depends(owner_only)])
 async def gsheets_backfill():
-    """Push every mapped register to Euler Master.
-
-    First appends any waiting headers (OEM Extra, Insurance Agent, Cancellation,
-    TCS/RSA/exchange) so new CRM fields have a column to land in. Then upserts
-    all SYNC_MAP entities. Idempotent — existing IDs update in place.
-    """
-    leads = [clean(x) for x in await db.leads.find().to_list(5000)]
-    bookings = [clean(x) for x in await db.bookings.find().to_list(5000)]
-    payments = [clean(x) for x in await db.payments.find().to_list(5000)]
-    delivery_docs = [clean(x) for x in await db.deliveries.find().to_list(5000)]
-    by_delivery = {d.get("leadId"): d for d in delivery_docs if d.get("leadId")}
-    for l in leads:
-        lid = l.get("leadId")
-        if not lid or lid in by_delivery:
-            continue
-        if str(l.get("deliveryStatus") or "").lower() != "delivered":
-            continue
-        delivery_docs.append({
-            "leadId": lid, "customerName": l.get("customerName"),
-            "deliveryDate": l.get("deliveryDate"), "delivered": "Yes",
-            "invoiceNumber": l.get("invoiceNumber", ""),
-            "chassisNumber": l.get("chassisNumber", ""),
-            "numberPlate": l.get("numberPlate", ""),
-            "insurerName": l.get("insurerName", ""),
-            "insurance": l.get("insuranceStatus", ""),
-            "registration": l.get("registrationStatus", ""),
-            "invoice": l.get("invoiceStatus", ""),
-            "rc": l.get("rcStatus", ""),
-            "pdi": l.get("pdiStatus", ""),
-        })
-        by_delivery[lid] = delivery_docs[-1]
-    finance_docs = []
-    for f in await db.finance.find().to_list(5000):
-        f = clean(f)
-        finance_docs.append({
-            "financeFileNumber": f.get("financeFileNumber") or f.get("fileNumber"),
-            "leadId": f.get("leadId"),
-            "customerName": f.get("customerName"),
-            "financerName": f.get("financerName") or f.get("financer"),
-            "committedAmount": f.get("committedAmount", f.get("sanctionedAmount")),
-            "disbursedAmount": f.get("disbursedAmount", f.get("receivedAgainstFile")),
-            "financeOutstanding": f.get("financeOutstanding", f.get("fileOutstanding")),
-            "status": f.get("status"),
-            "lastPaymentDate": f.get("lastPaymentDate", ""),
-            "lastUpdated": f.get("lastUpdated", ""),
-        })
+    """Push Scheme Claim Register rows to Euler Master. Other registers stay in Mongo."""
     await oem_claims.apply_oem_filing_to_register(db)
-    extra_by_lead = {}
-    for c in await db.claims.find({"componentKey": "oemExtraSupport"}).to_list(2000):
-        extra_by_lead[c.get("leadId")] = c
-    oem_extra = []
-    for l in leads:
-        extra = ce.compute_oem_extra_support(l)
-        if ce.num(extra.get("oemExtraSupportReceived")) <= 0:
-            continue
-        claim = extra_by_lead.get(l.get("leadId")) or {}
-        oem_extra.append({
-            "leadId": l.get("leadId"),
-            "bookingId": l.get("bookingId", ""),
-            "customerName": l.get("customerName", ""),
-            "model": l.get("interestedModel", ""),
-            "variant": l.get("variant", ""),
-            "bookingDate": l.get("bookingDate", ""),
-            "oemExtraSupportReceived": extra["oemExtraSupportReceived"],
-            "oemExtraSupportPassed": extra["oemExtraSupportPassed"],
-            "oemExtraSupportRetained": extra["oemExtraSupportRetained"],
-            "chassisNumber": l.get("chassisNumber") or claim.get("chassisNumber") or "",
-            "invoiceNumber": l.get("invoiceNumber") or claim.get("invoiceNumber") or "",
-            "status": claim.get("claimStatus") or "Open",
-            "claimReference": claim.get("claimReference") or "",
-            "lastUpdated": l.get("lastUpdated", ""),
-            "remarks": "",
-        })
     datasets = {
-        "leads": leads,
-        "bookings": bookings,
-        "payments": payments,
-        "deliveries": delivery_docs,
         "claims": [clean(x) for x in await db.claims.find().to_list(5000)],
-        "finance": finance_docs,
-        "insurance": [_insurance_sheet_row(clean(x)) for x in await db.insurance.find().to_list(5000)],
-        "dealer_earnings": [clean(x) for x in await db.dealer_earnings.find().to_list(5000)],
-        "incentive_register": [clean(x) for x in await db.incentive_register.find().to_list(5000)],
-        "oem_extra_support": oem_extra,
-        "activities": [clean(x) for x in await db.activities.find().to_list(8000)],
     }
-    result = await gsheets.backfill(datasets)
-    fin_views = await rebuild_finance_views()
-    if isinstance(result, dict):
-        result["financeViews"] = fin_views
-    return result
+    return await gsheets.backfill(datasets)
 
 
 # ---------------------------------------------------------------- owner reports
