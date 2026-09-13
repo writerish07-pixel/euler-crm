@@ -689,8 +689,18 @@ function BotspaceCard() {
       </div>
       <p className="text-sm text-ink-soft mb-3">
         Euler lead chats only — numbers not in this CRM (Tata etc.) are ignored.
-        Paste the BotSpace API key and Channel ID. Templates must be Meta-approved before auto-send works.
+        Paste the BotSpace API key and Channel ID. When WhatsApp is configured and a template is Meta-approved / Active, the app uses it automatically.
+        Meta does not let this CRM create templates — submit them in BotSpace (see <code>docs/whatsapp-meta-templates.md</code>).
+        Booking and approval now send <b>booking_deal_confirm</b> with the final deal amount so the customer can check the figure.
       </p>
+      <div className="text-xs text-ink-soft bg-zinc-50 rounded-lg p-3 ring-1 ring-line mb-3" data-testid="botspace-template-guide">
+        Submit these in BotSpace → WhatsApp Templates (Hindi, Utility unless noted). The app starts using each one once Meta marks it Active:
+        <ul className="list-disc pl-5 mt-1 space-y-0.5">
+          <li><code>booking_deal_confirm</code> — booking + approval deal amount (5 variables)</li>
+          <li><code>booking_confirm</code> — fallback if the deal template is not Active yet (no amount)</li>
+          <li><code>lead_followup_3day</code>, <code>delivery_review</code>, <code>finance_overdue_exec</code></li>
+        </ul>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="API key">
           <Input data-testid="botspace-api-key" type="password" value={form.apiKey}
@@ -1073,10 +1083,12 @@ function CoulsonCard() {
         {cfg && <Badge tone={badgeTone}>{badgeLabel}</Badge>}
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        Euler accepts this password on{" "}
+        Euler issues a JWT that lasts about <b>3 days</b>. This app cannot make that token last forever — only Euler can.
+        The lasting fix is to <b>save the same username and password</b> here. When the JWT dies, Sync tries that login and stores the new session.
+        Euler often accepts the password in a browser on{" "}
         <a className="underline" href="https://coulson.eulerlogistics.com" target="_blank" rel="noreferrer">coulson.eulerlogistics.com</a>
-        {" "}and still refuses it from this app. That is on their side — a Railway variable will not change it.
-        Sign in on Coulson, then paste the session below. Sync writes chassis, invoice and the OEM mobile onto matching CRM leads (unique mobile, or unique customer name when the number is blank or wrong). RTO, insurance and other charges stay on Price Master.
+        {" "}and still refuses it from this server. If auto-renew fails, paste a fresh session below (fallback).
+        Sync writes chassis, invoice and the OEM mobile onto matching CRM leads. RTO, insurance and other charges stay on Price Master.
       </p>
       <ol className="text-sm text-ink-soft mb-3 list-decimal pl-5 space-y-1">
         <li>Open Coulson, sign in with the same Username and Password (a private window is fine).</li>
@@ -1121,8 +1133,8 @@ function CoulsonCard() {
         </div>
       )}
 
-      <details className="mb-1">
-        <summary className="text-sm text-ink-soft cursor-pointer">Password login (Euler usually refuses this from our server)</summary>
+      <details className="mb-1" open>
+        <summary className="text-sm text-ink-soft cursor-pointer">Saved login (auto-renews the 3-day session when Euler accepts it from this server)</summary>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 mb-3">
           <Field label="Coulson username">
             <Input data-testid="coulson-username" name="coulson-oem-username" value={form.username}

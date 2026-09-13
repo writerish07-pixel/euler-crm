@@ -86,6 +86,7 @@ test("approval drawer prefills OEM extra support and saves it on the request", a
     interestedModel: "Turbo Max",
     variant: "Maxx (PV)",
     oemExtraSupportReceived: 7000,
+    mobile: "9636959028",
   }));
   await act(async () => { root.unmount(); });
   host.remove();

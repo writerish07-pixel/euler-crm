@@ -1,19 +1,22 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { get } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
 export default function Bookings() {
   const { isField } = useAuth();
   const [rows, setRows] = useState([]);
   const period = usePeriodState();
-  useEffect(() => { get("/bookings", period.params).then(setRows); }, [period.params]);
+  const load = useCallback(() => get("/bookings", period.params).then(setRows), [period.params]);
+  useEffect(() => { load(); }, [load]);
   return (
     <div>
-      <PageHeader title="Booking Register" subtitle={`${rows.length} bookings${isField ? " · field view" : ""}`} />
+      <PageHeader title="Booking Register" subtitle={`${rows.length} bookings${isField ? " · field view" : ""}`}
+        actions={<ReportActions onRefresh={load} />} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
         rowKey="bookingId"

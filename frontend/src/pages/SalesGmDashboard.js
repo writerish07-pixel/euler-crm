@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
@@ -8,16 +8,26 @@ import { toast } from "sonner";
 import { get } from "../lib/api";
 import { compactInr, inr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
 
 /** Showroom-wide sales board — all executives, deal desk, no money posting. */
 export default function SalesGmDashboard() {
   const [d, setD] = useState(null);
-  useEffect(() => {
+  const load = useCallback(() => {
     get("/sales-gm/dashboard").then(setD).catch(() => toast.error("Could not load Sales GM dashboard"));
   }, []);
+  useEffect(() => { load(); }, [load]);
 
-  if (!d) return <div className="text-ink-faint text-sm">Loading Sales GM dashboard…</div>;
+  if (!d) {
+    return (
+      <div data-testid="sales-gm-dashboard">
+        <PageHeader title="Sales GM Dashboard" subtitle="Showroom-wide sales"
+          actions={<ReportActions onRefresh={load} />} />
+        <div className="text-ink-faint text-sm">Loading Sales GM dashboard…</div>
+      </div>
+    );
+  }
   const k = d.kpis || {};
   const scope = d.scope || {};
 
@@ -26,6 +36,7 @@ export default function SalesGmDashboard() {
       <PageHeader
         title="Sales GM Dashboard"
         subtitle={`${scope.note || "Showroom-wide sales"} · MTD + YTD · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`}
+        actions={<ReportActions onRefresh={load} />}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="gm-period-kpis">

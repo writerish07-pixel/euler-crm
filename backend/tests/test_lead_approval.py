@@ -97,6 +97,16 @@ async def attach_kyc(client, request_id, extra=()):
 
 
 @pytest.mark.asyncio
+async def test_executive_without_mobile_is_rejected(exec_client):
+    r = await exec_client.post("/api/leads", json=_enquiry(mobile=""))
+    assert r.status_code == 422, r.text
+    assert "mobile" in r.text.lower()
+    assert await server.db.lead_requests.count_documents({}) == 0
+    short = await exec_client.post("/api/leads", json=_enquiry(mobile="98765"))
+    assert short.status_code == 422, short.text
+
+
+@pytest.mark.asyncio
 async def test_executive_without_deal_amount_is_rejected(exec_client):
     r = await exec_client.post("/api/leads", json=_enquiry(budget=0))
     assert r.status_code == 422, r.text

@@ -1,20 +1,36 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { ShieldCheck, TrendingUp, IndianRupee, AlertCircle } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
 import { get } from "../lib/api";
 import { inr, compactInr } from "../lib/format";
 import { Card, PageHeader, StatCard, Table } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 
 export default function InsurancePayoutReport() {
   const [d, setD] = useState(null);
-  useEffect(() => { get("/reports/insurance-payout").then(setD).catch(() => {}); }, []);
-  if (!d) return <div className="text-ink-faint text-sm">Loading report…</div>;
+  const period = usePeriodState();
+  const load = useCallback(() => get("/reports/insurance-payout", period.params).then(setD).catch(() => {}), [period.params]);
+  useEffect(() => { load(); }, [load]);
+  if (!d) {
+    return (
+      <div>
+        <PageHeader title="Insurer Payout Report" subtitle="Owner · expected vs received insurer payouts by month"
+          actions={<ReportActions onRefresh={load} showRebuild />} />
+        <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+        <div className="text-ink-faint text-sm">Loading report…</div>
+      </div>
+    );
+  }
 
   const chart = [...d.byMonth].reverse().map((m) => ({ month: m.key, Expected: m.expected, Received: m.received }));
 
   return (
     <div>
-      <PageHeader title="Insurer Payout Report" subtitle="Owner · expected vs received insurer payouts by month" />
+      <PageHeader title="Insurer Payout Report" subtitle="Owner · expected vs received insurer payouts by month"
+        actions={<ReportActions onRefresh={load} showRebuild />} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard label="Total Premium" value={compactInr(d.totals.premium)} icon={ShieldCheck} />
         <StatCard label="Expected Payout" value={compactInr(d.totals.expected)} icon={TrendingUp} tone="text-cobalt" />

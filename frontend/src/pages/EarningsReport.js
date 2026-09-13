@@ -1,14 +1,28 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Coins, TrendingUp, ShieldCheck, Layers } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
 import { get } from "../lib/api";
 import { inr, compactInr } from "../lib/format";
 import { Card, PageHeader, StatCard, Table } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 
 export default function EarningsReport() {
   const [d, setD] = useState(null);
-  useEffect(() => { get("/reports/dealer-earnings").then(setD).catch(() => {}); }, []);
-  if (!d) return <div className="text-ink-faint text-sm">Loading report…</div>;
+  const period = usePeriodState();
+  const load = useCallback(() => get("/reports/dealer-earnings", period.params).then(setD).catch(() => {}), [period.params]);
+  useEffect(() => { load(); }, [load]);
+  if (!d) {
+    return (
+      <div>
+        <PageHeader title="Dealer Earnings Report" subtitle="Owner · monthly margin, scheme retained, insurance & extra income"
+          actions={<ReportActions onRefresh={load} showRebuild />} />
+        <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+        <div className="text-ink-faint text-sm">Loading report…</div>
+      </div>
+    );
+  }
 
   const chart = [...d.byMonth].reverse().map((m) => ({
     month: m.key, Margin: m.margin, Scheme: m.scheme, Insurance: m.insurance, Other: m.other, Extra: m.extra || 0,
@@ -16,7 +30,9 @@ export default function EarningsReport() {
 
   return (
     <div>
-      <PageHeader title="Dealer Earnings Report" subtitle="Owner · monthly margin, scheme retained, insurance & extra income" />
+      <PageHeader title="Dealer Earnings Report" subtitle="Owner · monthly margin, scheme retained, insurance & extra income"
+        actions={<ReportActions onRefresh={load} showRebuild />} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <div className="grid grid-cols-2 lg:grid-cols-6 gap-4 mb-6">
         <StatCard label="Total Earnings" value={compactInr(d.totals.total)} icon={Coins} tone="text-amber-600" />
         <StatCard label="Dealer Margin" value={compactInr(d.totals.margin)} icon={TrendingUp} tone="text-cobalt" />

@@ -1,15 +1,17 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Coins } from "lucide-react";
 import { get } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, StatCard } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
 export default function DealerEarnings() {
   const [data, setData] = useState({ rows: [], total: 0 });
   const period = usePeriodState();
-  useEffect(() => { get("/dealer-earnings", period.params).then(setData); }, [period.params]);
+  const load = useCallback(() => get("/dealer-earnings", period.params).then(setData), [period.params]);
+  useEffect(() => { load(); }, [load]);
   const { rows, total } = data;
   const margin = rows.reduce((s, r) => s + Number(r.dealerMarginNetExGst || 0), 0);
   const scheme = rows.reduce((s, r) => s + Number(r.dealerSchemeRetained || 0), 0);
@@ -19,7 +21,8 @@ export default function DealerEarnings() {
 
   return (
     <div>
-      <PageHeader title="Dealer Earnings" subtitle="Owner-only margin & retained-benefit analytics" />
+      <PageHeader title="Dealer Earnings" subtitle="Owner-only margin & retained-benefit analytics"
+        actions={<ReportActions onRefresh={load} showRebuild />} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
         <StatCard label="Total Dealer Earnings" value={inr(total)} icon={Coins} tone="text-amber-600" />

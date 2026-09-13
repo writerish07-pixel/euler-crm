@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
@@ -8,16 +8,26 @@ import { toast } from "sonner";
 import { get } from "../lib/api";
 import { compactInr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
 
 /** Shared home for company ASM and RM — retail + pipeline hygiene. */
 export default function FieldDashboard() {
   const [d, setD] = useState(null);
-  useEffect(() => {
+  const load = useCallback(() => {
     get("/field/dashboard").then(setD).catch(() => toast.error("Could not load field dashboard"));
   }, []);
+  useEffect(() => { load(); }, [load]);
 
-  if (!d) return <div className="text-ink-faint text-sm">Loading field dashboard…</div>;
+  if (!d) {
+    return (
+      <div data-testid="field-dashboard">
+        <PageHeader title="Field Dashboard" subtitle="ASM / RM · company retail"
+          actions={<ReportActions onRefresh={load} />} />
+        <div className="text-ink-faint text-sm">Loading field dashboard…</div>
+      </div>
+    );
+  }
   const k = d.kpis || {};
 
   return (
@@ -25,6 +35,7 @@ export default function FieldDashboard() {
       <PageHeader
         title="Field Dashboard"
         subtitle={`ASM / RM · company retail · MTD + YTD · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`}
+        actions={<ReportActions onRefresh={load} />}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="field-period-kpis">

@@ -9,6 +9,7 @@ import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard,
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
 const MATCH = OEM_MATCH;
@@ -80,6 +81,7 @@ export default function Claims() {
     <div>
       <PageHeader title="Scheme Claim Register" subtitle={`${rows.length} claims · ${inr(eligible)} eligible`}
         actions={<div className="flex items-center gap-2">
+          <ReportActions onRefresh={load} showRebuild />
           <Link to="/oem-claims" data-testid="open-oem-settlements"
             className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
             OEM Claim Settlements <ExternalLink size={14} />

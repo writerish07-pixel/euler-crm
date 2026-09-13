@@ -7,6 +7,7 @@ import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, Modal } f
 import { useAuth } from "../context/AuthContext";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
 function financerRollup(rows) {
@@ -76,6 +77,7 @@ export default function Finance() {
                 <button key={k} onClick={() => setView(k)} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${view === k ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}>{l}</button>
               ))}
             </div>
+            <ReportActions onRefresh={load} />
             {isMoneyDesk && (
               <Button data-testid="record-financer-receipt-btn" onClick={() => setReceipt(true)}>
                 <Landmark size={16} /> Record Financer Receipt

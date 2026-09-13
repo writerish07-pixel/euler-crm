@@ -37,6 +37,39 @@ Use your real Google review URL in template C before submit.
 
 ---
 
+## B0. `booking_deal_confirm` (use this — includes deal amount)
+
+Submit this **new** name. Do not change `booking_confirm` in place — Meta will reject a variable-count change on an existing template.
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | Hindi (`hi`) |
+| Name | `booking_deal_confirm` |
+
+**Body**
+```
+नमस्ते {{1}} जी,
+
+आपकी {{2}} की बुकिंग कन्फर्म हो गई है। बुकिंग डेट: {{3}}। आपके कार्यकारी: {{4}}।
+
+फाइनल डील राशि: {{5}}।
+
+अगर यह राशि आपके साथ तय राशि से अलग है तो अभी जवाब दें।
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Customer | सुरेन्द्र |
+| {{2}} | Model | Turbo Max |
+| {{3}} | Booking date | 15-08-2026 |
+| {{4}} | Executive | अमित |
+| {{5}} | Final deal amount | ₹4,85,000 |
+
+Euler CRM sends this on Convert to Booking and on GM / Owner Approve (same 5 variables). Until Meta marks it Active, the app falls back to `booking_confirm` (no amount).
+
+---
+
 ## B. `booking_confirm`
 
 | Field | Value |

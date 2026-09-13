@@ -1,7 +1,10 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { ShieldAlert, CheckCircle2 } from "lucide-react";
 import { get } from "../lib/api";
 import { Card, PageHeader, Table, Badge } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 
 const SEV_TONE = {
   High: "bg-red-50 text-red-700 ring-red-600/20",
@@ -11,11 +14,16 @@ const SEV_TONE = {
 
 export default function ClaimExceptions() {
   const [d, setD] = useState(null);
-  useEffect(() => { get("/reports/claim-exceptions").then(setD).catch(() => {}); }, []);
-  if (!d) return <div className="text-ink-faint text-sm">Reconciling claims…</div>;
+  const period = usePeriodState();
+  const load = useCallback(() => get("/reports/claim-exceptions", period.params).then(setD).catch(() => {}), [period.params]);
+  useEffect(() => { load(); }, [load]);
   return (
     <div data-testid="claim-exceptions-report">
-      <PageHeader title="Claim Exception Report" subtitle="Owner · reconciliation of claims, payments & data integrity" />
+      <PageHeader title="Claim Exception Report" subtitle="Owner · reconciliation of claims, payments & data integrity"
+        actions={<ReportActions onRefresh={load} showRebuild />} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+      {!d && <div className="text-ink-faint text-sm">Reconciling claims…</div>}
+      {d && (<>
       {d.count === 0 ? (
         <Card className="p-8 flex flex-col items-center gap-3 text-center" data-testid="no-exceptions">
           <CheckCircle2 size={40} className="text-emerald-500" />
@@ -37,6 +45,7 @@ export default function ClaimExceptions() {
             rows={d.exceptions.map((e, i) => ({ ...e, _k: `${e.leadId}-${e.type}-${i}` }))} empty="No exceptions" />
         </>
       )}
+      </>)}
     </div>
   );
 }

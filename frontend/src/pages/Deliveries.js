@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { get } from "../lib/api";
 import { fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
 const Chip = ({ ok, label }) => (
@@ -14,11 +15,13 @@ const Chip = ({ ok, label }) => (
 export default function Deliveries() {
   const [rows, setRows] = useState([]);
   const period = usePeriodState();
-  useEffect(() => { get("/deliveries", period.params).then(setRows); }, [period.params]);
+  const load = useCallback(() => get("/deliveries", period.params).then(setRows), [period.params]);
+  useEffect(() => { load(); }, [load]);
   const isOk = (v) => ["done", "yes", "true", "completed"].includes(String(v || "").toLowerCase());
   return (
     <div>
-      <PageHeader title="Delivery Tracker" subtitle={`${rows.length} bookings in fulfilment`} />
+      <PageHeader title="Delivery Tracker" subtitle={`${rows.length} bookings in fulfilment`}
+        actions={<ReportActions onRefresh={load} />} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
         rowKey="leadId"
