@@ -34,6 +34,7 @@ test("refresh button calls onRefresh", async () => {
 });
 
 test("rebuild posts then reloads", async () => {
+  post.mockResolvedValue({ recomputed: 3, failed: 0 });
   const onRefresh = jest.fn(() => Promise.resolve());
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -41,10 +42,10 @@ test("rebuild posts then reloads", async () => {
   await act(async () => {
     root.render(<ReportActions onRefresh={onRefresh} showRebuild />);
   });
-  await act(async () => {
-    host.querySelector('[data-testid="report-rebuild-btn"]').click();
-  });
-  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  const btn = host.querySelector('[data-testid="report-rebuild-btn"]');
+  expect(btn).toBeTruthy();
+  await act(async () => { btn.click(); });
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
   expect(post).toHaveBeenCalledWith("/reports/rebuild", {});
   expect(onRefresh).toHaveBeenCalled();
   await act(async () => { root.unmount(); });

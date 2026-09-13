@@ -30,7 +30,7 @@ export default function ReportActions({
   const rebuild = async () => {
     setRebuilding(true);
     try {
-      const r = await post("/reports/rebuild", {});
+      const r = (await post("/reports/rebuild", {})) || {};
       const n = r.recomputed || 0;
       toast.success(n ? `Rebuilt ${n} deal${n === 1 ? "" : "s"}` : "Rebuild finished");
       if (r.failed) toast.error(`${r.failed} deal${r.failed === 1 ? "" : "s"} failed to rebuild`);

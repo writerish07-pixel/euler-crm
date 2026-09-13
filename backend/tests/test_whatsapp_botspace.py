@@ -385,7 +385,7 @@ async def test_booking_whatsapp_send_then_skip_unless_force(client, monkeypatch)
     assert r.json().get("ok") is True
     assert not r.json().get("skipped")
     assert len(calls) == 1
-    assert calls[0]["template_id"] == "booking_confirm"
+    assert calls[0]["template_id"] == "booking_deal_confirm"
 
     lead = await server.db.leads.find_one({"leadId": "LDBK13"})
     assert lead.get("whatsappBookingSentAt")
@@ -473,7 +473,7 @@ async def test_booking_whatsapp_sends_when_mongo_enabled_false(client, monkeypat
     assert r.json().get("ok") is True
     assert not r.json().get("skipped")
     assert len(calls) == 1
-    assert calls[0]["template_id"] == "booking_confirm"
+    assert calls[0]["template_id"] == "booking_deal_confirm"
 
 
 @pytest.mark.asyncio
