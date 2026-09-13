@@ -216,6 +216,33 @@ async def _enable_whatsapp(client):
 
 
 @pytest.mark.asyncio
+async def test_booking_whatsapp_includes_deal_amount(client, monkeypatch):
+    calls = []
+
+    async def fake_send(phone, template_id, variables, name=""):
+        calls.append({"phone": phone, "template_id": template_id, "variables": variables})
+        return {"ok": True, "data": {"id": "wamid.deal"}}
+
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    await _enable_whatsapp(client)
+    await server.db.leads.insert_one({
+        "leadId": "LDDEAL1", "customerName": "Surendra", "mobile": "9876500099",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-09-10",
+        "interestedModel": "Turbo Max", "executive": "Amit", "customerPayable": 485000,
+    })
+    res = await wa.notify_booking("LDDEAL1", force=True, immediate=True)
+    assert res.get("ok") is True
+    assert calls and calls[0]["template_id"] == "booking_deal_confirm"
+    assert calls[0]["variables"][4] == "₹485,000"
+
+    calls.clear()
+    res2 = await wa.notify_deal_amount("LDDEAL1", immediate=True)
+    assert res2.get("ok") is True
+    assert calls[0]["template_id"] == "booking_deal_confirm"
+    assert calls[0]["variables"][4] == "₹485,000"
+
+
+@pytest.mark.asyncio
 async def test_google_review_rejects_undelivered(client, monkeypatch):
     await _enable_whatsapp(client)
     await server.db.leads.insert_one({
@@ -358,7 +385,7 @@ async def test_booking_whatsapp_send_then_skip_unless_force(client, monkeypatch)
     assert r.json().get("ok") is True
     assert not r.json().get("skipped")
     assert len(calls) == 1
-    assert calls[0]["template_id"] == "booking_confirm"
+    assert calls[0]["template_id"] == "booking_deal_confirm"
 
     lead = await server.db.leads.find_one({"leadId": "LDBK13"})
     assert lead.get("whatsappBookingSentAt")
@@ -446,7 +473,7 @@ async def test_booking_whatsapp_sends_when_mongo_enabled_false(client, monkeypat
     assert r.json().get("ok") is True
     assert not r.json().get("skipped")
     assert len(calls) == 1
-    assert calls[0]["template_id"] == "booking_confirm"
+    assert calls[0]["template_id"] == "booking_deal_confirm"
 
 
 @pytest.mark.asyncio

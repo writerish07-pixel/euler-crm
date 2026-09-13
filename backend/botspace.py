@@ -20,7 +20,7 @@ BOTSPACE_BASE = "https://public-api.bot.space"
 
 DEFAULT_TEMPLATES = {
     "followup": "lead_followup_3day",
-    "booking": "booking_confirm",
+    "booking": "booking_deal_confirm",
     "delivery": "delivery_review",
     "finance": "finance_overdue_exec",
     # Internal daily reports (English, Utility category). Staff messages, so they
@@ -53,6 +53,7 @@ REPORT_SLOTS = {"morning": 8, "eod": 20}
 # If Meta never approved the rewritten Utility names, try the previous ones
 # rather than silently skipping the whole slot.
 TEMPLATE_ALIASES = {
+    "booking": ["booking_deal_confirm", "booking_confirm"],
     "execMorning": ["exec_morning_statement", "exec_day_ahead"],
     "execEod": ["exec_eod_statement", "exec_eod_scorecard"],
     "managerEod": ["manager_eod_statement", "manager_eod_volume"],
@@ -88,6 +89,15 @@ def digits10(phone) -> str:
 def e164_in(phone) -> str:
     d = digits10(phone)
     return f"+91{d}" if len(d) == 10 else (str(phone or "").strip())
+
+
+def _deal_amount_text(lead: dict) -> str:
+    try:
+        amt = float(lead.get("customerPayable") or lead.get("dealAmount")
+                    or lead.get("budget") or 0)
+    except (TypeError, ValueError):
+        amt = 0.0
+    return f"₹{amt:,.0f}"
 
 
 def parse_day(value) -> Optional[date]:
@@ -528,16 +538,24 @@ async def notify_booking(lead_id: str, *, force: bool = False, immediate: bool =
     cfg = await get_config()
     if not cfg["enabled"]:
         return {"ok": False, "skipped": True, "reason": "whatsapp-not-configured"}
-    vars_ = [
+    amount = _deal_amount_text(lead)
+    vars5 = [
         lead.get("customerName") or "ग्राहक",
         lead.get("interestedModel") or "vehicle",
         str(lead.get("bookingDate") or today_ist()),
         lead.get("executive") or "team",
+        amount,
     ]
-    text = f"Booking confirm {lead.get('leadId')}"
+    vars4 = vars5[:4]
+    tid = cfg["templates"].get("booking") or DEFAULT_TEMPLATES["booking"]
+    # Prefer the 5-var deal-amount template so the customer sees the agreed payable.
+    if "deal" not in str(tid):
+        tid = DEFAULT_TEMPLATES["booking"]
+    vars_ = vars5 if "deal" in str(tid) else vars4
+    text = f"Booking confirm {lead.get('leadId')} · {amount}"
     res = await _enqueue_or_send(
         lead=lead, kind="booking", phone=lead.get("mobile"),
-        template_id=cfg["templates"]["booking"], variables=vars_, text=text,
+        template_id=tid, variables=vars_, text=text,
         customer_hours=not immediate,
     )
     if res.get("ok"):
@@ -546,6 +564,37 @@ async def notify_booking(lead_id: str, *, force: bool = False, immediate: bool =
         }})
         await _activity(lead, "WhatsApp booking confirmation sent")
     return {**res, "leadId": lead_id}
+
+
+async def notify_deal_amount(lead_id: str, *, immediate: bool = True):
+    """Tell the customer the approved / booked deal amount (anti-cheat check)."""
+    db = _db()
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead:
+        return {"ok": False, "reason": "lead-not-found"}
+    phone = digits10(lead.get("mobile"))
+    if len(phone) != 10:
+        return {"ok": False, "reason": "no-mobile"}
+    cfg = await get_config()
+    if not cfg["enabled"]:
+        return {"ok": False, "skipped": True, "reason": "whatsapp-not-configured"}
+    amount = _deal_amount_text(lead)
+    vars_ = [
+        lead.get("customerName") or "ग्राहक",
+        lead.get("interestedModel") or "vehicle",
+        str(lead.get("bookingDate") or today_ist()),
+        lead.get("executive") or "team",
+        amount,
+    ]
+    tid = cfg["templates"].get("booking") or DEFAULT_TEMPLATES["booking"]
+    if "deal" not in str(tid):
+        tid = DEFAULT_TEMPLATES["booking"]
+    return await _enqueue_or_send(
+        lead=lead, kind="booking", phone=lead.get("mobile"),
+        template_id=tid, variables=vars_,
+        text=f"Deal amount {lead.get('leadId')} · {amount}",
+        customer_hours=not immediate,
+    )
 
 
 async def send_booking_confirms(*, force: bool = False, immediate: bool = True) -> dict:

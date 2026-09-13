@@ -789,3 +789,27 @@ async def test_cancelled_sept_delivery_does_not_drop_yard(client):
     assert n == 0
     assert await server.db.oem_inventory.find_one({"chassis": "MD9CANCELLED"}) is not None
 
+
+@pytest.mark.asyncio
+async def test_expired_session_renews_with_saved_password(client, monkeypatch):
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+
+    renewed = _coulson_jwt(exp_offset=3600)
+    monkeypatch.setattr(coulson_client, "login", lambda user, pw: renewed)
+
+    await server.db["system"].update_one(
+        {"_id": "coulson"},
+        {"$set": {
+            "username": "vaibhav.akar", "password": "saved-pass",
+            "sessionToken": _coulson_jwt(exp_offset=-60),
+        }},
+        upsert=True)
+    token, src = await oem_sync._access_token(server.db)
+    assert src == "password-renew"
+    assert token == renewed
+    stored = await server.db["system"].find_one({"_id": "coulson"})
+    assert stored.get("sessionToken") == renewed
+

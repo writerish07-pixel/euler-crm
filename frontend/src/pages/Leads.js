@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Plus, ChevronRight, Upload } from "lucide-react";
+import ReportActions from "../components/ReportActions";
 import { toast } from "sonner";
 import { get, post, put, apiErrorMessage } from "../lib/api";
-import { inr, fmtDate, todayISO } from "../lib/format";
+import { inr, fmtDate, todayISO, digitsLast10 } from "../lib/format";
 import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
 import LeadImport from "./LeadImport";
@@ -119,12 +120,15 @@ export default function Leads() {
       <PageHeader
         title="Lead Register"
         subtitle={`${leads.length} leads in pipeline${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}`}
-        actions={!isField ? <div className="flex gap-2">
-          {!isExecutive && (
+        actions={<div className="flex gap-2">
+          <ReportActions onRefresh={load} />
+          {!isField && !isExecutive && (
             <Button variant="secondary" data-testid="import-leads-btn" onClick={() => setShowImport(true)}><Upload size={16} /> Import</Button>
           )}
-          <Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> {isExecutive ? "Request lead" : "New Lead"}</Button>
-        </div> : null}
+          {!isField && (
+            <Button data-testid="new-lead-btn" onClick={() => setShowNew(true)}><Plus size={16} /> {isExecutive ? "Request lead" : "New Lead"}</Button>
+          )}
+        </div>}
       />
 
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
@@ -214,6 +218,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
     if (isTl && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
+    if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
     if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
     const kycErr = kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
@@ -256,7 +261,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
         <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
         <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
-        <Field label="Mobile"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
+        <Field label={isExecutive ? "Mobile *" : "Mobile"}><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} inputMode="numeric" placeholder="10-digit mobile" /></Field>
         <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>
         <Field label="Customer type">
           <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>

@@ -6,6 +6,7 @@ import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card, Modal } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 import InsuranceMisUpload from "./InsuranceMisUpload";
 
@@ -25,6 +26,7 @@ export default function Insurance() {
   const [receipt, setReceipt] = useState(false);
   const [misOpen, setMisOpen] = useState(false);
   const [selected, setSelected] = useState({});
+  const [receiptTick, setReceiptTick] = useState(0);
   const period = usePeriodState();
 
   const load = useCallback(() => {
@@ -192,6 +194,7 @@ export default function Insurance() {
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${tab === k ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}>{l}</button>
             ))}
           </div>
+          <ReportActions onRefresh={() => { load(); setReceiptTick((n) => n + 1); }} showRebuild />
           <Button variant="secondary" data-testid="upload-mis-btn" onClick={() => setMisOpen(true)}>
             <UploadCloud size={16} /> Upload MIS
           </Button>
@@ -202,7 +205,7 @@ export default function Insurance() {
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
 
       {tab === "receipts" ? (
-        <PayoutReceiptLedger agents={agents} />
+        <PayoutReceiptLedger agents={agents} refreshTick={receiptTick} />
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -292,12 +295,12 @@ function rateHint(r) {
   return src ? `${(Number(r.payoutRate) * 100).toFixed(1)}% — ${src}` : "";
 }
 
-function PayoutReceiptLedger({ agents }) {
+function PayoutReceiptLedger({ agents, refreshTick = 0 }) {
   const [rows, setRows] = useState([]);
   const [agentId, setAgentId] = useState("");
   useEffect(() => {
     get("/insurance/receipts", agentId ? { agent_id: agentId } : {}).then(setRows).catch(() => setRows([]));
-  }, [agentId]);
+  }, [agentId, refreshTick]);
   const total = useMemo(() => rows.reduce((s, r) => s + Number(r.amount || 0), 0), [rows]);
   return (
     <div data-testid="insurance-receipt-ledger">

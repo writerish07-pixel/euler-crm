@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, Wallet, IndianRupee,
@@ -9,6 +9,7 @@ import { get } from "../lib/api";
 import { toast } from "sonner";
 import { inr, compactInr, num, ytdCount, ytdMoney, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 import ErrorBoundary from "../components/ErrorBoundary";
 import OwnerPriceEditor from "../components/OwnerPriceEditor";
 import YardStockCard from "../components/YardStockCard";
@@ -18,9 +19,10 @@ export default function Dashboard() {
   const { isOwner } = useAuth();
   const [d, setD] = useState(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     get("/dashboard").then(setD).catch(() => toast.error("Could not load dashboard"));
   }, []);
+  useEffect(() => { load(); }, [load]);
 
   const k = d?.kpis || {};
   const mtd = d?.period?.mtd || {};
@@ -36,7 +38,10 @@ export default function Dashboard() {
         subtitle={d?.lastUpdated
           ? `MTD + YTD morning board · updated ${fmtTime(d.lastUpdated)}`
           : "MTD + YTD morning board"}
-        actions={<Link to="/monthly"><Button variant="secondary" data-testid="ops-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>}
+        actions={<div className="flex gap-2">
+          <ReportActions onRefresh={load} />
+          <Link to="/monthly"><Button variant="secondary" data-testid="ops-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
+        </div>}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="ops-period-kpis">

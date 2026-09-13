@@ -3215,6 +3215,9 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
     if role == "tl" and not str(body.executive or "").strip():
         raise HTTPException(422, "Pick the executive this lead belongs to.")
     if role == "executive":
+        mobile_digits = re.sub(r"\D", "", str(body.mobile or ""))
+        if len(mobile_digits) < 10:
+            raise HTTPException(422, "A 10-digit mobile is required before sending for approval.")
         if ce.num(body.budget) <= 0:
             raise HTTPException(422, "Enter the deal amount before sending for GM / Owner approval.")
         existing = await _mobile_taken_by_lead(body.mobile)
@@ -3507,6 +3510,10 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         {"requestId": request_id},
         {"$set": {"status": "approved", "leadId": lead["leadId"]}},
     )
+    try:
+        wa.schedule(wa.notify_deal_amount(lead["leadId"]))
+    except Exception:
+        logger.exception("WhatsApp deal-amount on approval failed")
     return {"ok": True, "leadId": lead["leadId"], "lead": lead, "existing": bool(existing_id)}
 
 
@@ -3724,6 +3731,7 @@ class LeadRequestUpdateIn(BaseModel):
     customerType: Optional[str] = None
     gstin: Optional[str] = None
     oemExtraSupportReceived: Optional[float] = None
+    mobile: Optional[str] = None
 
 
 async def _request_public(req, user):
@@ -3786,8 +3794,16 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
             payload[k] = patch[k]
     if "oemExtraSupportReceived" in patch and patch["oemExtraSupportReceived"] is not None:
         payload["oemExtraSupportReceived"] = ce.round2(max(0.0, ce.num(patch["oemExtraSupportReceived"])))
+    if "mobile" in patch and patch["mobile"] is not None:
+        digits = re.sub(r"\D", "", str(patch["mobile"] or ""))
+        if len(digits) < 10:
+            raise HTTPException(422, "A 10-digit mobile is required before sending for approval.")
+        payload["mobile"] = digits[-10:]
     if payload.get("customerType"):
         payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+    mobile_digits = re.sub(r"\D", "", str(payload.get("mobile") or ""))
+    if len(mobile_digits) < 10:
+        raise HTTPException(422, "A 10-digit mobile is required before sending for approval.")
     deal_amount = ce.round2(ce.num(payload.get("budget")))
     model = str(payload.get("interestedModel") or "").strip()
     variant = str(payload.get("variant") or "").strip()
@@ -3805,12 +3821,15 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
         "askedAt": now_iso() if deal_amount > 0 else "",
     }})
     existing_id = str(req.get("existingLeadId") or "").strip()
-    if existing_id and (model or variant):
-        await db.leads.update_one({"leadId": existing_id}, {"$set": {
-            "interestedModel": model,
-            "variant": variant,
-            "lastUpdated": now_iso(),
-        }})
+    if existing_id and (model or variant or payload.get("mobile")):
+        lead_patch = {"lastUpdated": now_iso()}
+        if model:
+            lead_patch["interestedModel"] = model
+        if variant:
+            lead_patch["variant"] = variant
+        if payload.get("mobile"):
+            lead_patch["mobile"] = payload["mobile"]
+        await db.leads.update_one({"leadId": existing_id}, {"$set": lead_patch})
     updated = await db.lead_requests.find_one({"requestId": request_id})
     return _request_out(updated)
 
@@ -7461,11 +7480,30 @@ async def list_oem_inventory(model: Optional[str] = None, variant: Optional[str]
     return [clean(r) for r in rows]
 
 
+@api.get("/inventory/transit")
+async def list_transit_inventory(model: Optional[str] = None, _user=Depends(current_user)):
+    rows = await oem_sync.list_transit_inventory(db, model)
+    return [clean(r) for r in rows]
+
+
+@api.get("/inventory/need-to-order")
+async def list_need_to_order(_user=Depends(current_user)):
+    """Booked deals whose model/variant has no live yard stock."""
+    return await oem_sync.need_to_order_bookings(db)
+
+
 @api.get("/inventory/summary")
 async def inventory_summary(_user=Depends(current_user)):
     counts = await oem_sync.inventory_counts(db)
     out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
-    return {"total": sum(c["count"] for c in out), "rows": out}
+    transit = await db.oem_inventory_transit.count_documents({})
+    need = await oem_sync.need_to_order_bookings(db)
+    return {
+        "total": sum(c["count"] for c in out),
+        "transit": transit,
+        "needToOrder": len(need),
+        "rows": out,
+    }
 
 
 # ---------------------------------------------------------------- masters registers
@@ -7693,12 +7731,14 @@ async def list_bookings(month: Optional[str] = None, year: Optional[str] = None,
 
 
 @api.get("/activities")
-async def list_activities(lead_id: Optional[str] = None, user=Depends(current_user)):
+async def list_activities(lead_id: Optional[str] = None, month: Optional[str] = None,
+                         year: Optional[str] = None, user=Depends(current_user)):
     q = {"leadId": lead_id} if lead_id else {}
     rows = [clean(a) for a in await db.activities.find(q).sort("activityId", -1).to_list(2000)]
     if user.get("role") == "executive":
         mine = await _own_lead_ids(user)
         rows = [a for a in rows if a.get("leadId") in mine]
+    rows = _rows_in_period(rows, _parse_period(month, year), lambda a: a.get("date"))
     return rows
 
 
@@ -8830,27 +8870,46 @@ async def _owner_booking_metrics():
         if not (dealer_scheme > 0) and not use_shares:
             dealer_scheme = ce.num(claim["dealerDiscount"])
         reg = reg_by_lead.get(l.get("leadId"))
+        atot = alloc.get("totals") or {}
         rows.append({
             "leadId": l.get("leadId"), "executive": l.get("executive") or "Unassigned",
             "month": str(l.get("bookingDate") or "")[:7] or "Unknown",
+            "bookingDate": str(l.get("bookingDate") or "")[:10],
             "totals": totals, "claim": claim, "shares": shares, "income": income,
             "companyClaim": company_claim, "companyOem": company_oem, "dealerScheme": dealer_scheme,
+            "customerBenefit": ce.num(atot.get("customerBenefit")),
+            "dealerFundedGiven": ce.num(atot.get("dealerFundedBenefit")),
+            "oemShare": ce.num(atot.get("oemShare")) or company_oem,
+            "dealerRetained": ce.num(atot.get("dealerRetained")),
             "paid": ce.num(l.get("totalReceived")), "reg": reg,
             "displayByComponent": shares["displayByComponent"] if use_shares else income["oemClaimByComponent"],
         })
     return rows, ref_counts
 
 
+async def _owner_rows_in_period(month=None, year=None):
+    rows, refs = await _owner_booking_metrics()
+    rows = _rows_in_period(rows, _parse_period(month, year),
+                           lambda r: r.get("bookingDate") or "")
+    return rows, refs
+
+
 @api.get("/reports/owner-commercial", dependencies=[Depends(owner_only)])
-async def owner_commercial_report():
-    """Port of buildOwnerCommercialReport_ — discount ownership, claim position, averages, executive usage."""
-    rows, _ = await _owner_booking_metrics()
+async def owner_commercial_report(month: Optional[str] = None, year: Optional[str] = None):
+    """Discount ownership from the scheme allocation engine, not staff-typed offer boxes.
+
+    Your Own Share Given = dealer-funded benefit actually passed to the customer.
+    OEM-Funded / Receivable = Scheme Master company share (what we claim from OEM).
+    Total Discount Given = customer benefit (what the customer actually received).
+    Scheme Income Retained = scheme available − customer benefit.
+    """
+    rows, _ = await _owner_rows_in_period(month, year)
     n = len(rows)
-    dealer_cost = ce.round2(sum(r["claim"]["dealerDiscount"] for r in rows))
-    oem_cost = ce.round2(sum(r["companyOem"] for r in rows))
-    total_disc = ce.round2(sum(r["totals"]["totalDiscount"] for r in rows))
+    dealer_cost = ce.round2(sum(r["dealerFundedGiven"] for r in rows))
+    oem_cost = ce.round2(sum(r["oemShare"] for r in rows))
+    total_disc = ce.round2(sum(r["customerBenefit"] for r in rows))
     claim_total = ce.round2(sum(r["companyClaim"] for r in rows))
-    retained = ce.round2(sum(r["income"]["retainedIncomeTotal"] for r in rows))
+    retained = ce.round2(sum(r["dealerRetained"] for r in rows))
     payable_total = ce.round2(sum(r["totals"]["customerPayable"] for r in rows))
     pending_claims = 0
     pending_value = 0.0
@@ -8860,9 +8919,10 @@ async def owner_commercial_report():
         recvd = ce.num(reg["received"]) if reg else 0.0
         if recvd > 0:
             received_value = ce.round2(received_value + recvd)
-        elif r["companyClaim"] > 0:
+        outstanding = ce.round2(max(0.0, r["companyClaim"] - recvd))
+        if outstanding > 0.01:
             pending_claims += 1
-            pending_value = ce.round2(pending_value + r["companyClaim"])
+            pending_value = ce.round2(pending_value + outstanding)
     scheme_roi = ce.round2((oem_cost / total_disc) * 100) if total_disc > 0 else 0
     ageing_sum, ageing_count = 0, 0
     for c in await db.claims.find({"submittedDate": {"$exists": True, "$nin": ["", None]}}).to_list(5000):
@@ -8875,11 +8935,12 @@ async def owner_commercial_report():
         e = by_exec.setdefault(r["executive"], {"executive": r["executive"], "bookings": 0,
                                                 "totalDiscount": 0.0, "dealerDiscount": 0.0, "oemDiscount": 0.0})
         e["bookings"] += 1
-        e["totalDiscount"] = ce.round2(e["totalDiscount"] + r["totals"]["totalDiscount"])
-        e["dealerDiscount"] = ce.round2(e["dealerDiscount"] + r["claim"]["dealerDiscount"])
-        e["oemDiscount"] = ce.round2(e["oemDiscount"] + r["companyOem"])
+        e["totalDiscount"] = ce.round2(e["totalDiscount"] + r["customerBenefit"])
+        e["dealerDiscount"] = ce.round2(e["dealerDiscount"] + r["dealerFundedGiven"])
+        e["oemDiscount"] = ce.round2(e["oemDiscount"] + r["oemShare"])
     return {
         "bookings": n,
+        "period": periodmod.as_dict(_parse_period(month, year)),
         "discountOwnership": {
             "totalBookings": n, "dealerShareGiven": dealer_cost, "oemFunded": oem_cost,
             "totalDiscountGiven": total_disc, "oemReceivable": claim_total, "schemeIncomeRetained": retained,
@@ -8948,9 +9009,9 @@ async def scheme_allocation_impact():
 
 
 @api.get("/reports/oem-claim-dashboard", dependencies=[Depends(owner_only)])
-async def oem_claim_dashboard():
+async def oem_claim_dashboard(month: Optional[str] = None, year: Optional[str] = None):
     """Port of buildOemClaimDashboard_ — status/value/monthly/scheme-wise/executive-wise claim summaries."""
-    rows, _ = await _owner_booking_metrics()
+    rows, _ = await _owner_rows_in_period(month, year)
     status_keys = ["Pending", "Submitted", "Approved", "Rejected", "Received", "Not Applicable"]
     status_count = {s: 0 for s in status_keys}
     status_value = {s: 0.0 for s in status_keys}
@@ -8964,8 +9025,8 @@ async def oem_claim_dashboard():
     execu = {}
     for r in rows:
         cc = r["companyClaim"]
-        total_disc_val = ce.round2(total_disc_val + r["totals"]["totalDiscount"])
-        dealer_share_val = ce.round2(dealer_share_val + r["dealerScheme"])
+        total_disc_val = ce.round2(total_disc_val + r.get("customerBenefit", r["totals"]["totalDiscount"]))
+        dealer_share_val = ce.round2(dealer_share_val + r.get("dealerFundedGiven", r["dealerScheme"]))
         company_share_val = ce.round2(company_share_val + cc)
         eligible_val = ce.round2(eligible_val + cc)
         reg = r["reg"]
@@ -9031,6 +9092,7 @@ async def oem_claim_dashboard():
         eligible_val - status_value.get("Received", 0) - incentive_received)
     return {
         "bookings": len(rows), "totalOemClaimValue": total_oem,
+        "period": periodmod.as_dict(_parse_period(month, year)),
         "statusSummary": [{"status": s, "bookings": status_count.get(s, 0), "value": status_value.get(s, 0)} for s in status_keys],
         "valueSummary": {
             "totalDiscountGiven": total_disc_val, "eligibleClaim": eligible_val,
@@ -9373,9 +9435,9 @@ async def production_audit():
 
 
 @api.get("/reports/claim-exceptions", dependencies=[Depends(owner_only)])
-async def claim_exceptions_report():
+async def claim_exceptions_report(month: Optional[str] = None, year: Optional[str] = None):
     """Port of reconcileAllClaims_/reconcileBooking_ — surfaces claim & data-integrity exceptions."""
-    rows, ref_counts = await _owner_booking_metrics()
+    rows, ref_counts = await _owner_rows_in_period(month, year)
     exceptions = []
     for r in rows:
         lid = r["leadId"]
@@ -9404,7 +9466,26 @@ async def claim_exceptions_report():
             exceptions.append({"leadId": lid, "type": "Negative Discount", "severity": "High", "detail": ""})
         if r["totals"]["customerPayable"] < 0:
             exceptions.append({"leadId": lid, "type": "Negative Payable", "severity": "High", "detail": ""})
-    return {"count": len(exceptions), "exceptions": exceptions}
+    return {"count": len(exceptions), "exceptions": exceptions,
+            "period": periodmod.as_dict(_parse_period(month, year))}
+
+
+@api.post("/reports/rebuild", dependencies=[Depends(owner_only)])
+async def rebuild_owner_reports():
+    """Recompute every commercial lead so owner reports pick up live scheme / claim / insurance."""
+    leads = await _commercial_leads()
+    done, failed = 0, 0
+    async with defer_sheet_writes():
+        for l in leads:
+            lid = l.get("leadId")
+            if not lid:
+                continue
+            try:
+                await recompute_lead(lid)
+                done += 1
+            except Exception:
+                failed += 1
+    return {"ok": True, "recomputed": done, "failed": failed}
 
 
 
@@ -9982,9 +10063,9 @@ async def drop_extra_support(body: DropExtraSupportIn, act=Depends(actor)):
 
 
 @api.get("/dropped-extra-support", dependencies=[Depends(oem_claim_desk_only)])
-async def list_dropped_extra_support():
-    rows = await db.dropped_oem_extra_support.find().sort("droppedAt", -1).to_list(2000)
-    return [clean(r) for r in rows]
+async def list_dropped_extra_support(month: Optional[str] = None, year: Optional[str] = None):
+    rows = [clean(r) for r in await db.dropped_oem_extra_support.find().sort("droppedAt", -1).to_list(2000)]
+    return _rows_in_period(rows, _parse_period(month, year), lambda r: r.get("droppedAt"))
 
 
 # ---------------------------------------------------------------- audit log (H4) — owner-only viewer
@@ -10587,20 +10668,23 @@ async def gsheets_backfill():
 
 # ---------------------------------------------------------------- owner reports
 @api.get("/reports/insurance-payout", dependencies=[Depends(owner_only)])
-async def insurance_payout_report():
+async def insurance_payout_report(month: Optional[str] = None, year: Optional[str] = None):
     entries = await db.insurance.find().to_list(5000)
+    entries = _rows_in_period(
+        entries, _parse_period(month, year),
+        lambda e: e.get("policyDate") or e.get("deliveryDate"))
     by_month = {}
     by_insurer = {}
     by_agent = {}
     totals = {"premium": 0.0, "expected": 0.0, "received": 0.0, "outstanding": 0.0, "count": 0}
     for e in entries:
-        month = str(e.get("policyDate") or e.get("deliveryDate") or "")[:7] or "Unknown"
+        ym = str(e.get("policyDate") or e.get("deliveryDate") or "")[:7] or "Unknown"
         premium = ce.num(e.get("insuranceAmount"))
         expected = ce.num(e.get("expectedPayout"))
         received = ce.num(e.get("receivedPayout"))
         outstanding = ce.num(e.get("payoutOutstanding"))
         agent = e.get("insuranceAgentName") or "— No agent —"
-        for bucket, key in ((by_month, month), (by_insurer, e.get("insuranceCompany") or "Unknown"),
+        for bucket, key in ((by_month, ym), (by_insurer, e.get("insuranceCompany") or "Unknown"),
                             (by_agent, agent)):
             row = bucket.setdefault(key, {"key": key, "premium": 0.0, "expected": 0.0, "received": 0.0, "outstanding": 0.0, "count": 0})
             row["premium"] += premium; row["expected"] += expected
@@ -10615,6 +10699,7 @@ async def insurance_payout_report():
 
     return {"byMonth": norm(by_month, True), "byInsurer": norm(by_insurer),
             "byAgent": norm(by_agent),
+            "period": periodmod.as_dict(_parse_period(month, year)),
             "totals": {k: (ce.round2(v) if isinstance(v, float) else v) for k, v in totals.items()}}
 
 
@@ -10698,9 +10783,11 @@ async def scheme_allocation_impact_report():
 
 
 @api.get("/reports/dealer-earnings", dependencies=[Depends(owner_only)])
-async def dealer_earnings_report():
+async def dealer_earnings_report(month: Optional[str] = None, year: Optional[str] = None):
     """Live dealer earnings from booked leads: margin + scheme retained + insurance income + other."""
     leads = await _commercial_leads()
+    leads = _rows_in_period(leads, _parse_period(month, year),
+                            lambda l: l.get("deliveryDate") or l.get("bookingDate"))
     scheme_rows = await get_scheme_rows()
     # insurance income (dealer payout) per lead
     ins_by_lead = {}
@@ -10795,6 +10882,7 @@ async def dealer_earnings_report():
             m[k] = ce.round2(m[k])
     return {
         "byMonth": months,
+        "period": periodmod.as_dict(_parse_period(month, year)),
         "components": [{"label": lbl, "amount": ce.round2(amt)} for lbl, amt in components.items() if amt],
         "totals": {k: (ce.round2(v) if isinstance(v, float) else v) for k, v in totals.items()},
     }
@@ -11255,8 +11343,9 @@ class QuotationIn(BaseModel):
 
 
 @api.get("/quotations")
-async def list_quotations():
-    return [clean(q) for q in await db.quotations.find().sort("quoteId", -1).to_list(1000)]
+async def list_quotations(month: Optional[str] = None, year: Optional[str] = None):
+    rows = [clean(q) for q in await db.quotations.find().sort("quoteId", -1).to_list(1000)]
+    return _rows_in_period(rows, _parse_period(month, year), lambda q: q.get("date"))
 
 
 @api.post("/quotations")

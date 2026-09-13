@@ -344,6 +344,28 @@ def fetch_present_inventory(token: str, limit=200):
 # Billed vehicles leave PRESENT immediately. The dealer Sold tab is the same
 # inventory API with vehicle_status=SOLD (Coulson SPA: Present / In Transit / Sold).
 SOLD_INVENTORY_STATUSES = ("SOLD",)
+TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT", "IN TRANSIT", "TRANSIT")
+
+
+def fetch_transit_inventory(token: str, limit=200):
+    """Vehicles on the way to the dealer — Coulson In Transit tab."""
+    rows = []
+    seen = set()
+    for status in TRANSIT_INVENTORY_STATUSES:
+        try:
+            chunk = fetch_inventory_by_status(token, status, limit=limit)
+        except CoulsonError as e:
+            log.info("Coulson %s inventory skipped: %s", status, e)
+            continue
+        for v in chunk or []:
+            key = str((v or {}).get("vin") or (v or {}).get("chassis") or (v or {}).get("id") or "")
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            if v:
+                rows.append(v)
+    return rows
 
 
 def fetch_sold_inventory(token: str, limit=200):

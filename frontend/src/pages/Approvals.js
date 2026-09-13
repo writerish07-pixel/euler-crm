@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
 import { RequestKycPreview } from "../components/LeadDocuments";
@@ -75,6 +76,7 @@ export default function Approvals() {
         subtitle={canApproveLeads
           ? "Approve or reject deal format and KYC"
           : "New enquiries waiting for approval"}
+        actions={<ReportActions onRefresh={load} />}
       />
       {canApproveLeads && (
         <div className="flex flex-wrap items-center gap-2 mb-3">

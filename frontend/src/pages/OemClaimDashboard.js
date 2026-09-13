@@ -1,17 +1,25 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Receipt, Building2, HandCoins, AlertTriangle } from "lucide-react";
 import { get } from "../lib/api";
 import { inr, compactInr } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 
 export default function OemClaimDashboard() {
   const [d, setD] = useState(null);
-  useEffect(() => { get("/reports/oem-claim-dashboard").then(setD).catch(() => {}); }, []);
-  if (!d) return <div className="text-ink-faint text-sm">Loading dashboard…</div>;
-  const v = d.valueSummary;
+  const period = usePeriodState();
+  const load = useCallback(() => get("/reports/oem-claim-dashboard", period.params).then(setD).catch(() => {}), [period.params]);
+  useEffect(() => { load(); }, [load]);
+  const v = d?.valueSummary;
   return (
     <div data-testid="oem-claim-dashboard">
-      <PageHeader title="OEM Claim Dashboard" subtitle="Owner · company-share claim position across all bookings" />
+      <PageHeader title="OEM Claim Dashboard" subtitle="Owner · company-share claim position from the scheme allocation engine"
+        actions={<ReportActions onRefresh={load} showRebuild />} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+      {!d && <div className="text-ink-faint text-sm">Loading dashboard…</div>}
+      {d && (<>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard label="Bookings" value={d.bookings} icon={Receipt} tone="text-cobalt" />
         <StatCard label="Eligible Claim (company)" value={compactInr(v.eligibleClaim)} icon={Building2} tone="text-emerald-600" />
@@ -81,6 +89,7 @@ export default function OemClaimDashboard() {
             rows={d.executiveWise} empty="—" />
         </div>
       </div>
+      </>)}
     </div>
   );
 }

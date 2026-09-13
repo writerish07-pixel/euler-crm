@@ -288,13 +288,30 @@ async def _access_token(db, username=None, password=None):
     token = session_from_doc(doc)
     if token:
         return token, "session"
+    user, pw, src = await resolve_credentials(db)
+    if credentials_configured(user, pw):
+        try:
+            new_token = coulson_client.login(user, pw)
+            try:
+                await save_session(db, new_token, user)
+            except Exception:
+                log.exception("Could not persist renewed Coulson session")
+            return new_token, "password-renew"
+        except coulson_client.CoulsonError as e:
+            if session_expired(doc):
+                raise coulson_client.CoulsonError(
+                    "Coulson session expired and Euler refused the saved password from this "
+                    "server. Sign in at coulson.eulerlogistics.com and paste a new session. "
+                    "Their JWT lasts about 3 days; when password login from this app works, "
+                    "saved username + password renews it automatically."
+                ) from e
+            raise
     if session_expired(doc):
         raise coulson_client.CoulsonError(
-            "Coulson session expired — sign in at coulson.eulerlogistics.com and paste a new session")
-    user, pw, src = await resolve_credentials(db)
-    if not credentials_configured(user, pw):
-        return "", ""
-    return coulson_client.login(user, pw), src or "settings"
+            "Coulson session expired — sign in at coulson.eulerlogistics.com and paste a new session. "
+            "Save the same username and password here so the app can renew the session itself."
+        )
+    return "", ""
 
 
 async def sync_from_coulson(db, *, username=None, password=None):
@@ -315,6 +332,13 @@ async def sync_from_coulson(db, *, username=None, password=None):
         log.warning("Coulson sold inventory skipped: %s", e)
     except Exception:
         log.exception("Coulson sold inventory failed")
+    transit_vehicles = []
+    try:
+        transit_vehicles = coulson_client.fetch_transit_inventory(token) or []
+    except coulson_client.CoulsonError as e:
+        log.warning("Coulson transit inventory skipped: %s", e)
+    except Exception:
+        log.exception("Coulson transit inventory failed")
 
     # Index OEM rows by catalog sku key (multiple SAP ids can share a SKU).
     by_key = {s.key: [] for s in cat.CATALOG}
@@ -387,10 +411,35 @@ async def sync_from_coulson(db, *, username=None, password=None):
     dropped = await drop_delivered_from_inventory(db)
     yard_count = await db.oem_inventory.count_documents({})
     sold_count = await replace_sold_inventory(db, sold_vehicles, oem_by_id, by_key)
+    transit_docs = []
+    for v in transit_vehicles:
+        sku = None
+        price = 0.0
+        oem_full = oem_by_id.get(v.get("sap_vehicle_model_id"))
+        if oem_full:
+            sku = cat.sku_for_oem_row(oem_full)
+            if sku:
+                price = cat.jaipur_price(oem_full)
+        if not sku:
+            sku = cat.sku_for_oem_row({
+                "model": v.get("model"),
+                "variant": v.get("variant"),
+                "load_body": v.get("updated_load_body") or v.get("load_body_assembly"),
+                "sap_product_name": v.get("sap_product_name"),
+                "model_registered_name": v.get("model_registered_name"),
+            })
+        doc = _inventory_doc(v, sku, price)
+        doc["stockStatus"] = "transit"
+        transit_docs.append(doc)
+    await db.oem_inventory_transit.delete_many({})
+    if transit_docs:
+        await db.oem_inventory_transit.insert_many(transit_docs)
+    transit_count = len(transit_docs)
     leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(db)
 
     extra = {
         "inventoryCount": yard_count,
+        "transitCount": transit_count,
         "soldCount": sold_count,
         "leadsVehicleIds": leads_vehicle_ids,
         "deliveredDropped": dropped,
@@ -977,3 +1026,48 @@ async def list_inventory(db, model=None, variant=None, *, family=False):
     if family or variant:
         return [r for r in rows if inventory_row_matches_lead(r, model, variant or "")]
     return [r for r in rows if str(r.get("model") or "") == str(model)]
+
+
+async def list_transit_inventory(db, model=None):
+    rows = [r async for r in db.oem_inventory_transit.find({}).sort("model", 1)]
+    if not model:
+        return rows
+    return [r for r in rows if str(r.get("model") or "") == str(model)]
+
+
+def _is_open_booking(lead):
+    if not lead or lead.get("dealCancelled"):
+        return False
+    acct = str(lead.get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return False
+    st = str(lead.get("currentStatus") or "").lower()
+    if "deliver" in st or "lost" in st or "cancel" in st:
+        return False
+    return "book" in st or "finance" in st
+
+
+async def need_to_order_bookings(db):
+    """Booked / finance leads with no matching chassis currently in the yard."""
+    counts = await inventory_counts(db)
+    out = []
+    async for l in db.leads.find({}):
+        if not _is_open_booking(l):
+            continue
+        model = l.get("interestedModel") or ""
+        variant = l.get("variant") or ""
+        if counts.get((model, variant), 0) > 0:
+            continue
+        out.append({
+            "leadId": l.get("leadId"),
+            "customerName": l.get("customerName") or "",
+            "mobile": l.get("mobile") or "",
+            "executive": l.get("executive") or "",
+            "model": model,
+            "variant": variant,
+            "bookingDate": l.get("bookingDate") or "",
+            "customerPayable": l.get("customerPayable") or 0,
+            "currentStatus": l.get("currentStatus") or "",
+        })
+    out.sort(key=lambda r: (str(r.get("bookingDate") or ""), r.get("customerName") or ""))
+    return out

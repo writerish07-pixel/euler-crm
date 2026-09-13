@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, compactInr, fmtDate, fmtTime, todayISO, num, ytdCount, ytdMoney } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Portal, Field, Input, Select } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
 import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
 import { useAuth } from "../context/AuthContext";
@@ -46,7 +47,15 @@ export default function AccountsDashboard() {
     w.document.close();
   };
 
-  if (!d) return <div className="text-ink-faint text-sm">Loading accounts dashboard…</div>;
+  if (!d) {
+    return (
+      <div data-testid="accounts-dashboard">
+        <PageHeader title="Accounts Dashboard" subtitle="Tally cross-check"
+          actions={<ReportActions onRefresh={load} />} />
+        <div className="text-ink-faint text-sm">Loading accounts dashboard…</div>
+      </div>
+    );
+  }
   const k = d.kpis || {};
   const dn = d.doNotPost || {};
   const canTallyUpload = isOwner || isAccounts;
@@ -57,6 +66,7 @@ export default function AccountsDashboard() {
       <PageHeader
         title="Accounts Dashboard"
         subtitle={`Tally cross-check · MTD + YTD · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`}
+        actions={<ReportActions onRefresh={load} />}
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="acct-period-kpis">

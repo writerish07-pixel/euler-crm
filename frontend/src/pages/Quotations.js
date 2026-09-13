@@ -4,6 +4,9 @@ import { toast } from "sonner";
 import { get, post } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 
 const CHARGES = [["exShowroom","Ex-Showroom"],["registrationRto","RTO"],["insurance","Insurance"],["accessories","Accessories"],["handlingCharges","Handling"],["fastag","Fastag"],["trc","TRC"],["extendedWarranty","Ext. Warranty"],["otherCharges","Other"]];
 const DISCS = [["consumerDiscount","Consumer"],["exchangeBonus","Exchange"],["loyaltyBonus","Loyalty"],["referralBonus","Referral"],["dsaDiscount","DSA"],["additionalDiscount","Additional"]];
@@ -12,13 +15,18 @@ export default function Quotations() {
   const [rows, setRows] = useState([]);
   const [show, setShow] = useState(false);
   const [masters, setMasters] = useState(null);
-  const load = useCallback(() => get("/quotations").then(setRows), []);
+  const period = usePeriodState();
+  const load = useCallback(() => get("/quotations", period.params).then(setRows), [period.params]);
   useEffect(() => { load(); get("/masters").then(setMasters); }, [load]);
 
   return (
     <div>
       <PageHeader title="Quotations" subtitle={`${rows.length} saved quotes`}
-        actions={<Button data-testid="new-quote-btn" onClick={() => setShow(true)}><Plus size={16} /> New Quotation</Button>} />
+        actions={<div className="flex gap-2">
+          <ReportActions onRefresh={load} />
+          <Button data-testid="new-quote-btn" onClick={() => setShow(true)}><Plus size={16} /> New Quotation</Button>
+        </div>} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
         rowKey="quoteId"
         columns={[

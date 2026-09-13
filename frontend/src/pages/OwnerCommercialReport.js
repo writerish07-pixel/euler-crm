@@ -1,8 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Coins, HandCoins, Building2, Receipt } from "lucide-react";
 import { get } from "../lib/api";
 import { inr, compactInr } from "../lib/format";
 import { Card, PageHeader, StatCard, Table } from "../components/ui";
+import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 
 function KVRow({ label, value, tone }) {
   return (
@@ -15,12 +18,17 @@ function KVRow({ label, value, tone }) {
 
 export default function OwnerCommercialReport() {
   const [d, setD] = useState(null);
-  useEffect(() => { get("/reports/owner-commercial").then(setD).catch(() => {}); }, []);
-  if (!d) return <div className="text-ink-faint text-sm">Loading report…</div>;
-  const o = d.discountOwnership, c = d.claimPosition, a = d.averages;
+  const period = usePeriodState();
+  const load = useCallback(() => get("/reports/owner-commercial", period.params).then(setD).catch(() => {}), [period.params]);
+  useEffect(() => { load(); }, [load]);
+  const o = d?.discountOwnership, c = d?.claimPosition, a = d?.averages;
   return (
     <div data-testid="owner-commercial-report">
-      <PageHeader title="Owner Commercial Report" subtitle="Owner · discount ownership, claim position & executive usage" />
+      <PageHeader title="Owner Commercial Report" subtitle="Scheme allocation · your share, OEM-funded and what the customer received"
+        actions={<ReportActions onRefresh={load} showRebuild />} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+      {!d && <div className="text-ink-faint text-sm">Loading report…</div>}
+      {d && (<>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <StatCard label="Total Bookings" value={o.totalBookings} icon={Receipt} tone="text-cobalt" />
         <StatCard label="OEM-Funded (company)" value={compactInr(o.oemFunded)} icon={Building2} tone="text-emerald-600" />
@@ -57,6 +65,7 @@ export default function OwnerCommercialReport() {
           { key: "oemDiscount", label: "OEM Discount", align: "right", mono: true, render: (r) => inr(r.oemDiscount) },
         ]}
         rows={d.byExecutive} empty="No bookings yet" />
+      </>)}
     </div>
   );
 }

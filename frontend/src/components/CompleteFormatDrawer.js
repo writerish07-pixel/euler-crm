@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { get, put, apiErrorMessage } from "../lib/api";
 import { Drawer, Button, Field, Input, Select } from "./ui";
+import { digitsLast10 } from "../lib/format";
 import { LocalKycBlock, kycReady, uploadKycFiles } from "./LeadDocuments";
 import DealFormatCard from "./DealFormatCard";
 import CallLink from "./CallLink";
@@ -16,6 +17,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
   const [gstin, setGstin] = useState(row.gstin || "");
   const [oemExtra, setOemExtra] = useState(
     Number(row.oemExtraSupportReceived) > 0 ? Number(row.oemExtraSupportReceived) : "");
+  const [mobile, setMobile] = useState(row.mobile || "");
   const [busy, setBusy] = useState(false);
   const [masters, setMasters] = useState(null);
   const [variants, setVariants] = useState([]);
@@ -55,13 +57,16 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
   const save = async () => {
     if (!model || !variant) return toast.error("Select model and variant");
     if (!(Number(budget) > 0)) return toast.error("Enter Cx Demand");
-    const kycErr = kycReady(customerType, kyc, gstin);
+    if (!digitsLast10(mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
+    const alreadyKyc = row.kycComplete === true;
+    const kycErr = alreadyKyc ? "" : kycReady(customerType, kyc, gstin);
     if (kycErr) return toast.error(kycErr);
     setBusy(true);
     try {
       await put(`/lead-requests/${row.requestId}`, {
         budget: Number(budget), gstin, interestedModel: model, variant,
         oemExtraSupportReceived: Number(oemExtra) || 0,
+        mobile: digitsLast10(mobile),
       });
       await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, kyc);
       toast.success("Sent for approval");
@@ -91,8 +96,12 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     >
       <div className="space-y-4">
         <p className="text-sm text-ink-soft">
-          Select the vehicle, enter Cx Demand, attach KYC, then send for approval.
+          Select the vehicle, enter a 10-digit mobile and Cx Demand, attach KYC, then send for approval.
         </p>
+        <Field label="Mobile *">
+          <Input data-testid="approval-mobile" value={mobile} inputMode="numeric"
+            placeholder="10-digit mobile" onChange={(e) => setMobile(e.target.value)} />
+        </Field>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Model *">
             <Select data-testid="approval-model" value={model} onChange={(e) => {

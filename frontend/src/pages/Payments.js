@@ -7,6 +7,7 @@ import { inr, fmtDate, todayISO } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Table, Badge, Card, Field, Input, Select, Button } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
 export default function Payments() {
@@ -77,7 +78,7 @@ export default function Payments() {
   ];
   return (
     <div>
-      <PageHeader title="Payment Ledger" subtitle={subtitle} />
+      <PageHeader title="Payment Ledger" subtitle={subtitle} actions={<ReportActions onRefresh={load} />} />
       {leadId && (
         <div className="flex flex-wrap items-center gap-2 mb-3 text-sm" data-testid="payments-lead-filter">
           <span className="text-ink-soft">Showing receipts for</span>

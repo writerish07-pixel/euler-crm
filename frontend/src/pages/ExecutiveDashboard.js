@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
@@ -8,13 +8,15 @@ import { toast } from "sonner";
 import { get } from "../lib/api";
 import { inr, compactInr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
 
 export default function ExecutiveDashboard() {
   const [d, setD] = useState(null);
-  useEffect(() => {
+  const load = useCallback(() => {
     get("/executive/dashboard").then(setD).catch(() => toast.error("Could not load executive dashboard"));
   }, []);
+  useEffect(() => { load(); }, [load]);
 
   const k = (d && d.kpis) || {};
   const scope = (d && d.scope) || {};
@@ -26,6 +28,7 @@ export default function ExecutiveDashboard() {
         subtitle={d
           ? `${scope.note || "My pipeline"} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`
           : "My pipeline"}
+        actions={<ReportActions onRefresh={load} />}
       />
 
       {!d ? (

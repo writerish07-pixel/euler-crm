@@ -6,6 +6,7 @@ import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, looksCombinedSupport, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
 
@@ -137,6 +138,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
             mirror.syncedAt ? ` · synced ${fmtDate(String(mirror.syncedAt).slice(0, 10))}` : ""
           }`}
         actions={<div className="flex items-center gap-2">
+          <ReportActions onRefresh={load} />
           <Link to="/claims" data-testid="open-scheme-register"
             className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
             Scheme Claim Register <ExternalLink size={14} />

@@ -1,19 +1,26 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { get } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, StatCard } from "../components/ui";
 import { LeadLink, useLeadDrawer } from "../components/LeadLink";
+import PeriodBar from "../components/PeriodBar";
+import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 
 export default function DroppedExtraSupport() {
   const [rows, setRows] = useState([]);
-  const { openLead, drawer } = useLeadDrawer(() => get("/dropped-extra-support").then(setRows));
-  useEffect(() => { get("/dropped-extra-support").then(setRows).catch(() => setRows([])); }, []);
+  const period = usePeriodState();
+  const load = useCallback(() => get("/dropped-extra-support", period.params).then(setRows).catch(() => setRows([])), [period.params]);
+  const { openLead, drawer } = useLeadDrawer(load);
+  useEffect(() => { load(); }, [load]);
   const total = rows.reduce((s, r) => s + Number(r.droppedAmount || 0), 0);
 
   return (
     <div>
       <PageHeader title="Dropped Extra Support"
-        subtitle="OEM Extra Support that was not approved and was taken off the claim register" />
+        subtitle="OEM Extra Support that was not approved and was taken off the claim register"
+        actions={<ReportActions onRefresh={load} showRebuild />} />
+      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
         <StatCard label="Dropped lines" value={rows.length} />
         <StatCard label="Amount dropped" value={inr(total)} tone="text-rose-600" />

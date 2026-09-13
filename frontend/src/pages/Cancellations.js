@@ -4,6 +4,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recha
 import { get } from "../lib/api";
 import { inr, compactInr, fmtDate } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Select } from "../components/ui";
+import ReportActions from "../components/ReportActions";
 
 const PERIODS = [
   ["month", "This month"],
@@ -35,7 +36,15 @@ export default function Cancellations() {
 
   useEffect(() => { load(); }, [load]);
 
-  if (!d) return <div className="text-ink-faint text-sm">Loading cancellations…</div>;
+  if (!d) {
+    return (
+      <div data-testid="cancellations-page">
+        <PageHeader title="Cancellations" subtitle="Who is losing leads, why, and how far down the funnel they got"
+          actions={<ReportActions onRefresh={load} showRebuild />} />
+        <div className="text-ink-faint text-sm">Loading cancellations…</div>
+      </div>
+    );
+  }
 
   const chart = d.byExecutive.slice(0, 8).map((r) => ({
     name: r.executive || "Unassigned", Cancelled: r.count,
@@ -59,6 +68,7 @@ export default function Cancellations() {
                 <option key={r.executive || "none"} value={r.executive}>{r.executive || "Unassigned"}</option>
               ))}
             </Select>
+            <ReportActions onRefresh={load} showRebuild />
           </div>
         } />
 
