@@ -7,7 +7,13 @@ API: `https://euler-crm-production.up.railway.app` (same as the website)
 
 ## Download (zip)
 
-File in the repo: [`files/euler_crm_android.zip`](../files/euler_crm_android.zip)
+Use this **direct download** (opens the zip, not a GitHub preview page):
+
+https://raw.githubusercontent.com/writerish07-pixel/euler-crm/cursor/native-android-ios-996c/files/euler_crm_android.zip
+
+If that still fails, open this page and tap **Download**:
+
+https://github.com/writerish07-pixel/euler-crm/blob/cursor/native-android-ios-996c/files/euler_crm_android.zip
 
 Inside the zip:
 
