@@ -3,7 +3,9 @@ uvicorn==0.25.0
 python-dotenv>=1.0.1
 # pymongo 4.5 / motor 3.3 crash on Railway's default Python 3.13
 # (C extensions bson/_cbson/pymongo._cmessage). 4.9+ and motor 3.6+ support 3.13;
-# .python-version still pins 3.12 so Railpack does not keep picking 3.13.
+# pin files MUST live in this backend/ folder too: Railway's service root is
+# backend/, so a repo-root .python-version is invisible to Railpack and it
+# keeps installing 3.13.15.
 pymongo==4.13.2
 motor==3.7.1
 pydantic>=2.6.4

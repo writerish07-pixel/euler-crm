@@ -22,6 +22,7 @@ Editor. If not configured, every call is a safe no-op.
 import asyncio
 import os
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -395,6 +396,13 @@ _formula_cache = {}  # (tab, row) -> set of formula-holding column indexes
 
 _RETRY_STATUSES = (429, 500, 503)
 
+# httplib2.Http is not thread-safe. Concurrent asyncio.to_thread(_upsert_sync)
+# workers share one Google client and abort in ssl.read:
+#   Fatal Python error: Segmentation fault
+# Railway dumps show several threads in gsheets._upsert_sync at once. Serialize
+# every Sheets HTTP call. RLock so nested _with_retry / execute is safe.
+_http_lock = threading.RLock()
+
 
 def _with_retry(fn, attempts=4):
     """Google Sheets enforces a per-minute read/write quota; a burst of dealership
@@ -406,7 +414,8 @@ def _with_retry(fn, attempts=4):
     last = None
     for i in range(attempts):
         try:
-            return fn()
+            with _http_lock:
+                return fn()
         except Exception as e:
             code = getattr(getattr(e, "resp", None), "status", None)
             try:
@@ -581,10 +590,30 @@ def _init():
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
+        from googleapiclient.http import HttpRequest
+        import google_auth_httplib2
+        import httplib2
         import json
         info = json.loads(Path(path).read_text())
         creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-        _service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+        class _LockedRequest(HttpRequest):
+            def execute(self, *args, **kwargs):
+                with _http_lock:
+                    return super().execute(*args, **kwargs)
+
+        def _request_builder(http, *args, **kwargs):
+            # Fresh httplib2.Http per request so worker threads never share SSL state.
+            authorized = google_auth_httplib2.AuthorizedHttp(
+                creds, http=httplib2.Http(timeout=60))
+            return _LockedRequest(authorized, *args, **kwargs)
+
+        _service = build(
+            "sheets", "v4",
+            credentials=creds,
+            cache_discovery=False,
+            requestBuilder=_request_builder,
+        )
         _status = {"enabled": True, "reason": "connected", "email": info.get("client_email"),
                    "credentialFound": True, "credentialSource": source}
     except Exception as e:
@@ -730,8 +759,8 @@ def _header_row_for(entity, tab):
     if hint:
         return int(hint)
     sheet_id = os.environ.get("GSHEET_ID", "")
-    res = _service.spreadsheets().values().get(
-        spreadsheetId=sheet_id, range=f"'{tab}'!1:5").execute()
+    res = _with_retry(lambda: _service.spreadsheets().values().get(
+        spreadsheetId=sheet_id, range=f"'{tab}'!1:5").execute())
     rows = res.get("values", [])
     best, best_n = 1, -1
     for i, row in enumerate(rows, start=1):
@@ -1360,6 +1389,11 @@ _BACKFILL_UPDATE_CHUNK = 80
 
 
 def _backfill_entity_sync(entity, docs):
+    with _http_lock:
+        return _backfill_entity_sync_body(entity, docs)
+
+
+def _backfill_entity_sync_body(entity, docs):
     """Reconcile one entity in a few Sheets calls instead of two per row.
 
     Live per-lead sync stays one-row-at-a-time (formula protection + ID cache).
@@ -1457,6 +1491,11 @@ def _backfill_entity_sync(entity, docs):
 
 
 def _upsert_sync(entity, doc):
+    with _http_lock:
+        return _upsert_sync_body(entity, doc)
+
+
+def _upsert_sync_body(entity, doc):
     """Header-mapped, ID-keyed upsert. Returns a structured result dict."""
     tab, id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
     sheet_id = os.environ.get("GSHEET_ID", "")
