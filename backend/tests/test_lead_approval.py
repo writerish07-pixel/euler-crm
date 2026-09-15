@@ -70,20 +70,16 @@ async def gm_client(client):
 
 
 async def matching_deal_budget(model="Turbo Max", variant="Maxx (PV)"):
-    row = await server.db.price_master.find_one({
-        "model": {"$regex": f"^{model}$", "$options": "i"},
-        "variant": variant,
+    deal = await server._deal_format_for(model, variant, 0)
+    total = server.ce.round2(server.ce.num(deal.get("priceTotal")))
+    if total > 0:
+        return total
+    await server.db.price_master.insert_one({
+        "priceId": "PM-GM-MATCH", "model": model, "variant": variant,
+        "exShowroom": 785000, "rto": 5500, "insurance": 19000, "status": "active",
     })
-    if not row:
-        await server.db.price_master.insert_one({
-            "priceId": "PM-GM-MATCH", "model": model, "variant": variant,
-            "exShowroom": 785000, "rto": 5500, "insurance": 19000, "status": "active",
-        })
-        return 785000 + 5500 + 19000
-    return server.ce.round2(
-        server.ce.num(row.get("exShowroom"))
-        + server.ce.num(row.get("rto"))
-        + server.ce.num(row.get("insurance")))
+    deal = await server._deal_format_for(model, variant, 0)
+    return server.ce.round2(server.ce.num(deal.get("priceTotal")))
 
 
 def _enquiry(name="Wait Approve", **over):
