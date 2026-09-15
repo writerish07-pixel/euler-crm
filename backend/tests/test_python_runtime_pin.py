@@ -25,6 +25,27 @@ def test_runtime_txt_pins_3_12():
     assert text == "python-3.12", text
 
 
+def test_backend_python_version_file_pins_3_12():
+    """Railway Root Directory is backend/ — repo-root pins are invisible to Railpack."""
+    text = (BACKEND / ".python-version").read_text().strip()
+    assert text.startswith("3.12"), text
+
+
+def test_backend_runtime_txt_pins_3_12():
+    text = (BACKEND / "runtime.txt").read_text().strip()
+    assert text == "python-3.12", text
+
+
+def test_backend_mise_toml_pins_3_12():
+    text = (BACKEND / "mise.toml").read_text()
+    assert "3.12" in text, text
+
+
+def test_backend_tool_versions_pins_3_12():
+    text = (BACKEND / ".tool-versions").read_text()
+    assert "3.12" in text, text
+
+
 def test_pymongo_and_motor_support_python_313():
     pins = _requirement_pins()
     pymongo = tuple(int(p) for p in pins["pymongo"].split(".")[:2])
