@@ -70,6 +70,9 @@ def test_deal_format_is_scheme_free_and_uses_billing_tcs():
     assert deal["netToCx"] == 1474600
     assert deal["supportRequired"] == 74600
     assert deal["extraMargin"] == 0
+    assert deal["priceTotal"] == 1450000
+    assert deal["additionalDiscount"] == 50000
+    assert deal["needsOwnerApproval"] is True
 
 
 def test_cx_demand_above_net_is_extra_margin():
@@ -78,6 +81,8 @@ def test_cx_demand_above_net_is_extra_margin():
     }, 1500000)
     assert deal["supportRequired"] == -25400
     assert deal["extraMargin"] == 25400
+    assert deal["additionalDiscount"] == 0
+    assert deal["needsOwnerApproval"] is True
 
 
 @pytest.mark.asyncio
@@ -93,6 +98,9 @@ async def test_deal_preview_api_matches_engine(client):
     assert body["netToCx"] == 1474600
     assert body["supportRequired"] == 74600
     assert body["transport"] == 10000
+    assert body["priceTotal"] == 1450000
+    assert body["additionalDiscount"] == 50000
+    assert body["needsOwnerApproval"] is True
 
 
 @pytest.mark.asyncio
@@ -110,6 +118,7 @@ async def test_owner_create_sets_outstanding_to_cx_demand(client):
     assert ce.num(lead["customerOutstanding"]) == 1400000
     assert lead["dealFormat"]["schemeIncluded"] is False
     assert ce.num(lead["grossVehicleCost"]) == 1460000
+    assert ce.num(lead["additionalDiscount"]) == 50000
 
 
 @pytest.mark.asyncio
@@ -142,6 +151,7 @@ async def test_approve_sets_outstanding_to_deal_price(client):
     assert ce.num(lead["customerOutstanding"]) == 1400000
     assert ce.num(lead["customerPayable"]) == 1400000
     assert lead["useDealPrice"] is True
+    assert ce.num(lead["additionalDiscount"]) == 50000
 
 
 @pytest.mark.asyncio

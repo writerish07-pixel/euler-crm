@@ -23,6 +23,15 @@ export default function DealFormatCard({
   const demand = cxDemand ?? d.cxDemand ?? 0;
   const support = Number(d.supportRequired ?? ((d.netToCx || 0) - Number(demand || 0)));
   const extra = support < 0;
+  const priceTotal = Number(
+    d.priceTotal ?? ((Number(d.exShowroom) || 0) + (Number(d.rto) || 0) + (Number(d.insurance) || 0)),
+  );
+  const additional = Number(
+    d.additionalDiscount ?? Math.max(0, priceTotal - (Number(demand) || 0)),
+  );
+  const ownerOnly = d.needsOwnerApproval == null
+    ? Math.abs(priceTotal - (Number(demand) || 0)) >= 1
+    : !!d.needsOwnerApproval;
   return (
     <div className="rounded-lg border border-line bg-paper px-3 py-3 space-y-1.5" data-testid="deal-format-card">
       <div className="text-xs font-semibold uppercase tracking-wide text-ink-soft mb-1">Deal format</div>
@@ -35,6 +44,9 @@ export default function DealFormatCard({
       <Line k="Ex-showroom" v={d.exShowroom} testid="deal-ex" />
       <Line k="RTO" v={d.rto} testid="deal-rto" />
       <Line k="Insurance" v={d.insurance} testid="deal-insurance" />
+      <div className="border-t border-line pt-1.5">
+        <Line k="My total (Ex + RTO + Insurance)" v={priceTotal} strong testid="deal-price-total" />
+      </div>
       <Line k="Transport" v={d.transport ?? d.handlingCharges} testid="deal-transport" />
       {Number(d.otherCharges) > 0 && <Line k="Other charges" v={d.otherCharges} testid="deal-other" />}
       <Line k="TCS (1% after discount)" v={d.tcs} testid="deal-tcs" />
@@ -54,6 +66,20 @@ export default function DealFormatCard({
           />
         </Field>
       )}
+      <div className={`rounded-md px-2 py-1.5 ${additional > 0 ? "bg-amber-50" : "bg-paper"}`}>
+        <Line
+          k="Additional (Dealer)"
+          v={additional}
+          strong
+          testid="deal-additional"
+          tone={additional > 0 ? "text-amber-800" : ""}
+        />
+      </div>
+      {ownerOnly && Number(demand) > 0 && (
+        <p className="text-[11px] text-rose-700" data-testid="deal-owner-only">
+          Deal differs from my total — only Owner can approve.
+        </p>
+      )}
       <div className={`rounded-md px-2 py-1.5 ${extra ? "bg-emerald-50" : "bg-amber-50"}`}>
         <Line
           k={extra ? "Extra margin" : "Support required"}
@@ -63,7 +89,7 @@ export default function DealFormatCard({
           tone={extra ? "text-emerald-700" : "text-amber-800"}
         />
       </div>
-      <p className="text-[11px] text-ink-faint">No scheme on this card. Scheme is decided later.</p>
+      <p className="text-[11px] text-ink-faint">No scheme on this card. Scheme is decided later. Additional (Dealer) is auto-filled from my total minus Cx Demand.</p>
     </div>
   );
 }

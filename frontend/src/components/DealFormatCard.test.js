@@ -1,0 +1,54 @@
+/**
+ * @jest-environment jsdom
+ */
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { act } from "react";
+import DealFormatCard from "./DealFormatCard";
+
+test("shows my total and auto additional when deal is below ex+rto+ins", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <DealFormatCard
+        snapshot={{
+          exShowroom: 785000, rto: 5500, insurance: 19000,
+          priceTotal: 809500, additionalDiscount: 19500,
+          needsOwnerApproval: true, netToCx: 809500, supportRequired: 19500,
+        }}
+        cxDemand={790000}
+        readOnly
+      />,
+    );
+  });
+  expect(host.querySelector('[data-testid="deal-price-total"]').textContent).toMatch(/8,09,500|809,500|809500/);
+  expect(host.querySelector('[data-testid="deal-additional"]').textContent).toMatch(/19,500|19500/);
+  expect(host.querySelector('[data-testid="deal-owner-only"]')).toBeTruthy();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("exact deal has zero additional and no owner-only note", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <DealFormatCard
+        snapshot={{
+          exShowroom: 785000, rto: 5500, insurance: 19000,
+          priceTotal: 809500, additionalDiscount: 0,
+          needsOwnerApproval: false, netToCx: 809500, supportRequired: 0,
+        }}
+        cxDemand={809500}
+        readOnly
+      />,
+    );
+  });
+  expect(host.querySelector('[data-testid="deal-additional"]').textContent).toMatch(/0/);
+  expect(host.querySelector('[data-testid="deal-owner-only"]')).toBeFalsy();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
