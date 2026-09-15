@@ -3307,6 +3307,17 @@ def _request_out(doc):
     row["askedForApproval"] = bool(row.get("askedForApproval"))
     row["oemExtraSupportReceived"] = ce.round2(ce.num(
         payload.get("oemExtraSupportReceived") or row.get("oemExtraSupportReceived") or 0))
+    df = row.get("dealFormat") or {}
+    if df.get("priceFound") or df.get("exShowroom") or df.get("rto") or df.get("insurance"):
+        df = ce.apply_deal_additional(df, row.get("cxDemand") or row.get("budget"))
+        row["dealFormat"] = df
+        row["priceTotal"] = df.get("priceTotal") or 0
+        row["additionalDiscount"] = df.get("additionalDiscount") or 0
+        row["needsOwnerApproval"] = bool(df.get("needsOwnerApproval"))
+    else:
+        row["priceTotal"] = 0
+        row["additionalDiscount"] = 0
+        row["needsOwnerApproval"] = False
     return row
 
 
@@ -3460,6 +3471,19 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             return {"ok": True, "leadId": fresh["leadId"], "already": True}
         raise HTTPException(409, f"This request is already {(fresh or {}).get('status')}.")
     payload = claimed.get("payload") or {}
+    live_deal = await _deal_format_for(
+        payload.get("interestedModel"), payload.get("variant"),
+        payload.get("budget") or claimed.get("dealAmount") or claimed.get("cxDemand"),
+        payload.get("createdDate"))
+    if str(user.get("role") or "") == "sales_gm" and live_deal.get("needsOwnerApproval"):
+        await db.lead_requests.update_one(
+            {"requestId": request_id},
+            {"$set": {"status": "pending", "approvedBy": "", "approvedByName": "", "approvedAt": ""}},
+        )
+        raise HTTPException(
+            403,
+            "Only the Owner can approve this deal — Cx Demand differs from Ex-showroom + RTO + Insurance.",
+        )
     missing = await lead_docs.missing_kyc(
         db, request_id=request_id,
         customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
@@ -4362,6 +4386,7 @@ async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None,
         "budget": cx if cx > 0 else 0,
         "dealFormat": deal,
         "useDealPrice": cx > 0,
+        "additionalDiscount": ce.round2(max(0.0, ce.num(deal.get("additionalDiscount")))),
         "lastUpdated": now_iso(),
     }
     if oem_extra_received is not None:
@@ -11391,6 +11416,25 @@ async def migrate_insurance_rates():
     return {"ok": True, "fixed": fixed}
 
 
+async def _apply_rto_insurance_defaults():
+    """Set Storm/Turbo and 3-wheeler RTO + insurance on Price Master. Does not reprice leads."""
+    updated = 0
+    for row in await db.price_master.find({}).to_list(5000):
+        pair = ce.default_rto_insurance_for_model(row.get("model"), row.get("variant"))
+        if not pair:
+            continue
+        rto, ins = pair
+        if abs(ce.num(row.get("rto")) - rto) < 0.005 and abs(ce.num(row.get("insurance")) - ins) < 0.005:
+            continue
+        await db.price_master.update_one({"priceId": row.get("priceId")}, {"$set": {
+            "rto": rto, "insurance": ins,
+        }})
+        updated += 1
+    if updated:
+        logging.info("PRICE_MASTER_RTO_INSURANCE: updated %s rows", updated)
+    return updated
+
+
 # Slabs of the arrangement that existed before agents were modelled. Seeded once
 # so every pre-agent entry has an agent to point at and NO amount changes.
 LEGACY_AGENT_SLABS = [
@@ -11747,6 +11791,10 @@ async def _run_boot_maintenance():
             await _oem_catalog_boot()
         except Exception:
             logging.exception("OEM_CATALOG_BOOT_ERROR")
+        try:
+            await _apply_rto_insurance_defaults()
+        except Exception:
+            logging.exception("PRICE_MASTER_RTO_INSURANCE_ERROR")
         try:
             await sept_2026_schemes.ensure_sept_2026_schemes(db)
         except Exception:

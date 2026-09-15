@@ -69,6 +69,23 @@ async def gm_client(client):
         yield c
 
 
+async def matching_deal_budget(model="Turbo Max", variant="Maxx (PV)"):
+    row = await server.db.price_master.find_one({
+        "model": {"$regex": f"^{model}$", "$options": "i"},
+        "variant": variant,
+    })
+    if not row:
+        await server.db.price_master.insert_one({
+            "priceId": "PM-GM-MATCH", "model": model, "variant": variant,
+            "exShowroom": 785000, "rto": 5500, "insurance": 19000, "status": "active",
+        })
+        return 785000 + 5500 + 19000
+    return server.ce.round2(
+        server.ce.num(row.get("exShowroom"))
+        + server.ce.num(row.get("rto"))
+        + server.ce.num(row.get("insurance")))
+
+
 def _enquiry(name="Wait Approve", **over):
     body = {
         "customerName": name,
@@ -160,7 +177,8 @@ async def test_owner_approve_creates_the_live_lead(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_sales_gm_can_approve(exec_client, gm_client, client):
-    r = await exec_client.post("/api/leads", json=_enquiry("GM Approves"))
+    budget = await matching_deal_budget()
+    r = await exec_client.post("/api/leads", json=_enquiry("GM Approves", budget=budget))
     rid = r.json()["requestId"]
     await attach_kyc(exec_client, rid)
     ap = await gm_client.post(f"/api/lead-requests/{rid}/approve")
@@ -291,6 +309,7 @@ async def test_gm_approve_copies_lead_oem_extra_onto_scheme(gm_client, client):
     assert server.ce.num(lead.get("oemExtraSupportReceived")) == 5000
 
     rid = "LR26OEMX1"
+    budget = await matching_deal_budget()
     await server.db.lead_requests.insert_one({
         "requestId": rid,
         "status": "pending",
@@ -302,9 +321,9 @@ async def test_gm_approve_copies_lead_oem_extra_onto_scheme(gm_client, client):
             "interestedModel": "Turbo Max",
             "variant": "Maxx (PV)",
             "executive": "Amit",
-            "budget": 185000,
+            "budget": budget,
         },
-        "dealAmount": 185000,
+        "dealAmount": budget,
         "createdAt": "2026-09-09T00:00:00+00:00",
         "submittedBy": "executive@euler.com",
         "submittedByName": "Executive",

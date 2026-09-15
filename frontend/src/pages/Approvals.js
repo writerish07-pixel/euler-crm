@@ -12,7 +12,7 @@ import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import CallLink from "../components/CallLink";
 
 export default function Approvals() {
-  const { canApproveLeads, isExecutive } = useAuth();
+  const { canApproveLeads, isExecutive, isSalesGm } = useAuth();
   const [rows, setRows] = useState([]);
   const [status, setStatus] = useState("pending");
   const [busy, setBusy] = useState("");
@@ -123,9 +123,25 @@ export default function Approvals() {
             <div className="text-sm">{r.interestedModel} <span className="text-ink-faint">{r.variant}</span></div>
           ) },
           { key: "executive", label: "Executive" },
-          { key: "deal", label: "Deal format", render: (r) => (
-            <span className="font-mono">{inr(r.budget || r.dealAmount)}</span>
-          ) },
+          { key: "deal", label: "Deal format", render: (r) => {
+            const addl = Number(r.dealFormat?.additionalDiscount ?? r.additionalDiscount ?? 0);
+            const ownerOnly = !!(r.needsOwnerApproval || r.dealFormat?.needsOwnerApproval);
+            return (
+              <div>
+                <span className="font-mono">{inr(r.budget || r.dealAmount)}</span>
+                {addl > 0 && (
+                  <div className="text-[10px] text-amber-800" data-testid={`addl-${r.requestId}`}>
+                    Additional {inr(addl)}
+                  </div>
+                )}
+                {ownerOnly && (
+                  <div className="text-[10px] text-rose-700" data-testid={`owner-only-${r.requestId}`}>
+                    Owner approval
+                  </div>
+                )}
+              </div>
+            );
+          } },
           { key: "oemExtra", label: "OEM Extra Support", render: (r) => (
             <span className="font-mono" data-testid={`oem-extra-${r.requestId}`}>
               {Number(r.oemExtraSupportReceived) > 0 ? inr(r.oemExtraSupportReceived) : "—"}
@@ -153,9 +169,14 @@ export default function Approvals() {
             ),
           }] : []),
           ...(canApproveLeads && status === "pending" ? [{
-            key: "act", label: "", align: "right", render: (r) => (
+            key: "act", label: "", align: "right", render: (r) => {
+              const ownerOnly = !!(r.needsOwnerApproval || r.dealFormat?.needsOwnerApproval);
+              const gmBlocked = isSalesGm && ownerOnly;
+              return (
               <div className="flex gap-2 justify-end">
-                <Button data-testid={`approve-${r.requestId}`} disabled={!!busy || r.kycComplete === false}
+                <Button data-testid={`approve-${r.requestId}`}
+                  disabled={!!busy || r.kycComplete === false || gmBlocked}
+                  title={gmBlocked ? "Only the Owner can approve a deal that differs from Ex + RTO + Insurance" : undefined}
                   onClick={() => act(r.requestId, "approve")}>
                   <Check size={14} /> Approve
                 </Button>
@@ -164,7 +185,8 @@ export default function Approvals() {
                   <X size={14} /> Reject
                 </Button>
               </div>
-            ),
+              );
+            },
           }] : []),
         ]}
         rows={rows}

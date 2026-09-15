@@ -85,12 +85,46 @@ def calculate_tcs(taxable, rate=TCS_RATE, threshold=TCS_THRESHOLD):
 
 DEAL_OTHER_CHARGE_KEYS = ("accessories", "trc", "fastag", "extendedWarranty", "otherCharges")
 
+# Price Master dealer charges (not OEM / Coulson). Storm + Turbo vs 3-wheelers.
+RTO_STORM_TURBO = 5500.0
+INSURANCE_STORM_TURBO = 19000.0
+RTO_THREE_WHEELER = 5500.0
+INSURANCE_THREE_WHEELER = 10000.0
+# Cx Demand vs Ex+RTO+Insurance: treat ±₹1 as equal so GM can still approve.
+DEAL_AMOUNT_EQUAL_RUPEES = 1.0
+
+
+def default_rto_insurance_for_model(model, variant=""):
+    """Fixed RTO / insurance by family, or None when the model is not in scope."""
+    fam = normalize_scheme_model_key(model, variant)
+    if fam in ("storm", "turbo"):
+        return (RTO_STORM_TURBO, INSURANCE_STORM_TURBO)
+    if fam in ("hiload", "hirange", "hicity"):
+        return (RTO_THREE_WHEELER, INSURANCE_THREE_WHEELER)
+    return None
+
+
+def apply_deal_additional(deal, cx_demand=None):
+    """Additional (Dealer) = max(0, Ex+RTO+Insurance − Cx Demand). Owner-only if any gap."""
+    deal = dict(deal or {})
+    cx = round2(max(0.0, num(cx_demand if cx_demand is not None else deal.get("cxDemand"))))
+    price_total = round2(
+        num(deal.get("exShowroom")) + num(deal.get("rto")) + num(deal.get("insurance")))
+    diff = round2(price_total - cx)
+    deal["cxDemand"] = cx
+    deal["priceTotal"] = price_total
+    deal["additionalDiscount"] = round2(max(0.0, diff))
+    deal["dealDifference"] = diff
+    deal["needsOwnerApproval"] = abs(diff) >= DEAL_AMOUNT_EQUAL_RUPEES
+    return deal
+
 
 def compute_deal_format(charges, cx_demand=0):
     """Scheme-free quote card. TCS matches billing with nothing passed: 1% of GVC.
 
     Staff never see scheme here. Support Required = Net to Cx − Cx Demand
     (negative = extra margin when the customer pays above list).
+    Additional (Dealer) is the gap between Ex+RTO+Insurance and Cx Demand.
     """
     charges = charges or {}
     ex = round2(num(charges.get("exShowroom")))
@@ -104,7 +138,7 @@ def compute_deal_format(charges, cx_demand=0):
     net_to_cx = round2(gvc + tcs)
     cx = round2(max(0.0, num(cx_demand)))
     support = round2(net_to_cx - cx)
-    return {
+    return apply_deal_additional({
         "exShowroom": ex,
         "rto": rto,
         "insurance": insurance,
@@ -119,7 +153,7 @@ def compute_deal_format(charges, cx_demand=0):
         "supportRequired": support,
         "extraMargin": round2(max(0.0, -support)),
         "schemeIncluded": False,
-    }
+    }, cx)
 
 
 def normalize_benefit_mode(mode):

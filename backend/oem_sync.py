@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 
 import oem_catalog as cat
 import coulson as coulson_client
+import commercial as ce
 
 log = logging.getLogger("oem_sync")
 
@@ -80,9 +81,10 @@ async def apply_catalog(db, *, overwrite_ex_showroom=True):
             patch["exShowroom"] = ex
         if existing is None:
             pid = await _next_price_id(db)
+            rto_ins = ce.default_rto_insurance_for_model(sku.crm_model, sku.crm_variant) or (0, 0)
             doc = {
                 "priceId": pid,
-                "rto": 0, "insurance": 0, "accessories": 0, "handlingCharges": 0,
+                "rto": rto_ins[0], "insurance": rto_ins[1], "accessories": 0, "handlingCharges": 0,
                 "trc": 0, "fastag": 0, "extendedWarranty": 0, "otherCharges": 0,
                 "gstPercent": 0, "tcsApplicable": "No", "priceVersion": "OEM",
                 "remarks": "Added from Euler OEM catalog",
