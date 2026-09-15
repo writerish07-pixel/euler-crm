@@ -5,14 +5,22 @@ The website stays live. This puts the same CRM on a phone as an app named **Eule
 Package: `com.eulermotors.crm`  
 API: `https://euler-crm-production.up.railway.app` (same as the website)
 
-## Fastest: install the debug APK on a phone
+## Download (zip)
 
-A debug APK is for you and staff to try. It is **not** the Play Store build.
+File in the repo: [`files/euler_crm_android.zip`](../files/euler_crm_android.zip)
 
-1. Copy `euler_crm_android_debug.apk` to the phone (WhatsApp, Drive, USB, or Downloads).
-2. On the phone: **Settings → Security** (or **Apps**) → allow **Install unknown apps** for Chrome / Files / WhatsApp.
-3. Open the APK → **Install**.
-4. Open **Euler CRM** and sign in with the same user ID and password as the website.
+Inside the zip:
+
+- `Euler-CRM.apk` — the app
+- `INSTALL.txt` — these same steps
+
+## Install on a phone
+
+1. Unzip `euler_crm_android.zip`.
+2. Copy `Euler-CRM.apk` to the phone (WhatsApp, Drive, USB, or Downloads).
+3. On the phone: **Settings → Security** (or **Apps**) → allow **Install unknown apps** for Chrome / Files / WhatsApp.
+4. Open `Euler-CRM.apk` → **Install**.
+5. Open **Euler CRM** and sign in with the same user ID and password as the website.
 
 If Android says “Play Protect”, choose **Install anyway** for this dealer-internal app.
 
