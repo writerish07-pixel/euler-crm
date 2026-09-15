@@ -2,6 +2,8 @@
 
 The live website stays on Render / Cloudflare. These store apps wrap the **same** React CRM and talk to the **same** Railway API (`https://euler-crm-production.up.railway.app`). Staff keep using the browser until you publish the apps and tell them to switch.
 
+**Start here for Android:** [ANDROID.md](ANDROID.md) (install the APK on a phone).
+
 ## One-time setup
 
 On a machine with Node 20+:
