@@ -120,6 +120,28 @@ async def test_webhook_keeps_euler_lead_only(client):
 
 
 @pytest.mark.asyncio
+async def test_inbound_uses_latest_active_when_mobile_is_shared(client):
+    await server.db.leads.insert_one({
+        "leadId": "LDWA-OLD", "customerName": "Repeat", "mobile": "9876500001",
+        "accountStatus": "Closed", "currentStatus": "Close Won",
+        "lastUpdated": "2026-08-01T10:00:00+00:00",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LDWA-NEW", "customerName": "Repeat", "mobile": "9876500001",
+        "accountStatus": "Active", "currentStatus": "New",
+        "lastUpdated": "2026-08-20T10:00:00+00:00",
+    })
+    r = await client.post("/api/integrations/botspace/webhook", json={
+        "event": "message-event", "direction": "incoming",
+        "id": "msg-shared-mobile",
+        "phone": {"countryCode": "91", "phone": "9876500001"},
+        "payload": {"type": "text", "payload": {"text": "hello"}},
+    })
+    assert r.status_code == 200
+    assert r.json().get("leadId") == "LDWA-NEW"
+
+
+@pytest.mark.asyncio
 async def test_stop_opts_out(client):
     await server.db.leads.insert_one({
         "leadId": "LDWA2", "customerName": "Stop Me", "mobile": "9123456780",

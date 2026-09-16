@@ -1109,6 +1109,8 @@ class LeadIn(BaseModel):
     customerType: str = "Individual"
     gstin: str = ""
     oemExtraSupportReceived: float = 0
+    # Staff confirm: this is another vehicle on a mobile already in the CRM.
+    anotherVehicle: bool = False
 
 
 class LeadUpdateIn(BaseModel):
@@ -1141,6 +1143,7 @@ class LeadUpdateIn(BaseModel):
     bookingAmount: Optional[float] = None
     customerType: Optional[str] = None
     gstin: Optional[str] = None
+    anotherVehicle: Optional[bool] = None
 
 
 class BookingIn(BaseModel):
@@ -3143,27 +3146,148 @@ class RejectRequestIn(BaseModel):
     reason: str = ""
 
 
-async def _mobile_taken_by_lead(mobile: str, exclude_lead_id: str = ""):
-    import re as _re
-    mob = _re.sub(r"\D", "", mobile or "")
-    if len(mob) < 10:
-        return None
-    last10 = mob[-10:]
+def _mobile_last10(mobile: str) -> str:
+    digits = re.sub(r"\D", "", mobile or "")
+    return digits[-10:] if len(digits) >= 10 else ""
+
+
+def _mobile_pipeline_bucket(lead) -> str:
+    """active | delivered | closed | cancelled — used for WhatsApp rank and 409 copy."""
+    if (lead or {}).get("dealCancelled"):
+        return "cancelled"
+    acct = str((lead or {}).get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return "cancelled"
+    status = str((lead or {}).get("currentStatus") or "").lower()
+    ds = str((lead or {}).get("deliveryStatus") or "").lower()
+    if ds == "delivered" or status == "delivered":
+        return "delivered"
+    if acct == "closed" or status in ("close won", "closed", "lost"):
+        return "closed"
+    return "active"
+
+
+def _mobile_lead_summary(lead) -> dict:
+    return {
+        "leadId": (lead or {}).get("leadId") or "",
+        "customerName": (lead or {}).get("customerName") or "",
+        "currentStatus": (lead or {}).get("currentStatus") or "",
+        "accountStatus": (lead or {}).get("accountStatus") or "Active",
+        "interestedModel": (lead or {}).get("interestedModel") or "",
+        "variant": (lead or {}).get("variant") or "",
+        "executive": (lead or {}).get("executive") or "",
+        "bucket": _mobile_pipeline_bucket(lead),
+    }
+
+
+def _mobile_pending_summary(req) -> dict:
+    payload = (req or {}).get("payload") or {}
+    return {
+        "requestId": (req or {}).get("requestId") or "",
+        "customerName": payload.get("customerName") or "",
+        "status": (req or {}).get("status") or "",
+        "interestedModel": payload.get("interestedModel") or "",
+        "variant": payload.get("variant") or "",
+    }
+
+
+def _mobile_conflict_code(existing, incoming_name: str = "") -> str:
+    if not existing:
+        return ""
+    incoming_n = _norm_name(incoming_name)
+    if incoming_n:
+        for lead in existing:
+            other = _norm_name(lead.get("customerName"))
+            if other and other != incoming_n:
+                return "mobile_other_customer"
+    if any(_mobile_pipeline_bucket(lead) == "active" for lead in existing):
+        return "mobile_active_deal"
+    return "mobile_previous_deal"
+
+
+def _mobile_conflict_message(code, existing, pending, incoming_name: str = "") -> str:
+    first = existing[0] if existing else None
+    lid = (first or {}).get("leadId") or ""
+    name = (first or {}).get("customerName") or ""
+    extra = f" and {len(existing) - 1} more" if existing and len(existing) > 1 else ""
+    if code == "mobile_other_customer":
+        typed = (incoming_name or "").strip() or "a different name"
+        return (
+            f"This mobile is already on {lid} as {name}. You typed {typed}. "
+            "Open the existing file, or tap Another vehicle only if this is a second unit."
+        )
+    if code == "mobile_previous_deal":
+        return (
+            f"This mobile was used on {lid} ({name}){extra}. "
+            "Open that file, or tap New purchase if this is another vehicle."
+        )
+    if pending and not existing:
+        pid = (pending[0] or {}).get("requestId") or ""
+        return (
+            f"This mobile is already waiting for approval ({pid}). "
+            "Open that request, or tap Another vehicle if this is a second unit."
+        )
+    return (
+        f"This mobile already has an open deal {lid} ({name}){extra}. "
+        "Open that file, or tap Another vehicle if this is a second unit."
+    )
+
+
+async def _leads_sharing_mobile(mobile: str, exclude_lead_id: str = ""):
+    last10 = _mobile_last10(mobile)
+    if not last10:
+        return []
     q = {"mobile": {"$regex": last10 + "$"}}
     if exclude_lead_id:
         q["leadId"] = {"$ne": exclude_lead_id}
-    return await db.leads.find_one(q)
+    return await db.leads.find(q).to_list(80)
 
 
-async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created from CRM"):
-    existing = await _mobile_taken_by_lead(body.mobile)
-    if existing:
-        raise HTTPException(
-            409,
-            f"Mobile already used by lead {existing.get('leadId')} ({existing.get('customerName')}).",
-        )
-    lead_id = await next_id("lead", "LD26")
+async def _pending_sharing_mobile(mobile: str, exclude_request_id: str = ""):
+    last10 = _mobile_last10(mobile)
+    if not last10:
+        return []
+    q = {
+        "status": {"$in": ["pending", "approving"]},
+        "payload.mobile": {"$regex": last10 + "$"},
+    }
+    if exclude_request_id:
+        q["requestId"] = {"$ne": exclude_request_id}
+    return await db.lead_requests.find(q).to_list(40)
+
+
+async def _mobile_taken_by_lead(mobile: str, exclude_lead_id: str = ""):
+    rows = await _leads_sharing_mobile(mobile, exclude_lead_id)
+    return rows[0] if rows else None
+
+
+async def _raise_if_mobile_taken(mobile: str, *, incoming_name: str = "",
+                                 exclude_lead_id: str = "", allow: bool = False,
+                                 check_pending: bool = True):
+    """409 unless staff confirmed anotherVehicle / allow_same_mobile."""
+    if allow:
+        return
+    existing = await _leads_sharing_mobile(mobile, exclude_lead_id)
+    pending = await _pending_sharing_mobile(mobile) if check_pending else []
+    if not existing and not pending:
+        return
+    code = _mobile_conflict_code(existing, incoming_name) or "mobile_active_deal"
+    raise HTTPException(409, {
+        "code": code,
+        "message": _mobile_conflict_message(code, existing, pending, incoming_name),
+        "existing": [_mobile_lead_summary(l) for l in existing],
+        "pending": [_mobile_pending_summary(p) for p in pending],
+    })
+
+
+async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created from CRM",
+                            allow_same_mobile: bool = False):
     payload = body.model_dump()
+    another = bool(payload.pop("anotherVehicle", False))
+    await _raise_if_mobile_taken(
+        body.mobile, incoming_name=body.customerName, allow=another or allow_same_mobile,
+        check_pending=False)
+    lead_id = await next_id("lead", "LD26")
     created_date = str(payload.pop("createdDate", None) or "").strip() or today()
     payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
     payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
@@ -3220,26 +3344,10 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             raise HTTPException(422, "A 10-digit mobile is required before sending for approval.")
         if ce.num(body.budget) <= 0:
             raise HTTPException(422, "Enter the deal amount before sending for GM / Owner approval.")
-        existing = await _mobile_taken_by_lead(body.mobile)
-        if existing:
-            raise HTTPException(
-                409,
-                f"Mobile already used by lead {existing.get('leadId')} ({existing.get('customerName')}).",
-            )
-        pending_same = None
-        if str(body.mobile or "").strip():
-            last10 = re.sub(r"\D", "", body.mobile)[-10:]
-            if len(last10) == 10:
-                pending_same = await db.lead_requests.find_one({
-                    "status": {"$in": ["pending", "approving"]},
-                    "payload.mobile": {"$regex": last10 + "$"},
-                })
-        if pending_same:
-            raise HTTPException(
-                409,
-                f"This mobile is already waiting for approval ({pending_same.get('requestId')}).",
-            )
         payload = body.model_dump()
+        another = bool(payload.pop("anotherVehicle", False))
+        await _raise_if_mobile_taken(
+            body.mobile, incoming_name=body.customerName, allow=another, check_pending=True)
         payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
         payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
         if payload["customerType"] != "B2B":
@@ -3516,7 +3624,9 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             lead = clean(await db.leads.find_one({"leadId": existing_id}))
         else:
             body = LeadIn(**payload)
-            lead = await _insert_live_lead(body, source_note="Lead created after GM / Owner approval")
+            lead = await _insert_live_lead(
+                body, source_note="Lead created after GM / Owner approval",
+                allow_same_mobile=True)
             extra = await _oem_extra_against_lead(lead, payload)
             if extra > 0:
                 await db.leads.update_one({"leadId": lead["leadId"]}, {
@@ -3624,6 +3734,20 @@ async def get_lead_split(user=Depends(current_user)):
     plan["myExecutive"] = (user.get("name") or "").strip()
     plan["canEdit"] = role in ("owner", "sales_gm")
     return plan
+
+
+@api.get("/leads/mobile-matches")
+async def get_lead_mobile_matches(mobile: str = "", _sales=Depends(sales_staff_only)):
+    """Leads and pending requests sharing this last-10 mobile. Before /leads/{id}."""
+    existing = await _leads_sharing_mobile(mobile)
+    pending = await _pending_sharing_mobile(mobile)
+    code = _mobile_conflict_code(existing) or ("mobile_active_deal" if pending else "")
+    return {
+        "mobile": _mobile_last10(mobile),
+        "existing": [_mobile_lead_summary(l) for l in existing],
+        "pending": [_mobile_pending_summary(p) for p in pending],
+        "code": code or None,
+    }
 
 
 @api.put("/leads/split", dependencies=[Depends(sales_gm_only)])
@@ -4074,6 +4198,7 @@ async def delete_document(document_id: str, user=Depends(current_user), act=Depe
 # itself so the guarantee doesn't rely solely on the Pydantic model staying in sync.
 LEAD_SYSTEM_FIELDS = {
     "leadId", "createdDate", "accountStatus", "deliveryStatus", "lastUpdated",
+    "anotherVehicle",
     "outstandingAmount", "customerOutstanding", "companyOutstanding", "totalReceived",
     "customerPayable", "grossVehicleCost", "totalDiscount", "consumerDiscount", "exchangeBonus",
     "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount", "exShowroom", "rto",
@@ -4151,7 +4276,15 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
         )
     _require_action(lead, "canEditLead", "lead edits", act)
     payload = body.model_dump(exclude_unset=True)
+    another = bool(payload.pop("anotherVehicle", False))
     payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
+    if "mobile" in payload:
+        new10 = _mobile_last10(str(payload.get("mobile") or ""))
+        old10 = _mobile_last10(str(lead.get("mobile") or ""))
+        if new10 and new10 != old10:
+            await _raise_if_mobile_taken(
+                payload.get("mobile") or "", incoming_name=payload.get("customerName") or lead.get("customerName") or "",
+                exclude_lead_id=lead_id, allow=another, check_pending=True)
 
     null_fields = [k for k, v in payload.items() if v is None and k not in LEAD_NULLABLE_FIELDS]
     if null_fields:
@@ -5655,7 +5788,7 @@ async def _import_allowed_values():
 
 
 async def _existing_lead_mobiles():
-    """last-10-digits -> {leadId, customerName}, same unique key POST /leads uses."""
+    """last-10-digits -> {leadId, customerName} of mobiles already on the register."""
     out = {}
     for l in await db.leads.find().to_list(5000):
         digits = re.sub(r"\D", "", str(l.get("mobile") or ""))
@@ -5667,13 +5800,20 @@ async def _existing_lead_mobiles():
     return out
 
 
-def _validate_import_rows(rows, allowed, existing_mobiles):
+def _form_flag(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _validate_import_rows(rows, allowed, existing_mobiles, allow_same_mobile=False):
     """Canonicalise every row against the live masters and collect per-row errors.
 
     A value that is present but not in its master list is an ERROR, never a silent
     fix — that mismatch is exactly what makes imported leads unusable downstream
     (Price Master lookups, executive scoreboards, source reports). Blank optional
     cells fall back to IMPORT_DEFAULTS, matching the New Lead form.
+
+    Same-file duplicate mobiles are allowed (fleet / 5× Turbo Max). Mobiles already
+    in the CRM are skipped unless staff tick anotherVehicle.
     """
     pairs = {(v["model"].lower(), v["variant"].lower()) for v in allowed["vehicles"]}
     variants_by_model = {}
@@ -5686,7 +5826,6 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
         ("financeRequired", "yesNo", "Finance Required"),
         ("exchangeRequired", "yesNo", "Exchange Required"),
     ]
-    seen_mobiles = {}
     out = []
     for d in rows:
         row = dict(d)
@@ -5705,7 +5844,7 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
         else:
             mob = mob[-10:]
             hit = existing_mobiles.get(mob)
-            if hit:
+            if hit and hit.get("leadId") and not allow_same_mobile:
                 # Already in the CRM — skip on commit, not an error to fix in the sheet.
                 row["mobile"] = mob
                 row["__alreadyInApp"] = hit
@@ -5713,10 +5852,6 @@ def _validate_import_rows(rows, allowed, existing_mobiles):
                 row["__errors"] = []
                 out.append(row)
                 continue
-            if mob in seen_mobiles:
-                errors.append(f"Duplicate mobile — same number as row {seen_mobiles[mob]}")
-            else:
-                seen_mobiles[mob] = row_no
         row["mobile"] = mob
         row["altMobile"] = re.sub(r"\D", "", str(row.get("altMobile") or ""))
 
@@ -5925,8 +6060,9 @@ async def import_template(_sales=Depends(sales_staff_only)):
         ("", False),
         ("1. Type one lead per row on the 'Leads' sheet. Do not rename or reorder the header row.", False),
         ("2. Grey-list columns have dropdowns. Pick a value — typing your own is rejected on upload.", False),
-        ("3. Required: Customer Name and Mobile (10 digits). A mobile already in the CRM "
-         "is skipped automatically — it is not imported again.", False),
+        ("3. Required: Customer Name and Mobile (10 digits). The same mobile may appear "
+         "more than once in the file (fleet / repeat buyer — one row per vehicle). "
+         "A mobile already in the CRM is skipped unless you tick “another vehicle” in the import drawer.", False),
         ("4. Lead Date / Next Follow-up: use YYYY-MM-DD. Blank Lead Date becomes today.", False),
         ("5. Variant must belong to the Interested Model — see 'Valid Model / Valid Variant' on Lists.", False),
         ("5b. Executive is optional. Leave it blank to use the Owner / Sales GM lead split "
@@ -5962,6 +6098,7 @@ async def import_template(_sales=Depends(sales_staff_only)):
 
 @api.post("/leads/import/preview")
 async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
+                         anotherVehicle: Optional[str] = Form(None),
                          _sales=Depends(sales_staff_only)):
     import json as _json
     content = await file.read()
@@ -5971,8 +6108,10 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
         _, rows = _parse_import_bytes(file.filename, content, mp)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
+    allow_same = _form_flag(anotherVehicle)
     allowed = await _import_allowed_values()
-    checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
+    checked = _validate_import_rows(
+        rows, allowed, await _existing_lead_mobiles(), allow_same_mobile=allow_same)
     valid = [r for r in checked if not r["__errors"] and not r.get("__alreadyInApp")]
     already = _import_already_report(checked)
     return {"detectedHeaders": [h for h in headers if h],
@@ -5991,6 +6130,7 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
 @api.post("/leads/import/commit")
 async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
                         executiveMap: Optional[str] = Form(None),
+                        anotherVehicle: Optional[str] = Form(None),
                         user=Depends(sales_staff_only)):
     """Insert only the rows that pass validation; report the rest untouched."""
     if str(user.get("role") or "") == "executive":
@@ -6006,8 +6146,10 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
         _, rows = _parse_import_bytes(file.filename, content, mp)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
+    allow_same = _form_flag(anotherVehicle)
     allowed = await _import_allowed_values()
-    checked = _validate_import_rows(rows, allowed, await _existing_lead_mobiles())
+    checked = _validate_import_rows(
+        rows, allowed, await _existing_lead_mobiles(), allow_same_mobile=allow_same)
     _apply_executive_map(checked, _parse_executive_map(executiveMap),
                          allowed.get("executives") or [])
     fresh = await _existing_lead_mobiles()
@@ -6017,11 +6159,10 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
             continue
         mob = str(d.get("mobile") or "")
         hit = fresh.get(mob)
-        if hit:
+        if hit and hit.get("leadId") and not allow_same:
             d["__alreadyInApp"] = hit
             continue
         keep.append(d)
-        fresh[mob] = {"leadId": "", "customerName": d.get("customerName") or ""}
 
     ids = await next_ids("lead", "LD26", len(keep))
     plan = await _load_lead_split()

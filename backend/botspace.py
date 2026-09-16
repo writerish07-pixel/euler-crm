@@ -281,16 +281,38 @@ async def save_config(body: dict) -> dict:
     return public_config(await get_config())
 
 
+def _whatsapp_pipeline_bucket(lead) -> int:
+    """Lower is better: Active pipeline, then delivered, closed, cancelled."""
+    if (lead or {}).get("dealCancelled"):
+        return 3
+    acct = str((lead or {}).get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return 3
+    status = str((lead or {}).get("currentStatus") or "").lower()
+    ds = str((lead or {}).get("deliveryStatus") or "").lower()
+    if ds == "delivered" or status == "delivered":
+        return 1
+    if acct == "closed" or status in ("close won", "closed", "lost"):
+        return 2
+    return 0
+
+
 async def find_euler_lead_by_phone(phone) -> Optional[dict]:
-    """Only CRM leads. Unknown numbers (Tata etc.) return None."""
+    """Only CRM leads. Same mobile on many units → latest Active pipeline file."""
     d = digits10(phone)
     if len(d) != 10:
         return None
     db = _db()
-    lead = await db.leads.find_one({"mobile": {"$regex": f"{d}$"}})
-    if lead:
-        return lead
-    return await db.leads.find_one({"altMobile": {"$regex": f"{d}$"}})
+    q = {"$or": [
+        {"mobile": {"$regex": f"{d}$"}},
+        {"altMobile": {"$regex": f"{d}$"}},
+    ]}
+    leads = await db.leads.find(q).to_list(80)
+    if not leads:
+        return None
+    leads.sort(key=lambda l: str(l.get("lastUpdated") or l.get("createdDate") or ""), reverse=True)
+    leads.sort(key=_whatsapp_pipeline_bucket)
+    return leads[0]
 
 
 def _payload_text(payload) -> str:

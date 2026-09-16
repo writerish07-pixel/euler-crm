@@ -207,6 +207,64 @@ export function Modal({ open = true, onClose, children, width = "max-w-lg", test
   );
 }
 
+/** Confirm before creating / saving a second lead on a mobile already in Euler. */
+export function MobileClashDialog({ clash, onOpenExisting, onAnotherVehicle, onCancel, busy }) {
+  if (!clash) return null;
+  const existing = clash.existing || [];
+  const pending = clash.pending || [];
+  const onlyClosed = clash.code === "mobile_previous_deal";
+  const otherCust = clash.code === "mobile_other_customer";
+  const title = otherCust
+    ? "This mobile is already on another customer"
+    : onlyClosed
+      ? "This mobile was used before"
+      : "This mobile already has a deal";
+  const confirmLabel = onlyClosed ? "New purchase" : "Another vehicle";
+  return (
+    <Modal onClose={onCancel} width="max-w-lg" testid="mobile-clash-modal">
+      <div className="flex-1 min-h-0 overflow-y-auto p-6">
+        <h3 className="font-heading text-lg font-bold text-ink">{title}</h3>
+        <p className="text-sm text-ink-soft mt-2">{clash.message}</p>
+        {existing.length > 0 && (
+          <ul className="mt-3 space-y-2">
+            {existing.map((l) => (
+              <li key={l.leadId}>
+                <button
+                  type="button"
+                  data-testid={`open-existing-${l.leadId}`}
+                  className="w-full text-left rounded-lg ring-1 ring-inset ring-line px-3 py-2 hover:bg-cobalt-tint/40"
+                  onClick={() => onOpenExisting(l.leadId)}
+                >
+                  <div className="text-sm font-medium text-ink">{l.leadId} · {l.customerName || "—"}</div>
+                  <div className="text-[11px] text-ink-faint">
+                    {[l.interestedModel, l.variant, l.currentStatus].filter(Boolean).join(" · ")}
+                  </div>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {pending.length > 0 && (
+          <p className="text-xs text-ink-soft mt-3">
+            Waiting for approval: {pending.map((p) => p.requestId).filter(Boolean).join(", ")}
+          </p>
+        )}
+      </div>
+      <div className="flex justify-end gap-2 px-6 py-4 border-t border-line bg-zinc-50/60 shrink-0">
+        <Button variant="secondary" onClick={onCancel}>Cancel</Button>
+        {existing.length === 1 && (
+          <Button variant="secondary" data-testid="open-existing-btn" onClick={() => onOpenExisting(existing[0].leadId)}>
+            Open existing
+          </Button>
+        )}
+        <Button data-testid="another-vehicle-btn" onClick={onAnotherVehicle} disabled={busy}>
+          {busy ? "Saving…" : confirmLabel}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
 export function Field({ label, children }) {
   return (
     <label className="block">

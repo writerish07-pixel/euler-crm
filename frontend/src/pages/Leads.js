@@ -3,9 +3,9 @@ import { useSearchParams } from "react-router-dom";
 import { Plus, ChevronRight, Upload } from "lucide-react";
 import ReportActions from "../components/ReportActions";
 import { toast } from "sonner";
-import { get, post, put, apiErrorMessage } from "../lib/api";
+import { get, post, put, apiErrorMessage, apiErrorDetail } from "../lib/api";
 import { inr, fmtDate, todayISO, digitsLast10 } from "../lib/format";
-import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select } from "../components/ui";
+import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select, MobileClashDialog } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
 import LeadImport from "./LeadImport";
 import { useAuth } from "../context/AuthContext";
@@ -192,6 +192,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const [variants, setVariants] = useState([]);
   const [deal, setDeal] = useState(null);
   const [dealLoading, setDealLoading] = useState(false);
+  const [clash, setClash] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   useEffect(() => {
@@ -214,21 +215,16 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     return () => { alive = false; };
   }, [form.interestedModel, form.variant, form.budget]);
 
-  const submit = async () => {
-    if (!form.customerName) return toast.error("Customer name is required");
-    if (!form.createdDate) return toast.error("Lead date is required");
-    if (isTl && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
-    if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
-    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
-    const kycErr = kycReady(form.customerType, kyc, form.gstin);
-    if (kycErr) return toast.error(kycErr);
+  const saveLead = async (extra = {}) => {
     setBusy(true);
     try {
       const lead = await post("/leads", {
         ...form,
         budget: Number(form.budget),
         oemExtraSupportReceived: Number(form.oemExtraSupportReceived) || 0,
+        ...extra,
       });
+      setClash(null);
       try {
         if (lead.pending && lead.requestId) {
           await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, kyc);
@@ -246,14 +242,31 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
       toast.success(`Lead ${lead.leadId} created`);
       onCreated(lead.leadId);
     } catch (e) {
+      const detail = apiErrorDetail(e);
+      if (e?.response?.status === 409 && detail && String(detail.code || "").startsWith("mobile_")) {
+        setClash(detail);
+        return;
+      }
       toast.error(apiErrorMessage(e, "Failed to create lead"));
     } finally { setBusy(false); }
+  };
+
+  const submit = async () => {
+    if (!form.customerName) return toast.error("Customer name is required");
+    if (!form.createdDate) return toast.error("Lead date is required");
+    if (isTl && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
+    if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
+    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
+    const kycErr = kycReady(form.customerType, kyc, form.gstin);
+    if (kycErr) return toast.error(kycErr);
+    await saveLead();
   };
 
   if (!masters) return null;
   const execOptions = [...(masters.executives || [])];
   if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
   return (
+    <>
     <Drawer open onClose={onClose} width="max-w-2xl" title={isExecutive ? "Request a lead" : "New Lead"}
       subtitle={isExecutive ? "Sent for owner or GM approval" : isTl ? "Live lead assigned to any executive" : "Capture a fresh enquiry"}
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : (isExecutive ? "Send for approval" : "Create Lead")}</Button></div>}>
@@ -298,5 +311,13 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} />
       </div>
     </Drawer>
+    <MobileClashDialog
+      clash={clash}
+      busy={busy}
+      onCancel={() => setClash(null)}
+      onOpenExisting={(id) => { setClash(null); onCreated(id); }}
+      onAnotherVehicle={() => saveLead({ anotherVehicle: true })}
+    />
+    </>
   );
 }

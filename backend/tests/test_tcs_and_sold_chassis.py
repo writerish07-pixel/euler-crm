@@ -442,3 +442,64 @@ async def test_unique_mobile_still_wins_over_name(client):
     assert lead["mobile"] == "9811110088"
     assert stats["mobilesUpdated"] == 0
     await server.db.leads.delete_many({"leadId": "LD-NM-MOB"})
+
+
+def test_same_mobile_two_models_match_unique_sold_rows():
+    sold = [
+        {"chassis": "MD9TWOA", "mobile": "9990000001", "model": "Turbo Max", "variant": "Maxx (PV)",
+         "customerName": "Fleet Co"},
+        {"chassis": "MD9TWOB", "mobile": "9990000001", "model": "Storm EV", "variant": "Storm (PV)",
+         "customerName": "Fleet Co"},
+    ]
+    turbo = {"mobile": "9990000001", "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+             "customerName": "Fleet Co"}
+    storm = {"mobile": "9990000001", "interestedModel": "Storm EV", "variant": "Storm (PV)",
+             "customerName": "Fleet Co"}
+    assert oem_sync.match_sold_row(turbo, sold)["chassis"] == "MD9TWOA"
+    assert oem_sync.match_sold_row(storm, sold)["chassis"] == "MD9TWOB"
+
+
+def test_five_identical_sold_rows_stay_unmatched_until_chassis_set():
+    sold = [
+        {"chassis": f"MD9FIVE{i}", "mobile": "9990000002", "model": "Turbo Max",
+         "variant": "Maxx (PV)", "customerName": "Repeat Buyer"}
+        for i in range(5)
+    ]
+    lead = {"mobile": "9990000002", "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "customerName": "Repeat Buyer"}
+    assert oem_sync.match_sold_row(lead, sold) is None
+    occupied = {"MD9FIVE0"}
+    owned = {**lead, "chassisNumber": "MD9FIVE0"}
+    assert oem_sync.match_sold_row(owned, sold, occupied)["chassis"] == "MD9FIVE0"
+    assert oem_sync.match_sold_row(lead, sold, occupied) is None
+
+
+@pytest.mark.asyncio
+async def test_apply_sold_same_mobile_two_models_writes_both(client):
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-SM-A", "LD-SM-B"]}})
+    await server.db.oem_sold.delete_many({"chassis": {"$in": ["MD9SMA", "MD9SMB"]}})
+    await server.db.leads.insert_one({
+        "leadId": "LD-SM-A", "customerName": "Fleet Co", "mobile": "9811110066",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-SM-B", "customerName": "Fleet Co", "mobile": "9811110066",
+        "interestedModel": "Storm EV", "variant": "Storm (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9SMA", "mobile": "9811110066", "invoiceNumber": "INV-A",
+        "customerName": "Fleet Co", "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9SMB", "mobile": "9811110066", "invoiceNumber": "INV-B",
+        "customerName": "Fleet Co", "model": "Storm EV", "variant": "Storm (PV)",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    a = await server.db.leads.find_one({"leadId": "LD-SM-A"})
+    b = await server.db.leads.find_one({"leadId": "LD-SM-B"})
+    assert a["chassisNumber"] == "MD9SMA" and a["invoiceNumber"] == "INV-A"
+    assert b["chassisNumber"] == "MD9SMB" and b["invoiceNumber"] == "INV-B"
+    assert stats["updated"] == 2
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-SM-A", "LD-SM-B"]}})

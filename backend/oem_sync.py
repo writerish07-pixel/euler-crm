@@ -680,10 +680,26 @@ def sold_match_score(row, lead):
     return score
 
 
+def occupied_chassis_numbers(leads, except_id=""):
+    """Chassis already sitting on another live lead — skip these when matching Sold."""
+    out = set()
+    for other in leads or []:
+        if (other or {}).get("leadId") == except_id:
+            continue
+        if not live_occupies_vehicle_id(other):
+            continue
+        ch = _norm_chassis(other.get("chassisNumber"))
+        if ch:
+            out.add(ch)
+    return out
+
+
 async def match_sold_for_lead(db, lead):
-    """Unique CRM mobile, or unique customer name, → Coulson sold vehicle."""
+    """Unique remaining Sold row for this lead (chassis first, then mobile/name)."""
     rows = [r async for r in db.oem_sold.find({})]
-    row = match_sold_row(lead, rows)
+    leads = [l async for l in db.leads.find({})]
+    occupied = occupied_chassis_numbers(leads, (lead or {}).get("leadId"))
+    row = match_sold_row(lead, rows, occupied)
     if not row:
         return None
     return _sold_match_payload(row, _digits10(row.get("mobile")))
@@ -703,12 +719,22 @@ def _name_key_usable(key):
     return len(key.split()) >= 2
 
 
-def _match_sold_by_mobile(lead, sold_rows):
+def _match_sold_by_mobile(lead, sold_rows, occupied_chassis=None):
+    have = _norm_chassis((lead or {}).get("chassisNumber"))
+    occupied = set(occupied_chassis or ())
+    if have:
+        occupied.discard(have)
+        for row in sold_rows or []:
+            if _norm_chassis(row.get("chassis")) == have:
+                return row
     mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
     if len(mobile) != 10:
         return None
     candidates = []
     for row in sold_rows or []:
+        ch = _norm_chassis(row.get("chassis"))
+        if ch and ch in occupied:
+            continue
         if _digits10(row.get("mobile")) != mobile:
             continue
         score = sold_match_score(row, lead)
@@ -724,16 +750,23 @@ def _match_sold_by_mobile(lead, sold_rows):
     return top[0]
 
 
-def _match_sold_by_name(lead, sold_rows):
-    """Exactly one Sold row and this lead share a usable customer name."""
+def _match_sold_by_name(lead, sold_rows, occupied_chassis=None):
+    """Exactly one remaining Sold row and this lead share a usable customer name."""
     key = _norm_person_name((lead or {}).get("customerName"))
     if not _name_key_usable(key):
         return None
+    occupied = set(occupied_chassis or ())
+    have = _norm_chassis((lead or {}).get("chassisNumber"))
+    if have:
+        occupied.discard(have)
     hits = []
     for row in sold_rows or []:
+        ch = _norm_chassis(row.get("chassis"))
+        if ch and ch in occupied:
+            continue
         if _norm_person_name(row.get("customerName")) != key:
             continue
-        if not _norm_chassis(row.get("chassis")):
+        if not ch:
             continue
         if len(_digits10(row.get("mobile"))) != 10:
             continue
@@ -743,14 +776,19 @@ def _match_sold_by_name(lead, sold_rows):
     return hits[0]
 
 
-def match_sold_row(lead, sold_rows):
-    """Pick the unique sold row for this lead, or None if missing/ambiguous.
+def match_sold_row(lead, sold_rows, occupied_chassis=None):
+    """Pick the unique remaining sold row for this lead, or None if missing/ambiguous.
 
-    Mobile wins when it uniquely matches. If the CRM mobile is blank or does
+    A chassis already on the lead wins. Otherwise mobile wins when it uniquely
+    matches among unoccupied Sold rows. If the CRM mobile is blank or does
     not appear on Sold, a unique customer name is enough — that is how
     Roshan Sharma / Prakash Chand Ranwa style mismatches get a chassis.
+    Five identical Turbo Max on one mobile stay unmatched until chassis is set.
     """
-    return _match_sold_by_mobile(lead, sold_rows) or _match_sold_by_name(lead, sold_rows)
+    return (
+        _match_sold_by_mobile(lead, sold_rows, occupied_chassis)
+        or _match_sold_by_name(lead, sold_rows, occupied_chassis)
+    )
 
 
 def _sold_match_payload(row, mobile):
@@ -853,8 +891,10 @@ async def apply_sold_vehicle_ids_to_leads(db):
 
     by_chassis = {}
     no_match = 0
+    occupied = occupied_chassis_numbers(leads)
     for lead in leads:
-        row = match_sold_row(lead, sold)
+        mine = occupied - {_norm_chassis((lead or {}).get("chassisNumber"))}
+        row = match_sold_row(lead, sold, mine)
         ch = _norm_chassis((row or {}).get("chassis"))
         if not row or not ch:
             no_match += 1
@@ -914,8 +954,6 @@ async def apply_sold_vehicle_ids_to_leads(db):
             conflict = True
         if "numberPlate" in patch and _field_taken(
                 leads, "numberPlate", patch["numberPlate"], lid):
-            conflict = True
-        if "mobile" in patch and _mobile_taken(leads, patch["mobile"], lid):
             conflict = True
         if conflict:
             stats["skippedConflict"] += 1
