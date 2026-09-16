@@ -147,18 +147,45 @@ async def test_name_clash_is_other_customer(client):
 @pytest.mark.asyncio
 async def test_exec_needs_flag_then_gm_can_approve(exec_client, client):
     mobile = next_mobile()
-    live = await client.post("/api/leads", json=_enquiry("Live", mobile=mobile, executive="Amit"))
+    live = await client.post(
+        "/api/leads", json=_enquiry("Live", mobile=mobile, executive="Executive"))
     assert live.status_code == 200
-    blocked = await exec_client.post("/api/leads", json=_enquiry("Second Unit", mobile=mobile))
+    blocked = await exec_client.post(
+        "/api/leads", json=_enquiry("Second Unit", mobile=mobile, executive="Executive"))
     assert blocked.status_code == 409
     pending = await exec_client.post(
-        "/api/leads", json=_enquiry("Second Unit", mobile=mobile, anotherVehicle=True))
+        "/api/leads", json=_enquiry(
+            "Second Unit", mobile=mobile, executive="Executive", anotherVehicle=True))
     assert pending.status_code == 200, pending.text
     rid = pending.json()["requestId"]
     await attach_kyc(exec_client, rid)
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     assert ap.json()["leadId"] != live.json()["leadId"]
+
+
+@pytest.mark.asyncio
+async def test_other_executive_cannot_open_a_second_file(exec_client, client):
+    mobile = next_mobile()
+    live = await client.post("/api/leads", json=_enquiry("Amit Cust", mobile=mobile, executive="Amit"))
+    assert live.status_code == 200
+    blocked = await exec_client.post("/api/leads", json=_enquiry("Poach", mobile=mobile))
+    assert blocked.status_code == 409, blocked.text
+    d = _detail(blocked)
+    assert d["code"] == "mobile_other_executive"
+    assert "Amit" in d["message"]
+    assert d.get("executive") == "Amit"
+    still = await exec_client.post(
+        "/api/leads", json=_enquiry("Poach", mobile=mobile, anotherVehicle=True))
+    assert still.status_code == 409
+    assert _detail(still)["code"] == "mobile_other_executive"
+    owner_other = await client.post(
+        "/api/leads", json=_enquiry("Poach", mobile=mobile, executive="Rahul", anotherVehicle=True))
+    assert owner_other.status_code == 409
+    assert _detail(owner_other)["code"] == "mobile_other_executive"
+    same = await client.post(
+        "/api/leads", json=_enquiry("Amit Cust", mobile=mobile, executive="Amit", anotherVehicle=True))
+    assert same.status_code == 200, same.text
 
 
 @pytest.mark.asyncio

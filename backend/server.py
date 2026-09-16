@@ -3188,7 +3188,46 @@ def _mobile_pending_summary(req) -> dict:
         "status": (req or {}).get("status") or "",
         "interestedModel": payload.get("interestedModel") or "",
         "variant": payload.get("variant") or "",
+        "executive": payload.get("executive") or (req or {}).get("submittedByName") or "",
     }
+
+
+def _pending_holder_names(req) -> list:
+    payload = (req or {}).get("payload") or {}
+    names = []
+    seen = set()
+    for raw in (payload.get("executive"), (req or {}).get("submittedByName"),
+                (req or {}).get("assignedExecutive")):
+        fold = _norm_name(raw)
+        if fold and fold not in seen:
+            seen.add(fold)
+            names.append(str(raw or "").strip())
+    return names
+
+
+def _open_other_executive(existing, pending, incoming_exec: str):
+    """Open files / pending requests held by a different named executive."""
+    want = _norm_name(incoming_exec)
+    other_leads = []
+    for lead in existing or []:
+        if _mobile_pipeline_bucket(lead) != "active":
+            continue
+        held = str(lead.get("executive") or "").strip()
+        if not held:
+            continue
+        if want and _norm_name(held) == want:
+            continue
+        other_leads.append(lead)
+    other_pending = []
+    for req in pending or []:
+        holders = _pending_holder_names(req)
+        if not holders:
+            continue
+        folds = {_norm_name(n) for n in holders}
+        if want and want in folds:
+            continue
+        other_pending.append(req)
+    return other_leads, other_pending
 
 
 def _mobile_conflict_code(existing, incoming_name: str = "") -> str:
@@ -3205,11 +3244,26 @@ def _mobile_conflict_code(existing, incoming_name: str = "") -> str:
     return "mobile_previous_deal"
 
 
-def _mobile_conflict_message(code, existing, pending, incoming_name: str = "") -> str:
+def _mobile_conflict_message(code, existing, pending, incoming_name: str = "",
+                             other_exec: str = "") -> str:
     first = existing[0] if existing else None
     lid = (first or {}).get("leadId") or ""
     name = (first or {}).get("customerName") or ""
     extra = f" and {len(existing) - 1} more" if existing and len(existing) > 1 else ""
+    if code == "mobile_other_executive":
+        held = (other_exec or (first or {}).get("executive") or "").strip() or "another executive"
+        if pending and not existing:
+            pid = (pending[0] or {}).get("requestId") or ""
+            return (
+                f"This lead is already with {held}"
+                + (f" ({pid})" if pid else "")
+                + ". They are already in touch with this customer."
+            )
+        return (
+            f"This lead is already with {held}"
+            + (f" ({lid})" if lid else "")
+            + ". They are already in touch with this customer."
+        )
     if code == "mobile_other_customer":
         typed = (incoming_name or "").strip() or "a different name"
         return (
@@ -3262,21 +3316,41 @@ async def _mobile_taken_by_lead(mobile: str, exclude_lead_id: str = ""):
 
 
 async def _raise_if_mobile_taken(mobile: str, *, incoming_name: str = "",
+                                 incoming_executive: str = "",
                                  exclude_lead_id: str = "", allow: bool = False,
                                  check_pending: bool = True):
-    """409 unless staff confirmed anotherVehicle / allow_same_mobile."""
+    """409 for another executive's open file, or unless anotherVehicle is confirmed."""
+    existing = await _leads_sharing_mobile(mobile, exclude_lead_id)
+    pending = await _pending_sharing_mobile(mobile)
+    other_leads, other_pending = _open_other_executive(existing, pending, incoming_executive)
+    if other_leads or other_pending:
+        shown = other_leads or existing
+        shown_p = other_pending or pending
+        held = ""
+        if other_leads:
+            held = str((other_leads[0] or {}).get("executive") or "").strip()
+        elif other_pending:
+            names = _pending_holder_names(other_pending[0])
+            held = names[0] if names else ""
+        raise HTTPException(409, {
+            "code": "mobile_other_executive",
+            "message": _mobile_conflict_message(
+                "mobile_other_executive", shown, shown_p, incoming_name, other_exec=held),
+            "existing": [_mobile_lead_summary(l) for l in shown],
+            "pending": [_mobile_pending_summary(p) for p in shown_p],
+            "executive": held,
+        })
     if allow:
         return
-    existing = await _leads_sharing_mobile(mobile, exclude_lead_id)
-    pending = await _pending_sharing_mobile(mobile) if check_pending else []
-    if not existing and not pending:
+    pending_lock = pending if check_pending else []
+    if not existing and not pending_lock:
         return
     code = _mobile_conflict_code(existing, incoming_name) or "mobile_active_deal"
     raise HTTPException(409, {
         "code": code,
-        "message": _mobile_conflict_message(code, existing, pending, incoming_name),
+        "message": _mobile_conflict_message(code, existing, pending_lock, incoming_name),
         "existing": [_mobile_lead_summary(l) for l in existing],
-        "pending": [_mobile_pending_summary(p) for p in pending],
+        "pending": [_mobile_pending_summary(p) for p in pending_lock],
     })
 
 
@@ -3285,7 +3359,8 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     payload = body.model_dump()
     another = bool(payload.pop("anotherVehicle", False))
     await _raise_if_mobile_taken(
-        body.mobile, incoming_name=body.customerName, allow=another or allow_same_mobile,
+        body.mobile, incoming_name=body.customerName,
+        incoming_executive=body.executive, allow=another or allow_same_mobile,
         check_pending=False)
     lead_id = await next_id("lead", "LD26")
     created_date = str(payload.pop("createdDate", None) or "").strip() or today()
@@ -3347,7 +3422,9 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
         payload = body.model_dump()
         another = bool(payload.pop("anotherVehicle", False))
         await _raise_if_mobile_taken(
-            body.mobile, incoming_name=body.customerName, allow=another, check_pending=True)
+            body.mobile, incoming_name=body.customerName,
+            incoming_executive=user.get("name") or payload.get("executive") or "",
+            allow=another, check_pending=True)
         payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
         payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
         if payload["customerType"] != "B2B":
@@ -4283,7 +4360,9 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
         old10 = _mobile_last10(str(lead.get("mobile") or ""))
         if new10 and new10 != old10:
             await _raise_if_mobile_taken(
-                payload.get("mobile") or "", incoming_name=payload.get("customerName") or lead.get("customerName") or "",
+                payload.get("mobile") or "",
+                incoming_name=payload.get("customerName") or lead.get("customerName") or "",
+                incoming_executive=payload.get("executive") or lead.get("executive") or "",
                 exclude_lead_id=lead_id, allow=another, check_pending=True)
 
     null_fields = [k for k, v in payload.items() if v is None and k not in LEAD_NULLABLE_FIELDS]
@@ -5800,11 +5879,43 @@ async def _existing_lead_mobiles():
     return out
 
 
+async def _open_executives_by_mobile():
+    """last-10-digits -> named executives who hold an open (active pipeline) file."""
+    out = {}
+    for l in await db.leads.find().to_list(5000):
+        if _mobile_pipeline_bucket(l) != "active":
+            continue
+        digits = re.sub(r"\D", "", str(l.get("mobile") or ""))
+        name = str(l.get("executive") or "").strip()
+        if len(digits) < 10 or not name:
+            continue
+        bucket = out.setdefault(digits[-10:], [])
+        if name not in bucket:
+            bucket.append(name)
+    return out
+
+
+def _import_other_exec_error(row, open_executives):
+    mob = str((row or {}).get("mobile") or "")
+    last10 = mob[-10:] if len(re.sub(r"\D", "", mob)) >= 10 else ""
+    if not last10:
+        return ""
+    held = (open_executives or {}).get(last10) or []
+    row_e = _norm_name((row or {}).get("executive"))
+    if row_e and any(_norm_name(n) == row_e for n in held):
+        return ""
+    others = [n for n in held if str(n or "").strip()]
+    if not others:
+        return ""
+    return f"This lead is already with {others[0]}"
+
+
 def _form_flag(value) -> bool:
     return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _validate_import_rows(rows, allowed, existing_mobiles, allow_same_mobile=False):
+def _validate_import_rows(rows, allowed, existing_mobiles, allow_same_mobile=False,
+                          open_executives=None):
     """Canonicalise every row against the live masters and collect per-row errors.
 
     A value that is present but not in its master list is an ERROR, never a silent
@@ -5862,6 +5973,10 @@ def _validate_import_rows(rows, allowed, existing_mobiles, allow_same_mobile=Fal
         else:
             canonical = _import_match(exec_raw, allowed.get("executives") or [])
             row["executive"] = canonical or ""
+
+        held_err = _import_other_exec_error(row, open_executives)
+        if held_err:
+            errors.append(held_err)
 
         for field, key, label in list_fields:
             raw = str(row.get(field) or "").strip()
@@ -6111,7 +6226,8 @@ async def import_preview(file: UploadFile = File(...), mapping: Optional[str] = 
     allow_same = _form_flag(anotherVehicle)
     allowed = await _import_allowed_values()
     checked = _validate_import_rows(
-        rows, allowed, await _existing_lead_mobiles(), allow_same_mobile=allow_same)
+        rows, allowed, await _existing_lead_mobiles(), allow_same_mobile=allow_same,
+        open_executives=await _open_executives_by_mobile())
     valid = [r for r in checked if not r["__errors"] and not r.get("__alreadyInApp")]
     already = _import_already_report(checked)
     return {"detectedHeaders": [h for h in headers if h],
@@ -6149,9 +6265,19 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
     allow_same = _form_flag(anotherVehicle)
     allowed = await _import_allowed_values()
     checked = _validate_import_rows(
-        rows, allowed, await _existing_lead_mobiles(), allow_same_mobile=allow_same)
+        rows, allowed, await _existing_lead_mobiles(), allow_same_mobile=allow_same,
+        open_executives=await _open_executives_by_mobile())
     _apply_executive_map(checked, _parse_executive_map(executiveMap),
                          allowed.get("executives") or [])
+    open_execs = await _open_executives_by_mobile()
+    for d in checked:
+        if d.get("__alreadyInApp"):
+            continue
+        d["__errors"] = [e for e in (d.get("__errors") or [])
+                         if not str(e).startswith("This lead is already with ")]
+        held_err = _import_other_exec_error(d, open_execs)
+        if held_err:
+            d["__errors"].append(held_err)
     fresh = await _existing_lead_mobiles()
     keep = []
     for d in checked:

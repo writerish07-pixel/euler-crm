@@ -314,6 +314,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     <MobileClashDialog
       clash={clash}
       busy={busy}
+      canOpenExisting={!(isExecutive && clash?.code === "mobile_other_executive")}
       onCancel={() => setClash(null)}
       onOpenExisting={(id) => { setClash(null); onCreated(id); }}
       onAnotherVehicle={() => saveLead({ anotherVehicle: true })}

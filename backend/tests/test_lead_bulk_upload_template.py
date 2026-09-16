@@ -305,6 +305,30 @@ async def test_another_vehicle_imports_onto_existing_crm_mobile(client):
 
 
 @pytest.mark.asyncio
+async def test_import_another_vehicle_blocked_when_other_executive_holds_mobile(client):
+    await client.post("/api/leads/import/commit",
+                      files={"file": ("a.csv", _csv([_row("Amit File", "9800000071")]), "text/csv")})
+    rows = [_row("Other Exec", "9800000071", **{"Executive": "Rahul"})]
+    r = await client.post(
+        "/api/leads/import/preview",
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+        data={"anotherVehicle": "true"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["validCount"] == 0
+    problems = " ".join(" ".join(e["errors"]) for e in r.json()["errors"])
+    assert "already with" in problems.lower()
+    commit = await client.post(
+        "/api/leads/import/commit",
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+        data={"anotherVehicle": "true"},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["created"] == 0
+    assert await server.db.leads.count_documents({"mobile": "9800000071"}) == 1
+
+
+@pytest.mark.asyncio
 async def test_dates_accept_indian_format_and_reject_junk(client):
     rows = [_row("DMY Date", "9800000051", **{"Lead Date": "10-08-2026"}),
             _row("Junk Date", "9800000052", **{"Lead Date": "next monday"})]
