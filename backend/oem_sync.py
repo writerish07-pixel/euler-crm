@@ -725,8 +725,13 @@ def _match_sold_by_mobile(lead, sold_rows, occupied_chassis=None):
     if have:
         occupied.discard(have)
         for row in sold_rows or []:
-            if _norm_chassis(row.get("chassis")) == have:
-                return row
+            if _norm_chassis(row.get("chassis")) != have:
+                continue
+            sold_m = _digits10(row.get("mobile"))
+            lead_m = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
+            if sold_m and lead_m and sold_m != lead_m:
+                return None
+            return row
     mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
     if len(mobile) != 10:
         return None

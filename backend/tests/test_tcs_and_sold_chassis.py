@@ -336,9 +336,11 @@ async def test_sold_id_backfill_does_not_steal_live_chassis(client):
     })
     stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
     assert stats["updated"] == 0
-    assert stats["skippedConflict"] >= 1
     want = await server.db.leads.find_one({"leadId": "LD-SOLD-WANT"})
+    has = await server.db.leads.find_one({"leadId": "LD-SOLD-HAS"})
     assert not want.get("chassisNumber")
+    assert has["chassisNumber"] == chassis
+    assert has["invoiceNumber"] == "CINV-HAS-KEEP"
     await server.db.leads.delete_many({"leadId": {"$in": ["LD-SOLD-WANT", "LD-SOLD-HAS"]}})
 
 
