@@ -2,10 +2,10 @@ import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink } from "lucide-react";
 import { Link } from "react-router-dom";
-import { get, post, put, del, apiErrorMessage } from "../lib/api";
+import { get, post, put, del, apiErrorMessage, apiErrorDetail } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
-import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card } from "../components/ui";
+import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
 import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
@@ -1667,30 +1667,38 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
     bookingAmount: lead.bookingAmount ?? 0,
   });
   const [variants, setVariants] = useState([]);
+  const [clash, setClash] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   useEffect(() => { if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants); }, [form.interestedModel]);
   const isBookedLead = Boolean(lead.bookingDate)
     || ["booked", "finance process", "delivered", "close won"].includes(String(lead.currentStatus || "").toLowerCase());
 
-  const save = async () => {
+  const save = async (extra = {}) => {
     if (!form.customerName) return toast.error("Customer name is required");
     const vehicleChanged = form.interestedModel !== (lead.interestedModel || "")
       || form.variant !== (lead.variant || "");
     try {
-      const body = { ...form, budget: Number(form.budget) };
+      const body = { ...form, budget: Number(form.budget), ...extra };
       if (isBookedLead) body.bookingAmount = Number(form.bookingAmount) || 0;
       else delete body.bookingAmount;
       await put(`/leads/${lead.leadId}`, body);
+      setClash(null);
       toast.success(vehicleChanged
         ? "Lead updated — Ex-Showroom & scheme recalculated from masters"
         : "Lead updated");
       onSaved({ vehicleChanged });
     } catch (e) {
+      const detail = apiErrorDetail(e);
+      if (e?.response?.status === 409 && detail && String(detail.code || "").startsWith("mobile_")) {
+        setClash(detail);
+        return;
+      }
       toast.error(apiErrorMessage(e, "Update failed"));
     }
   };
   const m = masters || {};
   return (
+    <>
     <Modal onClose={onClose} width="max-w-2xl" testid="edit-lead-modal">
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Edit Lead — {lead.leadId}</h3>
@@ -1729,9 +1737,16 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
       </div>
       <div className="flex justify-end gap-2 px-6 py-4 border-t border-line bg-zinc-50/60 shrink-0">
         <Button variant="secondary" onClick={onClose}>Cancel</Button>
-        <Button data-testid="save-edit-lead-btn" onClick={save}>Save Changes</Button>
+        <Button data-testid="save-edit-lead-btn" onClick={() => save()}>Save Changes</Button>
       </div>
     </Modal>
+    <MobileClashDialog
+      clash={clash}
+      onCancel={() => setClash(null)}
+      onOpenExisting={() => setClash(null)}
+      onAnotherVehicle={() => save({ anotherVehicle: true })}
+    />
+    </>
   );
 }
 

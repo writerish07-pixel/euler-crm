@@ -12,6 +12,7 @@ export default function LeadImport({ onClose, onDone }) {
   const [step, setStep] = useState("upload"); // upload -> map
   const [split, setSplit] = useState(null);
   const [execMap, setExecMap] = useState({});
+  const [anotherVehicle, setAnotherVehicle] = useState(false);
 
   useEffect(() => {
     get("/leads/split").then(setSplit).catch(() => {});
@@ -33,10 +34,11 @@ export default function LeadImport({ onClose, onDone }) {
     }
   };
 
-  const runPreview = async (f, mp) => {
+  const runPreview = async (f, mp, another) => {
     const fd = new FormData();
     fd.append("file", f);
     if (mp) fd.append("mapping", JSON.stringify(mp));
+    if (another) fd.append("anotherVehicle", "true");
     return postForm("/leads/import/preview", fd);
   };
 
@@ -44,7 +46,7 @@ export default function LeadImport({ onClose, onDone }) {
     if (!f) return;
     setFile(f); setBusy(true);
     try {
-      const res = await runPreview(f, null);
+      const res = await runPreview(f, null, anotherVehicle);
       setData(res); setMapping(res.suggestedMapping || {});
       const next = {};
       (res.executivePrompts || []).forEach((p) => { next[p.key] = p.suggested || ""; });
@@ -61,7 +63,7 @@ export default function LeadImport({ onClose, onDone }) {
     setMapping(mp);
     setBusy(true);
     try {
-      const res = await runPreview(file, mp);
+      const res = await runPreview(file, mp, anotherVehicle);
       setData((d) => ({ ...d, ...res, suggestedMapping: d.suggestedMapping }));
       const next = {};
       (res.executivePrompts || []).forEach((p) => { next[p.key] = p.suggested || ""; });
@@ -75,6 +77,7 @@ export default function LeadImport({ onClose, onDone }) {
     setBusy(true);
     const fd = new FormData(); fd.append("file", file); fd.append("mapping", JSON.stringify(mapping));
     if (Object.keys(execMap).length) fd.append("executiveMap", JSON.stringify(execMap));
+    if (anotherVehicle) fd.append("anotherVehicle", "true");
     try {
       const res = await postForm("/leads/import/commit", fd, { timeout: 180000, retry: false });
       const { created, skipped } = res;
@@ -133,7 +136,9 @@ export default function LeadImport({ onClose, onDone }) {
           <p className="text-xs text-ink-soft mt-4">
             Download the template first — its Lead Source, Executive, Model, Variant, Priority and Status
             columns are dropdowns built from your Settings and Price Master, so uploaded values always match the app.
-            Mobiles already in Euler are skipped automatically.
+            Mobiles already in Euler are skipped automatically. Tick “another vehicle”
+            to import extra units on the same mobile (fleet or repeat buyer). The same
+            mobile may appear more than once in one sheet — one row per vehicle.
           </p>
           <p className="text-xs text-ink-soft mt-2" data-testid="import-split-note">{splitNote}</p>
         </>
@@ -145,10 +150,32 @@ export default function LeadImport({ onClose, onDone }) {
             <CheckCircle2 size={16} className="text-emerald-500" />
             <span className="text-sm font-medium text-ink">{file?.name}</span>
             <Badge className="ml-auto">{data.detectedHeaders.length} columns · {data.rowCount} rows</Badge>
-            <button onClick={() => { setStep("upload"); setData(null); setFile(null); setExecMap({}); }} className="text-xs text-cobalt hover:underline">Change file</button>
+            <button onClick={() => { setStep("upload"); setData(null); setFile(null); setExecMap({}); setAnotherVehicle(false); }} className="text-xs text-cobalt hover:underline">Change file</button>
           </div>
 
           <p className="text-xs text-ink-soft mb-4" data-testid="import-split-note-map">{splitNote}</p>
+
+          <label className="flex items-start gap-2 mb-4 text-sm text-ink" data-testid="import-another-vehicle">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={anotherVehicle}
+              onChange={async (e) => {
+                const on = e.target.checked;
+                setAnotherVehicle(on);
+                if (!file) return;
+                setBusy(true);
+                try {
+                  const res = await runPreview(file, mapping, on);
+                  setData((d) => ({ ...d, ...res, suggestedMapping: d.suggestedMapping }));
+                } catch { /* keep old */ } finally { setBusy(false); }
+              }}
+            />
+            <span>
+              These rows are another vehicle on an existing mobile (repeat buyer / fleet).
+              Unticked, numbers already in Euler stay skipped.
+            </span>
+          </label>
 
           {(data.executivePrompts || []).length > 0 && (
             <Card className="p-4 mb-5" data-testid="import-exec-match">
@@ -221,7 +248,11 @@ export default function LeadImport({ onClose, onDone }) {
           {(data.alreadyInApp || []).length > 0 && (
             <>
               <h4 className="font-heading font-bold text-ink text-sm mb-2">Already in Euler — skipped</h4>
-              <p className="text-xs text-ink-soft mb-2">Same mobile is already a lead. These rows will not be imported again.</p>
+              <p className="text-xs text-ink-soft mb-2">
+                {anotherVehicle
+                  ? "Already-in-app rows are imported as extra units because “another vehicle” is ticked."
+                  : "Same mobile is already a lead. These rows will not be imported again unless you tick “another vehicle”."}
+              </p>
               <Card className="overflow-hidden mb-5" data-testid="import-already">
                 <div className="overflow-x-auto max-h-40">
                   <table className="w-full text-left text-sm">

@@ -63,6 +63,7 @@ test("a timed-out import does not retry and tells the user leads may already be 
   await renderImport();
   await chooseFile();
   expect(document.querySelector('[data-testid="import-already-count"]')?.textContent).toBe("359");
+  expect(document.querySelector('[data-testid="import-another-vehicle"]')).toBeTruthy();
   await act(async () => {
     document.querySelector('[data-testid="commit-import-btn"]').click();
   });

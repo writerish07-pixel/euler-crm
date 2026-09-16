@@ -219,6 +219,15 @@ export const postForm = (url, formData, opts = {}) => {
   return withFallback(run);
 };
 
+export function apiErrorDetail(err) {
+  const data = err?.response?.data;
+  const detail = data && typeof data === "object" && !(typeof Blob !== "undefined" && data instanceof Blob)
+    ? data.detail
+    : null;
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) return detail;
+  return null;
+}
+
 export function apiErrorMessage(err, fallback = "Request failed") {
   const data = err?.response?.data;
   const detail = data && typeof data === "object" && !(typeof Blob !== "undefined" && data instanceof Blob)

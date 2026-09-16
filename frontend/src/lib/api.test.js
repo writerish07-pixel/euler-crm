@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, postForm, post, isBulkMutationPath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, isBulkMutationPath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -63,8 +63,21 @@ describe("apiErrorMessage", () => {
     })).toBe("Field required");
   });
 
-  test("falls back when detail is missing", () => {
-    expect(apiErrorMessage({ message: "Network Error" }, "Import failed")).toBe("Network Error");
+  test("reads FastAPI object detail.message", () => {
+    expect(apiErrorMessage({
+      response: { data: { detail: { code: "mobile_active_deal", message: "This mobile already has an open deal" } } },
+    })).toBe("This mobile already has an open deal");
+  });
+});
+
+describe("apiErrorDetail", () => {
+  test("returns the FastAPI object detail", () => {
+    const detail = { code: "mobile_active_deal", message: "open deal", existing: [] };
+    expect(apiErrorDetail({ response: { data: { detail } } })).toEqual(detail);
+  });
+
+  test("is null for a string detail", () => {
+    expect(apiErrorDetail({ response: { data: { detail: "Pick an executive" } } })).toBe(null);
   });
 });
 

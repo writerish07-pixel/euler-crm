@@ -254,16 +254,16 @@ async def test_blank_optional_cells_use_new_lead_defaults(client):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_mobiles_blocked_in_file_and_against_crm(client):
+async def test_duplicate_mobiles_same_file_ok_crm_skipped(client):
     await client.post("/api/leads/import/commit",
                       files={"file": ("a.csv", _csv([_row("First In", "9800000041")]), "text/csv")})
     rows = [_row("Same File A", "9800000042"), _row("Same File B", "9800000042"),
             _row("Already There", "9800000041"), _row("No Mobile", "")]
     body = await _preview(client, rows)
-    assert (body["validCount"], body["alreadyCount"], body["errorCount"]) == (1, 1, 2)
+    assert (body["validCount"], body["alreadyCount"], body["errorCount"]) == (2, 1, 1)
     problems = {e["customerName"]: " ".join(e["errors"]) for e in body["errors"]}
     assert "Already There" not in problems
-    assert "Duplicate mobile" in problems["Same File B"]
+    assert "Same File B" not in problems
     assert "Mobile is required" in problems["No Mobile"]
     already = {e["customerName"]: e["leadId"] for e in body["alreadyInApp"]}
     assert "Already There" in already
@@ -273,10 +273,59 @@ async def test_duplicate_mobiles_blocked_in_file_and_against_crm(client):
     r = await client.post("/api/leads/import/commit",
                           files={"file": ("leads.csv", _csv(rows), "text/csv")})
     assert r.status_code == 200, r.text
-    assert r.json()["created"] == 1
+    assert r.json()["created"] == 2
     assert r.json()["alreadyExisted"] == 1
-    assert r.json()["skipped"] == 2
+    assert r.json()["skipped"] == 1
     assert await server.db.leads.count_documents({"mobile": "9800000041"}) == 1
+    assert await server.db.leads.count_documents({"mobile": "9800000042"}) == 2
+
+
+@pytest.mark.asyncio
+async def test_another_vehicle_imports_onto_existing_crm_mobile(client):
+    await client.post("/api/leads/import/commit",
+                      files={"file": ("a.csv", _csv([_row("First In", "9800000061")]), "text/csv")})
+    rows = [_row("Second Unit", "9800000061", **{"Interested Model": "Storm EV", "Variant": "Storm (PV)"})]
+    skipped = await _preview(client, rows)
+    assert skipped["alreadyCount"] == 1 and skipped["validCount"] == 0
+    r = await client.post(
+        "/api/leads/import/preview",
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+        data={"anotherVehicle": "true"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["validCount"] == 1 and r.json()["alreadyCount"] == 0
+    commit = await client.post(
+        "/api/leads/import/commit",
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+        data={"anotherVehicle": "true"},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["created"] == 1
+    assert await server.db.leads.count_documents({"mobile": "9800000061"}) == 2
+
+
+@pytest.mark.asyncio
+async def test_import_another_vehicle_blocked_when_other_executive_holds_mobile(client):
+    await client.post("/api/leads/import/commit",
+                      files={"file": ("a.csv", _csv([_row("Amit File", "9800000071")]), "text/csv")})
+    rows = [_row("Other Exec", "9800000071", **{"Executive": "Rahul"})]
+    r = await client.post(
+        "/api/leads/import/preview",
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+        data={"anotherVehicle": "true"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["validCount"] == 0
+    problems = " ".join(" ".join(e["errors"]) for e in r.json()["errors"])
+    assert "already with" in problems.lower()
+    commit = await client.post(
+        "/api/leads/import/commit",
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+        data={"anotherVehicle": "true"},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["created"] == 0
+    assert await server.db.leads.count_documents({"mobile": "9800000071"}) == 1
 
 
 @pytest.mark.asyncio
