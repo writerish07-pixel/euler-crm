@@ -29,6 +29,11 @@ KINDS = {
     "delivery_rto": {"group": "delivery", "label": "RTO / Registration", "unique": True},
     "tally_invoice": {"group": "tally", "label": "Tally GST invoice", "unique": True},
     "refund_cheque": {"group": "refund", "label": "Refund cheque", "unique": False},
+    "oem_extra_support": {
+        "group": "oem_extra",
+        "label": "OEM Extra Support email (ASM / RM)",
+        "unique": True,
+    },
 }
 
 KYC_INDIVIDUAL = ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan")
@@ -76,6 +81,10 @@ def can_read_kind(user, kind: str, *, own: bool = False) -> bool:
         if role in ("owner", "sales_gm", "tl", "accounts"):
             return True
         return role == "executive" and own
+    if group == "oem_extra":
+        if role in ("owner", "sales_gm", "tl", "accounts"):
+            return True
+        return role == "executive" and own
     if group == "delivery":
         return role in ("owner", "sales_gm", "tl", "accounts")
     if group == "tally":
@@ -94,6 +103,10 @@ def can_upload_kind(user, kind: str, *, own: bool = False) -> bool:
         return False
     group = info["group"]
     if group == "kyc":
+        if role in ("owner", "sales_gm", "tl"):
+            return True
+        return role == "executive" and own
+    if group == "oem_extra":
         if role in ("owner", "sales_gm", "tl"):
             return True
         return role == "executive" and own
@@ -159,6 +172,19 @@ async def missing_kyc(db, *, request_id: str = "", lead_id: str = "",
     if normalize_customer_type(customer_type) == "B2B" and not str(gstin or "").strip():
         missing.append("gstin")
     return missing
+
+
+async def has_oem_extra_proof(db, *, request_id: str = "", lead_id: str = "") -> bool:
+    """True when the ASM/RM confirmation email is on the request or the live lead."""
+    clauses = []
+    if request_id:
+        clauses.append({"requestId": request_id, "kind": "oem_extra_support"})
+    if lead_id:
+        clauses.append({"leadId": lead_id, "kind": "oem_extra_support"})
+    if not clauses:
+        return False
+    q = {"$or": clauses} if len(clauses) > 1 else clauses[0]
+    return await db[COLLECTION].find_one(q, _META_PROJ) is not None
 
 
 async def list_docs(db, user, *, lead_id: str = "", request_id: str = "",

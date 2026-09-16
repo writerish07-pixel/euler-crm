@@ -88,4 +88,6 @@ PENDING_SHEET_COLUMNS = {
                "oemStageLabel"],
     # Appended on OEM Extra Support Register alongside chassis/invoice/claim no.
     "oem_extra_support": ["chassisNumber", "invoiceNumber", "claimReference"],
+    "payments": ["paymentReference"],
+    "bookings": ["paymentReference"],
 }

@@ -3444,7 +3444,27 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
         row["kycMissing"] = missing
         row["kycComplete"] = not missing
         out.append(row)
-    return await _attach_oem_extra_to_requests(out)
+    out = await _attach_oem_extra_to_requests(out)
+    need_lead_proof = [
+        r.get("existingLeadId") for r in out
+        if ce.num(r.get("oemExtraSupportReceived")) > 0
+        and r.get("existingLeadId")
+        and not any(d.get("kind") == "oem_extra_support" for d in (r.get("documents") or []))
+    ]
+    lead_proof = set()
+    if need_lead_proof:
+        for d in await db[lead_docs.COLLECTION].find(
+                {"leadId": {"$in": need_lead_proof}, "kind": "oem_extra_support"},
+                {"leadId": 1}).to_list(len(need_lead_proof) + 20):
+            if d.get("leadId"):
+                lead_proof.add(d["leadId"])
+    for row in out:
+        extra = ce.num(row.get("oemExtraSupportReceived"))
+        has_proof = any(d.get("kind") == "oem_extra_support" for d in (row.get("documents") or []))
+        if not has_proof and row.get("existingLeadId") in lead_proof:
+            has_proof = True
+        row["oemExtraProofMissing"] = extra > 0 and not has_proof
+    return out
 
 
 @api.post("/lead-requests/{request_id}/approve")
@@ -3493,6 +3513,19 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         labels = [lead_docs.KINDS.get(k, {}).get("label") or k for k in missing]
         raise HTTPException(422, "KYC is incomplete — " + ", ".join(labels) + ".")
     existing_id = str(claimed.get("existingLeadId") or "").strip()
+    live_for_extra = await db.leads.find_one({"leadId": existing_id}) if existing_id else None
+    extra_needed = await _oem_extra_against_lead(live_for_extra, payload)
+    if extra_needed > 0 and not await lead_docs.has_oem_extra_proof(
+            db, request_id=request_id, lead_id=existing_id):
+        await db.lead_requests.update_one(
+            {"requestId": request_id},
+            {"$set": {"status": "pending", "approvedBy": "", "approvedByName": "", "approvedAt": ""}},
+        )
+        raise HTTPException(
+            422,
+            "OEM Extra Support needs the confirmation email from Siddharth Dubey (ASM) "
+            "or Siddharth Sharma (RM).",
+        )
     try:
         if existing_id:
             live = await db.leads.find_one({"leadId": existing_id})
@@ -3778,6 +3811,14 @@ async def _request_public(req, user):
         existing_id = str(row.get("existingLeadId") or "").strip()
         lead = await db.leads.find_one({"leadId": existing_id}) if existing_id else None
         row["oemExtraSupportReceived"] = await _oem_extra_against_lead(lead, req.get("payload"))
+    extra = ce.num(row.get("oemExtraSupportReceived"))
+    has_proof = any(d.get("kind") == "oem_extra_support" for d in docs)
+    if extra > 0 and not has_proof:
+        existing_id = str(row.get("existingLeadId") or "").strip()
+        if existing_id:
+            has_proof = await lead_docs.has_oem_extra_proof(
+                db, request_id=rid or "", lead_id=existing_id)
+    row["oemExtraProofMissing"] = extra > 0 and not has_proof
     return row
 
 
@@ -4018,8 +4059,8 @@ async def upload_request_document(request_id: str, kind: str = Form(...),
     if not own and not _can_approve_leads(user):
         raise HTTPException(403, "You can only attach KYC to your own request.")
     kind = lead_docs.require_kind(kind)
-    if lead_docs.KINDS[kind]["group"] != "kyc":
-        raise HTTPException(422, "Only KYC files can be attached to a lead request.")
+    if lead_docs.KINDS[kind]["group"] not in ("kyc", "oem_extra"):
+        raise HTTPException(422, "Only KYC or OEM Extra Support files can be attached to a lead request.")
     if not lead_docs.can_upload_kind(user, kind, own=own or _can_approve_leads(user)):
         raise HTTPException(403, "You cannot upload this kind of document.")
     data, ctype, filename = await lead_docs.read_upload(file)
@@ -4551,6 +4592,9 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
     requested = ce.round2(max(0.0, ce.num(body.bookingAmount)))
     held = await _net_received(lead_id)
     extra = ce.round2(max(0.0, requested - held))
+    pay_ref = str(body.paymentReference or "").strip()
+    if extra > 0.01 and _payment_ref_required(body.paymentMode, extra) and not pay_ref:
+        raise HTTPException(422, f"Enter the {_payment_ref_label(body.paymentMode).lower()}")
     await db.leads.update_one({"leadId": lead_id}, {"$set": {
         "currentStatus": "Booked", "bookingDate": bdate, "bookingAmount": requested,
         "executive": body.executive or lead.get("executive"), "financeRequired": body.financeRequired,
@@ -4562,7 +4606,6 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
         # Allow booking-confirm WhatsApp for this new booking (cancel cleared it too).
         "whatsappBookingSentAt": "",
     }})
-    pay_ref = str(body.paymentReference or "").strip()
     await db.bookings.insert_one({
         "bookingId": booking_id, "leadId": lead_id, "customerName": lead.get("customerName"),
         "bookingDate": bdate, "model": lead.get("interestedModel"), "variant": lead.get("variant"),
@@ -6084,6 +6127,22 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
 
 
 # ---------------------------------------------------------------- payments
+def _payment_ref_label(mode) -> str:
+    m = str(mode or "").strip().lower()
+    if m == "cheque":
+        return "Cheque number"
+    if m in ("upi", "neft"):
+        return "UTR / transaction number"
+    return "Transaction number"
+
+
+def _payment_ref_required(mode, amount) -> bool:
+    m = str(mode or "").strip().lower()
+    if m in ("cash", "finance", ""):
+        return False
+    return ce.num(amount) > 0
+
+
 async def _add_payment_internal(lead_id, body: PaymentIn):
     # Same guard record_financer_receipt/record_claim_receipt already have — this endpoint
     # was missing it, which let a negative amount silently reduce runningTotal (the
@@ -6091,6 +6150,9 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
     # that DECREASES running, so negative amounts sailed through undetected).
     if body.amount <= 0:
         raise HTTPException(422, "Enter a valid payment amount")
+    pay_ref = str(body.paymentReference or "").strip()
+    if _payment_ref_required(body.paymentMode, body.amount) and not pay_ref:
+        raise HTTPException(422, f"Enter the {_payment_ref_label(body.paymentMode).lower()}")
     lead = await db.leads.find_one({"leadId": lead_id})
     # Double-submit guard (U4): reject an identical receipt (same lead/amount/mode) within 4s
     recent = await db.payments.find_one(
@@ -6133,7 +6195,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         "narration": body.narration, "runningTotal": running, "outstandingBalance": outstanding,
         "paymentId": f"PY{uuid.uuid4().hex[:12]}", "financerName": body.financerName,
         "financeFileNumber": finance_file_number,
-        "paymentReference": str(body.paymentReference or "").strip(),
+        "paymentReference": pay_ref,
         "recordedAt": now_iso(),
     }
     try:
@@ -6153,9 +6215,17 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
 
 @api.get("/payments")
 async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = None,
-                        year: Optional[str] = None):
-    q = {"leadId": lead_id} if lead_id else {}
-    rows = [clean(p) for p in await db.payments.find(q).sort("date", -1).to_list(2000)]
+                        year: Optional[str] = None, q: Optional[str] = None):
+    filt = {"leadId": lead_id} if lead_id else {}
+    rows = [clean(p) for p in await db.payments.find(filt).sort("date", -1).to_list(2000)]
+    needle = str(q or "").strip().lower()
+    if needle:
+        def _hit(p):
+            blob = " ".join(str(p.get(k) or "") for k in (
+                "receiptNumber", "leadId", "customerName", "paymentMode",
+                "paymentReference", "narration", "financeFileNumber"))
+            return needle in blob.lower()
+        rows = [p for p in rows if _hit(p)]
     return _rows_in_period(rows, _parse_period(month, year), lambda p: p.get("date"))
 
 
@@ -9151,7 +9221,8 @@ CRITICAL_ENDPOINTS = [
     ("PUT", "/api/leads/{lead_id}/delivery"),
     ("GET", "/api/leads/{lead_id}/oem-sold"),
     ("GET", "/api/leads/{lead_id}/billing-summary"),
-    ("GET", "/api/payments"), ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
+    ("GET", "/api/payments"), ("GET", "/api/oem-extra-support"),
+    ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),
     ("GET", "/api/insurance/agents-rollup"), ("GET", "/api/insurance/receipts"),
     ("GET", "/api/insurance-agents"), ("POST", "/api/insurance-agents"),
@@ -10093,6 +10164,75 @@ async def list_dropped_extra_support(month: Optional[str] = None, year: Optional
     return _rows_in_period(rows, _parse_period(month, year), lambda r: r.get("droppedAt"))
 
 
+@api.get("/oem-extra-support", dependencies=[Depends(oem_claim_desk_only)])
+async def list_oem_extra_support(month: Optional[str] = None, year: Optional[str] = None):
+    """App register for OEM Extra Support — same columns the sheet used to carry."""
+    leads = await db.leads.find().to_list(8000)
+    rows_src = []
+    lids = []
+    for l in leads:
+        oem = ce.compute_oem_extra_support(l)
+        if oem["oemExtraSupportReceived"] <= 0:
+            continue
+        lids.append(l.get("leadId"))
+        rows_src.append((l, oem))
+    claims_by = {}
+    if lids:
+        for c in await db.claims.find({
+            "leadId": {"$in": lids},
+            "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+            "manual": {"$ne": True},
+        }).to_list(len(lids) + 50):
+            lid = c.get("leadId")
+            if lid and lid not in claims_by:
+                claims_by[lid] = c
+    bookings_by = {}
+    if lids:
+        for b in await db.bookings.find({"leadId": {"$in": lids}}).sort("bookingId", -1).to_list(len(lids) * 4):
+            if str(b.get("bookingStatus") or "").lower() == "cancelled":
+                continue
+            lid = b.get("leadId")
+            if lid and lid not in bookings_by:
+                bookings_by[lid] = b
+    docs_by = {}
+    if lids:
+        for d in await db[lead_docs.COLLECTION].find(
+                {"leadId": {"$in": lids}, "kind": "oem_extra_support"}, {"data": 0}
+        ).to_list(len(lids) + 20):
+            lid = d.get("leadId")
+            if lid and lid not in docs_by:
+                docs_by[lid] = lead_docs.public_row(d)
+    rows = []
+    for l, oem in rows_src:
+        lid = l.get("leadId")
+        claim = claims_by.get(lid) or {}
+        bk = bookings_by.get(lid) or {}
+        proof = docs_by.get(lid) or {}
+        rows.append({
+            "leadId": lid,
+            "bookingId": bk.get("bookingId") or l.get("bookingId") or "",
+            "customerName": l.get("customerName") or "",
+            "model": l.get("interestedModel") or "",
+            "variant": l.get("variant") or "",
+            "executive": l.get("executive") or "",
+            "bookingDate": l.get("bookingDate") or bk.get("bookingDate") or "",
+            "oemExtraSupportReceived": oem["oemExtraSupportReceived"],
+            "oemExtraSupportPassed": oem["oemExtraSupportPassed"],
+            "oemExtraSupportRetained": oem["oemExtraSupportRetained"],
+            "chassisNumber": l.get("chassisNumber") or "",
+            "invoiceNumber": l.get("invoiceNumber") or "",
+            "claimReference": claim.get("claimReference") or "",
+            "status": claim.get("claimStatus") or l.get("currentStatus") or "Open",
+            "hasProof": bool(proof),
+            "proofFilename": proof.get("filename") or "",
+            "proofDocumentId": proof.get("documentId") or "",
+            "lastUpdated": l.get("lastUpdated") or "",
+        })
+    rows.sort(key=lambda r: (r.get("bookingDate") or r.get("lastUpdated") or ""), reverse=True)
+    return _rows_in_period(rows, _parse_period(month, year),
+                           lambda r: r.get("bookingDate") or r.get("lastUpdated"))
+
+
 # ---------------------------------------------------------------- audit log (H4) — owner-only viewer
 @api.get("/audit-log", dependencies=[Depends(owner_only)])
 async def list_audit_log(module: Optional[str] = None, leadId: Optional[str] = None, limit: int = 500):
@@ -10925,9 +11065,9 @@ async def export_xlsx(user=Depends(current_user)):
         "Leads": ("leads", ["leadId", "customerName", "mobile", "interestedModel", "variant", "executive",
                             "currentStatus", "customerPayable", "totalReceived", "customerOutstanding", "bookingDate"]),
         "Payments": ("payments", ["receiptNumber", "leadId", "customerName", "date", "amount", "paymentMode",
-                                  "runningTotal", "outstandingBalance"]),
+                                  "paymentReference", "narration", "runningTotal", "outstandingBalance"]),
         "Bookings": ("bookings", ["bookingId", "leadId", "customerName", "bookingDate", "model", "variant",
-                                  "bookingAmount", "paymentMode", "bookingStatus"]),
+                                  "bookingAmount", "paymentMode", "paymentReference", "bookingStatus"]),
         "Claims": ("claims", ["claimId", "leadId", "customer", "component", "claimAmount", "claimStatus", "receivedAmount"]),
         "Finance": ("finance", ["fileNumber", "leadId", "customerName", "financer", "sanctionedAmount",
                                 "receivedAgainstFile", "fileOutstanding", "status"]),

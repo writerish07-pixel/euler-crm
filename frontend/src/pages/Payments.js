@@ -9,18 +9,25 @@ import { PageHeader, Table, Badge, Card, Field, Input, Select, Button } from "..
 import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
+import { paymentRefLabel, paymentRefRequired } from "../components/DealFormatCard";
 
 export default function Payments() {
   const { isOwner } = useAuth();
   const [params, setParams] = useSearchParams();
   const leadId = params.get("leadId") || params.get("lead_id") || "";
+  const [q, setQ] = useState(params.get("q") || "");
   const [rows, setRows] = useState([]);
   const [lead, setLead] = useState(null);
   const [masters, setMasters] = useState(null);
   const period = usePeriodState();
   const load = useCallback(() => {
-    get("/payments", { ...period.params, ...(leadId ? { lead_id: leadId } : {}) }).then(setRows);
-  }, [period.params, leadId]);
+    const needle = String(q || "").trim();
+    get("/payments", {
+      ...period.params,
+      ...(leadId ? { lead_id: leadId } : {}),
+      ...(needle ? { q: needle } : {}),
+    }).then(setRows);
+  }, [period.params, leadId, q]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters).catch(() => setMasters(null)); }, []);
   useEffect(() => {
@@ -59,6 +66,9 @@ export default function Payments() {
     { key: "date", label: "Date", render: (r) => fmtDate(r.date) },
     { key: "amount", label: "Amount", align: "right", mono: true, render: (r) => <span className="font-semibold">{inr(r.amount)}</span> },
     { key: "paymentMode", label: "Mode", render: (r) => <Badge>{r.entryType === "Refund" ? "Refund" : r.paymentMode}</Badge> },
+    { key: "paymentReference", label: "UTR / cheque", mono: true, render: (r) => (
+      <span data-testid={`payment-utr-${r.receiptNumber}`}>{r.paymentReference || "—"}</span>
+    ) },
     { key: "outstandingBalance", label: "Balance", align: "right", mono: true, render: (r) => inr(r.outstandingBalance) },
     { key: "narration", label: "Narration" },
     ...(isOwner ? [{
@@ -91,22 +101,31 @@ export default function Payments() {
       )}
       {leadId && <AddReceiptForm leadId={leadId} masters={masters} onSaved={load} />}
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+      <div className="mb-3 max-w-sm">
+        <Field label="Search UTR / receipt / customer">
+          <Input data-testid="payments-utr-search" value={q} placeholder="UTR, receipt, name, lead"
+            onChange={(e) => setQ(e.target.value)} />
+        </Field>
+      </div>
       <Table rowKey="receiptNumber" columns={columns} rows={rows} />
     </div>
   );
 }
 
 function AddReceiptForm({ leadId, masters, onSaved }) {
-  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
+  const [form, setForm] = useState({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const add = async (allowExcess = false) => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     if (!form.date) return toast.error("Payment date is required");
     if (form.paymentMode === "Finance" && !form.financerName) return toast.error("Select a Financer for a Finance receipt");
+    if (paymentRefRequired(form.paymentMode, form.amount) && !String(form.paymentReference || "").trim()) {
+      return toast.error(`Enter the ${paymentRefLabel(form.paymentMode).toLowerCase()}`);
+    }
     try {
       await post(`/leads/${leadId}/payments`, { ...form, amount: +form.amount, allowExcess });
       toast.success(`Receipt added · ${inr(+form.amount)}`);
-      setForm({ amount: "", paymentMode: "Cash", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
+      setForm({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
       onSaved();
     } catch (e) {
       const detail = apiErrorMessage(e, "Could not add receipt");
@@ -123,13 +142,17 @@ function AddReceiptForm({ leadId, masters, onSaved }) {
   return (
     <Card className="p-4 mb-4" data-testid="payments-add-receipt">
       <div className="text-sm font-semibold text-ink mb-3">Add receipt for this lead</div>
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 items-end">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 items-end">
         <Field label="Amount (₹)"><Input data-testid="ledger-payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
         <Field label="Date"><Input type="date" value={form.date} onChange={set("date")} /></Field>
         <Field label="Mode">
-          <Select value={form.paymentMode} onChange={set("paymentMode")}>
+          <Select data-testid="ledger-payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>
             {(masters?.paymentModes || ["Cash", "UPI", "Cheque", "NEFT", "Finance"]).map((m) => <option key={m}>{m}</option>)}
           </Select>
+        </Field>
+        <Field label={paymentRefLabel(form.paymentMode)}>
+          <Input data-testid="ledger-payment-ref" value={form.paymentReference} onChange={set("paymentReference")}
+            placeholder={form.paymentMode === "Cheque" ? "Cheque number" : "UTR / transaction number"} />
         </Field>
         <Field label="Narration"><Input value={form.narration} onChange={set("narration")} /></Field>
         <Button data-testid="ledger-add-payment-btn" onClick={() => add(false)}><Wallet size={15} /> Add Receipt</Button>

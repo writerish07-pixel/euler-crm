@@ -20,7 +20,9 @@ jest.mock("../lib/api", () => ({
 }));
 jest.mock("./LeadDocuments", () => ({
   LocalKycBlock: () => <div data-testid="kyc-block" />,
+  LocalOemExtraBlock: () => <div data-testid="oem-extra-proof-block" />,
   kycReady: () => "",
+  extraSupportReady: () => "",
   uploadKycFiles: () => Promise.resolve(),
 }));
 

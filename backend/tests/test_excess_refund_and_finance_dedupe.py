@@ -132,7 +132,8 @@ async def test_excess_does_not_block_delivery_but_short_payment_does(client):
 
     paid = await _booked_lead(client, "9700000003")
     await client.post(f"/api/leads/{paid}/payments", json={
-        "amount": 2500, "paymentMode": "UPI", "date": "2026-08-10", "allowExcess": True})
+        "amount": 2500, "paymentMode": "UPI", "date": "2026-08-10", "allowExcess": True,
+        "paymentReference": "UTR-EXCESS-2500"})
     await _deliver(client, paid)
     lead = await server.db.leads.find_one({"leadId": paid})
     assert lead["deliveryStatus"] == "Delivered"

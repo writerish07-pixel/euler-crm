@@ -311,3 +311,6 @@ def test_tl_kyc_permissions_do_not_need_own_lead():
     assert server.lead_docs.can_read_kind(tl, "kyc_pan", own=False) is True
     assert server.lead_docs.can_upload_kind(exec_u, "kyc_pan", own=False) is False
     assert server.lead_docs.can_upload_kind(exec_u, "kyc_pan", own=True) is True
+    assert server.lead_docs.can_upload_kind(exec_u, "oem_extra_support", own=True) is True
+    assert server.lead_docs.can_upload_kind(exec_u, "oem_extra_support", own=False) is False
+    assert server.lead_docs.can_read_kind(tl, "oem_extra_support", own=False) is True

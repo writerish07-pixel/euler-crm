@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { get, put, apiErrorMessage } from "../lib/api";
 import { Drawer, Button, Field, Input, Select } from "./ui";
 import { digitsLast10 } from "../lib/format";
-import { LocalKycBlock, kycReady, uploadKycFiles } from "./LeadDocuments";
+import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock } from "./LeadDocuments";
 import DealFormatCard from "./DealFormatCard";
 import CallLink from "./CallLink";
 
@@ -14,6 +14,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
   const [deal, setDeal] = useState(row.dealFormat || null);
   const [dealLoading, setDealLoading] = useState(false);
   const [kyc, setKyc] = useState({});
+  const [extraProof, setExtraProof] = useState({});
   const [gstin, setGstin] = useState(row.gstin || "");
   const [oemExtra, setOemExtra] = useState(
     Number(row.oemExtraSupportReceived) > 0 ? Number(row.oemExtraSupportReceived) : "");
@@ -61,6 +62,8 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     const alreadyKyc = row.kycComplete === true;
     const kycErr = alreadyKyc ? "" : kycReady(customerType, kyc, gstin);
     if (kycErr) return toast.error(kycErr);
+    const extraErr = extraSupportReady(oemExtra, extraProof, row.documents);
+    if (extraErr) return toast.error(extraErr);
     setBusy(true);
     try {
       await put(`/lead-requests/${row.requestId}`, {
@@ -68,7 +71,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         oemExtraSupportReceived: Number(oemExtra) || 0,
         mobile: digitsLast10(mobile),
       });
-      await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, kyc);
+      await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, { ...kyc, ...extraProof });
       toast.success("Sent for approval");
       onSaved();
     } catch (e) {
@@ -139,6 +142,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
             Filled if extra support already exists against this lead. On Approve it becomes Scheme · OEM Extra Support Received.
           </p>
         </Field>
+        <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={oemExtra} existingDocs={row.documents} />
         <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} />
       </div>
     </Drawer>

@@ -11,7 +11,7 @@ import LeadImport from "./LeadImport";
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
-import { LocalKycBlock, kycReady, uploadKycFiles } from "../components/LeadDocuments";
+import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock } from "../components/LeadDocuments";
 import DealFormatCard from "../components/DealFormatCard";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
@@ -188,6 +188,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     oemExtraSupportReceived: "",
   });
   const [kyc, setKyc] = useState({});
+  const [extraProof, setExtraProof] = useState({});
   const [busy, setBusy] = useState(false);
   const [variants, setVariants] = useState([]);
   const [deal, setDeal] = useState(null);
@@ -222,6 +223,8 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
     const kycErr = kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
+    const extraErr = extraSupportReady(form.oemExtraSupportReceived, extraProof);
+    if (extraErr) return toast.error(extraErr);
     setBusy(true);
     try {
       const lead = await post("/leads", {
@@ -231,9 +234,9 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
       });
       try {
         if (lead.pending && lead.requestId) {
-          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, kyc);
+          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, { ...kyc, ...extraProof });
         } else if (lead.leadId) {
-          await uploadKycFiles(`/leads/${lead.leadId}/documents`, kyc);
+          await uploadKycFiles(`/leads/${lead.leadId}/documents`, { ...kyc, ...extraProof });
         }
       } catch (ue) {
         toast.error(apiErrorMessage(ue, "Lead saved but a KYC file failed — attach it again."));
@@ -293,6 +296,9 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
             <Input data-testid="lead-oem-extra" type="number" min="0" step="1"
               value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} />
           </Field>
+        )}
+        {isExecutive && (
+          <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={form.oemExtraSupportReceived} />
         )}
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} />
