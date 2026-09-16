@@ -49,6 +49,7 @@ const NAV = [
     { to: "/claims", label: "Scheme Claim Register", icon: ReceiptText, oemClaimDesk: true },
     { to: "/oem-claims", label: "OEM Claim Settlements", icon: FileCheck, oemClaimDesk: true },
     { to: "/oem-claims/no-vehicle", label: "Missing chassis", icon: FileCheck, oemClaimDesk: true },
+    { to: "/oem-extra-support", label: "OEM Extra Support", icon: Handshake, oemClaimDesk: true },
     { to: "/dropped-extra-support", label: "Dropped Extra Support", icon: Ban, oemClaimDesk: true },
     { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },

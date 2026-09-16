@@ -105,6 +105,7 @@ async def test_owner_deletes_receipt_and_recomputes(client):
 
     extra = await client.post(f"/api/leads/{lid}/payments", json={
         "amount": 2500, "paymentMode": "UPI", "date": "2026-08-11", "allowExcess": True,
+        "paymentReference": "UTR-WRONG-2500",
         "narration": "wrong extra"})
     assert extra.status_code == 200, extra.text
     rec = extra.json()["receiptNumber"]

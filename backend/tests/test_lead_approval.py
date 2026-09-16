@@ -39,6 +39,7 @@ async def client():
     await server.db.lead_requests.delete_many({})
     await server.db.activities.delete_many({})
     await server.db.claims.delete_many({})
+    await server.db[server.lead_docs.COLLECTION].delete_many({})
     await server.db.push_subscriptions.delete_many({})
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -284,7 +285,10 @@ async def test_approval_oem_extra_support_lands_on_scheme(exec_client, client):
     assert upd.status_code == 200, upd.text
     assert upd.json()["oemExtraSupportReceived"] == 8500
 
-    await attach_kyc(exec_client, rid)
+    await attach_kyc(exec_client, rid, extra=("oem_extra_support",))
+    waiting = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in waiting if x["requestId"] == rid)
+    assert row["oemExtraProofMissing"] is False
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     lid = ap.json()["leadId"]
@@ -330,7 +334,7 @@ async def test_gm_approve_copies_lead_oem_extra_onto_scheme(gm_client, client):
     opened = await client.get(f"/api/lead-requests/{rid}")
     assert opened.json()["oemExtraSupportReceived"] == 5000
 
-    await attach_kyc(client, rid)
+    await attach_kyc(client, rid, extra=("oem_extra_support",))
     ap = await gm_client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     assert ap.json()["leadId"] == lid
@@ -375,8 +379,25 @@ async def test_approval_autofills_oem_extra_from_existing_claim(client):
     row = next(x for x in listed if x["requestId"] == rid)
     assert row["oemExtraSupportReceived"] == 4000
 
-    await attach_kyc(client, rid)
+    await attach_kyc(client, rid, extra=("oem_extra_support",))
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     after = await server.db.leads.find_one({"leadId": lid})
     assert after["oemExtraSupportReceived"] == 4000
+
+
+@pytest.mark.asyncio
+async def test_approval_oem_extra_without_proof_is_rejected(exec_client, client):
+    r = await exec_client.post("/api/leads", json=_enquiry(
+        "No Proof Extra", oemExtraSupportReceived=6000))
+    rid = r.json()["requestId"]
+    await attach_kyc(exec_client, rid)
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == rid)
+    assert row["oemExtraProofMissing"] is True
+    ap = await client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 422, ap.text
+    assert "Siddharth" in ap.json()["detail"]
+    assert await server.db.leads.count_documents({"customerName": "No Proof Extra"}) == 0
+    req = await server.db.lead_requests.find_one({"requestId": rid})
+    assert req["status"] == "pending"

@@ -12,6 +12,7 @@ export const DOC_LABELS = {
   delivery_rto: "RTO / Registration",
   tally_invoice: "Tally GST invoice",
   refund_cheque: "Refund cheque",
+  oem_extra_support: "OEM Extra Support email (ASM / RM)",
 };
 
 const ACCEPT = "image/*,application/pdf";
@@ -209,15 +210,62 @@ export function kycReady(customerType, files, gstin) {
   return "";
 }
 
+export function extraSupportReady(amount, files, existingDocs = []) {
+  if (!(Number(amount) > 0)) return "";
+  if (files && files.oem_extra_support) return "";
+  if ((existingDocs || []).some((d) => d.kind === "oem_extra_support")) return "";
+  return "Attach the OEM Extra Support confirmation email from Siddharth Dubey (ASM) or Siddharth Sharma (RM)";
+}
+
+export function LocalOemExtraBlock({ files, setFiles, amount, existingDocs = [] }) {
+  if (!(Number(amount) > 0)) return null;
+  const have = (existingDocs || []).find((d) => d.kind === "oem_extra_support");
+  return (
+    <div className="sm:col-span-2 space-y-2" data-testid="oem-extra-proof-block">
+      <div className="text-xs font-semibold text-ink">OEM Extra Support proof *</div>
+      <p className="text-[11px] text-ink-soft">
+        Email confirmation from Siddharth Dubey (ASM) or Siddharth Sharma (RM) is required when Extra Support is filled.
+      </p>
+      {have ? (
+        <p className="text-[11px] text-emerald-700">Proof already attached · {have.filename || "file"}</p>
+      ) : (
+        <DocSlot
+          kind="oem_extra_support"
+          localFile={files.oem_extra_support}
+          onLocalFile={(f) => setFiles((prev) => ({ ...prev, oem_extra_support: f }))}
+          canUpload
+        />
+      )}
+    </div>
+  );
+}
+
 export function RequestKycPreview({ documents = [] }) {
-  if (!documents.length) return <span className="text-[11px] text-rose-700">No KYC yet</span>;
+  const kyc = (documents || []).filter((d) => String(d.kind || "").startsWith("kyc_"));
+  if (!kyc.length) return <span className="text-[11px] text-rose-700">No KYC yet</span>;
   return (
     <div className="flex flex-wrap gap-1.5">
-      {documents.map((d) => (
+      {kyc.map((d) => (
         <button key={d.documentId} type="button" className="text-left" title={d.filename}
           onClick={() => openDocumentFile(d.documentId, d.filename).catch(() => toast.error("Could not open"))}>
           <DocThumb doc={d} />
           <div className="text-[10px] text-ink-faint truncate w-16">{DOC_LABELS[d.kind] || d.kind}</div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function RequestOemExtraPreview({ documents = [] }) {
+  const rows = (documents || []).filter((d) => d.kind === "oem_extra_support");
+  if (!rows.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-1" data-testid="oem-extra-proof-preview">
+      {rows.map((d) => (
+        <button key={d.documentId} type="button" className="text-left" title={d.filename}
+          onClick={() => openDocumentFile(d.documentId, d.filename).catch(() => toast.error("Could not open"))}>
+          <DocThumb doc={d} />
+          <div className="text-[10px] text-ink-faint truncate w-16">ASM / RM email</div>
         </button>
       ))}
     </div>

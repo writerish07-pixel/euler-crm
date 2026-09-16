@@ -7,7 +7,7 @@ import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui
 import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
-import { RequestKycPreview } from "../components/LeadDocuments";
+import { RequestKycPreview, RequestOemExtraPreview } from "../components/LeadDocuments";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import CallLink from "../components/CallLink";
 
@@ -143,9 +143,17 @@ export default function Approvals() {
             );
           } },
           { key: "oemExtra", label: "OEM Extra Support", render: (r) => (
-            <span className="font-mono" data-testid={`oem-extra-${r.requestId}`}>
-              {Number(r.oemExtraSupportReceived) > 0 ? inr(r.oemExtraSupportReceived) : "—"}
-            </span>
+            <div>
+              <span className="font-mono" data-testid={`oem-extra-${r.requestId}`}>
+                {Number(r.oemExtraSupportReceived) > 0 ? inr(r.oemExtraSupportReceived) : "—"}
+              </span>
+              <RequestOemExtraPreview documents={r.documents || []} />
+              {r.oemExtraProofMissing && (
+                <div className="text-[10px] text-rose-700 mt-1" data-testid={`oem-extra-proof-missing-${r.requestId}`}>
+                  Missing ASM / RM email
+                </div>
+              )}
+            </div>
           ) },
           { key: "kyc", label: "KYC", render: (r) => (
             <div>
@@ -175,8 +183,8 @@ export default function Approvals() {
               return (
               <div className="flex gap-2 justify-end">
                 <Button data-testid={`approve-${r.requestId}`}
-                  disabled={!!busy || r.kycComplete === false || gmBlocked}
-                  title={gmBlocked ? "Only the Owner can approve a deal that differs from Ex + RTO + Insurance" : undefined}
+                  disabled={!!busy || r.kycComplete === false || r.oemExtraProofMissing || gmBlocked}
+                  title={gmBlocked ? "Only the Owner can approve a deal that differs from Ex + RTO + Insurance" : (r.oemExtraProofMissing ? "Attach the ASM / RM extra-support email first" : undefined)}
                   onClick={() => act(r.requestId, "approve")}>
                   <Check size={14} /> Approve
                 </Button>

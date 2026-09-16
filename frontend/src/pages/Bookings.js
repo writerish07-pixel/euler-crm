@@ -29,6 +29,7 @@ export default function Bookings() {
           ...(!isField ? [
             { key: "bookingAmount", label: "Advance", align: "right", mono: true, render: (r) => inr(r.bookingAmount) },
             { key: "paymentMode", label: "Mode", render: (r) => <Badge>{r.paymentMode}</Badge> },
+            { key: "paymentReference", label: "UTR / cheque", mono: true, render: (r) => r.paymentReference || "—" },
           ] : []),
           { key: "bookingStatus", label: "Status", render: (r) => <Badge>{r.bookingStatus}</Badge> },
         ]}

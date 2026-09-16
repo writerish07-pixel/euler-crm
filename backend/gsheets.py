@@ -91,11 +91,12 @@ SYNC_MAP = {
                  ["bookingId", "leadId", "customerName", "bookingDate", "model", "variant",
                   "bookingAmount", "financeRequired", "exchangeRequired", "snapshotId",
                   "bookingStatus", "createdDate", "amountReceived", "paymentMode",
+                  "paymentReference",
                   "createdBy", "lastUpdated", "dealerTotalEarnings"], None),
     "payments": (_tab("GSHEET_TAB_PAYMENTS", "Payment Ledger"), "receiptNumber",
                  ["receiptNumber", "leadId", "customerName", "date", "amount", "paymentMode",
                   "narration", "runningTotal", "outstandingBalance", "paymentId",
-                  "financerName", "financeFileNumber"], None),
+                  "financerName", "financeFileNumber", "paymentReference"], None),
     "deliveries": (_tab("GSHEET_TAB_DELIVERIES", "Delivery Tracker"), "leadId",
                    ["leadId", "customerName", "insurance", "registration", "invoice", "accessories",
                     "rc", "numberPlate", "pdi", "delivered", "deliveryDate", "insurerName",
@@ -262,6 +263,8 @@ HEADER_ALIASES = {
     # Payment Ledger
     "date": ["date", "payment date", "receipt date"],
     "amount": ["amount", "payment amount", "receipt amount"],
+    "paymentReference": ["payment reference", "utr", "utr number", "transaction number",
+                         "cheque number"],
     # Finance Register — headers differ substantially from CRM field names
     "financeFileNumber": ["file number", "finance file number"],
     "financerName": ["financer", "financer name"],

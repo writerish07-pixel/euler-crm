@@ -413,6 +413,16 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
             documents={documents}
             onChanged={onSaved}
           />
+          {Number(lead.oemExtraSupportReceived) > 0 && (
+            <LeadDocsStrip
+              leadId={lead.leadId}
+              kinds={["oem_extra_support"]}
+              canUploadKinds={canUploadKyc ? ["oem_extra_support"] : []}
+              title="OEM Extra Support proof"
+              documents={documents}
+              onChanged={onSaved}
+            />
+          )}
         </div>
       )}
       {booked && (
@@ -1006,7 +1016,13 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
                   <Badge className="ml-1">{isRefund ? "Refund" : p.paymentMode}</Badge>
                   {isRefund && p.paymentMode ? <span className="text-xs text-ink-faint ml-1">via {p.paymentMode}</span> : null}
                 </div>
-                <div className="text-xs text-ink-faint">{p.receiptNumber} · {fmtDate(p.date)} · {p.narration || "—"}{p.financeFileNumber ? ` · ${p.financeFileNumber}` : ""}</div>
+                <div className="text-xs text-ink-faint">
+                  {p.receiptNumber}
+                  {p.paymentReference ? ` · ${p.paymentReference}` : ""}
+                  {" · "}{fmtDate(p.date)}
+                  {" · "}{p.narration || "—"}
+                  {p.financeFileNumber ? ` · ${p.financeFileNumber}` : ""}
+                </div>
               </div>
               <div className="text-right text-xs text-ink-soft">
                 <div>Running: <span className="font-mono">{inr(p.runningTotal)}</span></div>
