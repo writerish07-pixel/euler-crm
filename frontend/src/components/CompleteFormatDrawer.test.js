@@ -25,6 +25,9 @@ jest.mock("./LeadDocuments", () => ({
   extraSupportReady: () => "",
   uploadKycFiles: () => Promise.resolve(),
 }));
+jest.mock("../context/AuthContext", () => ({
+  useAuth: () => ({ canSeeOwnerCommercials: false, isOwner: false }),
+}));
 
 import { put } from "../lib/api";
 import CompleteFormatDrawer from "./CompleteFormatDrawer";

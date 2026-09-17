@@ -38,6 +38,14 @@ body {
   scrollbar-width: thin;
 }
 
+img, svg, video, canvas {
+  max-width: 100%;
+}
+
+input, select, textarea {
+  max-width: 100%;
+}
+
 @media (max-width: 1023px) {
   body {
     overflow-x: hidden;

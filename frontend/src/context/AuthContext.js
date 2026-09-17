@@ -122,6 +122,8 @@ export function AuthProvider({ children }) {
       retrySession,
       sessionError,
       isOwner: role === "owner",
+      // Dealer margin / retained / earnings — owner desk only. Not GM, TL, exec.
+      canSeeOwnerCommercials: role === "owner",
       isAccounts: role === "accounts",
       isExecutive: role === "executive",
       isSalesGm: role === "sales_gm",

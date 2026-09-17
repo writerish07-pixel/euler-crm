@@ -6,7 +6,7 @@ import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
-import { usePeriodState } from "../lib/period";
+import { useAuth } from "../context/AuthContext";
 
 const CHARGES = [["exShowroom","Ex-Showroom"],["registrationRto","RTO"],["insurance","Insurance"],["accessories","Accessories"],["handlingCharges","Handling"],["fastag","Fastag"],["trc","TRC"],["extendedWarranty","Ext. Warranty"],["otherCharges","Other"]];
 const DISCS = [["consumerDiscount","Consumer"],["exchangeBonus","Exchange"],["loyaltyBonus","Loyalty"],["referralBonus","Referral"],["dsaDiscount","DSA"],["additionalDiscount","Additional"]];
@@ -47,6 +47,7 @@ export default function Quotations() {
 }
 
 function QuoteDrawer({ masters, onClose, onSaved }) {
+  const { canSeeOwnerCommercials } = useAuth();
   const [form, setForm] = useState(() => {
     const f = { customerName: "", mobile: "", model: "", variant: "", finalExchangeValue: 0, financer: "", narration: "" };
     [...CHARGES, ...DISCS].forEach(([k]) => (f[k] = 0));
@@ -82,28 +83,28 @@ function QuoteDrawer({ masters, onClose, onSaved }) {
   return (
     <Drawer open onClose={onClose} width="max-w-3xl" title="New Quotation" subtitle="Build a deal quote with live commercial math"
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-quote-btn" onClick={save}>Save Quotation</Button></div>}>
-      <div className="grid grid-cols-3 gap-3 mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
         <Field label="Customer Name *"><Input data-testid="quote-name" value={form.customerName} onChange={set("customerName")} /></Field>
         <Field label="Mobile"><Input value={form.mobile} onChange={set("mobile")} /></Field>
         <div />
         <Field label="Model"><Select value={form.model} onChange={set("model")}><option value="">—</option>{masters.models.map((m) => <option key={m}>{m}</option>)}</Select></Field>
-        <div className="col-span-2"><Field label="Variant (auto-fills price)"><Select value={form.variant} onChange={(e) => applyVariant(e.target.value)}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field></div>
+        <div className="sm:col-span-2"><Field label="Variant (auto-fills price)"><Select value={form.variant} onChange={(e) => applyVariant(e.target.value)}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field></div>
       </div>
       <h4 className="font-heading font-bold text-ink text-sm mb-2">Charges</h4>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {CHARGES.map(([k, l]) => <Field key={k} label={l}><Input type="number" value={form[k]} onChange={set(k)} /></Field>)}
       </div>
       <h4 className="font-heading font-bold text-ink text-sm mb-2 mt-4">Discounts / Scheme</h4>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {DISCS.map(([k, l]) => <Field key={k} label={l}><Input type="number" value={form[k]} onChange={set(k)} /></Field>)}
         <Field label="Exchange Value"><Input type="number" value={form.finalExchangeValue} onChange={set("finalExchangeValue")} /></Field>
       </div>
       {preview && (
         <Card className="p-4 mt-4 bg-cobalt-tint/40 border-cobalt/20">
-          <div className="grid grid-cols-4 gap-3 text-center">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
             <P label="Gross" v={preview.grossVehicleCost} />
             <P label="Total Discount" v={preview.totalDiscount} />
-            <P label="OEM Share" v={preview.claim.claimEligible} />
+            {canSeeOwnerCommercials && <P label="OEM Share" v={preview.claim?.claimEligible} />}
             <P label="Customer Payable" v={preview.customerPayable} hi />
           </div>
         </Card>

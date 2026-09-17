@@ -4,9 +4,9 @@ import { Field, Input } from "./ui";
 
 function Line({ k, v, strong, testid, tone }) {
   return (
-    <div className={`flex justify-between gap-3 text-sm ${strong ? "font-semibold" : ""}`} data-testid={testid}>
-      <span className="text-ink-soft">{k}</span>
-      <span className={`font-mono ${tone || ""}`}>{inr(v)}</span>
+    <div className={`flex justify-between gap-3 text-sm min-w-0 ${strong ? "font-semibold" : ""}`} data-testid={testid}>
+      <span className="text-ink-soft min-w-0 break-words">{k}</span>
+      <span className={`font-mono shrink-0 ${tone || ""}`}>{inr(v)}</span>
     </div>
   );
 }
@@ -18,6 +18,7 @@ export default function DealFormatCard({
   readOnly = false,
   loading = false,
   missingPrice = false,
+  showOwnerPnl = true,
 }) {
   const d = snapshot || {};
   const demand = cxDemand ?? d.cxDemand ?? 0;
@@ -80,6 +81,7 @@ export default function DealFormatCard({
           Deal differs from my total — only Owner can approve.
         </p>
       )}
+      {(!extra || showOwnerPnl) && (
       <div className={`rounded-md px-2 py-1.5 ${extra ? "bg-emerald-50" : "bg-amber-50"}`}>
         <Line
           k={extra ? "Extra margin" : "Support required"}
@@ -89,6 +91,7 @@ export default function DealFormatCard({
           tone={extra ? "text-emerald-700" : "text-amber-800"}
         />
       </div>
+      )}
       <p className="text-[11px] text-ink-faint">No scheme on this card. Scheme is decided later. Additional (Dealer) is auto-filled from my total minus Cx Demand.</p>
     </div>
   );

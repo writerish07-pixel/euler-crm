@@ -107,6 +107,9 @@ async def test_gm_sees_all_leads_and_commercials(client):
         assert d360.status_code == 200, d360.text
         assert d360.json().get("fieldView") is not True
         assert "commercials" in d360.json()
+        commercials = d360.json()["commercials"] or {}
+        assert "margin" not in commercials
+        assert "dealerMarginNetExGst" not in (d360.json().get("lead") or {})
 
 
 @pytest.mark.asyncio
@@ -133,6 +136,8 @@ async def test_gm_is_deal_desk_not_money_desk(client):
         assert fin.status_code == 200, fin.text
         earn = await c.get("/api/dealer-earnings")
         assert earn.status_code == 403, earn.text
+        extra = await c.put(f"/api/leads/{lid}/extra-income", json={"documentationIncome": 100})
+        assert extra.status_code == 403, extra.text
         master = await c.get("/api/incentive-master")
         assert master.status_code == 403, master.text
         board = await c.get("/api/executive-incentive/board")

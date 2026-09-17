@@ -117,7 +117,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           </div>
         : <DrawerActions lead={lead} actions={actions} refresh={refresh} onClose={onClose} onBooked={() => (execHandover ? refresh() : advance("price"))} />}
     >
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex flex-wrap items-center gap-2 mb-4 min-w-0">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
         {isExecutive && lead.assignmentPending && (
@@ -141,7 +141,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             className="!py-1 !px-2.5 text-xs !text-red-600 hover:!bg-red-50"><Trash2 size={13} /> Delete</Button>
         )}
         {!fieldView && (
-          <div className="ml-auto text-right">
+          <div className="w-full sm:w-auto sm:ml-auto text-left sm:text-right">
             <div className="text-xs text-ink-faint">Outstanding</div>
             <div className={`font-mono font-bold ${lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{inr(lead.customerOutstanding)}</div>
           </div>
@@ -150,7 +150,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
       {isExecutive && lead.assignmentPending && (
         <div className="mb-4 rounded-lg bg-amber-50 ring-1 ring-inset ring-amber-600/20 p-3 flex flex-wrap items-center gap-2" data-testid="assignment-pending-banner">
-          <p className="text-sm text-amber-900 flex-1 min-w-[12rem]">
+          <p className="text-sm text-amber-900 flex-1 min-w-0">
             Tap Proceed to send deal format and KYC for approval.
           </p>
           <Button data-testid="drawer-proceed-btn" onClick={async () => {
@@ -240,7 +240,7 @@ function FieldOverview({ lead, booking, delivery }) {
     <div className="grid grid-cols-1 gap-5" data-testid="field-lead-overview">
       <Card className="p-4">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Pipeline</h4>
-        <div className="grid grid-cols-2 gap-x-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
           <KV label="Executive" value={lead.executive || "—"} />
           <KV label="Priority" value={lead.priority || "—"} />
           <KV label="Lead Source" value={lead.leadSource || "—"} />
@@ -262,7 +262,7 @@ function FieldDeliveryReadOnly({ delivery, lead }) {
   return (
     <Card className="p-4" data-testid="field-delivery-readonly">
       <h4 className="font-heading font-bold text-ink text-sm mb-2">Delivery status</h4>
-      <div className="grid grid-cols-2 gap-x-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
         <KV label="Status" value={lead.deliveryStatus || lead.currentStatus || "—"} />
         <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
         <KV label="Invoice" value={delivery?.invoiceNumber || lead.invoiceNumber || "—"} />
@@ -343,15 +343,15 @@ function companyKeptRetained(oemShare, customerBenefit) {
 /* -------------------------------------------------- Overview */
 function KV({ label, value, tone }) {
   return (
-    <div className="flex items-center justify-between py-1.5 border-b border-zinc-100 last:border-0">
-      <span className="text-sm text-ink-soft">{label}</span>
-      <span className={`font-mono tabular text-sm font-medium ${tone || "text-ink"}`}>{value}</span>
+    <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 last:border-0 min-w-0">
+      <span className="text-sm text-ink-soft min-w-0 break-words">{label}</span>
+      <span className={`font-mono tabular text-sm font-medium shrink-0 text-right ${tone || "text-ink"}`}>{value}</span>
     </div>
   );
 }
 
 function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
-  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl } = useAuth();
+  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, canSeeOwnerCommercials } = useAuth();
   const booked = !!actions.isBooked;
   const kycKinds = lead.customerType === "B2B"
     ? ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst"]
@@ -376,18 +376,24 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Collections & Claims</h4>
         <KV label="Total Received" value={inr(lead.totalReceived)} tone="text-emerald-600" />
         <KV label="Customer Outstanding" value={inr(lead.customerOutstanding)} tone={lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"} />
-        <KV label="OEM Claimable (Company Share)" value={inr(c.oemClaimCompanyShare ?? c.claim.claimEligible)} tone="text-amber-600" />
+        {canSeeOwnerCommercials && (
+          <KV label="OEM Claimable (Company Share)" value={inr(c.oemClaimCompanyShare ?? c.claim?.claimEligible)} tone="text-amber-600" />
+        )}
         <KV label="OEM Extra Support Received" value={inr(lead.oemExtraSupportReceived || c.oemExtraSupport?.oemExtraSupportReceived || 0)} tone="text-amber-600" />
         <KV label="OEM Extra Support Passed" value={inr(lead.oemExtraSupportPassed || c.oemExtraSupport?.oemExtraSupportPassed || 0)} />
-        <KV label="OEM Extra Support Retained" value={inr(lead.oemExtraSupportRetained || c.oemExtraSupport?.oemExtraSupportRetained || 0)} tone="text-emerald-600" />
-        <KV label="Dealer Scheme Retained" value={inr(c.dealerSchemeRetained ?? c.dealerRetained)} />
-        <KV label="Dealer-Funded Benefit" value={inr(c.dealerFundedBenefit ?? lead.dealerFundedBenefit ?? 0)} tone="text-rose-600" />
-        <KV label="Dealer Margin (Net)" value={inr(c.margin.marginNetExGst)} />
+        {canSeeOwnerCommercials && (
+          <>
+            <KV label="OEM Extra Support Retained" value={inr(lead.oemExtraSupportRetained || c.oemExtraSupport?.oemExtraSupportRetained || 0)} tone="text-emerald-600" />
+            <KV label="Dealer Scheme Retained" value={inr(c.dealerSchemeRetained ?? c.dealerRetained)} />
+            <KV label="Dealer-Funded Benefit" value={inr(c.dealerFundedBenefit ?? lead.dealerFundedBenefit ?? 0)} tone="text-rose-600" />
+            <KV label="Dealer Margin (Net)" value={inr(c.margin?.marginNetExGst)} />
+          </>
+        )}
         <KV label="Lead Source" value={lead.leadSource || "—"} tone="text-ink" />
       </Card>
       <Card className="p-4 sm:col-span-2">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6">
           <KV label="Executive" value={lead.executive || "—"} />
           <div className="flex items-center justify-between py-1.5 border-b border-zinc-100">
             <span className="text-sm text-ink-soft">Mobile</span>
@@ -509,7 +515,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
       {inactive && <StepLock text="This lead is not Active — price structure is read-only." />}
       {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner can edit a completed step." />}
       {masterMsg && <p className="text-xs text-ink-soft mb-3" data-testid="exshowroom-lock-note">{masterMsg}</p>}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <Field label="Price Date"><Input data-testid="price-date" type="date" value={priceDate} onChange={(e) => setPriceDate(e.target.value)} disabled={locked} /></Field>
         {CHARGE_FIELDS.map(([k, label]) => (
           <Field key={k} label={label}>
@@ -553,7 +559,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
       )}
       {preview && (
         <Card className="p-4 mt-4 bg-cobalt-tint/40 border-cobalt/20">
-          <div className="grid grid-cols-4 gap-3 text-center">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
             <Prev label="Gross Vehicle Cost" v={preview.grossVehicleCost} />
             <Prev label="TCS" v={preview.tcs} />
             <Prev label="Total Discount" v={preview.totalDiscount} />
@@ -743,7 +749,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         </div>
       )}
 
-      <div className="grid grid-cols-4 gap-3 mb-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-2">
         <Field label="Scheme Date">
           <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
         </Field>
@@ -759,17 +765,19 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount} onChange={set("additionalDiscount")} disabled={locked} />
         </Field>
       </div>
-      <div className="grid grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
         <div>
           <div className="text-[11px] text-ink-faint uppercase">OEM Extra Claim (full Received)</div>
           <div className="font-mono text-amber-700" data-testid="oem-extra-claim">{inr(oemRecv)}</div>
         </div>
-        <div>
-          <div className="text-[11px] text-ink-faint uppercase">OEM Extra Retained (earnings)</div>
-          <div className="font-mono text-emerald-700" data-testid="oem-extra-retained">{inr(oemRetained)}</div>
-        </div>
+        {isOwner && (
+          <div>
+            <div className="text-[11px] text-ink-faint uppercase">OEM Extra Retained (earnings)</div>
+            <div className="font-mono text-emerald-700" data-testid="oem-extra-retained">{inr(oemRetained)}</div>
+          </div>
+        )}
         <div className="text-[11px] text-ink-faint self-end">
-          Passed comes from Received only. Additional (Dealer) is your margin discount — separate.
+          Passed comes from Received only. Additional (Dealer) is a customer discount — separate.
         </div>
       </div>
       {hiddenFields.length > 0 && (
@@ -791,21 +799,25 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           return (
             <Card key={comp.key} className="p-4 bg-zinc-50/80 border-line" data-testid={`scheme-component-${comp.key}`}>
               <div className="text-sm font-semibold text-ink mb-3">{comp.label}</div>
-              <div className="grid grid-cols-3 gap-3 text-sm mb-3">
+              <div className={`grid gap-3 text-sm mb-3 ${isOwner ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1"}`}>
                 <div>
                   <div className="text-[11px] text-ink-faint uppercase">Available</div>
                   <div className="font-mono" data-testid={`avail-${comp.key}`}>{inr(comp.available)}</div>
                 </div>
-                <div>
-                  <div className="text-[11px] text-ink-faint uppercase">OEM Share</div>
-                  <div className="font-mono">{inr(comp.oemShare)}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] text-ink-faint uppercase">Dealer Share</div>
-                  <div className="font-mono">{inr(comp.dealerShare)}</div>
-                </div>
+                {isOwner && (
+                  <>
+                    <div>
+                      <div className="text-[11px] text-ink-faint uppercase">OEM Share</div>
+                      <div className="font-mono">{inr(comp.oemShare)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-ink-faint uppercase">Dealer Share</div>
+                      <div className="font-mono">{inr(comp.dealerShare)}</div>
+                    </div>
+                  </>
+                )}
               </div>
-              <div className="flex items-center gap-3 mb-3" data-testid={`use-scheme-${comp.key}`}>
+              <div className="flex flex-wrap items-center gap-3 mb-3" data-testid={`use-scheme-${comp.key}`}>
                 <div className="text-[11px] text-ink-faint uppercase min-w-[6.5rem]">Use this scheme?</div>
                 <label className="flex items-center gap-1.5 text-sm">
                   <input type="radio" name={`use-${comp.key}`} data-testid={`use-no-${comp.key}`}
@@ -820,7 +832,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
                   Yes
                 </label>
               </div>
-              <div className="grid grid-cols-3 gap-3 text-sm">
+              <div className={`grid gap-3 text-sm ${isOwner ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1"}`}>
                 {isUsed ? (
                   <Field label="Customer Benefit">
                     <Input data-testid={`breakup-${comp.key}`} type="number" min={0} max={comp.available}
@@ -834,14 +846,18 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
                     <div className="font-mono" data-testid={`breakup-${comp.key}`}>{inr(0)}</div>
                   </div>
                 )}
-                <div>
-                  <div className="text-[11px] text-ink-faint uppercase">Dealer Retained</div>
-                  <div className="font-mono font-semibold text-emerald-700" data-testid={`retained-${comp.key}`}>{inr(retained)}</div>
-                </div>
-                <div>
-                  <div className="text-[11px] text-ink-faint uppercase">OEM Claim</div>
-                  <div className="font-mono text-amber-700" data-testid={`oem-claim-${comp.key}`}>{inr(oemClaim)}</div>
-                </div>
+                {isOwner && (
+                  <>
+                    <div>
+                      <div className="text-[11px] text-ink-faint uppercase">Dealer Retained</div>
+                      <div className="font-mono font-semibold text-emerald-700" data-testid={`retained-${comp.key}`}>{inr(retained)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-ink-faint uppercase">OEM Claim</div>
+                      <div className="font-mono text-amber-700" data-testid={`oem-claim-${comp.key}`}>{inr(oemClaim)}</div>
+                    </div>
+                  </>
+                )}
               </div>
             </Card>
           );
@@ -849,18 +865,18 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       </div>
 
       <Card className="p-4 mt-4 bg-amber-50/50 border-amber-200" data-testid="scheme-allocation-summary">
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-center">
+        <div className={`grid gap-3 text-center ${isOwner ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-5" : "grid-cols-2"}`}>
           <Prev label="Customer Benefit" v={previewCb} />
-          <Prev label="Dealer Scheme Retained" v={previewRetained} />
-          <Prev label="OEM Claimable" v={previewOemTotal} />
-          <Prev label="Dealer-Funded Benefit" v={previewFunded} />
+          {isOwner && <Prev label="Dealer Scheme Retained" v={previewRetained} />}
+          {isOwner && <Prev label="OEM Claimable" v={previewOemTotal} />}
+          {isOwner && <Prev label="Dealer-Funded Benefit" v={previewFunded} />}
           <Prev label="Scheme Available" v={previewAvail} />
         </div>
         <div className="text-[11px] text-ink-faint text-center mt-2">
           Summary follows Use Scheme = Yes only. Save to persist on the lead.
         </div>
       </Card>
-      <ExtraIncomeCard lead={lead} locked={locked} onSaved={onRefresh || onSaved} />
+      {isOwner && <ExtraIncomeCard lead={lead} locked={locked} onSaved={onRefresh || onSaved} />}
       <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save} disabled={locked}>Update Scheme</Button></div>
     </div>
   );
@@ -897,11 +913,11 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
   };
   return (
     <Card className="p-4 mt-4 bg-emerald-50/40 border-emerald-200" data-testid="extra-income-card">
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
         <div className="text-xs font-semibold text-ink">Dealer Extra Income (folds into Dealer Earnings)</div>
         <div className="text-xs text-ink-soft">Total <span className="font-mono font-semibold text-emerald-700">{inr(total)}</span></div>
       </div>
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {EXTRA_INCOME_FIELDS.map(([k, label]) => (
           <Field key={k} label={label}>
             <Input data-testid={`extra-${k}`} type="number" value={form[k]} onChange={set(k)} disabled={locked} />
@@ -986,7 +1002,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
         </Card>
       )}
       <Card className="p-4 mb-4">
-        <div className="grid grid-cols-5 gap-3 items-end">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 items-end">
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
           <Field label="Date"><Input data-testid="payment-date" type="date" value={form.date} onChange={set("date")} /></Field>
           <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{(masters?.paymentModes || []).map((m) => <option key={m}>{m}</option>)}</Select></Field>
@@ -998,7 +1014,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
           <Button data-testid="add-payment-btn" onClick={() => add(false)} disabled={locked}><Wallet size={15} /> Add Receipt</Button>
         </div>
         {form.paymentMode === "Finance" && (
-          <div className="grid grid-cols-2 gap-3 mt-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
             <Field label="Financer"><Select value={form.financerName} onChange={set("financerName")}><option value="">—</option>{(masters?.financers || []).map((f) => <option key={f}>{f}</option>)}</Select></Field>
             <Field label="Finance File Number"><Input value={form.financeFileNumber} onChange={set("financeFileNumber")} placeholder="Auto-generated on save" /></Field>
           </div>
@@ -1009,7 +1025,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
         {payments.map((p) => {
           const isRefund = p.entryType === "Refund";
           return (
-            <div key={p.receiptNumber} className={`flex items-center justify-between border rounded-lg px-4 py-2.5 ${isRefund ? "border-amber-200 bg-amber-50/50" : "border-line bg-white"}`}>
+            <div key={p.receiptNumber} className={`flex flex-wrap items-center justify-between gap-2 border rounded-lg px-3 sm:px-4 py-2.5 ${isRefund ? "border-amber-200 bg-amber-50/50" : "border-line bg-white"}`}>
               <div>
                 <div className={`text-sm font-semibold ${isRefund ? "text-amber-700" : "text-ink"}`}>
                   {inr(p.amount)}
@@ -1071,7 +1087,7 @@ function RefundForm({ lead, excess, dealCancelled = false, onSaved }) {
   };
   return (
     <div className="mt-4 pt-4 border-t border-amber-200">
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 items-end">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
         <Field label="Refund (₹)">
           <Input data-testid="refund-amount" type="number" value={form.amount} onChange={set("amount")} placeholder={String(excess)} />
         </Field>
@@ -1439,7 +1455,7 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
         </p>
       )}
       <OemClaimStrip leadId={lead.leadId} />
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Invoice Number"><Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")} disabled={locked} /></Field>
         <Field label="Chassis">
           {showYardSelect ? (
@@ -1485,7 +1501,7 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
       {alreadyDelivered && (
         <div className="mt-6" data-testid="billing-summary-section">
           {summaryLoading && <div className="text-sm text-ink-faint">Loading billing summary…</div>}
-          {!summaryLoading && summary && <BillingSummaryPanel summary={summary} leadId={lead.leadId} documents={documents} canUploadTally={isOwner || isAccounts} onDocsChanged={onSaved} />}
+          {!summaryLoading && summary && <BillingSummaryPanel summary={summary} leadId={lead.leadId} documents={documents} canUploadTally={isOwner || isAccounts} onDocsChanged={onSaved} isOwner={isOwner} />}
           {!summaryLoading && !summary && (
             <div className="text-sm text-ink-soft border border-line rounded-lg px-3 py-3">
               Billing summary not found. Open again after refresh, or call billing-summary API.
@@ -1497,7 +1513,7 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
   );
 }
 
-function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = false, onDocsChanged }) {
+function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = false, onDocsChanged, isOwner = false }) {
   const printSummary = () => {
     const el = document.getElementById("billing-summary-print");
     if (!el) return;
@@ -1528,7 +1544,7 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
 
   return (
     <Card className="p-4 border-line" data-testid="billing-summary-panel">
-      <div className="flex items-start justify-between gap-3 mb-3">
+      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-3">
         <div>
           <div className="flex items-center gap-2">
             <FileText size={16} className="text-ink-soft" />
@@ -1549,7 +1565,7 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
           {summary.disclaimer || "For Tally cross-check only — not a GST tax invoice."}
         </div>
 
-        <div className="grid grid-cols-2 gap-3 text-sm mb-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm mb-3">
           <div>
             <div className="text-[10px] uppercase tracking-wide text-ink-faint">Customer</div>
             <div className="font-semibold text-ink">{cust.name}</div>
@@ -1624,7 +1640,7 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
         </table>
         <p className="text-[11px] text-ink-faint mt-1">{gst.note}</p>
 
-        {(summary.doNotPostInTally || []).length > 0 && (
+        {(summary.doNotPostInTally || []).length > 0 && isOwner && (
           <>
             <h2 className="text-[11px] font-semibold uppercase tracking-wide text-red-700/80 mt-4 mb-1">E. Do not post on customer bill in Tally</h2>
             <table className="w-full text-sm">
@@ -1708,8 +1724,8 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
             ? " Model/variant is locked after pricing — ask the owner to change the vehicle."
             : " Changing model/variant refreshes Ex-Showroom from Price Master and realigns scheme."}
         </p>
-        <div className="grid grid-cols-3 gap-3">
-          <div className="col-span-2"><Field label="Customer Name *"><Input data-testid="edit-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="edit-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
           <Field label="Status"><Select data-testid="edit-status" value={form.currentStatus} onChange={set("currentStatus")}>{(m.statuses || ["New","Contacted","Follow-up","In Progress","Booked","Finance Process","Delivered","Close Won","Lost"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Mobile"><Input data-testid="edit-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
           <Field label="Alt Mobile"><Input value={form.altMobile} onChange={set("altMobile")} /></Field>
@@ -1730,9 +1746,9 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           )}
           <Field label="Next Follow-up"><Input type="date" value={form.nextFollowupDate || ""} onChange={set("nextFollowupDate")} /></Field>
           {isBookedLead && (
-            <p className="col-span-3 text-xs text-ink-soft -mt-1">Set booking advance to 0 if there was no token payment (corrects the old ₹5,000 default). Updates the booking advance receipt when present.</p>
+            <p className="sm:col-span-2 lg:col-span-3 text-xs text-ink-soft -mt-1">Set booking advance to 0 if there was no token payment (corrects the old ₹5,000 default). Updates the booking advance receipt when present.</p>
           )}
-          <div className="col-span-3"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
+          <div className="sm:col-span-2 lg:col-span-3"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         </div>
       </div>
       <div className="flex justify-end gap-2 px-6 py-4 border-t border-line bg-zinc-50/60 shrink-0">
@@ -1791,7 +1807,7 @@ function InsuranceTab({ lead, masters }) {
     <div>
       <Card className="p-4 mb-4">
         <p className="text-xs text-ink-soft mb-3">Premium is pre-filled from this lead's price structure. Enter the insurer & payout rate.</p>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           <Field label="Insurer"><Input data-testid="lead-ins-company" value={form.insuranceCompany} onChange={set("insuranceCompany")} /></Field>
           <Field label="Policy Number"><Input value={form.policyNumber} onChange={set("policyNumber")} /></Field>
           <Field label="Policy Date"><Input data-testid="lead-ins-policy-date" type="date" value={form.policyDate} onChange={set("policyDate")} /></Field>
@@ -1803,7 +1819,7 @@ function InsuranceTab({ lead, masters }) {
         <div className="text-[11px] text-ink-faint mt-1" data-testid="lead-ins-rate-hint">
           Auto-filled {suggestInsRate(lead.interestedModel)}% for {lead.interestedModel || "this model"} ({/storm|turbo/i.test(lead.interestedModel || "") ? "Storm/Turbo" : "other models"}) — editable.
         </div>
-        <div className="flex items-center justify-between mt-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 mt-3">
           <div className="text-sm text-ink-soft">Expected payout <span className="font-mono font-semibold text-cobalt">{inr(expected)}</span></div>
           <Button data-testid="lead-add-insurance-btn" onClick={save}>Add Insurance</Button>
         </div>
@@ -1991,12 +2007,12 @@ function BookingModal({ lead, onClose, onDone }) {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Booking Date"><Input data-testid="booking-date" type="date" value={form.bookingDate} onChange={set("bookingDate")} /></Field>
         <Field label="Booking advance (₹)">
           <Input data-testid="booking-amount" type="number" min="0" value={form.bookingAmount} onChange={set("bookingAmount")} />
         </Field>
-        <p className="col-span-2 text-xs text-ink-soft -mt-1">
+        <p className="sm:col-span-2 text-xs text-ink-soft -mt-1">
           Use 0 when the customer pays the full amount with no separate booking advance (default is 0, not ₹5,000).
           {Number(lead.totalReceived || 0) > 0
             ? ` ${inr(lead.totalReceived)} is already on this lead — leave 0 unless they are paying extra now, or you will not create a second receipt.`
@@ -2034,14 +2050,14 @@ function CloseModal({ lead, onClose, onDone }) {
   return (
     <MiniModal title="Close Lead" onClose={onClose} onSubmit={submit} submitLabel="Close Lead" danger testid="confirm-close-btn">
       {delivered && (
-        <div className="grid grid-cols-2 gap-3 mb-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
           <Field label="RC">
             <Select data-testid="close-rc" value={rc} onChange={(e) => setRc(e.target.value)}><option value="">Not yet</option><option value="Done">Done</option></Select>
           </Field>
           <Field label="Number Plate"><Input data-testid="close-plate" value={plate} onChange={(e) => setPlate(e.target.value)} /></Field>
         </div>
       )}
-      <div className="grid grid-cols-2 gap-3 mb-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <Field label="Close Date"><Input data-testid="close-date" type="date" value={closedDate} onChange={(e) => setClosedDate(e.target.value)} /></Field>
         <Field label="Close Reason"><Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Delivered & settled" /></Field>
       </div>
@@ -2118,7 +2134,7 @@ function CancelModal({ lead, actions, amend = false, onClose, onDone }) {
           </div>
         </div>
       )}
-      <div className="grid grid-cols-2 gap-3 mb-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
         <Field label="Cancel Date">
           <Input data-testid="cancel-date" type="date" value={cancelDate}
             onChange={(e) => setCancelDate(e.target.value)} />

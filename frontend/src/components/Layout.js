@@ -424,7 +424,7 @@ export default function Layout({ children }) {
             transform on an ancestor cannot trap `position: fixed`. Do not add
             animate-fade-up (or any transform) on <main> — it used to pin overlays
             to the page-tall box instead of the viewport. */}
-        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-4 sm:p-6 lg:p-8 pb-[calc(1rem+env(safe-area-inset-bottom))] min-w-0">{children}</main>
+        <main className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden overscroll-contain p-3 sm:p-6 lg:p-8 pb-[calc(0.75rem+env(safe-area-inset-bottom))] min-w-0">{children}</main>
       </div>
     </div>
   );
