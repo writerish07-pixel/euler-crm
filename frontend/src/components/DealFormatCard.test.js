@@ -52,3 +52,28 @@ test("exact deal has zero additional and no owner-only note", async () => {
   await act(async () => { root.unmount(); });
   host.remove();
 });
+
+test("staff deal format hides extra margin", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <DealFormatCard
+        snapshot={{
+          exShowroom: 785000, rto: 5500, insurance: 19000,
+          priceTotal: 809500, additionalDiscount: 0,
+          needsOwnerApproval: true, netToCx: 809500, supportRequired: -10000,
+          extraMargin: 10000,
+        }}
+        cxDemand={819500}
+        readOnly
+        showOwnerPnl={false}
+      />,
+    );
+  });
+  expect(host.querySelector('[data-testid="deal-support"]')).toBeFalsy();
+  expect(host.textContent).not.toMatch(/Extra margin/i);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
