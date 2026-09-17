@@ -269,6 +269,62 @@ async def test_asm_lead_360_hides_commercials(client):
 
 
 @pytest.mark.asyncio
+async def test_executive_360_hides_owner_pnl_keeps_customer_money(client):
+    await _login(client, "owner@euler.com")
+    created = await client.post("/api/leads", json={
+        "customerName": "Exec Margin",
+        "mobile": "9444444444",
+        "leadSource": "Walk-in",
+        "interestedModel": "HiLoad",
+        "variant": "Cargo",
+        "executive": "Executive",
+    })
+    assert created.status_code == 200, created.text
+    lead_id = created.json()["leadId"]
+    await server.db.leads.update_one(
+        {"leadId": lead_id},
+        {"$set": {
+            "customerPayable": 850000,
+            "customerOutstanding": 839000,
+            "totalReceived": 11000,
+            "dealerMarginNetExGst": 29932,
+            "dealerSchemeRetained": 5000,
+            "dealerFundedBenefit": 0,
+            "oemExtraSupportRetained": 2000,
+            "oemClaimCompanyShare": 15000,
+        }},
+    )
+
+    await _login(client, "executive@euler.com")
+    r = await client.get(f"/api/leads/{lead_id}/360")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("fieldView") is not True
+    lead = body["lead"]
+    assert lead.get("customerPayable") == 850000
+    assert lead.get("customerOutstanding") == 839000
+    assert lead.get("totalReceived") == 11000
+    assert "dealerMarginNetExGst" not in lead
+    assert "dealerSchemeRetained" not in lead
+    assert "oemExtraSupportRetained" not in lead
+    assert "dealerFundedBenefit" not in lead
+    commercials = body["commercials"] or {}
+    assert "margin" not in commercials
+    assert "dealerSchemeRetained" not in commercials
+    assert "oemClaimCompanyShare" not in commercials
+    listing = await client.get("/api/leads")
+    row = next(x for x in listing.json() if x["leadId"] == lead_id)
+    assert "dealerMarginNetExGst" not in row
+    assert row.get("customerPayable") == 850000
+
+    await _login(client, "owner@euler.com")
+    own = await client.get(f"/api/leads/{lead_id}/360")
+    assert own.status_code == 200
+    assert own.json()["lead"].get("dealerMarginNetExGst") == 29932
+    assert "margin" in (own.json().get("commercials") or {})
+
+
+@pytest.mark.asyncio
 async def test_asm_can_view_finance_register_readonly(client):
     """ASM/RM need Finance Register to see financer disbursed vs remaining — read only."""
     import server as srv

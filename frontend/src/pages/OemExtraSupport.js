@@ -9,7 +9,10 @@ import { usePeriodState } from "../lib/period";
 import { openDocumentFile } from "../components/LeadDocuments";
 import { toast } from "sonner";
 
+import { useAuth } from "../context/AuthContext";
+
 export default function OemExtraSupport() {
+  const { canSeeOwnerCommercials } = useAuth();
   const [rows, setRows] = useState([]);
   const period = usePeriodState();
   const load = useCallback(
@@ -32,7 +35,7 @@ export default function OemExtraSupport() {
         <StatCard label="Leads" value={rows.length} />
         <StatCard label="Received" value={inr(received)} tone="text-amber-700" />
         <StatCard label="Passed to customer" value={inr(passed)} />
-        <StatCard label="Retained" value={inr(retained)} tone="text-emerald-700" />
+        {canSeeOwnerCommercials && <StatCard label="Retained" value={inr(retained)} tone="text-emerald-700" />}
       </div>
       <Table
         rowKey="leadId"
@@ -52,8 +55,10 @@ export default function OemExtraSupport() {
             render: (r) => <span className="text-amber-700 font-semibold">{inr(r.oemExtraSupportReceived)}</span> },
           { key: "oemExtraSupportPassed", label: "Passed", align: "right", mono: true,
             render: (r) => inr(r.oemExtraSupportPassed) },
-          { key: "oemExtraSupportRetained", label: "Retained", align: "right", mono: true,
-            render: (r) => <span className="text-emerald-700">{inr(r.oemExtraSupportRetained)}</span> },
+          ...(canSeeOwnerCommercials ? [{
+            key: "oemExtraSupportRetained", label: "Retained", align: "right", mono: true,
+            render: (r) => <span className="text-emerald-700">{inr(r.oemExtraSupportRetained)}</span>,
+          }] : []),
           { key: "chassisNumber", label: "Chassis", mono: true },
           { key: "invoiceNumber", label: "Invoice", mono: true },
           { key: "claimReference", label: "OEM claim", mono: true },

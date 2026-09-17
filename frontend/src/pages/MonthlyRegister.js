@@ -11,7 +11,7 @@ import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
 
-function MetricGrid({ m, volumeOnly }) {
+function MetricGrid({ m, volumeOnly, ownerPnl }) {
   if (!m) return null;
   return (
     <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
@@ -20,15 +20,15 @@ function MetricGrid({ m, volumeOnly }) {
       <StatCard label="Deliveries" value={num(m.deliveries?.count)} icon={Truck} tone="text-teal-600" />
       {!volumeOnly && <StatCard label="Payments" value={compactInr(m.payments?.total)} sub={`${num(m.payments?.count)} receipts`} icon={Wallet} tone="text-cobalt" />}
       <StatCard label="Finance pending" value={compactInr(m.finance?.pending)} sub={`${num(m.finance?.files)} files · ${compactInr(m.finance?.received)} in`} icon={Landmark} tone="text-violet-600" />
-      {!volumeOnly && (
+      {ownerPnl && (
         <>
           <StatCard label="Scheme eligible" value={compactInr(m.scheme?.eligible)} sub={`${compactInr(m.scheme?.received)} received`} icon={ReceiptText} />
           <StatCard label="Insurance" value={compactInr(m.insurance?.expected)} sub={`${compactInr(m.insurance?.received)} received`} icon={ShieldCheck} />
           <StatCard label="Extra income" value={compactInr(m.extraIncome?.total)} icon={Coins} tone="text-amber-600" />
           <StatCard label="Dealer earnings" value={compactInr(m.earnings?.total)} icon={Coins} tone="text-amber-700" />
-          <StatCard label="Cancellations" value={num(m.cancellations?.count)} icon={Ban} tone="text-rose-600" />
         </>
       )}
+      {!volumeOnly && <StatCard label="Cancellations" value={num(m.cancellations?.count)} icon={Ban} tone="text-rose-600" />}
     </div>
   );
 }
@@ -42,7 +42,7 @@ function Cell({ label, value }) {
   );
 }
 
-function Strip({ title, m, testId, volumeOnly }) {
+function Strip({ title, m, testId, volumeOnly, ownerPnl }) {
   if (!m) return null;
   return (
     <Card className="p-4" data-testid={testId}>
@@ -53,8 +53,8 @@ function Strip({ title, m, testId, volumeOnly }) {
         <Cell label="Deliveries" value={num(m.deliveries?.count)} />
         {!volumeOnly && <Cell label="Payments" value={compactInr(m.payments?.total)} />}
         <Cell label="Finance in" value={compactInr(m.finance?.received)} />
-        {!volumeOnly && <Cell label="Scheme" value={compactInr(m.scheme?.eligible)} />}
-        {!volumeOnly && <Cell label="Earnings" value={compactInr(m.earnings?.total)} />}
+        {ownerPnl && <Cell label="Scheme" value={compactInr(m.scheme?.eligible)} />}
+        {ownerPnl && <Cell label="Earnings" value={compactInr(m.earnings?.total)} />}
         {!volumeOnly && <Cell label="Cancelled" value={num(m.cancellations?.count)} />}
       </div>
     </Card>
@@ -62,8 +62,9 @@ function Strip({ title, m, testId, volumeOnly }) {
 }
 
 export default function MonthlyRegister() {
-  const { isField, isExecutive } = useAuth();
+  const { isField, isExecutive, isOwner } = useAuth();
   const volumeOnly = isField;
+  const ownerPnl = isOwner;
   const [month, setMonth] = useState(thisMonth());
   const [year, setYear] = useState(thisYear());
   const [d, setD] = useState(null);
@@ -81,9 +82,11 @@ export default function MonthlyRegister() {
   const selectedLabel = periodLabel({ month, year });
   const subtitle = volumeOnly
     ? "Volume and finance totals · no dealer commercials"
-    : isExecutive
-      ? "Your assigned leads · pick any month or year for MTD / YTD"
-      : "Pick any month or year for MTD / YTD on leads, bookings, money, scheme and earnings";
+    : isOwner
+      ? "Pick any month or year for MTD / YTD on leads, bookings, money, scheme and earnings"
+      : isExecutive
+        ? "Your assigned leads · pick any month or year for MTD / YTD · no dealer commercials"
+        : "Volume, collections and finance · no dealer commercials";
 
   const columns = [
     { key: "month", label: "Month", mono: true,
@@ -99,7 +102,7 @@ export default function MonthlyRegister() {
       { key: "payments", label: "Payments", align: "right", mono: true, render: (r) => inr(r.payments?.total) },
     ] : []),
     { key: "finance", label: "Finance in", align: "right", mono: true, render: (r) => inr(r.finance?.received) },
-    ...(!volumeOnly ? [
+    ...(ownerPnl ? [
       { key: "scheme", label: "Scheme", align: "right", mono: true, render: (r) => inr(r.scheme?.eligible) },
       { key: "earnings", label: "Earnings", align: "right", mono: true, render: (r) => inr(r.earnings?.total) },
     ] : []),
@@ -122,11 +125,11 @@ export default function MonthlyRegister() {
         <>
           <section className="mb-6" data-testid="monthly-selected">
             <h3 className="font-heading font-bold text-ink mb-3">Selected · {d.period?.label || selectedLabel}</h3>
-            <MetricGrid m={d.selected} volumeOnly={volumeOnly} />
+            <MetricGrid m={d.selected} volumeOnly={volumeOnly} ownerPnl={ownerPnl} />
           </section>
           <div className="grid lg:grid-cols-2 gap-4 mb-6">
-            <Strip title={`This month (MTD) · ${d.mtd?.period?.label || ""}`} m={d.mtd} testId="monthly-mtd" volumeOnly={volumeOnly} />
-            <Strip title={`${d.ytd?.period?.label || "YTD"}`} m={d.ytd} testId="monthly-ytd" volumeOnly={volumeOnly} />
+            <Strip title={`This month (MTD) · ${d.mtd?.period?.label || ""}`} m={d.mtd} testId="monthly-mtd" volumeOnly={volumeOnly} ownerPnl={ownerPnl} />
+            <Strip title={`${d.ytd?.period?.label || "YTD"}`} m={d.ytd} testId="monthly-ytd" volumeOnly={volumeOnly} ownerPnl={ownerPnl} />
           </div>
           <section data-testid="monthly-by-month">
             <h3 className="font-heading font-bold text-ink mb-2">Month-wise · {d.focusYear}</h3>

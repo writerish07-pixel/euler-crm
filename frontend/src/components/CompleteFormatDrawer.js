@@ -6,8 +6,10 @@ import { digitsLast10 } from "../lib/format";
 import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock } from "./LeadDocuments";
 import DealFormatCard from "./DealFormatCard";
 import CallLink from "./CallLink";
+import { useAuth } from "../context/AuthContext";
 
 export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
+  const { canSeeOwnerCommercials } = useAuth();
   const [budget, setBudget] = useState(Number(row.budget || row.dealAmount || 0) || "");
   const [model, setModel] = useState(row.interestedModel || "");
   const [variant, setVariant] = useState(row.variant || "");
@@ -134,6 +136,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           onCxDemand={setBudget}
           loading={dealLoading}
           missingPrice={!model || !variant}
+          showOwnerPnl={!!canSeeOwnerCommercials}
         />
         <Field label="OEM Extra Support">
           <Input data-testid="approval-oem-extra" type="number" min="0" step="1"

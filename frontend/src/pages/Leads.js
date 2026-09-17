@@ -180,7 +180,7 @@ export default function Leads() {
 }
 
 function NewLeadDrawer({ masters, onClose, onCreated }) {
-  const { isExecutive, isTl, user } = useAuth();
+  const { isExecutive, isTl, user, canSeeOwnerCommercials } = useAuth();
   const [form, setForm] = useState({
     customerName: "", mobile: "", city: "", leadSource: "Walk-in", interestedModel: "",
     variant: "", executive: isExecutive ? (user?.name || "") : "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
@@ -302,6 +302,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
             onCxDemand={(v) => setForm((f) => ({ ...f, budget: v }))}
             loading={dealLoading}
             missingPrice={!form.interestedModel || !form.variant}
+            showOwnerPnl={!!canSeeOwnerCommercials}
           />
         </div>
         {isExecutive && (

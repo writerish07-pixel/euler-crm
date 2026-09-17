@@ -143,6 +143,9 @@ async def test_executive_opens_monthly_own_leads_not_export(exec_client, client)
     assert after_owner["selected"]["leads"]["count"] == before_owner["selected"]["leads"]["count"] + 2
     assert after_exec["scope"]["kind"] == "own"
     assert "payments" in after_exec["selected"]
+    assert "earnings" not in after_exec["selected"]
+    assert "scheme" not in after_exec["selected"]
+    assert "extraIncome" not in after_exec["selected"]
     assert (await exec_client.get("/api/export")).status_code == 403
 
 

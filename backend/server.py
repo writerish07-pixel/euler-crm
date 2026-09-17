@@ -1835,6 +1835,106 @@ def _field_safe_lead(lead: dict) -> dict:
     return {k: lead.get(k) for k in FIELD_LEAD_SAFE_KEYS if k in lead or lead.get(k) is not None}
 
 
+# Dealer P&L — owner only. Exec / GM / TL / Accounts see customer money (payable,
+# received, outstanding) and pipeline, never margin, retained or earnings.
+OWNER_PNL_LEAD_KEYS = {
+    "dealerMarginNetExGst", "dealerMarginGrossInclGst", "dealerMarginGst",
+    "dealerSchemeRetained", "dealerFundedBenefit", "dealerInsuranceIncome",
+    "dealerTotalEarnings", "extraDealerIncomeTotal",
+    "oemExtraSupportRetained", "oemClaimCompanyShare",
+    "schemeCompanyTotal", "schemeOemClaimable", "schemeOemClaimableTotal",
+    "consumerRetained", "exchangeRetained", "loyaltyRetained", "referralRetained",
+    "dsaRetained", "schemeRetainedBreakup",
+    "documentationIncome", "warrantyIncome", "rsaIncome", "referralIncome",
+    "otherIncome", "financeIncentive", "accessoriesMargin", "exchangeMargin",
+    "campaignIncentive",
+}
+
+OWNER_PNL_COMMERCIAL_KEYS = {
+    "margin", "claim", "dealerSchemeRetained", "dealerRetained",
+    "dealerFundedBenefit", "oemClaimCompanyShare", "schemeOemClaimable",
+    "oemExtraSupportClaimable", "schemeIncome", "schemeClaimShares",
+}
+
+OWNER_PNL_SHARE_KEYS = {
+    "oemShare", "dealerShare", "companyShare", "dealerFundedShare",
+    "oemClaimable", "dealerRetained", "dealerFundedBenefit",
+}
+
+
+def _is_owner_user(user) -> bool:
+    return ((user or {}).get("role") or "").strip().lower() == "owner"
+
+
+def _staff_safe_lead(lead: dict) -> dict:
+    """Drop dealer P&L fields so they are not available on staff dashboards."""
+    if not lead:
+        return lead
+    out = dict(lead)
+    for k in OWNER_PNL_LEAD_KEYS:
+        out.pop(k, None)
+    return out
+
+
+def _staff_safe_nested_shares(obj):
+    if isinstance(obj, dict):
+        return {k: _staff_safe_nested_shares(v) for k, v in obj.items()
+                if k not in OWNER_PNL_SHARE_KEYS}
+    if isinstance(obj, list):
+        return [_staff_safe_nested_shares(v) for v in obj]
+    return obj
+
+
+def _staff_safe_commercials(c):
+    if not c:
+        return c
+    out = {k: v for k, v in dict(c).items() if k not in OWNER_PNL_COMMERCIAL_KEYS}
+    extra = out.get("oemExtraSupport")
+    if isinstance(extra, dict):
+        extra = dict(extra)
+        extra.pop("oemExtraSupportRetained", None)
+        extra.pop("oemClaimable", None)
+        extra.pop("retained", None)
+        out["oemExtraSupport"] = extra
+    if "schemeAllocation" in out:
+        out["schemeAllocation"] = _staff_safe_nested_shares(out["schemeAllocation"])
+    return out
+
+
+def _staff_safe_scheme_rules(out):
+    if not out:
+        return out
+    body = _staff_safe_nested_shares(out)
+    return body
+
+
+def _staff_safe_deal_preview(d):
+    if not d:
+        return d
+    out = dict(d)
+    out.pop("extraMargin", None)
+    return out
+
+
+def _staff_safe_billing(summary):
+    if not summary:
+        return summary
+    out = dict(summary)
+    out.pop("doNotPostInTally", None)
+    return out
+
+
+def _lead_for_viewer(lead: dict, user) -> dict:
+    if not lead:
+        return lead
+    role = ((user or {}).get("role") or "").strip().lower()
+    if role in authmod.FIELD_ROLES:
+        return _field_safe_lead(lead)
+    if role != "owner":
+        return _staff_safe_lead(lead)
+    return lead
+
+
 def _volume_slice(leads, payments, period, cancel_events, *, include_money=True):
     """One MTD or YTD pack: event-dated counts (and receipts when allowed)."""
     leads_n = sum(1 for l in leads if periodmod.in_period(l.get("createdDate"), period))
@@ -2801,7 +2901,19 @@ def _scope_period_source(src, lead_ids):
     }
 
 
-async def _monthly_payload(period, *, oem=False, src=None):
+def _staff_period_metrics(m):
+    """Volume, customer collections and finance — no dealer P&L."""
+    return {
+        "leads": m["leads"],
+        "bookings": m["bookings"],
+        "deliveries": m["deliveries"],
+        "payments": m["payments"],
+        "finance": m["finance"],
+        "cancellations": m["cancellations"],
+    }
+
+
+async def _monthly_payload(period, *, oem=False, src=None, staff=False):
     src = src if src is not None else await _period_source()
     focus = periodmod.focus_year(period)
     selected = _period_metrics_from(src, period)
@@ -2810,12 +2922,12 @@ async def _monthly_payload(period, *, oem=False, src=None):
     mtd = _period_metrics_from(src, mtd_p)
     ytd = _period_metrics_from(src, ytd_p)
     by_month = []
+    wrap = _oem_period_metrics if oem else (_staff_period_metrics if staff else (lambda x: x))
     for ym in periodmod.year_months(focus):
         row = _period_metrics_from(src, periodmod.parse_period(month=ym))
-        packed = _oem_period_metrics(row) if oem else row
+        packed = wrap(row)
         packed["month"] = ym
         by_month.append(packed)
-    wrap = _oem_period_metrics if oem else (lambda x: x)
     return {
         "period": periodmod.as_dict(period),
         "focusYear": focus,
@@ -2832,7 +2944,8 @@ async def monthly_register(month: str = "", year: str = "", user=Depends(current
     """MTD / YTD / any month-year snapshot for leads, bookings, money, scheme, earnings.
 
     Executives see their own leads. ASM/RM get the volume+finance pack (no dealer
-    commercials). OEM is not on this route — they use /reports/oem-monthly.
+    commercials). Owner sees scheme / earnings. OEM is not on this route — they
+    use /reports/oem-monthly.
     """
     role = (user or {}).get("role")
     if role not in MONTHLY_REGISTER_ROLES:
@@ -2842,13 +2955,19 @@ async def monthly_register(month: str = "", year: str = "", user=Depends(current
         ids = {l["leadId"] for l in _leads_for_executive(src["leads"], user) if l.get("leadId")}
         src = _scope_period_source(src, ids)
     oem = role in FIELD_MONTHLY_ROLES
-    body = await _monthly_payload(_parse_period(month, year), oem=oem, src=src)
+    staff = role != "owner" and not oem
+    body = await _monthly_payload(_parse_period(month, year), oem=oem, src=src, staff=staff)
     if role == "executive":
-        body["scope"] = {"kind": "own", "note": "Your assigned leads only."}
+        body["scope"] = {"kind": "own", "note": "Your assigned leads only. No dealer commercials."}
     elif oem:
         body["scope"] = {
             "kind": "field",
             "note": "Volume and finance totals. No dealer commercials.",
+        }
+    elif staff:
+        body["scope"] = {
+            "kind": "dealership",
+            "note": "Volume, collections and finance. No dealer commercials.",
         }
     else:
         body["scope"] = {"kind": "dealership"}
@@ -3115,9 +3234,7 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         leads, period, lambda l: periodmod.lead_register_date(l, status or ""))
     rows = [clean(l) for l in leads]
     rows = await _attach_approval_request_ids(rows)
-    if user.get("role") in authmod.FIELD_ROLES:
-        return [_field_safe_lead(l) for l in rows]
-    return rows
+    return [_lead_for_viewer(l, user) for l in rows]
 
 
 async def _attach_approval_request_ids(rows: list) -> list:
@@ -3355,7 +3472,7 @@ async def _raise_if_mobile_taken(mobile: str, *, incoming_name: str = "",
 
 
 async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created from CRM",
-                            allow_same_mobile: bool = False):
+                            allow_same_mobile: bool = False, viewer=None):
     payload = body.model_dump()
     another = bool(payload.pop("anotherVehicle", False))
     await _raise_if_mobile_taken(
@@ -3396,10 +3513,11 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     cx = ce.round2(ce.num(payload.get("budget")))
     extra = ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived"))))
     if cx > 0:
-        return await _apply_quoted_deal(
+        row = await _apply_quoted_deal(
             lead_id, payload.get("interestedModel"), payload.get("variant"), cx,
             created_date, oem_extra_received=extra if extra > 0 else None)
-    return clean(await db.leads.find_one({"leadId": lead_id}))
+        return _lead_for_viewer(row, viewer)
+    return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), viewer)
 
 
 def _can_approve_leads(user) -> bool:
@@ -3468,7 +3586,7 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             "dealAmount": req["dealAmount"],
             "message": "Sent for approval. The lead is created after it is approved.",
         }
-    return await _insert_live_lead(body)
+    return await _insert_live_lead(body, viewer=user)
 
 
 def _request_out(doc):
@@ -4105,9 +4223,7 @@ async def get_lead(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     _require_own_lead(lead, user)
     lead = (await _attach_approval_request_ids([clean(lead)]))[0]
-    if user.get("role") in authmod.FIELD_ROLES:
-        return _field_safe_lead(lead)
-    return lead
+    return _lead_for_viewer(lead, user)
 
 
 @api.get("/leads/{lead_id}/approval-request")
@@ -4197,6 +4313,10 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
             billing_summary = clean(await db.billing_summaries.find_one({"leadId": lead_id}) or {})
     else:
         billing_summary = clean(await db.billing_summaries.find_one({"leadId": lead_id}) or {})
+    if not _is_owner_user(user):
+        lead = _staff_safe_lead(lead)
+        commercials = _staff_safe_commercials(commercials)
+        billing_summary = _staff_safe_billing(billing_summary)
     return {
         "lead": lead, "commercials": commercials, "payments": payments,
         "activities": activities, "delivery": delivery, "booking": booking,
@@ -4946,11 +5066,11 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
         await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "update", "price-structure", leadId=lead_id, old=old, new=payload)
-    return clean(await db.leads.find_one({"leadId": lead_id}))
+    return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 
 @api.get("/leads/{lead_id}/scheme-rules")
-async def scheme_rules(lead_id: str, on: Optional[str] = None):
+async def scheme_rules(lead_id: str, on: Optional[str] = None, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     scheme_rows = await get_scheme_rows()
     model = lead.get("interestedModel") or ""
@@ -4961,6 +5081,8 @@ async def scheme_rules(lead_id: str, on: Optional[str] = None):
     snap = {**lead_to_snapshot(lead), "schemeAsOf": as_of}
     out["allocation"] = ce.compute_scheme_allocation(snap, scheme_rows)
     out["asOf"] = as_of
+    if not _is_owner_user(user):
+        out = _staff_safe_scheme_rules(out)
     return out
 
 
@@ -5082,7 +5204,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "update", "scheme", leadId=lead_id, old=old, new=payload)
-    return clean(await db.leads.find_one({"leadId": lead_id}))
+    return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 
 class SchemeAllocationIn(BaseModel):
@@ -5163,8 +5285,8 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
             "allocation": ce.compute_scheme_allocation(lead_to_snapshot(updated), scheme_rows)}
 
 
-@api.put("/leads/{lead_id}/extra-income")
-async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
+@api.put("/leads/{lead_id}/extra-income", dependencies=[Depends(owner_only)])
+async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)):
     """Dealer extra-income lines:
     Documentation / Warranty / RSA / Referral / Other / Finance Incentive /
     Accessories Margin / Exchange Margin / Campaign Incentive.
@@ -5188,7 +5310,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
     await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
     await write_audit(act, "update", "extra-income", leadId=lead_id, old=old, new=payload)
-    return clean(await db.leads.find_one({"leadId": lead_id}))
+    return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 
 @api.post("/leads/{lead_id}/close")
@@ -7138,7 +7260,7 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
                 await oem_sync.take_chassis_from_inventory(db, body.chassisNumber)
             except Exception:
                 logging.exception("Could not drop delivered chassis from yard inventory")
-    return clean(await db.leads.find_one({"leadId": lead_id}))
+    return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 
 async def _upsert_delivery_billing_summary(lead_id):
@@ -7171,7 +7293,7 @@ async def _refresh_billing_summary_if_delivered(lead_id):
 
 
 @api.get("/leads/{lead_id}/billing-summary")
-async def get_billing_summary(lead_id: str):
+async def get_billing_summary(lead_id: str, user=Depends(current_user)):
     """Delivery Billing Summary for Tally (full customer amount − benefits passed).
 
     Always rebuilds from the current lead when Delivered, so scheme / Additional
@@ -7184,7 +7306,10 @@ async def get_billing_summary(lead_id: str):
             "Billing summary is created when the lead is marked Delivered. "
             "Mark delivery first, then open this summary for Tally cross-check.",
         )
-    return clean(await _upsert_delivery_billing_summary(lead_id))
+    summary = clean(await _upsert_delivery_billing_summary(lead_id))
+    if not _is_owner_user(user):
+        summary = _staff_safe_billing(summary)
+    return summary
 
 
 async def _upsert_insurance_on_delivery(lead_id, delivery_date):
@@ -7495,9 +7620,12 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
 
 @api.get("/commercial/deal-preview")
 async def deal_preview(model: str = "", variant: str = "", cxDemand: float = 0,
-                       on: Optional[str] = None, _user=Depends(current_user)):
+                       on: Optional[str] = None, user=Depends(current_user)):
     """Scheme-free reverse quote: Price Master charges + billing TCS, no circular."""
-    return await _deal_format_for(model, variant, cxDemand, on)
+    deal = await _deal_format_for(model, variant, cxDemand, on)
+    if not _is_owner_user(user):
+        return _staff_safe_deal_preview(deal)
+    return deal
 
 
 @api.get("/price-master/variants")
@@ -10432,7 +10560,8 @@ async def list_dropped_extra_support(month: Optional[str] = None, year: Optional
 
 
 @api.get("/oem-extra-support", dependencies=[Depends(oem_claim_desk_only)])
-async def list_oem_extra_support(month: Optional[str] = None, year: Optional[str] = None):
+async def list_oem_extra_support(month: Optional[str] = None, year: Optional[str] = None,
+                                 user=Depends(current_user)):
     """App register for OEM Extra Support — same columns the sheet used to carry."""
     leads = await db.leads.find().to_list(8000)
     rows_src = []
@@ -10496,8 +10625,12 @@ async def list_oem_extra_support(month: Optional[str] = None, year: Optional[str
             "lastUpdated": l.get("lastUpdated") or "",
         })
     rows.sort(key=lambda r: (r.get("bookingDate") or r.get("lastUpdated") or ""), reverse=True)
-    return _rows_in_period(rows, _parse_period(month, year),
+    rows = _rows_in_period(rows, _parse_period(month, year),
                            lambda r: r.get("bookingDate") or r.get("lastUpdated"))
+    if not _is_owner_user(user):
+        for r in rows:
+            r.pop("oemExtraSupportRetained", None)
+    return rows
 
 
 # ---------------------------------------------------------------- audit log (H4) — owner-only viewer
@@ -11745,8 +11878,11 @@ async def share_dashboard():
 
 # ---------------------------------------------------------------- commercial preview + quotation
 @api.post("/commercial/compute")
-async def commercial_compute(body: SnapshotComputeIn):
-    return ce.compute_full_commercials(body.model_dump())
+async def commercial_compute(body: SnapshotComputeIn, user=Depends(current_user)):
+    result = ce.compute_full_commercials(body.model_dump())
+    if not _is_owner_user(user):
+        return _staff_safe_commercials(result)
+    return result
 
 
 class QuotationIn(BaseModel):
