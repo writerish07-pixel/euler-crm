@@ -652,6 +652,8 @@ async def refresh_sold_inventory(db):
     if not token:
         return 0
     sold_vehicles = coulson_client.fetch_sold_inventory(token) or []
+    if not sold_vehicles:
+        return await db.oem_sold.count_documents({})
     oem_models = []
     try:
         oem_models = coulson_client.fetch_sap_models(token) or []
@@ -976,6 +978,32 @@ async def apply_sold_vehicle_ids_to_leads(db):
         if "mobile" in patch:
             stats["mobilesUpdated"] += 1
     return stats
+
+
+def _delivered_missing_vehicle_ids(lead):
+    if not _lead_is_delivered(lead):
+        return False
+    if _lead_is_cancelled(lead):
+        return False
+    ch = _norm_chassis((lead or {}).get("chassisNumber"))
+    inv = _norm_invoice((lead or {}).get("invoiceNumber"))
+    return not ch or not inv
+
+
+async def delivered_missing_vehicle_ids(db):
+    """Delivered (not cancelled) leads still missing chassis and/or invoice."""
+    rows = []
+    async for l in db.leads.find({}):
+        if not _delivered_missing_vehicle_ids(l):
+            continue
+        rows.append({
+            "leadId": l.get("leadId") or "",
+            "customerName": l.get("customerName") or "",
+            "mobile": _digits10(l.get("mobile") or l.get("altMobile")),
+            "missingChassis": not _norm_chassis(l.get("chassisNumber")),
+            "missingInvoice": not _norm_invoice(l.get("invoiceNumber")),
+        })
+    return rows
 
 
 def inventory_family_key(model, variant=""):
