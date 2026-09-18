@@ -206,7 +206,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
-        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters} />}
+        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
@@ -1330,7 +1330,7 @@ function OemClaimStrip({ leadId }) {
   );
 }
 
-function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], onSaved }) {
+export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
   // Staff freeze after Mark Delivered; owner may edit delivery paperwork until closed.
