@@ -3,16 +3,15 @@ import { useSearchParams } from "react-router-dom";
 import { Plus, ChevronRight, Upload } from "lucide-react";
 import ReportActions from "../components/ReportActions";
 import { toast } from "sonner";
-import { get, post, put, apiErrorMessage, apiErrorDetail } from "../lib/api";
-import { inr, fmtDate, todayISO, digitsLast10 } from "../lib/format";
-import { PageHeader, Button, Table, Badge, Drawer, Field, Input, Select, MobileClashDialog } from "../components/ui";
+import { get, apiErrorMessage } from "../lib/api";
+import { inr } from "../lib/format";
+import { PageHeader, Button, Table, Badge, Input } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
 import LeadImport from "./LeadImport";
+import NewLeadDrawer from "./NewLeadDrawer";
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
-import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock } from "../components/LeadDocuments";
-import DealFormatCard from "../components/DealFormatCard";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 
@@ -170,179 +169,15 @@ export default function Leads() {
         />
       )}
       {showNew && (
-        <NewLeadDrawer masters={masters} onClose={() => setShowNew(false)} onCreated={(id) => { setShowNew(false); load(); if (id) setActive(id); }} />
+        <NewLeadDrawer
+          masters={masters}
+          onClose={() => setShowNew(false)}
+          onCreated={(id) => { setShowNew(false); load(); if (id) setActive(id); }}
+        />
       )}
       {showImport && (
         <LeadImport onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); load(); }} />
       )}
     </div>
-  );
-}
-
-function NewLeadDrawer({ masters, onClose, onCreated }) {
-  const { isExecutive, isTl, user, canSeeOwnerCommercials } = useAuth();
-  const [form, setForm] = useState({
-    customerName: "", mobile: "", city: "", leadSource: "Walk-in", interestedModel: "",
-    variant: "", executive: isExecutive ? (user?.name || "") : "", priority: "Normal", budget: 0, remarks: "", currentStatus: "New",
-    createdDate: todayISO(), nextFollowupDate: "", customerType: "Individual", gstin: "",
-    oemExtraSupportReceived: "",
-  });
-  const [kyc, setKyc] = useState({});
-  const [extraProof, setExtraProof] = useState({});
-  const [busy, setBusy] = useState(false);
-  const [variants, setVariants] = useState([]);
-  const [deal, setDeal] = useState(null);
-  const [dealLoading, setDealLoading] = useState(false);
-  const [clash, setClash] = useState(null);
-  const [passOn, setPassOn] = useState({});
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-
-  useEffect(() => {
-    if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants);
-    else setVariants([]);
-    setPassOn({});
-  }, [form.interestedModel, form.variant]);
-
-  const passOnKeys = Object.keys(passOn).filter((k) => passOn[k]).join(",");
-
-  useEffect(() => {
-    if (!form.interestedModel || !form.variant) {
-      setDeal(null);
-      return undefined;
-    }
-    let alive = true;
-    setDealLoading(true);
-    get("/commercial/deal-preview", {
-      model: form.interestedModel, variant: form.variant, cxDemand: Number(form.budget) || 0,
-      passOnKeys: passOnKeys || undefined,
-    }).then((d) => { if (alive) setDeal(d); })
-      .catch(() => { if (alive) setDeal(null); })
-      .finally(() => { if (alive) setDealLoading(false); });
-    return () => { alive = false; };
-  }, [form.interestedModel, form.variant, form.budget, passOnKeys]);
-
-  const togglePassOn = (key, yes, available) => {
-    setPassOn((p) => ({ ...p, [key]: yes }));
-    setForm((f) => {
-      const cur = Number(f.budget) || Number(deal?.netToCx) || 0;
-      const delta = yes ? -(Number(available) || 0) : (Number(available) || 0);
-      return { ...f, budget: Math.max(0, cur + delta) };
-    });
-  };
-
-  const saveLead = async (extra = {}) => {
-    setBusy(true);
-    try {
-      const lead = await post("/leads", {
-        ...form,
-        budget: Number(form.budget),
-        oemExtraSupportReceived: Number(form.oemExtraSupportReceived) || 0,
-        schemePassOn: passOn,
-        ...extra,
-      });
-      setClash(null);
-      try {
-        if (lead.pending && lead.requestId) {
-          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, { ...kyc, ...extraProof });
-        } else if (lead.leadId) {
-          await uploadKycFiles(`/leads/${lead.leadId}/documents`, { ...kyc, ...extraProof });
-        }
-      } catch (ue) {
-        toast.error(apiErrorMessage(ue, "Lead saved but a KYC file failed — attach it again."));
-      }
-      if (lead.pending) {
-        toast.success("Sent for approval");
-        onCreated(null);
-        return;
-      }
-      toast.success(`Lead ${lead.leadId} created`);
-      onCreated(lead.leadId);
-    } catch (e) {
-      const detail = apiErrorDetail(e);
-      if (e?.response?.status === 409 && detail && String(detail.code || "").startsWith("mobile_")) {
-        setClash(detail);
-        return;
-      }
-      toast.error(apiErrorMessage(e, "Failed to create lead"));
-    } finally { setBusy(false); }
-  };
-
-  const submit = async () => {
-    if (!form.customerName) return toast.error("Customer name is required");
-    if (!form.createdDate) return toast.error("Lead date is required");
-    if (isTl && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
-    if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
-    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
-    const kycErr = kycReady(form.customerType, kyc, form.gstin);
-    if (kycErr) return toast.error(kycErr);
-    const extraErr = extraSupportReady(form.oemExtraSupportReceived, extraProof);
-    if (extraErr) return toast.error(extraErr);
-    await saveLead();
-  };
-
-  if (!masters) return null;
-  const execOptions = [...(masters.executives || [])];
-  if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
-  return (
-    <>
-    <Drawer open onClose={onClose} width="max-w-2xl" title={isExecutive ? "Request a lead" : "New Lead"}
-      subtitle={isExecutive ? "Sent for owner or GM approval" : isTl ? "Live lead assigned to any executive" : "Capture a fresh enquiry"}
-      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : (isExecutive ? "Send for approval" : "Create Lead")}</Button></div>}>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
-        <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
-        <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
-        <Field label={isExecutive ? "Mobile *" : "Mobile"}><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} inputMode="numeric" placeholder="10-digit mobile" /></Field>
-        <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>
-        <Field label="Customer type">
-          <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>
-            <option>Individual</option>
-            <option value="B2B">B2B</option>
-          </Select>
-        </Field>
-        <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{masters.leadSources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label={isTl ? "Executive *" : "Executive"}>
-          <Select data-testid="lead-executive" value={form.executive} onChange={set("executive")}>
-            <option value="">—</option>
-            {execOptions.map((s) => <option key={s}>{s}</option>)}
-          </Select>
-        </Field>
-        <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{masters.models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label="Variant"><Select data-testid="lead-variant" value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
-        <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{masters.priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <div className="sm:col-span-2">
-          <DealFormatCard
-            snapshot={deal}
-            cxDemand={form.budget}
-            onCxDemand={(v) => setForm((f) => ({ ...f, budget: v }))}
-            loading={dealLoading}
-            missingPrice={!form.interestedModel || !form.variant}
-            showOwnerPnl={!!canSeeOwnerCommercials}
-            passOn={passOn}
-            onPassOn={togglePassOn}
-          />
-        </div>
-        {isExecutive && (
-          <Field label="OEM Extra Support">
-            <Input data-testid="lead-oem-extra" type="number" min="0" step="1"
-              value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} />
-          </Field>
-        )}
-        {isExecutive && (
-          <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={form.oemExtraSupportReceived} />
-        )}
-        <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
-        <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} />
-      </div>
-    </Drawer>
-    <MobileClashDialog
-      clash={clash}
-      busy={busy}
-      canOpenExisting={!(isExecutive && clash?.code === "mobile_other_executive")}
-      onCancel={() => setClash(null)}
-      onOpenExisting={(id) => { setClash(null); onCreated(id); }}
-      onAnotherVehicle={() => saveLead({ anotherVehicle: true })}
-    />
-    </>
   );
 }
