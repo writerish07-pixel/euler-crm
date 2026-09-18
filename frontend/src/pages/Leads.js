@@ -194,12 +194,16 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
   const [deal, setDeal] = useState(null);
   const [dealLoading, setDealLoading] = useState(false);
   const [clash, setClash] = useState(null);
+  const [passOn, setPassOn] = useState({});
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   useEffect(() => {
     if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants);
     else setVariants([]);
-  }, [form.interestedModel]);
+    setPassOn({});
+  }, [form.interestedModel, form.variant]);
+
+  const passOnKeys = Object.keys(passOn).filter((k) => passOn[k]).join(",");
 
   useEffect(() => {
     if (!form.interestedModel || !form.variant) {
@@ -210,11 +214,21 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
     setDealLoading(true);
     get("/commercial/deal-preview", {
       model: form.interestedModel, variant: form.variant, cxDemand: Number(form.budget) || 0,
+      passOnKeys: passOnKeys || undefined,
     }).then((d) => { if (alive) setDeal(d); })
       .catch(() => { if (alive) setDeal(null); })
       .finally(() => { if (alive) setDealLoading(false); });
     return () => { alive = false; };
-  }, [form.interestedModel, form.variant, form.budget]);
+  }, [form.interestedModel, form.variant, form.budget, passOnKeys]);
+
+  const togglePassOn = (key, yes, available) => {
+    setPassOn((p) => ({ ...p, [key]: yes }));
+    setForm((f) => {
+      const cur = Number(f.budget) || Number(deal?.netToCx) || 0;
+      const delta = yes ? -(Number(available) || 0) : (Number(available) || 0);
+      return { ...f, budget: Math.max(0, cur + delta) };
+    });
+  };
 
   const saveLead = async (extra = {}) => {
     setBusy(true);
@@ -223,6 +237,7 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
         ...form,
         budget: Number(form.budget),
         oemExtraSupportReceived: Number(form.oemExtraSupportReceived) || 0,
+        schemePassOn: passOn,
         ...extra,
       });
       setClash(null);
@@ -303,6 +318,8 @@ function NewLeadDrawer({ masters, onClose, onCreated }) {
             loading={dealLoading}
             missingPrice={!form.interestedModel || !form.variant}
             showOwnerPnl={!!canSeeOwnerCommercials}
+            passOn={passOn}
+            onPassOn={togglePassOn}
           />
         </div>
         {isExecutive && (

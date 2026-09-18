@@ -24,6 +24,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
   const [busy, setBusy] = useState(false);
   const [masters, setMasters] = useState(null);
   const [variants, setVariants] = useState([]);
+  const [passOn, setPassOn] = useState(() => row.schemePassOn || {});
   const customerType = row.customerType || "Individual";
 
   useEffect(() => {
@@ -49,13 +50,15 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     }
     let alive = true;
     setDealLoading(true);
+    const passOnKeys = Object.keys(passOn).filter((k) => passOn[k]).join(",");
     get("/commercial/deal-preview", {
       model, variant, cxDemand: Number(budget) || 0,
+      passOnKeys: passOnKeys || undefined,
     }).then((d) => { if (alive) setDeal(d); })
       .catch(() => { if (alive) setDeal(row.dealFormat || null); })
       .finally(() => { if (alive) setDealLoading(false); });
     return () => { alive = false; };
-  }, [model, variant, row.dealFormat, budget]);
+  }, [model, variant, row.dealFormat, budget, passOn]);
 
   const save = async () => {
     if (!model || !variant) return toast.error("Select model and variant");
@@ -72,6 +75,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         budget: Number(budget), gstin, interestedModel: model, variant,
         oemExtraSupportReceived: Number(oemExtra) || 0,
         mobile: digitsLast10(mobile),
+        schemePassOn: passOn,
       });
       await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, { ...kyc, ...extraProof });
       toast.success("Sent for approval");
@@ -137,6 +141,15 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           loading={dealLoading}
           missingPrice={!model || !variant}
           showOwnerPnl={!!canSeeOwnerCommercials}
+          passOn={passOn}
+          onPassOn={(key, yes, available) => {
+            setPassOn((p) => ({ ...p, [key]: yes }));
+            setBudget((cur) => {
+              const n = Number(cur) || Number(deal?.netToCx) || 0;
+              const delta = yes ? -(Number(available) || 0) : (Number(available) || 0);
+              return Math.max(0, n + delta);
+            });
+          }}
         />
         <Field label="OEM Extra Support">
           <Input data-testid="approval-oem-extra" type="number" min="0" step="1"

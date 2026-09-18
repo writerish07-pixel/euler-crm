@@ -171,14 +171,17 @@ export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onCha
 }
 
 export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin }) {
-  const kinds = customerType === "B2B"
-    ? ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst"]
-    : ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"];
+  const kinds = kycKinds(customerType);
+  const b2b = customerType === "B2B";
   return (
     <div className="sm:col-span-2 space-y-2" data-testid="kyc-block">
       <div className="text-xs font-semibold text-ink">KYC documents</div>
-      <p className="text-[11px] text-ink-soft">Aadhaar front &amp; back and PAN are required. B2B also needs GST. Phone camera uses the rear lens.</p>
-      {customerType === "B2B" && (
+      <p className="text-[11px] text-ink-soft">
+        {b2b
+          ? "B2B needs PAN, GST certificate and GSTIN. Aadhaar is optional."
+          : "Aadhaar front & back and PAN are required. Phone camera uses the rear lens."}
+      </p>
+      {b2b && (
         <label className="block">
           <span className="block text-xs font-medium text-ink-soft mb-1">GSTIN *</span>
           <input data-testid="lead-gstin" value={gstin} onChange={(e) => onGstin(e.target.value)}
@@ -187,7 +190,12 @@ export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin })
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {kinds.map((kind) => (
-          <DocSlot key={kind} kind={kind} localFile={files[kind]} onLocalFile={(f) => setFiles((prev) => ({ ...prev, [kind]: f }))} canUpload />
+          <div key={kind}>
+            <DocSlot kind={kind} localFile={files[kind]} onLocalFile={(f) => setFiles((prev) => ({ ...prev, [kind]: f }))} canUpload />
+            {b2b && (kind === "kyc_aadhaar_front" || kind === "kyc_aadhaar_back") && (
+              <div className="text-[10px] text-ink-faint mt-0.5 px-1">Optional for B2B</div>
+            )}
+          </div>
         ))}
       </div>
     </div>
@@ -201,11 +209,21 @@ export async function uploadKycFiles(url, files) {
   }
 }
 
-export function kycReady(customerType, files, gstin) {
-  const need = customerType === "B2B"
+export function kycKinds(customerType) {
+  return customerType === "B2B"
     ? ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst"]
     : ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"];
-  if (need.some((k) => !files[k])) return "Attach Aadhaar front, Aadhaar back and PAN" + (customerType === "B2B" ? ", plus GST" : "");
+}
+
+export function kycReady(customerType, files, gstin) {
+  const need = customerType === "B2B"
+    ? ["kyc_pan", "kyc_gst"]
+    : ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"];
+  if (need.some((k) => !files[k])) {
+    return customerType === "B2B"
+      ? "Attach PAN and GST certificate"
+      : "Attach Aadhaar front, Aadhaar back and PAN";
+  }
   if (customerType === "B2B" && !String(gstin || "").trim()) return "Enter the GSTIN";
   return "";
 }

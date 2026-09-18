@@ -37,7 +37,9 @@ KINDS = {
 }
 
 KYC_INDIVIDUAL = ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan")
-KYC_B2B = KYC_INDIVIDUAL + ("kyc_gst",)
+# B2B is a firm: PAN + GST are required. Aadhaar is optional (may still be attached).
+KYC_B2B = ("kyc_pan", "kyc_gst")
+KYC_B2B_OPTIONAL = ("kyc_aadhaar_front", "kyc_aadhaar_back")
 
 ALLOWED_TYPES = {
     "image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif",

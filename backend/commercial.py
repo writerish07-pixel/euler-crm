@@ -104,15 +104,22 @@ def default_rto_insurance_for_model(model, variant=""):
     return None
 
 
-def apply_deal_additional(deal, cx_demand=None):
-    """Additional (Dealer) = max(0, Ex+RTO+Insurance − Cx Demand). Owner-only if any gap."""
+def apply_deal_additional(deal, cx_demand=None, scheme_passed=None):
+    """Additional (Dealer) = max(0, Ex+RTO+Insurance − Cx Demand − OEM scheme passed).
+
+    Owner approval is only required when the remaining gap is a dealer extra
+    (or the customer is asked to pay above list). Passing OEM scheme does not
+    by itself need Owner.
+    """
     deal = dict(deal or {})
     cx = round2(max(0.0, num(cx_demand if cx_demand is not None else deal.get("cxDemand"))))
+    passed = round2(max(0.0, num(scheme_passed if scheme_passed is not None else deal.get("schemePassed"))))
     price_total = round2(
         num(deal.get("exShowroom")) + num(deal.get("rto")) + num(deal.get("insurance")))
-    diff = round2(price_total - cx)
+    diff = round2(price_total - cx - passed)
     deal["cxDemand"] = cx
     deal["priceTotal"] = price_total
+    deal["schemePassed"] = passed
     deal["additionalDiscount"] = round2(max(0.0, diff))
     deal["dealDifference"] = diff
     deal["needsOwnerApproval"] = abs(diff) >= DEAL_AMOUNT_EQUAL_RUPEES
@@ -153,7 +160,8 @@ def compute_deal_format(charges, cx_demand=0):
         "supportRequired": support,
         "extraMargin": round2(max(0.0, -support)),
         "schemeIncluded": False,
-    }, cx)
+        "schemePassed": 0,
+    }, cx, 0)
 
 
 def normalize_benefit_mode(mode):
@@ -1397,6 +1405,70 @@ def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows
             "entitlements": entitlements,
             "entitlementCompanyTotal": round2(sum(e["companyShare"] for e in entitlements)),
             "entitlementDealerTotal": round2(sum(e["dealerShare"] for e in entitlements))}
+
+
+def staff_scheme_offers_for_vehicle(model, variant, booking_date, scheme_rows):
+    """OEM scheme lines an executive can pass on at lead-create. No owner P&L."""
+    ctx = get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
+    offers = []
+    for key, rule in (ctx.get("rules") or {}).items():
+        if key == "additionalDiscount":
+            continue
+        avail = round2(num(rule.get("schemeAvailable") or rule.get("maxAmount")))
+        if not rule.get("allowed") or avail <= 0:
+            continue
+        offers.append({
+            "key": key,
+            "label": rule.get("label") or SCHEME_COMPONENT_LABELS.get(key, key),
+            "schemeAvailable": avail,
+        })
+    for e in ctx.get("entitlements") or []:
+        avail = round2(num(e.get("schemeAvailable") or e.get("totalBenefit")))
+        if avail <= 0:
+            continue
+        offers.append({
+            "key": e.get("key"),
+            "label": e.get("label") or SCHEME_COMPONENT_LABELS.get(e.get("key"), e.get("key")),
+            "schemeAvailable": avail,
+            "automatic": True,
+        })
+    total = round2(sum(o["schemeAvailable"] for o in offers))
+    return {
+        "schemeMonth": ctx.get("schemeMonth") or "",
+        "model": ctx.get("model") or str(model or ""),
+        "variant": ctx.get("variant") or str(variant or ""),
+        "offers": offers,
+        "oemAvailableTotal": total,
+    }
+
+
+def scheme_passed_from_pass_on(offers, pass_on):
+    """Full available amount is passed when that component's pass-on is Yes."""
+    used = {}
+    breakup = {}
+    total = 0.0
+    flags = pass_on if isinstance(pass_on, dict) else {}
+    for o in offers or []:
+        key = o.get("key")
+        if not key:
+            continue
+        yes = bool(flags.get(key))
+        used[key] = yes
+        amt = round2(num(o.get("schemeAvailable"))) if yes else 0.0
+        breakup[key] = amt
+        total += amt
+    return round2(total), breakup, used
+
+
+def apply_scheme_to_deal(deal, scheme_passed=0):
+    """Attach OEM-passed amount onto a scheme-free deal card and recut Additional."""
+    deal = dict(deal or {})
+    passed = round2(max(0.0, num(scheme_passed)))
+    deal["schemePassed"] = passed
+    deal["schemeIncluded"] = passed > 0
+    deal["netToCxAfterScheme"] = round2(num(deal.get("netToCx")) - passed)
+    deal["suggestedCxDemand"] = round2(max(0.0, num(deal.get("netToCx")) - passed))
+    return apply_deal_additional(deal, deal.get("cxDemand"), passed)
 
 
 def validate_scheme_offers(model, variant, booking_date, offers, scheme_rows):

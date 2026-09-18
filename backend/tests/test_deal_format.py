@@ -174,3 +174,67 @@ async def test_booking_stores_payment_reference(client):
     assert bk["paymentReference"] == "UTR123456789"
     lead = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(lead["customerOutstanding"]) == 1375000
+
+
+def test_oem_scheme_pass_on_cuts_additional_not_owner_approval():
+    deal = ce.compute_deal_format({
+        "exShowroom": 1410000, "rto": 10000, "insurance": 30000, "handlingCharges": 10000,
+    }, 1440000)
+    out = ce.apply_scheme_to_deal(deal, 10000)
+    assert out["schemePassed"] == 10000
+    assert out["additionalDiscount"] == 0
+    assert out["needsOwnerApproval"] is False
+    assert out["schemeIncluded"] is True
+
+
+@pytest.mark.asyncio
+async def test_deal_preview_pass_on_loyalty(client):
+    await server.db.scheme_master.delete_many({"schemeId": "SCM-DEAL-LOY"})
+    await server.db.scheme_master.insert_one({
+        "schemeId": "SCM-DEAL-LOY", "schemeMonth": "2026-09",
+        "effectiveFrom": "2026-09-01", "effectiveTo": "2026-09-30",
+        "model": "Storm", "variant": "", "componentKey": "loyaltyBonus",
+        "component": "Loyalty", "dealerShare": 0, "companyShare": 10000,
+        "totalBenefit": 10000, "status": "Active",
+    })
+    none = await client.get("/api/commercial/deal-preview", params={
+        "model": "Storm", "variant": "Storm LR Deal Test", "cxDemand": 1450000,
+        "on": "2026-09-10",
+    })
+    assert none.status_code == 200, none.text
+    body = none.json()
+    keys = [o["key"] for o in (body.get("schemeOffers") or [])]
+    assert "loyaltyBonus" in keys
+    assert body["schemePassed"] == 0
+
+    yes = await client.get("/api/commercial/deal-preview", params={
+        "model": "Storm", "variant": "Storm LR Deal Test", "cxDemand": 1440000,
+        "on": "2026-09-10", "passOnKeys": "loyaltyBonus",
+    })
+    assert yes.status_code == 200, yes.text
+    passed = yes.json()
+    assert passed["schemePassed"] == 10000
+    assert passed["additionalDiscount"] == 0
+    assert passed["needsOwnerApproval"] is False
+
+
+@pytest.mark.asyncio
+async def test_owner_inline_field_edit(client):
+    r = await client.post("/api/leads", json={
+        "customerName": "Owner Field", "mobile": next_mobile(),
+        "interestedModel": "Storm", "variant": "Storm LR Deal Test",
+        "executive": "Amit", "budget": 1450000, "city": "Jaipur",
+    })
+    assert r.status_code == 200, r.text
+    lid = r.json()["leadId"]
+    up = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "city", "value": "Udaipur"})
+    assert up.status_code == 200, up.text
+    assert up.json()["city"] == "Udaipur"
+    extra = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "oemExtraSupportReceived", "value": 7000,
+    })
+    assert extra.status_code == 200, extra.text
+    assert ce.num(extra.json()["oemExtraSupportReceived"]) == 7000
+    blocked = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "dealerMarginNetExGst", "value": 1})
+    assert blocked.status_code == 422
+
