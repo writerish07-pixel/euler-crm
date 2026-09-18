@@ -8,7 +8,7 @@ import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
-import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
+import { LeadDocsStrip, RefundChequePick, kycKinds } from "../components/LeadDocuments";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 
@@ -206,7 +206,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
-        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} />)}
+        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters} />}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
@@ -350,14 +350,63 @@ function KV({ label, value, tone }) {
   );
 }
 
-function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
+function OwnerKV({ label, field, value, display, type = "text", options, leadId, onSaved, tone, numeric }) {
+  const { isOwner } = useAuth();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value ?? "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setDraft(value ?? ""); }, [value]);
+  if (!isOwner) return <KV label={label} value={display ?? value ?? "—"} tone={tone} />;
+  const save = async () => {
+    setBusy(true);
+    try {
+      await put(`/leads/${leadId}/owner-field`, {
+        field,
+        value: numeric ? Number(draft) || 0 : draft,
+      });
+      toast.success(`${label} updated`);
+      setEditing(false);
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not save"));
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 last:border-0 min-w-0" data-testid={`owner-field-${field}`}>
+      <span className="text-sm text-ink-soft min-w-0 break-words">{label}</span>
+      {editing ? (
+        <div className="flex items-center gap-1 min-w-0">
+          {options ? (
+            <select className="rounded-md ring-1 ring-inset ring-line text-sm py-1 px-1.5 max-w-[10rem]"
+              value={draft} onChange={(e) => setDraft(e.target.value)} data-testid={`owner-edit-${field}`}>
+              {options.map((o) => <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>)}
+            </select>
+          ) : (
+            <input className="rounded-md ring-1 ring-inset ring-line text-sm py-1 px-1.5 w-28 font-mono"
+              type={type} value={draft} onChange={(e) => setDraft(e.target.value)}
+              data-testid={`owner-edit-${field}`} />
+          )}
+          <Button className="!py-0.5 !px-1.5 text-[11px]" onClick={save} disabled={busy} data-testid={`owner-save-${field}`}>Save</Button>
+          <Button variant="ghost" className="!py-0.5 !px-1.5 text-[11px]" onClick={() => { setDraft(value ?? ""); setEditing(false); }}>Cancel</Button>
+        </div>
+      ) : (
+        <button type="button" className="inline-flex items-center gap-1 font-mono tabular text-sm font-medium text-right shrink-0 text-cobalt"
+          data-testid={`owner-edit-btn-${field}`} onClick={() => setEditing(true)}>
+          <span className={tone || "text-ink"}>{display ?? (value || value === 0 ? (numeric ? inr(value) : value) : "—")}</span>
+          <Pencil size={11} className="text-ink-faint" />
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {} }) {
   const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, canSeeOwnerCommercials } = useAuth();
   const booked = !!actions.isBooked;
-  const kycKinds = lead.customerType === "B2B"
-    ? ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst"]
-    : ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"];
+  const kycDocKinds = kycKinds(lead.customerType);
   const canUploadKyc = isOwner || isSalesGm || isTl || isExecutive;
   const canSeeKyc = canUploadKyc || isAccounts;
+  const lid = lead.leadId;
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
       <Card className="p-4">
@@ -366,7 +415,8 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
         <KV label="TCS" value={inr(c.tcs)} />
         <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />
         <KV label="Passed to Customer" value={inr(c.totalPassedToCustomer)} />
-        <KV label="Final Exchange Value" value={inr(lead.finalExchangeValue || 0)} />
+        <OwnerKV label="Final Exchange Value" field="finalExchangeValue" value={lead.finalExchangeValue || 0}
+          display={inr(lead.finalExchangeValue || 0)} numeric leadId={lid} onSaved={onSaved} />
         <div className="mt-2 pt-2 border-t border-line flex items-center justify-between">
           <span className="text-sm font-semibold text-ink">Customer Payable</span>
           <span className="font-mono font-bold text-cobalt">{inr(c.customerPayable)}</span>
@@ -379,8 +429,14 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
         {canSeeOwnerCommercials && (
           <KV label="OEM Claimable (Company Share)" value={inr(c.oemClaimCompanyShare ?? c.claim?.claimEligible)} tone="text-amber-600" />
         )}
-        <KV label="OEM Extra Support Received" value={inr(lead.oemExtraSupportReceived || c.oemExtraSupport?.oemExtraSupportReceived || 0)} tone="text-amber-600" />
-        <KV label="OEM Extra Support Passed" value={inr(lead.oemExtraSupportPassed || c.oemExtraSupport?.oemExtraSupportPassed || 0)} />
+        <OwnerKV label="OEM Extra Support Received" field="oemExtraSupportReceived"
+          value={lead.oemExtraSupportReceived || 0}
+          display={inr(lead.oemExtraSupportReceived || c.oemExtraSupport?.oemExtraSupportReceived || 0)}
+          numeric leadId={lid} onSaved={onSaved} tone="text-amber-600" />
+        <OwnerKV label="OEM Extra Support Passed" field="oemExtraSupportPassed"
+          value={lead.oemExtraSupportPassed || 0}
+          display={inr(lead.oemExtraSupportPassed || c.oemExtraSupport?.oemExtraSupportPassed || 0)}
+          numeric leadId={lid} onSaved={onSaved} />
         {canSeeOwnerCommercials && (
           <>
             <KV label="OEM Extra Support Retained" value={inr(lead.oemExtraSupportRetained || c.oemExtraSupport?.oemExtraSupportRetained || 0)} tone="text-emerald-600" />
@@ -389,32 +445,43 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [] }) {
             <KV label="Dealer Margin (Net)" value={inr(c.margin?.marginNetExGst)} />
           </>
         )}
-        <KV label="Lead Source" value={lead.leadSource || "—"} tone="text-ink" />
+        <OwnerKV label="Lead Source" field="leadSource" value={lead.leadSource || ""}
+          options={(masters.leadSources || []).map((s) => s)} leadId={lid} onSaved={onSaved} />
       </Card>
       <Card className="p-4 sm:col-span-2">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6">
-          <KV label="Executive" value={lead.executive || "—"} />
-          <div className="flex items-center justify-between py-1.5 border-b border-zinc-100">
-            <span className="text-sm text-ink-soft">Mobile</span>
-            <CallLink mobile={lead.mobile} compact />
-          </div>
-          <KV label="Priority" value={lead.priority} />
+          <OwnerKV label="Customer" field="customerName" value={lead.customerName || ""} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Executive" field="executive" value={lead.executive || ""}
+            options={["", ...(masters.executives || [])]} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Mobile" field="mobile" value={lead.mobile || ""} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Priority" field="priority" value={lead.priority || "Normal"}
+            options={masters.priorities || ["Low", "Normal", "High", "Urgent"]} leadId={lid} onSaved={onSaved} />
           <KV label="Created" value={fmtDate(lead.createdDate)} />
-          <KV label="Booking Date" value={fmtDate(lead.bookingDate)} />
-          <KV label="Finance" value={lead.financeRequired} />
-          <KV label="Exchange" value={lead.exchangeRequired} />
-          <KV label="Customer type" value={lead.customerType || "Individual"} />
-          {lead.gstin ? <KV label="GSTIN" value={lead.gstin} /> : null}
+          <OwnerKV label="Booking Date" field="bookingDate" value={lead.bookingDate || ""} type="date"
+            display={fmtDate(lead.bookingDate)} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Finance" field="financeRequired" value={lead.financeRequired || "No"}
+            options={["No", "Yes"]} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Exchange" field="exchangeRequired" value={lead.exchangeRequired || "No"}
+            options={["No", "Yes"]} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Customer type" field="customerType" value={lead.customerType || "Individual"}
+            options={["Individual", "B2B"]} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="GSTIN" field="gstin" value={lead.gstin || ""} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="City" field="city" value={lead.city || ""} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Model" field="interestedModel" value={lead.interestedModel || ""}
+            options={["", ...(masters.models || [])]} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Variant" field="variant" value={lead.variant || ""} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
+            display={inr(lead.budget || lead.cxDemand || 0)} numeric leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Remarks" field="remarks" value={lead.remarks || ""} leadId={lid} onSaved={onSaved} />
         </div>
-        {lead.remarks && <div className="mt-2 text-sm text-ink-soft bg-zinc-50 rounded-lg p-3">{lead.remarks}</div>}
       </Card>
       {canSeeKyc && (
         <div className="sm:col-span-2">
           <LeadDocsStrip
             leadId={lead.leadId}
-            kinds={kycKinds}
-            canUploadKinds={canUploadKyc ? kycKinds : []}
+            kinds={kycDocKinds}
+            canUploadKinds={canUploadKyc ? kycDocKinds : []}
             title="KYC"
             documents={documents}
             onChanged={onSaved}

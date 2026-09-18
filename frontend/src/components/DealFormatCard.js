@@ -19,6 +19,8 @@ export default function DealFormatCard({
   loading = false,
   missingPrice = false,
   showOwnerPnl = true,
+  passOn = {},
+  onPassOn,
 }) {
   const d = snapshot || {};
   const demand = cxDemand ?? d.cxDemand ?? 0;
@@ -27,11 +29,13 @@ export default function DealFormatCard({
   const priceTotal = Number(
     d.priceTotal ?? ((Number(d.exShowroom) || 0) + (Number(d.rto) || 0) + (Number(d.insurance) || 0)),
   );
+  const offers = Array.isArray(d.schemeOffers) ? d.schemeOffers : [];
+  const passed = Number(d.schemePassed || 0);
   const additional = Number(
-    d.additionalDiscount ?? Math.max(0, priceTotal - (Number(demand) || 0)),
+    d.additionalDiscount ?? Math.max(0, priceTotal - (Number(demand) || 0) - passed),
   );
   const ownerOnly = d.needsOwnerApproval == null
-    ? Math.abs(priceTotal - (Number(demand) || 0)) >= 1
+    ? Math.abs(priceTotal - (Number(demand) || 0) - passed) >= 1
     : !!d.needsOwnerApproval;
   return (
     <div className="rounded-lg border border-line bg-paper px-3 py-3 space-y-1.5" data-testid="deal-format-card">
@@ -54,6 +58,50 @@ export default function DealFormatCard({
       <div className="border-t border-line pt-1.5">
         <Line k="Net to customer" v={d.netToCx} strong testid="deal-net-to-cx" />
       </div>
+      {offers.length > 0 && (
+        <div className="rounded-md border border-line bg-white px-2 py-2 space-y-2" data-testid="deal-oem-scheme">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
+            OEM scheme available{d.schemeMonth ? ` · ${d.schemeMonth}` : ""}
+          </div>
+          {offers.map((o) => {
+            const yes = !!(passOn[o.key] ?? d.schemePassOn?.[o.key]);
+            return (
+              <div key={o.key} className="space-y-1" data-testid={`deal-scheme-${o.key}`}>
+                <div className="flex justify-between gap-3 text-sm min-w-0">
+                  <span className="text-ink-soft min-w-0 break-words">{o.label}</span>
+                  <span className="font-mono shrink-0">{inr(o.schemeAvailable)}</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 text-sm">
+                  <span className="text-[11px] text-ink-faint uppercase">Pass on to customer?</span>
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="radio"
+                      name={`pass-${o.key}`}
+                      data-testid={`pass-no-${o.key}`}
+                      checked={!yes}
+                      disabled={readOnly}
+                      onChange={() => onPassOn && onPassOn(o.key, false, o.schemeAvailable)}
+                    />
+                    No
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="radio"
+                      name={`pass-${o.key}`}
+                      data-testid={`pass-yes-${o.key}`}
+                      checked={yes}
+                      disabled={readOnly}
+                      onChange={() => onPassOn && onPassOn(o.key, true, o.schemeAvailable)}
+                    />
+                    Yes
+                  </label>
+                </div>
+              </div>
+            );
+          })}
+          <Line k="OEM scheme passed" v={passed} strong testid="deal-scheme-passed" tone={passed > 0 ? "text-emerald-700" : ""} />
+        </div>
+      )}
       {readOnly ? (
         <Line k="Cx Demand" v={demand} strong testid="deal-cx-demand" />
       ) : (
@@ -78,7 +126,7 @@ export default function DealFormatCard({
       </div>
       {ownerOnly && Number(demand) > 0 && (
         <p className="text-[11px] text-rose-700" data-testid="deal-owner-only">
-          Deal differs from my total — only Owner can approve.
+          Deal differs from my total after OEM scheme — only Owner can approve.
         </p>
       )}
       {(!extra || showOwnerPnl) && (
@@ -92,7 +140,11 @@ export default function DealFormatCard({
         />
       </div>
       )}
-      <p className="text-[11px] text-ink-faint">No scheme on this card. Scheme is decided later. Additional (Dealer) is auto-filled from my total minus Cx Demand.</p>
+      <p className="text-[11px] text-ink-faint">
+        {offers.length
+          ? "Pass on Yes gives the full OEM amount to the customer and recuts Additional (Dealer)."
+          : "No OEM scheme on this model this month. Additional (Dealer) is auto-filled from my total minus Cx Demand."}
+      </p>
     </div>
   );
 }

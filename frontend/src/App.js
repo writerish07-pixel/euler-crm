@@ -96,12 +96,22 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
 }
 
 function HomeRedirect() {
-  const { isAccounts, isField, isExecutive, isOemFinance, isSalesGm } = useAuth();
+  const { isAccounts, isField, isExecutive, isOemFinance, isSalesGm, isTl } = useAuth();
   if (isOemFinance) return <Navigate to="/oem-finance" replace />;
   if (isAccounts) return <Navigate to="/accounts" replace />;
   if (isField) return <Navigate to="/field" replace />;
   if (isSalesGm) return <SalesGmDashboard />;
   if (isExecutive) return <ExecutiveDashboard />;
+  if (isTl) {
+    return (
+      <div data-testid="tl-home">
+        <Dashboard />
+        <div className="mt-10 pt-8 border-t border-line">
+          <ExecutiveDashboard teamView />
+        </div>
+      </div>
+    );
+  }
   return <Dashboard />;
 }
 

@@ -10,7 +10,7 @@ from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
@@ -1111,6 +1111,8 @@ class LeadIn(BaseModel):
     oemExtraSupportReceived: float = 0
     # Staff confirm: this is another vehicle on a mobile already in the CRM.
     anotherVehicle: bool = False
+    # Executive create-lead: which OEM scheme lines to pass to the customer.
+    schemePassOn: Optional[Dict[str, bool]] = None
 
 
 class LeadUpdateIn(BaseModel):
@@ -2214,11 +2216,18 @@ async def accounts_dashboard():
 
 @api.get("/executive/dashboard")
 async def executive_dashboard(user=Depends(current_user)):
-    """Pipeline home for a dealership executive — scoped to their assigned leads."""
-    if user.get("role") not in ("executive", "owner"):
-        raise HTTPException(403, "Executive dashboard is for Executive (and Owner).")
+    """Pipeline home for a dealership executive — scoped to their assigned leads.
+
+    Team Leader sees the same widgets for every executive (TL is above execs).
+    Owner can open it as an all-dealership view. Keep this endpoint as the
+    single source so TL home automatically inherits new executive-dashboard
+    fields.
+    """
+    role = user.get("role")
+    if role not in ("executive", "owner", "tl"):
+        raise HTTPException(403, "Executive dashboard is for Executive, Team Leader, and Owner.")
     leads_all = await db.leads.find().to_list(5000)
-    mine = _leads_for_executive(leads_all, user) if user.get("role") == "executive" else leads_all
+    mine = _leads_for_executive(leads_all, user) if role == "executive" else leads_all
     ym = this_month()
     td = today()
     vol = _volume_period_kpis(mine, include_money=False)
@@ -2301,17 +2310,25 @@ async def executive_dashboard(user=Depends(current_user)):
         })
 
     plan = await _load_exec_incentive_plan_for(user.get("name") or "")
-    incentive = ce.evaluate_executive_incentive(len(monthly_deliveries), plan)
-    incentive["month"] = ym
-    incentive["executive"] = plan.get("executive") or (user.get("name") or "")
+    incentive = None
+    if role == "executive" or role == "owner":
+        incentive = ce.evaluate_executive_incentive(len(monthly_deliveries), plan)
+        incentive["month"] = ym
+        incentive["executive"] = plan.get("executive") or (user.get("name") or "")
+
+    if role == "executive":
+        scope_note = "Scoped to leads where Executive matches your name."
+    elif role == "tl":
+        scope_note = "Team Leader view — all executives' pipelines."
+    else:
+        scope_note = "Owner view — all dealership leads."
 
     return {
         "scope": {
             "executiveName": user.get("name") or "",
             "matchedLeads": len(mine),
-            "note": "Scoped to leads where Executive matches your name."
-                    if user.get("role") == "executive"
-                    else "Owner view — all dealership leads.",
+            "note": scope_note,
+            "teamView": role in ("tl", "owner"),
         },
         "kpis": {
             "myLeadsMtd": vol["mtd"]["leads"],
@@ -3475,6 +3492,7 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
                             allow_same_mobile: bool = False, viewer=None):
     payload = body.model_dump()
     another = bool(payload.pop("anotherVehicle", False))
+    scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
     await _raise_if_mobile_taken(
         body.mobile, incoming_name=body.customerName,
         incoming_executive=body.executive, allow=another or allow_same_mobile,
@@ -3515,7 +3533,8 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     if cx > 0:
         row = await _apply_quoted_deal(
             lead_id, payload.get("interestedModel"), payload.get("variant"), cx,
-            created_date, oem_extra_received=extra if extra > 0 else None)
+            created_date, oem_extra_received=extra if extra > 0 else None,
+            scheme_pass_on=scheme_pass_on)
         return _lead_for_viewer(row, viewer)
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), viewer)
 
@@ -3539,6 +3558,7 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             raise HTTPException(422, "Enter the deal amount before sending for GM / Owner approval.")
         payload = body.model_dump()
         another = bool(payload.pop("anotherVehicle", False))
+        scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
         await _raise_if_mobile_taken(
             body.mobile, incoming_name=body.customerName,
             incoming_executive=user.get("name") or payload.get("executive") or "",
@@ -3553,7 +3573,7 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
         deal_amount = ce.round2(ce.num(body.budget))
         deal_format = await _deal_format_for(
             payload.get("interestedModel"), payload.get("variant"), deal_amount,
-            payload.get("createdDate"))
+            payload.get("createdDate"), scheme_pass_on)
         req = {
             "requestId": request_id,
             "status": "pending",
@@ -3565,6 +3585,7 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             "dealAmount": deal_amount,
             "dealFormat": deal_format,
             "cxDemand": deal_amount,
+            "schemePassOn": scheme_pass_on,
         }
         await db.lead_requests.insert_one(req)
         name = (body.customerName or "Customer").strip()
@@ -3610,17 +3631,23 @@ def _request_out(doc):
     row["askedForApproval"] = bool(row.get("askedForApproval"))
     row["oemExtraSupportReceived"] = ce.round2(ce.num(
         payload.get("oemExtraSupportReceived") or row.get("oemExtraSupportReceived") or 0))
+    row["schemePassOn"] = _parse_scheme_pass_on(
+        row.get("schemePassOn") or payload.get("schemePassOn"))
     df = row.get("dealFormat") or {}
     if df.get("priceFound") or df.get("exShowroom") or df.get("rto") or df.get("insurance"):
-        df = ce.apply_deal_additional(df, row.get("cxDemand") or row.get("budget"))
+        df = ce.apply_deal_additional(
+            df, row.get("cxDemand") or row.get("budget"),
+            df.get("schemePassed") or 0)
         row["dealFormat"] = df
         row["priceTotal"] = df.get("priceTotal") or 0
         row["additionalDiscount"] = df.get("additionalDiscount") or 0
         row["needsOwnerApproval"] = bool(df.get("needsOwnerApproval"))
+        row["schemePassed"] = df.get("schemePassed") or 0
     else:
         row["priceTotal"] = 0
         row["additionalDiscount"] = 0
         row["needsOwnerApproval"] = False
+        row["schemePassed"] = 0
     return row
 
 
@@ -3794,10 +3821,12 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             return {"ok": True, "leadId": fresh["leadId"], "already": True}
         raise HTTPException(409, f"This request is already {(fresh or {}).get('status')}.")
     payload = claimed.get("payload") or {}
+    scheme_pass_on = _parse_scheme_pass_on(
+        claimed.get("schemePassOn") or payload.get("schemePassOn"))
     live_deal = await _deal_format_for(
         payload.get("interestedModel"), payload.get("variant"),
         payload.get("budget") or claimed.get("dealAmount") or claimed.get("cxDemand"),
-        payload.get("createdDate"))
+        payload.get("createdDate"), scheme_pass_on)
     if str(user.get("role") or "") == "sales_gm" and live_deal.get("needsOwnerApproval"):
         await db.lead_requests.update_one(
             {"requestId": request_id},
@@ -3848,10 +3877,11 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             await _apply_quoted_deal(
                 existing_id, payload.get("interestedModel"), payload.get("variant"),
                 payload.get("budget"), payload.get("createdDate"),
-                oem_extra_received=extra if extra > 0 else None)
+                oem_extra_received=extra if extra > 0 else None,
+                scheme_pass_on=scheme_pass_on)
             lead = clean(await db.leads.find_one({"leadId": existing_id}))
         else:
-            body = LeadIn(**payload)
+            body = LeadIn(**{**payload, "schemePassOn": scheme_pass_on, "anotherVehicle": True})
             lead = await _insert_live_lead(
                 body, source_note="Lead created after GM / Owner approval",
                 allow_same_mobile=True)
@@ -4108,6 +4138,7 @@ class LeadRequestUpdateIn(BaseModel):
     gstin: Optional[str] = None
     oemExtraSupportReceived: Optional[float] = None
     mobile: Optional[str] = None
+    schemePassOn: Optional[Dict[str, bool]] = None
 
 
 async def _request_public(req, user):
@@ -4185,6 +4216,10 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
         payload["mobile"] = digits[-10:]
     if payload.get("customerType"):
         payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+    scheme_pass_on = _parse_scheme_pass_on(
+        patch.get("schemePassOn") if "schemePassOn" in patch else req.get("schemePassOn"))
+    if "schemePassOn" in patch:
+        payload["schemePassOn"] = scheme_pass_on
     mobile_digits = re.sub(r"\D", "", str(payload.get("mobile") or ""))
     if len(mobile_digits) < 10:
         raise HTTPException(422, "A 10-digit mobile is required before sending for approval.")
@@ -4195,12 +4230,13 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
         raise HTTPException(422, "Select model and variant so Deal format can load Price Master.")
     deal_format = await _deal_format_for(
         model, variant, deal_amount,
-        payload.get("createdDate"))
+        payload.get("createdDate"), scheme_pass_on)
     await db.lead_requests.update_one({"requestId": request_id}, {"$set": {
         "payload": payload,
         "dealAmount": deal_amount,
         "dealFormat": deal_format,
         "cxDemand": deal_amount,
+        "schemePassOn": scheme_pass_on,
         "askedForApproval": deal_amount > 0,
         "askedAt": now_iso() if deal_amount > 0 else "",
     }})
@@ -4582,6 +4618,75 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
     return clean(updated)
 
 
+class OwnerFieldIn(BaseModel):
+    field: str
+    value: Optional[Any] = None
+
+
+OWNER_IDENTITY_FIELDS = {
+    "customerName", "mobile", "altMobile", "village", "city", "leadSource",
+    "interestedModel", "variant", "executive", "currentStatus", "priority",
+    "budget", "remarks", "financeRequired", "exchangeRequired",
+    "nextFollowupDate", "bookingDate", "bookingAmount", "customerType", "gstin",
+}
+OWNER_PRICE_FIELDS = {
+    "rto", "insuranceAmount", "accessoriesAmount", "handlingCharges", "trc",
+    "fastag", "extendedWarranty", "rsaAmc", "otherCharges", "finalExchangeValue",
+    "tcsApplicable", "insuranceArrangedBy",
+}
+OWNER_SCHEME_FIELDS = {
+    "oemExtraSupportReceived", "oemExtraSupportPassed", "additionalDiscount",
+}
+
+
+@api.put("/leads/{lead_id}/owner-field")
+async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(actor),
+                               _owner=Depends(owner_only)):
+    """Owner inline edit of one lead field (identity, price source, or scheme extra)."""
+    field = str(body.field or "").strip()
+    if field == "cxDemand":
+        field = "budget"
+    if field not in OWNER_IDENTITY_FIELDS | OWNER_PRICE_FIELDS | OWNER_SCHEME_FIELDS:
+        raise HTTPException(422, f"Field '{field}' cannot be edited inline.")
+    lead = await get_lead_or_404(lead_id)
+    _require_mutable_lead(lead, "lead edits", act)
+    value = body.value
+    if field in ("budget", "bookingAmount") and value is not None:
+        value = ce.round2(max(0.0, ce.num(value)))
+    if field in OWNER_IDENTITY_FIELDS:
+        return await update_lead(lead_id, LeadUpdateIn(**{field: value}), act, None)
+    if field in OWNER_PRICE_FIELDS:
+        if field in ("tcsApplicable", "insuranceArrangedBy"):
+            patch_val = str(value or "").strip()
+        else:
+            patch_val = ce.round2(max(0.0, ce.num(value)))
+        old = {field: lead.get(field)}
+        await db.leads.update_one({"leadId": lead_id}, {"$set": {
+            field: patch_val, "lastUpdated": now_iso(),
+            "lastUpdatedBy": act.get("email", ""),
+        }})
+        await recompute_lead(lead_id)
+        await write_audit(act, "update", "lead-field", leadId=lead_id, old=old, new={field: patch_val})
+        updated = await db.leads.find_one({"leadId": lead_id})
+        await sheet_sync("leads", clean(dict(updated)))
+        return _lead_for_viewer(clean(updated), act)
+    # Scheme extras
+    patch_val = ce.round2(max(0.0, ce.num(value)))
+    if field == "oemExtraSupportPassed":
+        recv = ce.num(lead.get("oemExtraSupportReceived"))
+        patch_val = ce.round2(min(patch_val, recv))
+    old = {field: lead.get(field)}
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        field: patch_val, "lastUpdated": now_iso(),
+        "lastUpdatedBy": act.get("email", ""),
+    }})
+    await recompute_lead(lead_id)
+    await write_audit(act, "update", "lead-field", leadId=lead_id, old=old, new={field: patch_val})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    return _lead_for_viewer(clean(updated), act)
+
+
 async def _sync_booking_amount_edit(lead_id, lead, old_amount, new_amount, act=None):
     """Keep bookings row + Booking advance receipt aligned when bookingAmount is corrected."""
     new_amount = max(0.0, ce.num(new_amount))
@@ -4736,7 +4841,35 @@ def _deal_price_payable(lead):
     return None
 
 
-async def _deal_format_for(model, variant, cx_demand, on=None):
+def _parse_scheme_pass_on(raw) -> dict:
+    """Normalize {componentKey: true/false} from JSON, query string, or form."""
+    if not raw:
+        return {}
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        if text.startswith("{"):
+            try:
+                raw = json.loads(text)
+            except Exception:
+                return {}
+        else:
+            return {k.strip(): True for k in text.split(",") if k.strip()}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): bool(v) for k, v in raw.items() if k}
+
+
+async def _scheme_preview_for(model, variant, on=None):
+    as_of = str(on or today())[:10]
+    scheme_rows = await get_scheme_rows()
+    preview = ce.staff_scheme_offers_for_vehicle(model, variant, as_of, scheme_rows)
+    preview["asOf"] = as_of
+    return preview
+
+
+async def _deal_format_for(model, variant, cx_demand, on=None, scheme_pass_on=None):
     as_of = str(on or today())[:10]
     row = await _price_master_row(model, variant) if model else None
     charges = _charges_from_price_structure(_price_structure_from_master(row, as_of)) if row else {}
@@ -4746,14 +4879,66 @@ async def _deal_format_for(model, variant, cx_demand, on=None):
     deal["asOf"] = as_of
     deal["priceFound"] = bool(row)
     deal["priceId"] = (row or {}).get("priceId") or ""
+    preview = await _scheme_preview_for(model, variant, as_of)
+    flags = _parse_scheme_pass_on(scheme_pass_on)
+    passed, breakup, used = ce.scheme_passed_from_pass_on(preview.get("offers"), flags)
+    deal["schemeOffers"] = preview.get("offers") or []
+    deal["schemeMonth"] = preview.get("schemeMonth") or ""
+    deal["oemAvailableTotal"] = preview.get("oemAvailableTotal") or 0
+    deal["schemePassOn"] = used
+    deal["schemePassedBreakup"] = breakup
+    deal = ce.apply_scheme_to_deal(deal, passed)
     return deal
 
 
+async def _persist_scheme_pass_on(lead_id, pass_on, as_of=None):
+    """Write Use Scheme / Customer Benefit from the create-lead pass-on map."""
+    flags = _parse_scheme_pass_on(pass_on)
+    if not any(flags.values()):
+        return None
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead:
+        return None
+    scheme_date = _scheme_as_of(lead, as_of)
+    scheme_rows = await get_scheme_rows()
+    rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
+        lead.get("interestedModel") or "", lead.get("variant") or "",
+        scheme_date, scheme_rows)
+    preview = ce.staff_scheme_offers_for_vehicle(
+        lead.get("interestedModel") or "", lead.get("variant") or "",
+        scheme_date, scheme_rows)
+    passed, breakup, used = ce.scheme_passed_from_pass_on(preview.get("offers"), flags)
+    payload = {
+        "benefitMode": "Partial Benefit",
+        "schemeAsOf": scheme_date,
+        "schemeAllocationExplicit": True,
+        "schemeAllocationV2": True,
+        "benefitPassedBreakup": json.dumps(breakup),
+        "schemeComponentsUsed": json.dumps(used),
+        "customerBenefitPassed": passed,
+        "lastUpdated": now_iso(),
+    }
+    for key, rule in (rules_ctx.get("rules") or {}).items():
+        if key == "additionalDiscount":
+            continue
+        if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+            payload[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
+        else:
+            payload[key] = 0
+    await db.leads.update_one({"leadId": lead_id}, {"$set": payload})
+    await recompute_lead(lead_id)
+    return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
 async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None,
-                             oem_extra_received=None):
-    """Persist the scheme-free deal card and lock customer payable to Cx Demand."""
+                             oem_extra_received=None, scheme_pass_on=None):
+    """Persist the deal card and lock customer payable to Cx Demand.
+
+    OEM scheme pass-on (if any) is applied after the quote so Additional (Dealer)
+    does not absorb the OEM amount.
+    """
     cx = ce.round2(ce.num(cx_demand))
-    deal = await _deal_format_for(model, variant, cx, on)
+    deal = await _deal_format_for(model, variant, cx, on, scheme_pass_on)
     patch = {
         "cxDemand": cx,
         "budget": cx if cx > 0 else 0,
@@ -4776,6 +4961,8 @@ async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None,
     await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
     if cx > 0:
         await recompute_lead(lead_id)
+    if _parse_scheme_pass_on(scheme_pass_on):
+        await _persist_scheme_pass_on(lead_id, scheme_pass_on, on)
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
@@ -7620,12 +7807,23 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
 
 @api.get("/commercial/deal-preview")
 async def deal_preview(model: str = "", variant: str = "", cxDemand: float = 0,
-                       on: Optional[str] = None, user=Depends(current_user)):
-    """Scheme-free reverse quote: Price Master charges + billing TCS, no circular."""
-    deal = await _deal_format_for(model, variant, cxDemand, on)
+                       on: Optional[str] = None, passOnKeys: str = "",
+                       user=Depends(current_user)):
+    """Price Master quote plus OEM scheme available for the model, with pass-on."""
+    deal = await _deal_format_for(model, variant, cxDemand, on, passOnKeys)
     if not _is_owner_user(user):
         return _staff_safe_deal_preview(deal)
     return deal
+
+
+@api.get("/commercial/scheme-preview")
+async def scheme_preview(model: str = "", variant: str = "", on: Optional[str] = None,
+                         user=Depends(current_user)):
+    """OEM scheme lines available for a model/variant (no lead required)."""
+    out = await _scheme_preview_for(model, variant, on)
+    if not _is_owner_user(user):
+        return _staff_safe_scheme_rules(out)
+    return out
 
 
 @api.get("/price-master/variants")

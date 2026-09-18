@@ -84,9 +84,9 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, isTl, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
-    : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk" : "EV Dealership";
+    : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk" : isTl ? "Team Leader desk" : "EV Dealership";
   const nav = isOemFinance ? OEM_NAV : NAV;
   return (
     <aside
@@ -350,7 +350,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, isTl, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const location = useLocation();
@@ -402,6 +402,7 @@ export default function Layout({ children }) {
         isSalesGm={isSalesGm}
         canApproveLeads={canApproveLeads}
         isExecutive={isExecutive}
+        isTl={isTl}
         canViewMonthly={canViewMonthly}
         canMatchOemClaims={canMatchOemClaims}
         pendingApprovals={pendingApprovals}

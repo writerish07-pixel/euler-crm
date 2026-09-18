@@ -10,8 +10,13 @@ import { inr, compactInr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
+import { useAuth } from "../context/AuthContext";
 
-export default function ExecutiveDashboard() {
+export default function ExecutiveDashboard({ teamView = false }) {
+  // Team Leader home also renders this component so any new executive-dashboard
+  // widget appears for TL automatically. Do not fork a second copy.
+  const { isTl } = useAuth();
+  const team = teamView || isTl;
   const [d, setD] = useState(null);
   const load = useCallback(() => {
     get("/executive/dashboard").then(setD).catch(() => toast.error("Could not load executive dashboard"));
@@ -24,10 +29,10 @@ export default function ExecutiveDashboard() {
   return (
     <div data-testid="executive-dashboard">
       <PageHeader
-        title="Executive Dashboard"
+        title={team ? "Team Pipeline" : "Executive Dashboard"}
         subtitle={d
-          ? `${scope.note || "My pipeline"} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`
-          : "My pipeline"}
+          ? `${scope.note || (team ? "All executives" : "My pipeline")} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`
+          : (team ? "All executives" : "My pipeline")}
         actions={<ReportActions onRefresh={load} />}
       />
 
@@ -160,9 +165,11 @@ export default function ExecutiveDashboard() {
         </Card>
       )}
 
+      {!team && (
       <div className="mt-6">
         <YardStockCard />
       </div>
+      )}
       </>
       )}
     </div>

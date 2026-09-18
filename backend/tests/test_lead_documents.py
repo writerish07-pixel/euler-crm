@@ -159,7 +159,21 @@ async def test_kyc_then_approve_copies_docs_onto_the_lead(exec_client, client):
 
 
 @pytest.mark.asyncio
-async def test_b2b_needs_gst_and_gstin(exec_client, client):
+async def test_b2b_aadhaar_is_optional(exec_client, client):
+    r = await exec_client.post("/api/leads", json={
+        "customerName": "B2B No Aadhaar", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Executive", "budget": 200000,
+        "customerType": "B2B", "gstin": "22AAAAA0000A1Z5"})
+    rid = r.json()["requestId"]
+    pan = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "kyc_pan")
+    gst = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "kyc_gst")
+    assert pan.status_code == 200 and gst.status_code == 200
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == rid)
+    assert row["kycComplete"] is True
+    ap = await client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 200, ap.text
     r = await exec_client.post("/api/leads", json={
         "customerName": "B2B Co", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)",

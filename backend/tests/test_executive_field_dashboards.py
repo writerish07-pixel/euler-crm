@@ -30,6 +30,7 @@ async def client():
         ("accounts@euler.com", "Accounts", "accounts"),
         ("asm@euler.com", "ASM", "asm"),
         ("rm@euler.com", "RM", "rm"),
+        ("tl@euler.com", "Team Leader", "tl"),
     ):
         existing = await server.db.users.find_one({"email": email})
         if existing:
@@ -126,6 +127,23 @@ async def test_accounts_cannot_open_field_or_executive_dashboard(client):
     await _login(client, "accounts@euler.com")
     assert (await client.get("/api/field/dashboard")).status_code == 403
     assert (await client.get("/api/executive/dashboard")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_tl_opens_executive_dashboard_for_all_executives(client):
+    await _login(client, "tl@euler.com")
+    r = await client.get("/api/executive/dashboard")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["scope"]["teamView"] is True
+    assert body["scope"]["matchedLeads"] >= 1
+    assert "myLeadsMtd" in body["kpis"]
+    assert "worklist" in body
+    assert body.get("incentive") is None
+    # TL still has the operations dashboard.
+    ops = await client.get("/api/dashboard")
+    assert ops.status_code == 200, ops.text
+    assert "kpis" in ops.json()
 
 
 @pytest.mark.asyncio
