@@ -92,7 +92,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
     <aside
       data-testid="app-sidebar"
       className={cx(
-        "fixed inset-y-0 left-0 z-50 w-64 flex flex-col border-r border-line bg-white transition-transform duration-200 ease-out",
+        "fixed inset-y-0 left-0 z-50 w-64 flex flex-col border-r border-line bg-white transition-transform duration-200 ease-out pt-[env(safe-area-inset-top)]",
         "lg:translate-x-0 lg:z-40",
         open ? "translate-x-0 shadow-drawer" : "-translate-x-full lg:translate-x-0",
       )}
@@ -302,7 +302,7 @@ function Topbar({ onMenuOpen }) {
   };
   const initials = (user?.name || user?.email || "U").slice(0, 2).toUpperCase();
   return (
-    <header className="shrink-0 z-30 flex h-14 sm:h-16 items-center gap-2 sm:gap-4 border-b border-line bg-white/80 backdrop-blur px-3 sm:px-6">
+    <header className="shrink-0 z-30 flex h-[calc(3.5rem+env(safe-area-inset-top))] sm:h-[calc(4rem+env(safe-area-inset-top))] items-center gap-2 sm:gap-4 border-b border-line bg-white/80 backdrop-blur px-3 sm:px-6 pt-[env(safe-area-inset-top)]">
       <button
         type="button"
         data-testid="mobile-menu-btn"

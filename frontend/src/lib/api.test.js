@@ -21,6 +21,16 @@ describe("apiBases", () => {
     expect(originCanProxyApi("https://crm.onrender.com")).toBe(false);
     expect(originCanProxyApi("https://euler-crm.workers.dev")).toBe(true);
   });
+
+  test("does not treat Capacitor / localhost WebView as an API proxy", () => {
+    expect(originCanProxyApi("https://localhost")).toBe(false);
+    expect(originCanProxyApi("http://localhost:3000")).toBe(false);
+    expect(originCanProxyApi("capacitor://localhost")).toBe(false);
+    expect(apiBases(
+      "https://euler-crm-production.up.railway.app",
+      "https://localhost",
+    )).toEqual(["https://euler-crm-production.up.railway.app"]);
+  });
 });
 
 describe("isHtmlApiBody", () => {

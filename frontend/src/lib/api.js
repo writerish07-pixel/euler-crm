@@ -38,6 +38,9 @@ export function originCanProxyApi(origin = "") {
   if (!o) return false;
   if (o.includes("onrender.com")) return false;
   if (o.includes("github.io")) return false;
+  // Capacitor WebView origins have no /api proxy — always use Railway.
+  if (o.startsWith("capacitor:") || o.startsWith("ionic:") || o.startsWith("file:")) return false;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o)) return false;
   return true;
 }
 

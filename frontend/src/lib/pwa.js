@@ -1,4 +1,4 @@
-import { isFragileAndroid } from "./device";
+import { isFragileAndroid, isNativeShell } from "./device";
 
 const FRAGILE_SW_CLEARED = "euler_cleared_sw_v7";
 
@@ -89,6 +89,9 @@ function watchRegistration(reg) {
 export function registerServiceWorker() {
   if (process.env.NODE_ENV !== "production") return;
   if (!("serviceWorker" in navigator)) return;
+  // Native store apps load a bundled build. A service worker inside the
+  // WebView fights Capacitor updates the same way it fought ColorOS.
+  if (isNativeShell()) return;
 
   // Installed ColorOS/OriginOS shells keep a cached index.html that still
   // crashes on en-IN. Do not register a worker on those phones.
