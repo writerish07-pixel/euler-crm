@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
-  IndianRupee, Activity, ClipboardList, Warehouse, Trophy, CalendarDays,
+  IndianRupee, Activity, ClipboardList, Warehouse, Trophy, CalendarDays, Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
@@ -11,17 +11,22 @@ import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
 import { useAuth } from "../context/AuthContext";
+import NewLeadDrawer from "./NewLeadDrawer";
 
 export default function ExecutiveDashboard({ teamView = false }) {
   // Team Leader home also renders this component so any new executive-dashboard
   // widget appears for TL automatically. Do not fork a second copy.
-  const { isTl } = useAuth();
+  const { isTl, isExecutive } = useAuth();
   const team = teamView || isTl;
+  const navigate = useNavigate();
   const [d, setD] = useState(null);
+  const [masters, setMasters] = useState(null);
+  const [showNew, setShowNew] = useState(false);
   const load = useCallback(() => {
     get("/executive/dashboard").then(setD).catch(() => toast.error("Could not load executive dashboard"));
   }, []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { get("/masters").then(setMasters).catch(() => {}); }, []);
 
   const k = (d && d.kpis) || {};
   const scope = (d && d.scope) || {};
@@ -33,7 +38,12 @@ export default function ExecutiveDashboard({ teamView = false }) {
         subtitle={d
           ? `${scope.note || (team ? "All executives" : "My pipeline")} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`
           : (team ? "All executives" : "My pipeline")}
-        actions={<ReportActions onRefresh={load} />}
+        actions={<div className="flex gap-2">
+          <ReportActions onRefresh={load} />
+          <Button data-testid="exec-new-lead-btn" onClick={() => setShowNew(true)}>
+            <Plus size={16} /> {isExecutive && !team ? "Request lead" : "New Lead"}
+          </Button>
+        </div>}
       />
 
       {!d ? (
@@ -55,6 +65,9 @@ export default function ExecutiveDashboard({ teamView = false }) {
       </div>
 
       <div className="flex flex-wrap gap-2 mt-5">
+        <Button data-testid="exec-shortcut-new-lead" onClick={() => setShowNew(true)}>
+          <Plus size={14} /> {isExecutive && !team ? "Request lead" : "New Lead"}
+        </Button>
         <Link to="/leads"><Button variant="secondary" data-testid="exec-go-leads"><Users size={14} /> Leads</Button></Link>
         <Link to="/monthly"><Button variant="secondary" data-testid="exec-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="exec-go-bookings"><ClipboardList size={14} /> Bookings</Button></Link>
@@ -171,6 +184,17 @@ export default function ExecutiveDashboard({ teamView = false }) {
       </div>
       )}
       </>
+      )}
+      {showNew && (
+        <NewLeadDrawer
+          masters={masters}
+          onClose={() => setShowNew(false)}
+          onCreated={(id) => {
+            setShowNew(false);
+            load();
+            if (id) navigate(`/leads?open=${encodeURIComponent(id)}`);
+          }}
+        />
       )}
     </div>
   );

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink } from "lucide-react";
+import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
 import { get, post, put, del, apiErrorMessage, apiErrorDetail } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
@@ -11,6 +11,7 @@ import LeadWhatsApp from "./LeadWhatsApp";
 import { LeadDocsStrip, RefundChequePick, kycKinds } from "../components/LeadDocuments";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
+import NewLeadDrawer from "./NewLeadDrawer";
 
 const CHARGE_FIELDS = [
   ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
@@ -24,12 +25,13 @@ const SCHEME_FIELDS = [
 ];
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials } = useAuth();
+  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isSalesGm } = useAuth();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
   const [editing, setEditing] = useState(false);
   const [proceedRow, setProceedRow] = useState(null);
+  const [addUnit, setAddUnit] = useState(false);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -127,6 +129,12 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         {!fieldView && !leadLocked && actions.canEditLead && (
           <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
         )}
+        {!fieldView && (isExecutive || isTl || isOwner || isSalesGm) && (
+          <Button variant="secondary" data-testid="add-another-vehicle-btn"
+            onClick={() => setAddUnit(true)} className="!py-1 !px-2.5 text-xs">
+            <Plus size={13} /> Add another vehicle
+          </Button>
+        )}
         {!fieldView && isOwner && (
           <Button variant="secondary" data-testid="delete-lead-btn"
             onClick={async () => {
@@ -169,6 +177,27 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           row={proceedRow}
           onClose={() => setProceedRow(null)}
           onSaved={() => { setProceedRow(null); refresh(); }}
+        />
+      )}
+      {addUnit && (
+        <NewLeadDrawer
+          masters={masters}
+          initial={{
+            customerName: lead.customerName,
+            mobile: lead.mobile,
+            city: lead.city,
+            customerType: lead.customerType,
+            gstin: lead.gstin,
+            executive: isExecutive ? undefined : lead.executive,
+            anotherVehicle: true,
+          }}
+          onClose={() => setAddUnit(false)}
+          onCreated={(id) => {
+            setAddUnit(false);
+            if (id) {
+              refresh();
+            }
+          }}
         />
       )}
 

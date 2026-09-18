@@ -86,6 +86,18 @@ async def exec_client(client):
         yield c
 
 
+@pytest_asyncio.fixture
+async def tl_client(client):
+    email = "tl.multi@euler.com"
+    await server.client[os.environ["DB_NAME"]].users.delete_many({"email": email})
+    r = await client.post("/api/auth/users", json={
+        "email": email, "password": PW, "name": "Team Leader", "role": "tl",
+        "loginId": "tl.multi"})
+    assert r.status_code == 200, r.text
+    async for c in _as(email):
+        yield c
+
+
 def _detail(r):
     body = r.json()
     d = body.get("detail")
@@ -225,3 +237,23 @@ async def test_pending_same_mobile_blocked_without_flag(exec_client):
         "/api/leads", json=_enquiry("P2", mobile=mobile, anotherVehicle=True))
     assert ok.status_code == 200, ok.text
     assert ok.json()["requestId"] != first.json()["requestId"]
+
+
+@pytest.mark.asyncio
+async def test_tl_creates_second_unit_with_oem_extra(tl_client, client):
+    """TL live-creates another vehicle on the same mobile, with extra support."""
+    mobile = next_mobile()
+    first = await client.post(
+        "/api/leads", json=_enquiry("Ramesh", mobile=mobile, executive="Amit"))
+    assert first.status_code == 200, first.text
+    blocked = await tl_client.post(
+        "/api/leads", json=_enquiry("Ramesh", mobile=mobile, executive="Amit"))
+    assert blocked.status_code == 409
+    ok = await tl_client.post("/api/leads", json=_enquiry(
+        "Ramesh", mobile=mobile, executive="Amit",
+        anotherVehicle=True, oemExtraSupportReceived=7000))
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["leadId"] != first.json()["leadId"]
+    stored = await server.db.leads.find_one({"leadId": ok.json()["leadId"]})
+    assert float(stored.get("oemExtraSupportReceived") or 0) == 7000
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 2
