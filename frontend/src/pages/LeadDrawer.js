@@ -137,6 +137,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme }) {
                   {inr(u.customerPayable)}
                 </div>
                 {u.chassisNumber ? <div className="text-xs text-ink-soft mt-1">Chassis {u.chassisNumber}</div> : null}
+                {u.numberPlate ? <div className="text-xs text-ink-soft">Plate {u.numberPlate}</div> : null}
               </div>
               <div className="flex gap-2">
                 <Button data-testid={`units-tab-price-${sno}`} onClick={() => onOpenPrice(sno)}>Price Structure</Button>
@@ -1839,7 +1840,8 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                 <th className="py-1 pr-2">Model</th>
                 <th className="py-1 pr-2">Variant</th>
                 <th className="py-1 pr-2">Chassis</th>
-                <th className="py-1">Invoice</th>
+                <th className="py-1 pr-2">Invoice</th>
+                <th className="py-1">Number Plate</th>
               </tr>
             </thead>
             <tbody>
@@ -1857,13 +1859,22 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                         if (i === 0) setForm((f) => ({ ...f, chassisNumber: v }));
                       }} />
                   </td>
-                  <td className="py-1">
+                  <td className="py-1 pr-2">
                     <Input data-testid={`delivery-unit-invoice-${i + 1}`}
                       value={u.invoiceNumber || ""} disabled={oemIdsLocked} placeholder="From OEM Sold"
                       onChange={(e) => {
                         const v = e.target.value;
                         setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, invoiceNumber: v } : row)));
                         if (i === 0) setForm((f) => ({ ...f, invoiceNumber: v }));
+                      }} />
+                  </td>
+                  <td className="py-1">
+                    <Input data-testid={`delivery-unit-plate-${i + 1}`}
+                      value={u.numberPlate || ""} disabled={locked} placeholder="This unit’s plate"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, numberPlate: v } : row)));
+                        if (i === 0) setForm((f) => ({ ...f, numberPlate: v }));
                       }} />
                   </td>
                 </tr>
@@ -1885,7 +1896,9 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         </Field>
           </>
         )}
+        {packUnits.length <= 1 && (
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
+        )}
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>
         <Field label="Insurance Agent *">
           <Select data-testid="delivery-insurance-agent" value={form.insuranceAgentId}

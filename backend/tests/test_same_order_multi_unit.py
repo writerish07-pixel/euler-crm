@@ -356,6 +356,61 @@ async def test_delivery_fills_pack_serial_rows(client):
 
 
 @pytest.mark.asyncio
+async def test_delivery_records_number_plate_per_unit(client):
+    lid = "LD-PACK-PLATE"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Plate Pack", "mobile": "9813301666",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-01", "customerOutstanding": 0,
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9PLATE01", "invoiceNumber": "INV-PL-1"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9PLATE02", "invoiceNumber": "INV-PL-2"},
+        ],
+    })
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Done", "registration": "Done", "invoice": "Done",
+        "pdi": "Done", "insurerName": "TestIns",
+        "delivered": "",
+        "invoiceNumber": "INV-PL-1",
+        "chassisNumber": "MD9PLATE01",
+        "numberPlate": "RJ14AA0001",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9PLATE01", "invoiceNumber": "INV-PL-1",
+             "numberPlate": "RJ14AA0001"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9PLATE02", "invoiceNumber": "INV-PL-2",
+             "numberPlate": "RJ14AA0002"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    units = lead.get("units") or []
+    assert [u.get("numberPlate") for u in units] == ["RJ14AA0001", "RJ14AA0002"]
+    assert lead.get("numberPlate") == "RJ14AA0001"
+    dup = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Done", "registration": "Done", "invoice": "Done",
+        "pdi": "Done", "insurerName": "TestIns",
+        "delivered": "",
+        "invoiceNumber": "INV-PL-1",
+        "chassisNumber": "MD9PLATE01",
+        "numberPlate": "RJ14AA0001",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "chassisNumber": "MD9PLATE01",
+             "invoiceNumber": "INV-PL-1", "numberPlate": "RJ14AA0001"},
+            {"sno": 2, "model": "Turbo Max", "chassisNumber": "MD9PLATE02",
+             "invoiceNumber": "INV-PL-2", "numberPlate": "RJ14AA0001"},
+        ],
+    })
+    assert dup.status_code == 409, dup.text
+
+
+@pytest.mark.asyncio
 async def test_repair_same_model_ignores_variant_split(client):
     mobile = "9813301111"
     await server.db.leads.delete_many({"mobile": mobile})

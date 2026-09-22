@@ -739,6 +739,23 @@ async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chas
         checks.append(("invoiceNumber", rec.get("invoiceNumber"), "Invoice number"))
         checks.append(("chassisNumber", rec.get("chassisNumber"), "Chassis number"))
         checks.append(("numberPlate", rec.get("numberPlate"), "Number plate"))
+    on_order = {}
+    for rec in [_dump_unit(u) for u in (units or [])]:
+        for field, raw, label in (
+            ("invoiceNumber", rec.get("invoiceNumber"), "Invoice number"),
+            ("chassisNumber", rec.get("chassisNumber"), "Chassis number"),
+            ("numberPlate", rec.get("numberPlate"), "Number plate"),
+        ):
+            val = str(raw or "").strip()
+            if not val:
+                continue
+            key = (field, oem_sync._norm_chassis(val) if field == "chassisNumber" else val.lower())
+            if key in on_order:
+                raise HTTPException(
+                    409,
+                    f"{label} '{val}' is used on more than one unit of this order.",
+                )
+            on_order[key] = True
     seen = set()
     for field, raw, label in checks:
         val = str(raw or "").strip()
