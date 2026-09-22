@@ -5,6 +5,7 @@ import logging
 import io
 import os
 import re
+import time
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -992,6 +993,17 @@ async def recompute_lead(lead_id):
     }
     if oem_sync.is_same_order_pack(lead):
         updates["sameOrderMultiUnit"] = True
+        pack_total, pack_units, pack_filled, pack_pending = _refresh_unit_payables(
+            {**lead, **updates}, scheme_rows)
+        if pack_units:
+            updates["units"] = pack_units
+            updates["packUnitsFilled"] = pack_filled
+            updates["packUnitsPending"] = pack_pending
+            updates["packUnitsTotal"] = len(pack_units)
+            if pack_total is not None and _pack_uses_unit_structures({**lead, **updates, "units": pack_units}):
+                updates["cxDemand"] = pack_total
+                updates["budget"] = pack_total
+                updates["useDealPrice"] = pack_pending == 0 and pack_total > 0
     # Authoritative Insurance Benefit projection (parallel to loyaltyBonus offer field).
     # Available amount is stored on insuranceBenefit; CB feeds the Dealer Earnings sheet
     # column Customer Insurance Benefit Passed. Historical leads without auth allocation
@@ -1308,6 +1320,8 @@ class PriceStructureIn(BaseModel):
     otherCharges: float = 0
     tcsApplicable: str = "No"
     finalExchangeValue: float = 0
+    # Same-order pack: 1-based unit. Omitted / 1 writes the lead + unit 1.
+    unitSno: Optional[int] = None
 
 
 class SchemeIn(BaseModel):
@@ -1327,6 +1341,8 @@ class SchemeIn(BaseModel):
     oemExtraSupportPassed: float = 0
     # As-of date for which Scheme Master month to apply. Does not invent a booking.
     schemeDate: Optional[str] = None
+    # Same-order pack: 1-based unit. Omitted / 1 writes the lead + unit 1.
+    unitSno: Optional[int] = None
 
 
 class PaymentIn(BaseModel):
@@ -3763,6 +3779,7 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
         "sameOrderMultiUnit": bool(same_order and len(pack_units) > 1),
         "units": pack_units if same_order and len(pack_units) > 1 else [],
         "vehicleCount": max(len(pack_units), 1) if same_order and pack_units else 1,
+        "anotherVehicle": bool(another),
     }
     await db.leads.insert_one(doc)
     _act_doc = {
@@ -5225,10 +5242,12 @@ def _charges_from_price_structure(ps):
 def _deal_price_payable(lead):
     """Agreed Cx Demand is customer payable while useDealPrice is on.
 
-    Same-order packs use the pack Cx Demand (sum of unit quotes) when set,
-    otherwise the sum of each unit's Price Master + scheme + TCS.
+    Once a pack unit has its own saved Price / Scheme, payable is the sum of
+    filled units — not the create-time pack quote.
     """
     if not lead or lead.get("dealCancelled"):
+        return None
+    if _pack_uses_unit_structures(lead):
         return None
     if lead.get("useDealPrice") and ce.num(lead.get("cxDemand")) > 0:
         return ce.round2(ce.num(lead.get("cxDemand")))
@@ -5243,6 +5262,67 @@ UNIT_MONEY_KEYS = (
     "customerPayable", "customerBenefitPassed", "useDealPrice", "cxDemand",
     "budget", "grossVehicleCost",
 )
+
+UNIT_SCHEME_KEYS = (
+    "benefitPassedBreakup", "schemeComponentsUsed", "schemeAllocationExplicit",
+    "schemeAllocationV2", "schemeAsOf", "benefitMode",
+    "priceStructureSaved", "insuranceArrangedBy", "finalExchangeValue",
+)
+
+UNIT_COMMERCIAL_KEYS = UNIT_MONEY_KEYS + UNIT_SCHEME_KEYS
+
+
+def _pack_uses_unit_structures(lead):
+    """True once any pack unit (or lead-level unit 1) has a saved Price / Scheme."""
+    if not oem_sync.is_same_order_pack(lead or {}):
+        return False
+    if (lead or {}).get("priceStructureSaved") or _has_persisted_scheme(lead or {}):
+        return True
+    for u in (lead or {}).get("units") or []:
+        if not isinstance(u, dict):
+            continue
+        if u.get("priceStructureSaved") or _has_persisted_scheme(u):
+            return True
+    return False
+
+
+def _unit_is_priced(lead, unit, index):
+    if (unit or {}).get("priceStructureSaved"):
+        return True
+    if index == 0:
+        return _is_priced(lead)
+    return False
+
+
+def _unit_has_scheme(lead, unit, index):
+    if _has_persisted_scheme(unit or {}):
+        return True
+    if index == 0:
+        return _has_persisted_scheme(lead)
+    return False
+
+
+def _resolve_unit_index(lead, unit_sno):
+    """1-based unitSno → 0-based index. Missing / 1 is unit 1."""
+    units = _ensure_lead_units(lead)
+    if unit_sno is None or unit_sno == "":
+        return 0, units
+    try:
+        sno = int(unit_sno)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "unitSno must be a unit number on this order.")
+    if sno < 1:
+        raise HTTPException(422, "unitSno must be a unit number on this order.")
+    if sno > len(units):
+        raise HTTPException(422, "That unit is not on this order.")
+    return sno - 1, units
+
+
+def _copy_unit_commercials(src, dest):
+    for k in UNIT_COMMERCIAL_KEYS:
+        if k in (src or {}) and src.get(k) is not None:
+            dest[k] = src[k]
+    return dest
 
 
 def _dump_unit(u):
@@ -5273,9 +5353,7 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
             "invoiceNumber": str(u.get("invoiceNumber") or "").strip(),
             "numberPlate": str(u.get("numberPlate") or "").strip(),
         }
-        for k in UNIT_MONEY_KEYS:
-            if k in u and u.get(k) is not None:
-                rec[k] = u[k]
+        _copy_unit_commercials(u, rec)
         if rec["model"] or rec["variant"] or rec["chassisNumber"]:
             units.append(rec)
     if units and not units[0].get("model") and model:
@@ -5295,9 +5373,7 @@ def _unit1_from_lead(lead):
         "invoiceNumber": (lead or {}).get("invoiceNumber") or "",
         "numberPlate": (lead or {}).get("numberPlate") or "",
     }
-    for k in UNIT_MONEY_KEYS:
-        if k in (lead or {}) and (lead or {}).get(k) is not None:
-            rec[k] = lead[k]
+    _copy_unit_commercials(lead, rec)
     return rec
 
 
@@ -5316,33 +5392,75 @@ def _ensure_lead_units(lead):
     return [_unit1_from_lead(lead)]
 
 
-def _lead_overlay_unit(lead, unit):
-    """Lead-shaped dict for one unit so compute_commercial_totals can price it."""
+def _lead_overlay_unit(lead, unit, index=0):
+    """Lead-shaped dict for one unit so compute_commercial_totals can price it.
+
+    Extra units do not inherit unit 1 / lead-level price or scheme. OEM Extra
+    Support stays lead-level and is applied once on unit 1.
+    """
     u = unit or {}
     out = dict(lead or {})
     out["interestedModel"] = u.get("model") or u.get("interestedModel") or out.get("interestedModel")
     out["variant"] = u.get("variant") or out.get("variant")
-    for k in UNIT_MONEY_KEYS:
+    if index > 0:
+        for k in UNIT_COMMERCIAL_KEYS:
+            out.pop(k, None)
+        out["oemExtraSupportReceived"] = 0
+        out["oemExtraSupportPassed"] = 0
+        out["schemeAllocationExplicit"] = False
+        out["schemeAllocationV2"] = False
+        out["benefitPassedBreakup"] = ""
+        out["schemeComponentsUsed"] = ""
+        out["schemeAllocation"] = ""
+    for k in UNIT_COMMERCIAL_KEYS:
         if k in u:
             out[k] = u[k]
     return out
+
+
+def _refresh_unit_payables(lead, scheme_rows=None):
+    """Write each unit's payable and return (total_of_counted, units, filled, pending)."""
+    units = list((lead or {}).get("units") or [])
+    if not units and (lead or {}).get("sameOrderMultiUnit"):
+        units = [_unit1_from_lead(lead)]
+    if not units:
+        return None, units, 0, 0
+    filled_only = _pack_uses_unit_structures(lead)
+    total = 0.0
+    filled = 0
+    pending = 0
+    for i, raw in enumerate(units):
+        u = dict(raw or {})
+        priced = _unit_is_priced(lead, u, i)
+        schemed = _unit_has_scheme(lead, u, i)
+        complete = priced and (i == 0 or schemed)
+        if complete:
+            filled += 1
+        else:
+            pending += 1
+        count = priced if filled_only else True
+        if not count:
+            u["customerPayable"] = 0
+            units[i] = u
+            continue
+        if u.get("useDealPrice") and ce.num(u.get("cxDemand")) > 0:
+            pay = ce.round2(ce.num(u.get("cxDemand")))
+        else:
+            snap = lead_to_snapshot(_lead_overlay_unit(lead, u, i))
+            totals = ce.compute_commercial_totals(snap, scheme_rows)
+            pay = ce.round2(ce.num(totals.get("customerPayable")))
+        u["customerPayable"] = pay
+        units[i] = u
+        total += pay
+    return ce.round2(total), units, filled, pending
 
 
 def _sum_unit_payables(lead, scheme_rows=None):
     units = (lead or {}).get("units") or []
     if not units and not (lead or {}).get("sameOrderMultiUnit"):
         return None
-    if not units:
-        units = [_unit1_from_lead(lead)]
-    total = 0.0
-    for u in units:
-        if (u or {}).get("useDealPrice") and ce.num((u or {}).get("cxDemand")) > 0:
-            total += ce.round2(ce.num(u.get("cxDemand")))
-            continue
-        snap = lead_to_snapshot(_lead_overlay_unit(lead, u))
-        totals = ce.compute_commercial_totals(snap, scheme_rows)
-        total += ce.round2(ce.num(totals.get("customerPayable")))
-    return ce.round2(total)
+    total, _units, _filled, _pending = _refresh_unit_payables(lead, scheme_rows)
+    return total
 
 
 def _parse_scheme_pass_on(raw) -> dict:
@@ -5586,12 +5704,15 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
 
 
 @api.get("/leads/{lead_id}/price-preview")
-async def price_preview(lead_id: str):
+async def price_preview(lead_id: str, unit: Optional[int] = None):
     """What Price Master resolves to for this lead's model/variant, before booking.
     Lets the UI show the real commercial structure (or a precise 'not found')
     instead of discovering it only at booking time."""
     lead = await get_lead_or_404(lead_id)
-    model, variant = lead.get("interestedModel"), lead.get("variant")
+    idx, units = _resolve_unit_index(lead, unit)
+    chosen = units[idx] if units else {}
+    model = chosen.get("model") or lead.get("interestedModel")
+    variant = chosen.get("variant") or lead.get("variant")
     row = await _price_master_row(model, variant)
     if not row:
         return {"found": False, "model": model, "variant": variant,
@@ -5704,23 +5825,33 @@ _RETRY_DUP_OPEN = {
 }
 _retry_dup_repair_done = False
 _retry_dup_repair_lock = asyncio.Lock()
+_retry_dup_last_clean_at = 0.0
+_RETRY_DUP_CLEAN_TTL_SEC = 15.0
 
 
 async def _ensure_retry_dups_repaired():
-    """First Lead Register load heals triples so the desk sees one id per customer."""
-    global _retry_dup_repair_done
-    if _retry_dup_repair_done:
+    """Lead Register load heals triples. Does not stop after a boot pass of 0."""
+    global _retry_dup_repair_done, _retry_dup_last_clean_at
+    now = time.monotonic()
+    if _retry_dup_last_clean_at and (now - _retry_dup_last_clean_at) < _RETRY_DUP_CLEAN_TTL_SEC:
         return
     async with _retry_dup_repair_lock:
-        if _retry_dup_repair_done:
+        now = time.monotonic()
+        if _retry_dup_last_clean_at and (now - _retry_dup_last_clean_at) < _RETRY_DUP_CLEAN_TTL_SEC:
             return
         try:
             repaired = await _repair_retry_duplicate_leads()
             if repaired:
                 logging.info("RETRY_DUP_LEADS_REPAIRED: %s", len(repaired))
+                _retry_dup_last_clean_at = 0.0
+                _retry_dup_repair_done = False
+            else:
+                _retry_dup_last_clean_at = time.monotonic()
+                _retry_dup_repair_done = True
         except Exception:
             logging.exception("RETRY_DUP_LEADS_REPAIR_ERROR")
-        _retry_dup_repair_done = True
+            _retry_dup_last_clean_at = 0.0
+            _retry_dup_repair_done = False
 
 
 def _person_group_key(lead):
@@ -5744,8 +5875,14 @@ def _sku_key(lead):
     )
 
 
+def _model_key(lead):
+    return str((lead or {}).get("interestedModel") or "").strip().lower()
+
+
 def _is_retry_dup_candidate(lead):
     if not lead or lead.get("dealCancelled"):
+        return False
+    if lead.get("anotherVehicle"):
         return False
     if _is_booked_lead(lead) or _is_delivered_lead(lead):
         return False
@@ -5805,27 +5942,22 @@ async def _merge_retry_siblings_into_pack(keeper, extras):
 async def _repair_retry_duplicate_leads():
     """Collapse New files minted by the Create Lead retry / OEM leftover bug.
 
-    Same person + same SKU + 2+ open unbooked singles with no money → keep the
-    first id. createdDate is not required (many retried rows have it blank).
-    Different SKUs on the same day still join one pack.
+    Same person + same model + 2+ open unbooked singles with no money → keep the
+    first id. Variant is ignored so City / blank / Maxx (PV) copies still collapse.
+    createdDate is not required (many retried rows have it blank).
+    Different models on the same day still join one pack.
     """
     rows = await db.leads.find(
-        {
-            "dealCancelled": {"$ne": True},
-            "$or": [
-                {"currentStatus": {"$in": ["New", "Contacted", "Follow-up", "In Progress", ""]}},
-                {"currentStatus": {"$exists": False}},
-            ],
-        },
+        {"dealCancelled": {"$ne": True}},
         {
             "leadId": 1, "customerName": 1, "mobile": 1, "interestedModel": 1,
             "variant": 1, "createdDate": 1, "lastUpdated": 1, "currentStatus": 1,
             "accountStatus": 1, "units": 1, "sameOrderMultiUnit": 1,
             "bookingDate": 1, "bookingId": 1, "deliveryStatus": 1, "deliveryDate": 1,
             "chassisNumber": 1, "invoiceNumber": 1, "numberPlate": 1,
-            "exShowroom": 1, "dealCancelled": 1,
+            "exShowroom": 1, "dealCancelled": 1, "anotherVehicle": 1,
         },
-    ).to_list(8000)
+    ).sort("leadId", -1).to_list(15000)
     by_person = {}
     for lead in rows:
         if not _is_retry_dup_candidate(lead):
@@ -5838,11 +5970,11 @@ async def _repair_retry_duplicate_leads():
     for _key, cluster in by_person.items():
         if len(cluster) < 2:
             continue
-        by_sku = {}
+        by_model = {}
         for lead in cluster:
-            by_sku.setdefault(_sku_key(lead), []).append(lead)
+            by_model.setdefault(_model_key(lead) or _sku_key(lead), []).append(lead)
         leftover = []
-        for _sku, same in by_sku.items():
+        for _model, same in by_model.items():
             if len(same) < 2:
                 leftover.extend(same)
                 continue
@@ -5870,8 +6002,8 @@ async def _repair_retry_duplicate_leads():
                 continue
             days.setdefault(day, []).append(lead)
         for _day, same_day in days.items():
-            skus = {_sku_key(l) for l in same_day}
-            if len(same_day) < 2 or len(skus) < 2:
+            models = {_model_key(l) for l in same_day}
+            if len(same_day) < 2 or len(models) < 2:
                 continue
             same_day = sorted(same_day, key=lambda l: str(l.get("leadId") or ""))
             ids = [r["leadId"] for r in same_day]
@@ -5950,50 +6082,75 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)", act)
-    _require_owner_reedit(act, _is_priced(lead), "Price structure")
     payload = body.model_dump()
+    unit_sno = payload.pop("unitSno", None)
+    idx, units = _resolve_unit_index(lead, unit_sno)
+    chosen = units[idx] if units else {}
+    _require_owner_reedit(act, _unit_is_priced(lead, chosen, idx), "Price structure")
     payload["insuranceArrangedBy"] = ce.normalize_insurance_arranged_by(
         payload.get("insuranceArrangedBy"))
     # Ex-Showroom is Price Master–authoritative and not staff-editable. Prefer the
-    # live master row for the lead's model/variant; fall back to the lead's existing
+    # live master row for this unit's model/variant; fall back to the existing
     # value only when no master row exists (so a saved structure is not wiped).
-    row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
+    model = chosen.get("model") or lead.get("interestedModel")
+    variant = chosen.get("variant") or lead.get("variant")
+    row = await _price_master_row(model, variant)
     if row:
         master_ex = ce.num(_price_structure_from_master(row, _lead_price_as_of(lead)).get("exShowroom"))
         if master_ex <= 0:
             raise HTTPException(422,
-                f"Price Master row for {lead.get('interestedModel')}/{lead.get('variant')} "
+                f"Price Master row for {model}/{variant} "
                 f"has a zero ex-showroom price. Correct Price Master before saving.")
         payload["exShowroom"] = master_ex
     else:
-        payload["exShowroom"] = ce.num(lead.get("exShowroom"))
+        payload["exShowroom"] = ce.num(chosen.get("exShowroom") or (lead.get("exShowroom") if idx == 0 else 0))
         if payload["exShowroom"] <= 0:
             raise HTTPException(422,
-                f"Price Master entry not found for {lead.get('interestedModel') or '(none)'}/"
-                f"{lead.get('variant') or '(none)'}. Select a valid vehicle before pricing.")
+                f"Price Master entry not found for {model or '(none)'}/"
+                f"{variant or '(none)'}. Select a valid vehicle before pricing.")
     payload["priceStructureSaved"] = True
-    old = {k: lead.get(k) for k in payload.keys()}
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
+    if idx == 0 and (_is_booked_lead(lead) or _is_delivered_lead(lead)):
+        # Booked / delivered unit 1 prices stay. Staff may still mark the step saved
+        # and edit non-ex-showroom fields when the owner re-edit gate allows.
+        if ce.num(lead.get("exShowroom")) > 0:
+            payload["exShowroom"] = ce.num(lead.get("exShowroom"))
+    units = _ensure_lead_units(lead)
+    if idx >= len(units):
+        raise HTTPException(422, "That unit is not on this order.")
+    rec = dict(units[idx])
+    rec.update({k: payload[k] for k in payload if k != "unitSno"})
+    rec["sno"] = idx + 1
+    units[idx] = rec
+    patch = {"units": units, "lastUpdated": now_iso()}
+    if idx == 0:
+        patch.update(payload)
+    old = {k: (chosen.get(k) if idx > 0 else lead.get(k)) for k in payload.keys()}
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
     # Owner re-edit of price must also realign scheme pools / retained totals.
-    if _has_persisted_scheme({**lead, **payload}):
+    merged_scheme = {**lead, **(payload if idx == 0 else {}), "units": units}
+    if idx == 0 and _has_persisted_scheme(merged_scheme):
         await _cascade_vehicle_or_price_change(lead_id, refresh_price=False, realign_scheme=True)
     else:
         await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
-    await write_audit(act, "update", "price-structure", leadId=lead_id, old=old, new=payload)
+    await write_audit(act, "update", "price-structure", leadId=lead_id, old=old,
+                      new={**payload, "unitSno": idx + 1})
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 
 @api.get("/leads/{lead_id}/scheme-rules")
-async def scheme_rules(lead_id: str, on: Optional[str] = None, user=Depends(current_user)):
+async def scheme_rules(lead_id: str, on: Optional[str] = None, unit: Optional[int] = None,
+                      user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     scheme_rows = await get_scheme_rows()
-    model = lead.get("interestedModel") or ""
-    variant = lead.get("variant") or ""
-    as_of = _scheme_as_of(lead, on)
+    idx, units = _resolve_unit_index(lead, unit)
+    chosen = units[idx] if units else {}
+    model = chosen.get("model") or lead.get("interestedModel") or ""
+    variant = chosen.get("variant") or lead.get("variant") or ""
+    as_of = _scheme_as_of(lead, on or chosen.get("schemeAsOf"))
     out = ce.get_scheme_offer_rules_for_vehicle(model, variant, as_of, scheme_rows)
     # Preview allocation for the same as-of date the rules were resolved against.
-    snap = {**lead_to_snapshot(lead), "schemeAsOf": as_of}
+    snap = {**lead_to_snapshot(_lead_overlay_unit(lead, chosen, idx)), "schemeAsOf": as_of}
     out["allocation"] = ce.compute_scheme_allocation(snap, scheme_rows)
     out["asOf"] = as_of
     if not _is_owner_user(user):
@@ -6005,11 +6162,16 @@ async def scheme_rules(lead_id: str, on: Optional[str] = None, user=Depends(curr
 async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
-    _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
     payload = body.model_dump()
+    unit_sno = payload.pop("unitSno", None)
+    idx, units = _resolve_unit_index(lead, unit_sno)
+    chosen = units[idx] if units else {}
+    _require_owner_reedit(act, _unit_has_scheme(lead, chosen, idx), "Scheme")
     scheme_date = payload.pop("schemeDate", None)
-    as_of = _scheme_as_of(lead, scheme_date)
+    as_of = _scheme_as_of(lead, scheme_date or chosen.get("schemeAsOf"))
     payload["schemeAsOf"] = as_of
+    scheme_model = chosen.get("model") or lead.get("interestedModel") or ""
+    scheme_variant = chosen.get("variant") or lead.get("variant") or ""
     if payload.get("benefitPassedBreakup") is None:
         payload.pop("benefitPassedBreakup", None)
     if payload.get("schemeComponentsUsed") is None:
@@ -6018,7 +6180,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     scheme_rows = await get_scheme_rows()
     offers = {k: payload.get(k, 0) for k in ce.OFFER_KEYS}
     errors = ce.validate_scheme_offers(
-        lead.get("interestedModel") or "", lead.get("variant") or "",
+        scheme_model, scheme_variant,
         as_of, offers, scheme_rows)
     if errors:
         raise HTTPException(422, "Please fix these scheme fields:\n" + "\n".join(errors))
@@ -6050,7 +6212,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     # Legacy clients that omit breakup keep Full/No Benefit materialisation.
     if isinstance(parsed_breakup, dict):
         alloc_errs = ce.validate_scheme_allocation_breakup(
-            lead.get("interestedModel") or "", lead.get("variant") or "",
+            scheme_model, scheme_variant,
             as_of, parsed_breakup, scheme_rows)
         if alloc_errs:
             raise HTTPException(422, "Please fix these scheme allocation fields:\n" + "\n".join(alloc_errs))
@@ -6058,8 +6220,9 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         payload["schemeAllocationV2"] = True
         # Benefit Mode is not used by the new UI; store Partial for compatibility.
         payload["benefitMode"] = "Partial Benefit"
+        base = _lead_overlay_unit(lead, chosen, idx)
         provisional = {
-            **lead_to_snapshot({**lead, **payload}),
+            **lead_to_snapshot({**base, **payload}),
             "schemeAllocationExplicit": True,
             "schemeAllocationV2": True,
             "benefitPassedBreakup": parsed_breakup,
@@ -6069,7 +6232,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         # Ensure eligible offer pools are present so OEM claim shares resolve even
         # when customer benefit is ₹0 (Use Scheme = No). Available = Scheme Master.
         rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
-            lead.get("interestedModel") or "", lead.get("variant") or "",
+            scheme_model, scheme_variant,
             as_of, scheme_rows)
         for key, rule in (rules_ctx.get("rules") or {}).items():
             if key == "additionalDiscount":
@@ -6100,7 +6263,10 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     else:
         # Legacy path: materialise from Benefit Mode (older API / tests).
         payload["schemeAllocationV2"] = True
-        provisional = {**lead_to_snapshot({**lead, **payload}), "schemeAllocationV2": True}
+        provisional = {
+            **lead_to_snapshot({**_lead_overlay_unit(lead, chosen, idx), **payload}),
+            "schemeAllocationV2": True,
+        }
         alloc = ce.compute_scheme_allocation(provisional, scheme_rows)
         clean_bk = {c["key"]: c["customerBenefit"] for c in alloc["components"]
                     if c["key"] != "additionalDiscount"}
@@ -6108,17 +6274,33 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
         payload["schemeComponentsUsed"] = _json.dumps({k: (v > 0) for k, v in clean_bk.items()})
 
-    # OEM Extra Support: Received = full OEM claim; Passed ≤ Received; Retained derived in recompute.
-    # Additional (Dealer) stays untouched here — separate dealer-funded discount.
-    _oem = ce.compute_oem_extra_support(payload)
-    payload["oemExtraSupportReceived"] = _oem["oemExtraSupportReceived"]
-    payload["oemExtraSupportPassed"] = _oem["oemExtraSupportPassed"]
+    # OEM Extra Support is lead-level (one claim for the order), not per unit.
+    # Additional (Dealer) stays on the unit — separate dealer-funded discount.
+    _oem = ce.compute_oem_extra_support(payload if idx == 0 else lead)
+    if idx == 0:
+        payload["oemExtraSupportReceived"] = _oem["oemExtraSupportReceived"]
+        payload["oemExtraSupportPassed"] = _oem["oemExtraSupportPassed"]
+    else:
+        payload.pop("oemExtraSupportReceived", None)
+        payload.pop("oemExtraSupportPassed", None)
 
-    old = {k: lead.get(k) for k in payload.keys()}
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {**payload, "lastUpdated": now_iso()}})
+    units = _ensure_lead_units(lead)
+    if idx >= len(units):
+        raise HTTPException(422, "That unit is not on this order.")
+    rec = dict(units[idx])
+    for k, v in payload.items():
+        rec[k] = v
+    rec["sno"] = idx + 1
+    units[idx] = rec
+    patch = {"units": units, "lastUpdated": now_iso()}
+    if idx == 0:
+        patch.update(payload)
+    old = {k: (chosen.get(k) if idx > 0 else lead.get(k)) for k in payload.keys()}
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
     await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
-    await write_audit(act, "update", "scheme", leadId=lead_id, old=old, new=payload)
+    await write_audit(act, "update", "scheme", leadId=lead_id, old=old,
+                      new={**payload, "unitSno": idx + 1})
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 
@@ -13654,7 +13836,7 @@ async def _run_boot_maintenance():
     Google Sheet; a few thousand rows plus the OEM catalog took minutes, Railway
     healthchecks 502'd, and the replica was killed mid-boot (RAM spike then drop).
     """
-    global _finance_index_status, _retry_dup_repair_done
+    global _finance_index_status, _retry_dup_repair_done, _retry_dup_last_clean_at
     _boot_state["maintenance"] = "running"
     logging.info("BOOT_MAINTENANCE: starting (process is already listening)")
     try:
@@ -13709,9 +13891,14 @@ async def _run_boot_maintenance():
                 repaired = await _repair_retry_duplicate_leads()
                 if repaired:
                     logging.info("RETRY_DUP_LEADS_REPAIRED: %s", len(repaired))
-                _retry_dup_repair_done = True
+                # Always let the first Lead Register load scan again — boot used
+                # to mark done after 0 rows and leave live triples on the desk.
+                _retry_dup_repair_done = False
+                _retry_dup_last_clean_at = 0.0
         except Exception:
             logging.exception("RETRY_DUP_LEADS_REPAIR_ERROR")
+            _retry_dup_repair_done = False
+            _retry_dup_last_clean_at = 0.0
         try:
             await _repair_mis_only_received()
         except Exception:

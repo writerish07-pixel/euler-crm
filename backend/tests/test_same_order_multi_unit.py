@@ -207,7 +207,8 @@ async def test_repair_same_mobile_without_created_date(client):
             "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
             "accountStatus": "Active", "currentStatus": "New",
         })
-    server._retry_dup_repair_done = False
+    server._retry_dup_repair_done = True
+    server._retry_dup_last_clean_at = 0.0
     listed = await client.get("/api/leads", params={"q": "No Date Triple"})
     assert listed.status_code == 200, listed.text
     left = [l async for l in server.db.leads.find({"mobile": mobile})]
@@ -346,3 +347,137 @@ async def test_delivery_fills_pack_serial_rows(client):
     assert len(units) == 3
     assert all(u.get("chassisNumber") for u in units)
     assert all(u.get("invoiceNumber") for u in units)
+
+
+@pytest.mark.asyncio
+async def test_repair_same_model_ignores_variant_split(client):
+    mobile = "9813301111"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.leads.insert_one({
+        "leadId": "LD26VAR001", "customerName": "Guman Kanwar", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "City (F)",
+        "accountStatus": "Active", "currentStatus": "New",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD26VAR002", "customerName": "Guman Kanwar", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "",
+        "accountStatus": "Active", "currentStatus": "New",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD26VAR003", "customerName": "Guman Kanwar", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "New",
+    })
+    repaired = await server._repair_retry_duplicate_leads()
+    assert repaired
+    left = [l async for l in server.db.leads.find({"mobile": mobile})]
+    assert len(left) == 1
+    assert left[0]["leadId"] == "LD26VAR001"
+
+
+@pytest.mark.asyncio
+async def test_another_vehicle_is_not_purged_as_retry(client):
+    mobile = "9813301222"
+    await server.db.leads.delete_many({"mobile": mobile})
+    first = await client.post("/api/leads", json={
+        "customerName": "Keep Sibling",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert first.status_code == 200, first.text
+    second = await client.post("/api/leads", json={
+        "customerName": "Keep Sibling",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "anotherVehicle": True,
+    })
+    assert second.status_code == 200, second.text
+    assert second.json()["leadId"] != first.json()["leadId"]
+    assert second.json().get("anotherVehicle") is True
+    repaired = await server._repair_retry_duplicate_leads()
+    assert not any(
+        first.json()["leadId"] in (r.get("removed") or [])
+        or second.json()["leadId"] in (r.get("removed") or [])
+        for r in repaired
+    )
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 2
+
+
+@pytest.mark.asyncio
+async def test_pack_units_own_price_and_scheme(client):
+    mobile = "9813301333"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-U1", "PM-U2"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-U1", "model": "Turbo Max", "variant": "Unit A",
+        "exShowroom": 500000, "rto": 10000, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-U2", "model": "Storm", "variant": "Unit B",
+        "exShowroom": 700000, "rto": 20000, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    created = await client.post("/api/leads", json={
+        "customerName": "Per Unit Deal",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Unit A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    added = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Storm", "variant": "Unit B",
+    })
+    assert added.status_code == 200, added.text
+    p1 = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 500000, "rto": 10000, "unitSno": 1,
+    })
+    assert p1.status_code == 200, p1.text
+    s1 = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 5000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 1,
+    })
+    assert s1.status_code == 200, s1.text
+    mid = await server.db.leads.find_one({"leadId": lid})
+    # Unit 2 not filled yet — outstanding is unit 1 only.
+    assert ce.num(mid.get("packUnitsPending")) >= 1
+    unit1_pay = ce.num((mid.get("units") or [{}])[0].get("customerPayable")) or ce.num(mid.get("customerPayable"))
+    assert unit1_pay > 0
+    assert ce.num(mid.get("customerPayable")) == unit1_pay
+
+    p2 = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 700000, "rto": 20000, "unitSno": 2,
+    })
+    assert p2.status_code == 200, p2.text
+    s2 = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 25000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 2,
+    })
+    assert s2.status_code == 200, s2.text
+    done = await server.db.leads.find_one({"leadId": lid})
+    units = done.get("units") or []
+    assert len(units) == 2
+    assert units[0].get("priceStructureSaved") is True
+    assert units[1].get("priceStructureSaved") is True
+    assert ce.num(units[0].get("additionalDiscount")) == 5000
+    assert ce.num(units[1].get("additionalDiscount")) == 25000
+    assert ce.num(units[0].get("customerPayable")) != ce.num(units[1].get("customerPayable"))
+    assert ce.num(done.get("packUnitsPending")) == 0
+    assert ce.num(done.get("customerPayable")) == ce.round2(
+        ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
+    assert ce.num(done.get("customerOutstanding")) == ce.num(done.get("customerPayable"))
