@@ -9,6 +9,7 @@ test("extra support proof is required only when amount is filled", () => {
   expect(extraSupportReady(7000, {})).toMatch(/Siddharth Dubey/);
   expect(extraSupportReady(7000, { oem_extra_support: { name: "mail.png" } })).toBe("");
   expect(extraSupportReady(7000, {}, [{ kind: "oem_extra_support" }])).toBe("");
+  expect(extraSupportReady(7000, {}, [], { copyFromSibling: true })).toBe("");
 });
 
 test("kycReady still requires Aadhaar and PAN for individuals", () => {

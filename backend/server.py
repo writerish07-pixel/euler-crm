@@ -3877,6 +3877,11 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
     extra_needed = await _oem_extra_against_lead(live_for_extra, payload)
     if extra_needed > 0 and not await lead_docs.has_oem_extra_proof(
             db, request_id=request_id, lead_id=existing_id):
+        await _copy_create_docs_from_sibling(
+            "", mobile=payload.get("mobile") or "", name=payload.get("customerName") or "",
+            viewer=user, request_id=request_id, kinds=("oem_extra_support",))
+    if extra_needed > 0 and not await lead_docs.has_oem_extra_proof(
+            db, request_id=request_id, lead_id=existing_id):
         await db.lead_requests.update_one(
             {"requestId": request_id},
             {"$set": {"status": "pending", "approvedBy": "", "approvedByName": "", "approvedAt": ""}},
@@ -7431,13 +7436,16 @@ async def _sibling_lead_for_docs(mobile="", name="", exclude_id=""):
 
 
 async def _copy_create_docs_from_sibling(lead_id, *, mobile="", name="", viewer=None,
-                                         request_id=""):
+                                         request_id="", kinds=None):
     src = await _sibling_lead_for_docs(mobile, name, exclude_id=lead_id)
     if not src:
         return 0
     n = await lead_docs.copy_create_docs(
         db, next_id=next_id, from_lead_id=src.get("leadId") or "",
-        to_lead_id=lead_id or "", to_request_id=request_id or "", user=viewer)
+        to_lead_id=lead_id or "", to_request_id=request_id or "", user=viewer,
+        kinds=kinds)
+    if kinds:
+        return n
     if request_id:
         req_patch = {}
         if lead_docs.normalize_customer_type(src.get("customerType")) == "B2B":

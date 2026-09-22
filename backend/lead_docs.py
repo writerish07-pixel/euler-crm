@@ -250,7 +250,7 @@ async def has_create_docs(db, lead_id: str) -> bool:
 
 
 async def copy_create_docs(db, *, next_id, from_lead_id: str, to_lead_id: str = "",
-                           to_request_id: str = "", user=None) -> int:
+                           to_request_id: str = "", user=None, kinds=None) -> int:
     """Clone KYC + OEM Extra Support from one live lead onto another vehicle.
 
     Delivery, Tally and refund scans stay on the source file. Each copy is a
@@ -263,11 +263,12 @@ async def copy_create_docs(db, *, next_id, from_lead_id: str, to_lead_id: str = 
         return 0
     if not to_lead_id and not to_request_id:
         return 0
+    allow = set(kinds) if kinds else set(CREATE_DOC_KINDS)
     copied = 0
     seen = set()
     async for src in db[COLLECTION].find({"leadId": from_lead_id}):
         kind = src.get("kind") or ""
-        if kind not in CREATE_DOC_KINDS or kind in seen:
+        if kind not in CREATE_DOC_KINDS or kind not in allow or kind in seen:
             continue
         seen.add(kind)
         raw = src.get("data") or b""
