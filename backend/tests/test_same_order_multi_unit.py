@@ -130,8 +130,10 @@ async def test_same_order_create_autofills_pack_cx_demand(client):
     deal = body.get("dealFormat") or {}
     assert deal.get("pack") is True
     assert len(deal.get("units") or []) == 2
-    assert ce.num(body.get("cxDemand")) == ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx"))
-    assert ce.num(body.get("customerPayable")) == ce.num(body.get("cxDemand"))
+    unit_pays = [ce.num(u.get("customerPayable")) for u in (body.get("units") or [])]
+    assert all(p > 0 for p in unit_pays)
+    assert ce.num(body.get("customerPayable")) == ce.round2(sum(unit_pays))
+    assert ce.num(body.get("cxDemand")) == ce.num(body.get("customerPayable"))
     assert ce.num(body.get("cxDemand")) > 1200000
     unit_tcs = sum(ce.num(u.get("tcs")) for u in (deal.get("units") or []))
     assert ce.num(deal.get("tcs")) == unit_tcs
@@ -173,7 +175,11 @@ async def test_add_unit_to_existing_lead_recalculates_pack(client):
     assert body.get("sameOrderMultiUnit") is True
     deal = body.get("dealFormat") or {}
     assert deal.get("pack") is True
-    assert ce.num(body.get("cxDemand")) == ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx"))
+    unit_pays = [ce.num(u.get("customerPayable")) for u in (body.get("units") or [])]
+    assert len(unit_pays) == 2
+    assert all(p > 0 for p in unit_pays)
+    assert ce.num(body.get("customerPayable")) == ce.round2(sum(unit_pays))
+    assert ce.num(body.get("cxDemand")) == ce.num(body.get("customerPayable"))
     assert ce.num(body.get("cxDemand")) > 600000
     assert await server.db.leads.count_documents({"mobile": mobile}) == 1
 
@@ -502,6 +508,8 @@ async def test_pack_360_hydrates_unit_amounts_and_sums_payable(client):
         "accountStatus": "Active", "currentStatus": "Booked",
         "bookingDate": "2026-09-01",
         "exShowroom": 600000, "rto": 10000,
+        "customerPayable": 610000,
+        "cxDemand": 610000,
         "priceStructureSaved": True,
         "additionalDiscount": 5000000,
         "schemeAllocationExplicit": True,
@@ -509,9 +517,12 @@ async def test_pack_360_hydrates_unit_amounts_and_sums_payable(client):
         "sameOrderMultiUnit": True,
         "units": [
             {"sno": 1, "model": "Turbo Max", "variant": "Zero A",
-             "exShowroom": 600000, "rto": 10000, "priceStructureSaved": True},
-            {"sno": 2, "model": "Turbo Max", "variant": "Zero A"},
-            {"sno": 3, "model": "Turbo Max", "variant": "Zero A"},
+             "exShowroom": 600000, "rto": 10000, "priceStructureSaved": True,
+             "customerPayable": 610000},
+            {"sno": 2, "model": "Turbo Max", "variant": "Zero A",
+             "exShowroom": 600000, "rto": 10000, "customerPayable": 0},
+            {"sno": 3, "model": "Turbo Max", "variant": "Zero A",
+             "exShowroom": 600000, "rto": 10000, "customerPayable": 0},
         ],
     })
     r = await client.get(f"/api/leads/{lid}/360")
@@ -525,6 +536,8 @@ async def test_pack_360_hydrates_unit_amounts_and_sums_payable(client):
     assert all(ce.num(u.get("customerPayable")) > 0 for u in units)
     assert ce.num(c.get("customerPayable")) > 0
     assert ce.num(c.get("customerPayable")) == ce.num(lead.get("customerPayable"))
+    assert ce.num(lead.get("customerPayable")) == ce.round2(
+        sum(ce.num(u.get("customerPayable")) for u in units))
     assert ce.num(c.get("grossVehicleCost")) >= 1800000
     # Lead-level additionalDiscount must not turn pack payable negative.
     assert ce.num(c.get("customerPayable")) > 0
