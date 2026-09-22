@@ -95,6 +95,53 @@ async def test_same_order_create_one_lead_many_units(client):
 
 
 @pytest.mark.asyncio
+async def test_create_lead_retry_returns_same_id(client):
+    mobile = "9813300444"
+    await server.db.leads.delete_many({"mobile": mobile})
+    payload = {
+        "customerName": "Retry One Tap",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    }
+    first = await client.post("/api/leads", json=payload)
+    assert first.status_code == 200, first.text
+    second = await client.post("/api/leads", json=payload)
+    assert second.status_code == 200, second.text
+    assert second.json()["leadId"] == first.json()["leadId"]
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 1
+
+
+@pytest.mark.asyncio
+async def test_another_vehicle_still_mints_a_new_id(client):
+    mobile = "9813300555"
+    await server.db.leads.delete_many({"mobile": mobile})
+    first = await client.post("/api/leads", json={
+        "customerName": "Repeat Buyer",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert first.status_code == 200, first.text
+    second = await client.post("/api/leads", json={
+        "customerName": "Repeat Buyer",
+        "mobile": mobile,
+        "interestedModel": "Storm",
+        "variant": "Storm LR (PV)",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "anotherVehicle": True,
+    })
+    assert second.status_code == 200, second.text
+    assert second.json()["leadId"] != first.json()["leadId"]
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 2
+
+
+@pytest.mark.asyncio
 async def test_delivery_fills_pack_serial_rows(client):
     lid = "LD-PACK-DEL"
     mobile = "9813300222"

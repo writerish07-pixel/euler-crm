@@ -3597,6 +3597,52 @@ async def _mobile_taken_by_lead(mobile: str, exclude_lead_id: str = ""):
     return rows[0] if rows else None
 
 
+_CREATE_DEDUP_SEC = 60
+
+
+def _iso_to_utc(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _recent_identical_lead_create(body: "LeadIn"):
+    """Same Create Lead replayed after the first insert already landed.
+
+    The browser retries POST /leads on timeout / 502 / HTML across Railway and
+    the Cloudflare origin. Each retry used to mint another New leadId.
+    """
+    name = re.sub(r"\s+", " ", str(getattr(body, "customerName", "") or "").strip())
+    if not name:
+        return None
+    last10 = _mobile_last10(getattr(body, "mobile", "") or "")
+    model = str(getattr(body, "interestedModel", "") or "").strip()
+    variant = str(getattr(body, "variant", "") or "").strip()
+    q = {"customerName": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+    if last10:
+        q["mobile"] = {"$regex": last10 + "$"}
+    if model:
+        q["interestedModel"] = {"$regex": f"^{re.escape(model)}$", "$options": "i"}
+    if variant:
+        q["variant"] = {"$regex": f"^{re.escape(variant)}$", "$options": "i"}
+    rows = await db.leads.find(q).sort("lastUpdated", -1).to_list(8)
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        prev = _iso_to_utc(row.get("lastUpdated"))
+        if not prev:
+            continue
+        if (now - prev).total_seconds() <= _CREATE_DEDUP_SEC:
+            return row
+    return None
+
+
 async def _raise_if_mobile_taken(mobile: str, *, incoming_name: str = "",
                                  incoming_executive: str = "",
                                  exclude_lead_id: str = "", allow: bool = False,
@@ -3645,6 +3691,10 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
     if same_order:
         another = False
+    if not another and not allow_same_mobile:
+        recent = await _recent_identical_lead_create(body)
+        if recent:
+            return _lead_for_viewer(clean(recent), viewer)
     await _raise_if_mobile_taken(
         body.mobile, incoming_name=body.customerName,
         incoming_executive=body.executive, allow=another or allow_same_mobile,
@@ -7840,11 +7890,16 @@ def _same_sold_person(a, b):
     return bool(oem_sync._name_key_usable(ak) and ak == bk)
 
 
+# Leftover Sold matches already-split sibling files — do not mint a fourth id.
+_PACK_DO_NOT_CREATE = object()
+
+
 def _pack_target_for_sold(row, leads, sold_rows):
     """Existing same-name/mobile file this leftover Sold should join, or None.
 
-    Pack / 2+ family Sold on one open CRM file → append. Delivered single-unit
-    or already-split sibling files stay separate (repeat buyer / #169).
+    Pack or one open CRM file → append. Delivered single-unit leftover stays a
+    new id (repeat buyer / #169). Already-split siblings skip create so a sync
+    cannot keep adding New files for the same person.
     """
     live = [l for l in (leads or []) if oem_sync.live_occupies_vehicle_id(l)]
     same = oem_sync._live_same_mobile(live, (row or {}).get("mobile"))
@@ -7858,17 +7913,11 @@ def _pack_target_for_sold(row, leads, sold_rows):
     if packs:
         return packs[0]
     if len(same) > 1:
-        return None
+        return _PACK_DO_NOT_CREATE
     lead = same[0]
     if oem_sync._lead_is_delivered(lead) and oem_sync.vehicle_count(lead) <= 1:
         return None
-    family = [
-        s for s in (sold_rows or [])
-        if _same_sold_person(s, row) or _same_sold_person(s, lead)
-    ]
-    if len(family) >= 2:
-        return lead
-    return None
+    return lead
 
 
 def _family_sold_for_pack(row, sold_rows, leads, target):
@@ -8024,6 +8073,8 @@ async def _create_leads_from_unmatched_oem_sold():
         if not chassis or chassis in consumed:
             continue
         target = _pack_target_for_sold(row, leads, sold)
+        if target is _PACK_DO_NOT_CREATE:
+            continue
         if target:
             family = _family_sold_for_pack(row, sold, leads, target)
             live = target
