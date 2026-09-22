@@ -39,12 +39,24 @@ export default function DealFormatCard({
     : !!d.needsOwnerApproval;
   return (
     <div className="rounded-lg border border-line bg-paper px-3 py-3 space-y-1.5" data-testid="deal-format-card">
-      <div className="text-xs font-semibold uppercase tracking-wide text-ink-soft mb-1">Deal format</div>
+      <div className="text-xs font-semibold uppercase tracking-wide text-ink-soft mb-1">
+        Deal format{d.pack && d.unitCount > 1 ? ` · ${d.unitCount} units` : ""}
+      </div>
       {loading && <p className="text-xs text-ink-faint">Loading Price Master…</p>}
       {missingPrice && (
         <p className="text-xs text-amber-700" data-testid="deal-format-no-price">
           Select a vehicle to load prices.
         </p>
+      )}
+      {d.pack && Array.isArray(d.units) && d.units.length > 1 && (
+        <ul className="text-[11px] text-ink-soft space-y-0.5 mb-1" data-testid="deal-pack-units">
+          {d.units.map((u, i) => (
+            <li key={i}>
+              Unit {i + 1}{u.model ? ` · ${u.model}` : ""}{u.variant ? ` ${u.variant}` : ""}
+              {u.netToCx != null ? ` · ${inr(u.netToCx)}` : ""}
+            </li>
+          ))}
+        </ul>
       )}
       <Line k="Ex-showroom" v={d.exShowroom} testid="deal-ex" />
       <Line k="RTO" v={d.rto} testid="deal-rto" />

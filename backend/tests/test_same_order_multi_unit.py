@@ -17,6 +17,7 @@ from mongomock_motor import AsyncMongoMockClient  # noqa: E402
 
 motor.motor_asyncio.AsyncIOMotorClient = AsyncMongoMockClient
 
+import commercial as ce  # noqa: E402
 import httpx  # noqa: E402
 import oem_sync  # noqa: E402
 import period as periodmod  # noqa: E402
@@ -92,6 +93,148 @@ async def test_same_order_create_one_lead_many_units(client):
     assert hit["vehicleCount"] == 3
     n = await server.db.leads.count_documents({"mobile": mobile})
     assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_same_order_create_autofills_pack_cx_demand(client):
+    mobile = "9813300666"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-PACK-A", "PM-PACK-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-PACK-A", "model": "Turbo Max", "variant": "Pack A",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-PACK-B", "model": "Storm", "variant": "Pack B",
+        "exShowroom": 1200000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    r = await client.post("/api/leads", json={
+        "customerName": "Pack Calc",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Pack A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"model": "Turbo Max", "variant": "Pack A"},
+            {"model": "Storm", "variant": "Pack B"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("sameOrderMultiUnit") is True
+    assert body.get("vehicleCount") == 2
+    deal = body.get("dealFormat") or {}
+    assert deal.get("pack") is True
+    assert len(deal.get("units") or []) == 2
+    assert ce.num(body.get("cxDemand")) == ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx"))
+    assert ce.num(body.get("customerPayable")) == ce.num(body.get("cxDemand"))
+    assert ce.num(body.get("cxDemand")) > 1200000
+    unit_tcs = sum(ce.num(u.get("tcs")) for u in (deal.get("units") or []))
+    assert ce.num(deal.get("tcs")) == unit_tcs
+    assert unit_tcs >= 12000
+
+
+@pytest.mark.asyncio
+async def test_add_unit_to_existing_lead_recalculates_pack(client):
+    mobile = "9813300777"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-ADD-A", "PM-ADD-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-ADD-A", "model": "Turbo Max", "variant": "Add A",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-ADD-B", "model": "Storm", "variant": "Add B",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    first = await client.post("/api/leads", json={
+        "customerName": "Add Unit",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Add A",
+        "executive": "Amit",
+        "budget": 600000,
+        "leadSource": "Walk-in",
+    })
+    assert first.status_code == 200, first.text
+    lid = first.json()["leadId"]
+    add = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Storm", "variant": "Add B",
+    })
+    assert add.status_code == 200, add.text
+    body = add.json()
+    assert body.get("vehicleCount") == 2
+    assert body.get("sameOrderMultiUnit") is True
+    deal = body.get("dealFormat") or {}
+    assert deal.get("pack") is True
+    assert ce.num(body.get("cxDemand")) == ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx"))
+    assert ce.num(body.get("cxDemand")) > 600000
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_deletes_same_sku_retry_triples(client):
+    mobile = "9813300888"
+    await server.db.leads.delete_many({"mobile": mobile})
+    for i, lid in enumerate(("LD26RPAIR01", "LD26RPAIR02", "LD26RPAIR03")):
+        await server.db.leads.insert_one({
+            "leadId": lid, "customerName": "Retry Triple", "mobile": mobile,
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "accountStatus": "Active", "currentStatus": "New",
+            "createdDate": "2026-09-22", "lastUpdated": "2026-09-22T08:00:00+00:00",
+            "executive": "Amit",
+        })
+    r = await client.post("/api/leads/repair-retry-duplicates")
+    assert r.status_code == 200, r.text
+    assert r.json()["repaired"] == 1
+    left = [l async for l in server.db.leads.find({"mobile": mobile})]
+    assert len(left) == 1
+    assert left[0]["leadId"] == "LD26RPAIR01"
+
+
+@pytest.mark.asyncio
+async def test_repair_merges_same_day_different_skus(client):
+    mobile = "9813300999"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-MRG-A", "PM-MRG-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-MRG-A", "model": "Turbo Max", "variant": "Mrg A",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-MRG-B", "model": "Storm", "variant": "Mrg B",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD26MERGE01", "customerName": "Merge Pack", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Mrg A",
+        "accountStatus": "Active", "currentStatus": "New",
+        "createdDate": "2026-09-22", "lastUpdated": "2026-09-22T08:00:00+00:00",
+        "exShowroom": 500000,
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD26MERGE02", "customerName": "Merge Pack", "mobile": mobile,
+        "interestedModel": "Storm", "variant": "Mrg B",
+        "accountStatus": "Active", "currentStatus": "New",
+        "createdDate": "2026-09-22", "lastUpdated": "2026-09-22T08:01:00+00:00",
+        "exShowroom": 500000,
+    })
+    r = await client.post("/api/leads/repair-retry-duplicates")
+    assert r.status_code == 200, r.text
+    assert r.json()["repaired"] == 1
+    left = [l async for l in server.db.leads.find({"mobile": mobile})]
+    assert len(left) == 1
+    assert left[0]["leadId"] == "LD26MERGE01"
+    assert left[0].get("sameOrderMultiUnit") is True
+    assert left[0].get("vehicleCount") == 2
 
 
 @pytest.mark.asyncio

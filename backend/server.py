@@ -1242,6 +1242,12 @@ class LeadUnitIn(BaseModel):
     numberPlate: str = ""
 
 
+class AddLeadUnitIn(BaseModel):
+    """Add one SKU onto an existing same-order file."""
+    model: str
+    variant: str = ""
+
+
 class LeadUpdateIn(BaseModel):
     """PATCH-style partial update for PUT /leads/{lead_id}. Every field is Optional
     with no non-null default, so (a) exclude_unset=True only ever picks up keys the
@@ -3755,21 +3761,10 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
             lead_id, mobile=body.mobile, name=body.customerName, viewer=viewer)
     cx = ce.round2(ce.num(payload.get("budget")))
     extra = ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived"))))
-    if cx > 0:
-        await _apply_quoted_deal(
-            lead_id, payload.get("interestedModel"), payload.get("variant"), cx,
-            created_date, oem_extra_received=extra if extra > 0 else None,
-            scheme_pass_on=scheme_pass_on)
-    elif extra > 0:
-        await recompute_lead(lead_id)
     if same_order and len(pack_units) > 1:
         live = await db.leads.find_one({"leadId": lead_id}) or {}
-        priced = [_unit1_from_lead(live)]
-        if cx > 0:
-            priced[0]["useDealPrice"] = True
-            priced[0]["cxDemand"] = cx
-            priced[0]["customerPayable"] = cx
-        for extra_u in pack_units[1:]:
+        priced = []
+        for extra_u in pack_units:
             rec = await _price_unit_from_master(
                 extra_u.get("model"), extra_u.get("variant"), created_date)
             priced.append({
@@ -3781,14 +3776,39 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
                 "numberPlate": extra_u.get("numberPlate") or "",
                 **rec,
             })
-        for i, u in enumerate(priced):
-            u["sno"] = i + 1
-        await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        deal = await _deal_format_for_pack(priced, cx, created_date, scheme_pass_on)
+        if cx <= 0:
+            cx = ce.round2(ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx")))
+        patch = {
             "units": priced,
             "sameOrderMultiUnit": True,
             "vehicleCount": len(priced),
+            "cxDemand": cx,
+            "budget": cx,
+            "dealFormat": deal,
+            "useDealPrice": cx > 0,
+            "additionalDiscount": ce.round2(max(0.0, ce.num(deal.get("additionalDiscount")))),
             "lastUpdated": now_iso(),
-        }})
+        }
+        if extra > 0:
+            patch["oemExtraSupportReceived"] = extra
+        if priced:
+            patch["interestedModel"] = priced[0].get("model") or payload.get("interestedModel")
+            patch["variant"] = priced[0].get("variant") or payload.get("variant")
+            for k in ("exShowroom", "rto", "insuranceAmount", "handlingCharges",
+                      "accessoriesAmount", "trc", "fastag", "extendedWarranty", "otherCharges"):
+                if priced[0].get(k) is not None:
+                    patch[k] = priced[0][k]
+        await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+        if _parse_scheme_pass_on(scheme_pass_on):
+            await _persist_scheme_pass_on(lead_id, scheme_pass_on, created_date)
+        await recompute_lead(lead_id)
+    elif cx > 0:
+        await _apply_quoted_deal(
+            lead_id, payload.get("interestedModel"), payload.get("variant"), cx,
+            created_date, oem_extra_received=extra if extra > 0 else None,
+            scheme_pass_on=scheme_pass_on)
+    elif extra > 0:
         await recompute_lead(lead_id)
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), viewer)
 
@@ -3866,6 +3886,84 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             "message": "Sent for approval. The lead is created after it is approved.",
         }
     return await _insert_live_lead(body, viewer=user)
+
+
+async def _reprice_pack_deal(lead, *, cx_demand=None, keep_unit1_prices=False):
+    """Rebuild pack dealFormat + payable. Never rewrite booked/delivered unit 1 prices."""
+    units = _ensure_lead_units(lead)
+    as_of = str(lead.get("bookingDate") or lead.get("createdDate") or today())[:10]
+    priced = []
+    for i, u in enumerate(units):
+        rec = dict(u)
+        if i == 0 and (_is_booked_lead(lead) or _is_delivered_lead(lead) or (
+                keep_unit1_prices and ce.num(rec.get("exShowroom")) > 0)):
+            priced.append(rec)
+            continue
+        master = await _price_unit_from_master(rec.get("model"), rec.get("variant"), as_of)
+        for k, v in master.items():
+            if k in ("chassisNumber", "invoiceNumber", "numberPlate"):
+                continue
+            rec[k] = v
+        rec["sno"] = i + 1
+        priced.append(rec)
+    for i, u in enumerate(priced):
+        u["sno"] = i + 1
+    cx = ce.round2(ce.num(cx_demand if cx_demand is not None else lead.get("cxDemand")))
+    deal = await _deal_format_for_pack(priced, cx, as_of, lead.get("schemePassOn"))
+    if cx <= 0:
+        cx = ce.round2(ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx")))
+        deal = await _deal_format_for_pack(priced, cx, as_of, lead.get("schemePassOn"))
+    patch = {
+        "units": priced,
+        "sameOrderMultiUnit": True,
+        "vehicleCount": max(len(priced), 1),
+        "cxDemand": cx,
+        "budget": cx,
+        "dealFormat": deal,
+        "useDealPrice": cx > 0,
+        "additionalDiscount": ce.round2(max(0.0, ce.num(deal.get("additionalDiscount")))),
+        "lastUpdated": now_iso(),
+    }
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    await recompute_lead(lead["leadId"])
+    return clean(await db.leads.find_one({"leadId": lead["leadId"]}))
+
+
+@api.post("/leads/{lead_id}/units")
+async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
+                        user=Depends(sales_staff_only)):
+    """Add one SKU to this file. Recalculates pack payable. Unit 1 prices stay."""
+    if not str(body.model or "").strip():
+        raise HTTPException(422, "Pick a model for the extra unit.")
+    lead = await get_lead_or_404(lead_id)
+    if _is_delivered_lead(lead) or lead.get("dealCancelled"):
+        raise HTTPException(422, "Cannot add a unit on a delivered or cancelled file.")
+    units = _ensure_lead_units(lead)
+    as_of = today()
+    rec = await _price_unit_from_master(body.model, body.variant, as_of)
+    units.append({
+        "sno": len(units) + 1,
+        "model": str(body.model or "").strip(),
+        "variant": str(body.variant or "").strip(),
+        "chassisNumber": "",
+        "invoiceNumber": "",
+        "numberPlate": "",
+        **rec,
+    })
+    lead["units"] = units
+    lead["sameOrderMultiUnit"] = True
+    cx = ce.round2(ce.num(lead.get("cxDemand") or lead.get("budget")))
+    if _is_booked_lead(lead) and cx > 0:
+        cx = ce.round2(cx + ce.num(rec.get("customerPayable")))
+    else:
+        cx = 0
+    updated = await _reprice_pack_deal(lead, cx_demand=cx, keep_unit1_prices=True)
+    await write_audit(act, "update", "lead-unit", leadId=lead_id, new={
+        "model": body.model, "variant": body.variant,
+        "vehicleCount": updated.get("vehicleCount"),
+        "cxDemand": updated.get("cxDemand"),
+    })
+    return _lead_for_viewer(updated, user)
 
 
 def _request_out(doc):
@@ -5108,11 +5206,10 @@ def _charges_from_price_structure(ps):
 def _deal_price_payable(lead):
     """Agreed Cx Demand is customer payable while useDealPrice is on.
 
-    Same-order packs use the sum of unit payables instead of one quote.
+    Same-order packs use the pack Cx Demand (sum of unit quotes) when set,
+    otherwise the sum of each unit's Price Master + scheme + TCS.
     """
     if not lead or lead.get("dealCancelled"):
-        return None
-    if oem_sync.is_same_order_pack(lead) and (lead.get("units") or []):
         return None
     if lead.get("useDealPrice") and ce.num(lead.get("cxDemand")) > 0:
         return ce.round2(ce.num(lead.get("cxDemand")))
@@ -5277,6 +5374,41 @@ async def _deal_format_for(model, variant, cx_demand, on=None, scheme_pass_on=No
     deal["schemePassedBreakup"] = breakup
     deal = ce.apply_scheme_to_deal(deal, passed)
     return deal
+
+
+def _unit_specs_from(model, variant, raw_units):
+    """Unit 1 from the top-level SKU plus extra lines. Drops a duplicate first row."""
+    unit1 = {
+        "model": str(model or "").strip(),
+        "variant": str(variant or "").strip(),
+    }
+    rest = []
+    for u in _normalize_lead_units(raw_units):
+        rest.append({
+            "model": str(u.get("model") or "").strip(),
+            "variant": str(u.get("variant") or "").strip(),
+            "chassisNumber": u.get("chassisNumber") or "",
+            "invoiceNumber": u.get("invoiceNumber") or "",
+            "numberPlate": u.get("numberPlate") or "",
+        })
+    if rest and (
+        rest[0]["model"].lower() == unit1["model"].lower()
+        and rest[0]["variant"].lower() == unit1["variant"].lower()
+    ):
+        rest = rest[1:]
+    specs = [unit1] + rest if (unit1["model"] or unit1["variant"]) else rest
+    return [s for s in specs if s.get("model") or s.get("variant")]
+
+
+async def _deal_format_for_pack(unit_specs, cx_demand=0, on=None, scheme_pass_on=None):
+    """Price Master + scheme + TCS per unit, then one pack deal card."""
+    lines = []
+    for spec in unit_specs or []:
+        line = await _deal_format_for(
+            spec.get("model"), spec.get("variant"), 0, on, scheme_pass_on)
+        line["chassisNumber"] = spec.get("chassisNumber") or ""
+        lines.append(line)
+    return ce.sum_deal_formats(lines, cx_demand)
 
 
 async def _persist_scheme_pass_on(lead_id, pass_on, as_of=None):
@@ -5546,6 +5678,151 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
     # WhatsApp booking confirm is fire-and-forget — must never fail this booking.
     wa.schedule(wa.notify_booking(lead_id))
     return {"bookingId": booking_id, "snapshotId": snapshot_id, "lead": clean(await db.leads.find_one({"leadId": lead_id}))}
+
+
+_RETRY_DUP_OPEN = {
+    "", "new", "contacted", "follow-up", "followup", "in progress", "inprogress",
+}
+
+
+def _person_group_key(lead):
+    last10 = _mobile_last10((lead or {}).get("mobile") or "")
+    if last10:
+        return "m:" + last10
+    name = oem_sync._norm_person_name((lead or {}).get("customerName"))
+    if oem_sync._name_key_usable(name):
+        return "n:" + name
+    return ""
+
+
+def _lead_created_day(lead):
+    return str((lead or {}).get("createdDate") or "")[:10]
+
+
+def _sku_key(lead):
+    return (
+        str((lead or {}).get("interestedModel") or "").strip().lower(),
+        str((lead or {}).get("variant") or "").strip().lower(),
+    )
+
+
+def _is_retry_dup_candidate(lead):
+    if not lead or lead.get("dealCancelled"):
+        return False
+    if _is_booked_lead(lead) or _is_delivered_lead(lead):
+        return False
+    if oem_sync.is_same_order_pack(lead):
+        return False
+    status = str(lead.get("currentStatus") or "").strip().lower()
+    return status in _RETRY_DUP_OPEN
+
+
+async def _lead_has_money(lead_id):
+    pay = await db.payments.find_one({"leadId": lead_id})
+    book = await db.bookings.find_one({"leadId": lead_id})
+    return bool(pay or book)
+
+
+async def _purge_retry_duplicate_lead(lead_id):
+    """Remove a New file minted by a retried Create Lead. No sheet wait in tests."""
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead or not _is_retry_dup_candidate(lead):
+        return False
+    if await _lead_has_money(lead_id):
+        return False
+    try:
+        await gsheets.delete_lead_traces(lead_id)
+    except Exception:
+        logging.exception("retry-dup sheet purge failed for %s", lead_id)
+    for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
+                 "activities", "dealer_earnings", "incentive_register", "billing_summaries",
+                 "whatsapp_messages", "whatsapp_outbox"]:
+        await db[coll].delete_many({"leadId": lead_id})
+    await db[lead_docs.COLLECTION].delete_many({"leadId": lead_id})
+    await db.leads.delete_one({"leadId": lead_id})
+    return True
+
+
+async def _merge_retry_siblings_into_pack(keeper, extras):
+    """Different SKUs created the same day → one same-order file."""
+    units = _ensure_lead_units(keeper)
+    for extra in extras:
+        rec = _unit1_from_lead(extra)
+        rec["chassisNumber"] = extra.get("chassisNumber") or rec.get("chassisNumber") or ""
+        rec["invoiceNumber"] = extra.get("invoiceNumber") or rec.get("invoiceNumber") or ""
+        rec["numberPlate"] = extra.get("numberPlate") or rec.get("numberPlate") or ""
+        units.append(rec)
+        await db[lead_docs.COLLECTION].update_many(
+            {"leadId": extra["leadId"]}, {"$set": {"leadId": keeper["leadId"]}})
+    keeper["units"] = units
+    keeper["sameOrderMultiUnit"] = True
+    updated = await _reprice_pack_deal(keeper, cx_demand=0, keep_unit1_prices=True)
+    removed = []
+    for extra in extras:
+        if await _purge_retry_duplicate_lead(extra["leadId"]):
+            removed.append(extra["leadId"])
+    return updated, removed
+
+
+async def _repair_retry_duplicate_leads():
+    """Collapse New files minted by the Create Lead retry / OEM leftover bug.
+
+    Same person + same day + 2+ open unbooked singles with no money:
+    identical SKU → keep the first id, delete the rest.
+    Different SKUs → one pack on the first id.
+    """
+    rows = [l async for l in db.leads.find({})]
+    groups = {}
+    for lead in rows:
+        if not _is_retry_dup_candidate(lead):
+            continue
+        key = _person_group_key(lead)
+        day = _lead_created_day(lead)
+        if not key or not day:
+            continue
+        groups.setdefault((key, day), []).append(lead)
+    repaired = []
+    for (_key, day), cluster in groups.items():
+        if len(cluster) < 2:
+            continue
+        cluster = sorted(cluster, key=lambda l: str(l.get("leadId") or ""))
+        money = False
+        for row in cluster:
+            if await _lead_has_money(row["leadId"]):
+                money = True
+                break
+        if money:
+            continue
+        keeper = cluster[0]
+        extras = cluster[1:]
+        skus = {_sku_key(l) for l in cluster}
+        if len(skus) == 1:
+            removed = []
+            for extra in extras:
+                if await _purge_retry_duplicate_lead(extra["leadId"]):
+                    removed.append(extra["leadId"])
+            if removed:
+                repaired.append({
+                    "kept": keeper["leadId"], "removed": removed, "action": "delete-retry",
+                    "customerName": keeper.get("customerName") or "",
+                })
+        else:
+            updated, removed = await _merge_retry_siblings_into_pack(keeper, extras)
+            if removed:
+                repaired.append({
+                    "kept": keeper["leadId"], "removed": removed, "action": "merge-pack",
+                    "customerName": keeper.get("customerName") or "",
+                    "vehicleCount": (updated or {}).get("vehicleCount"),
+                })
+    return repaired
+
+
+@api.post("/leads/repair-retry-duplicates", dependencies=[Depends(owner_only)])
+async def repair_retry_duplicate_leads(act=Depends(actor)):
+    """Owner: collapse New files created by the triple-id bug."""
+    repaired = await _repair_retry_duplicate_leads()
+    await write_audit(act, "repair", "lead-retry-duplicates", new={"repaired": repaired})
+    return {"ok": True, "repaired": len(repaired), "groups": repaired}
 
 
 @api.delete("/leads/{lead_id}", dependencies=[Depends(owner_only)])
@@ -8625,9 +8902,21 @@ async def price_list(model: Optional[str] = None, q: str = "", user=Depends(curr
 @api.get("/commercial/deal-preview")
 async def deal_preview(model: str = "", variant: str = "", cxDemand: float = 0,
                        on: Optional[str] = None, passOnKeys: str = "",
+                       units: str = "",
                        user=Depends(current_user)):
-    """Price Master quote plus OEM scheme available for the model, with pass-on."""
-    deal = await _deal_format_for(model, variant, cxDemand, on, passOnKeys)
+    """Price Master quote plus OEM scheme. `units` is a JSON list for a pack."""
+    raw_units = None
+    if units:
+        try:
+            parsed = json.loads(units)
+            raw_units = parsed if isinstance(parsed, list) else None
+        except Exception:
+            raw_units = None
+    specs = _unit_specs_from(model, variant, raw_units)
+    if len(specs) > 1:
+        deal = await _deal_format_for_pack(specs, cxDemand, on, passOnKeys)
+    else:
+        deal = await _deal_format_for(model, variant, cxDemand, on, passOnKeys)
     if not _is_owner_user(user):
         return _staff_safe_deal_preview(deal)
     return deal
@@ -13352,6 +13641,13 @@ async def _run_boot_maintenance():
             await _repair_duplicate_finance_receipts()
         except Exception:
             logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
+        try:
+            if not _is_test_env():
+                repaired = await _repair_retry_duplicate_leads()
+                if repaired:
+                    logging.info("RETRY_DUP_LEADS_REPAIRED: %s", len(repaired))
+        except Exception:
+            logging.exception("RETRY_DUP_LEADS_REPAIR_ERROR")
         try:
             await _repair_mis_only_received()
         except Exception:

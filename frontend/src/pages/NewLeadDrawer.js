@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { get, post, apiErrorMessage, apiErrorDetail } from "../lib/api";
 import { todayISO, digitsLast10 } from "../lib/format";
@@ -50,7 +50,11 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const [unitVariants, setUnitVariants] = useState({});
   const [matches, setMatches] = useState(null);
   const [siblingDocs, setSiblingDocs] = useState([]);
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const cxTouched = useRef(false);
+  const set = (k) => (e) => {
+    if (k === "budget") cxTouched.current = true;
+    setForm((f) => ({ ...f, [k]: e.target.value }));
+  };
 
   useEffect(() => {
     if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants);
@@ -68,22 +72,36 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   }, [extraUnits.map((u) => u.model).join("|")]);
 
   const passOnKeys = Object.keys(passOn).filter((k) => passOn[k]).join(",");
+  const packUnitKey = extraUnits.map((u) => `${u.model}|${u.variant}`).join(";");
 
   useEffect(() => {
+    const extras = extraUnits.filter((u) => u.model);
+    const pack = sameOrder && extras.length > 0;
     if (!form.interestedModel || !form.variant) {
       setDeal(null);
       return undefined;
     }
     let alive = true;
     setDealLoading(true);
+    const units = pack
+      ? [{ model: form.interestedModel, variant: form.variant }, ...extras]
+      : undefined;
     get("/commercial/deal-preview", {
       model: form.interestedModel, variant: form.variant, cxDemand: Number(form.budget) || 0,
       passOnKeys: passOnKeys || undefined,
-    }).then((d) => { if (alive) setDeal(d); })
+      units: units ? JSON.stringify(units) : undefined,
+    }).then((d) => {
+      if (!alive) return;
+      setDeal(d);
+      const suggested = Number(d?.suggestedCxDemand || d?.netToCx || 0);
+      if (pack && !cxTouched.current && suggested > 0) {
+        setForm((f) => (Number(f.budget) === suggested ? f : { ...f, budget: suggested }));
+      }
+    })
       .catch(() => { if (alive) setDeal(null); })
       .finally(() => { if (alive) setDealLoading(false); });
     return () => { alive = false; };
-  }, [form.interestedModel, form.variant, form.budget, passOnKeys]);
+  }, [form.interestedModel, form.variant, form.budget, passOnKeys, sameOrder, packUnitKey]);
 
   useEffect(() => {
     const mobile = digitsLast10(form.mobile);
@@ -371,7 +389,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           <DealFormatCard
             snapshot={deal}
             cxDemand={form.budget}
-            onCxDemand={(v) => setForm((f) => ({ ...f, budget: v }))}
+            onCxDemand={(v) => { cxTouched.current = true; setForm((f) => ({ ...f, budget: v })); }}
             loading={dealLoading}
             missingPrice={!form.interestedModel || !form.variant}
             showOwnerPnl={!!canSeeOwnerCommercials}

@@ -1471,6 +1471,55 @@ def apply_scheme_to_deal(deal, scheme_passed=0):
     return apply_deal_additional(deal, deal.get("cxDemand"), passed)
 
 
+def sum_deal_formats(deals, cx_demand=0):
+    """Same-order pack card. TCS stays per unit (not 1% of the pack sum).
+
+    Cx Demand 0 → fill with Net to Cx minus OEM scheme passed. Additional
+    (Dealer) is My total − Cx Demand − OEM scheme, same as a single unit.
+    """
+    lines = [dict(d) for d in (deals or []) if d]
+    if not lines:
+        return apply_scheme_to_deal(compute_deal_format({}, cx_demand), 0)
+    keys = (
+        "exShowroom", "rto", "insurance", "transport", "handlingCharges",
+        "otherCharges", "grossVehicleCost", "tcs", "tcsBase", "netToCx",
+        "schemePassed", "oemAvailableTotal",
+    )
+    summed = {k: round2(sum(num(d.get(k)) for d in lines)) for k in keys}
+    summed["tcs"] = round2(sum(num(d.get("tcs")) for d in lines))
+    summed["netToCx"] = round2(sum(num(d.get("netToCx")) for d in lines))
+    summed["grossVehicleCost"] = round2(sum(num(d.get("grossVehicleCost")) for d in lines))
+    passed = summed["schemePassed"]
+    cx = round2(max(0.0, num(cx_demand)))
+    if cx <= 0:
+        cx = round2(max(0.0, summed["netToCx"] - passed))
+    support = round2(summed["netToCx"] - cx)
+    offers = []
+    for i, d in enumerate(lines):
+        for o in (d.get("schemeOffers") or []):
+            rec = dict(o)
+            rec["unit"] = i + 1
+            rec["unitModel"] = d.get("model") or ""
+            rec["unitVariant"] = d.get("variant") or ""
+            offers.append(rec)
+    out = apply_scheme_to_deal({
+        **summed,
+        "cxDemand": cx,
+        "supportRequired": support,
+        "extraMargin": round2(max(0.0, -support)),
+        "schemeOffers": offers,
+        "schemePassOn": {},
+        "schemeMonth": next((d.get("schemeMonth") for d in lines if d.get("schemeMonth")), ""),
+        "priceFound": all(bool(d.get("priceFound")) for d in lines),
+        "pack": True,
+        "unitCount": len(lines),
+        "units": lines,
+        "asOf": next((d.get("asOf") for d in lines if d.get("asOf")), ""),
+    }, passed)
+    out["suggestedCxDemand"] = round2(max(0.0, summed["netToCx"] - passed))
+    return out
+
+
 def validate_scheme_offers(model, variant, booking_date, offers, scheme_rows):
     """Port of validateSchemeOffersForVehicle_ — returns list of error lines (empty = OK)."""
     ctx = get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows)
