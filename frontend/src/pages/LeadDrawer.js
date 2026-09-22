@@ -1163,7 +1163,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         <div className="text-[11px] text-ink-faint self-end">
           Passed comes from Received only. Additional (Dealer) is a customer discount — separate.
         </div>
-      </div>
+      </div>}
       {hiddenFields.length > 0 && (
         <div className="text-[11px] text-ink-faint mb-3" data-testid="scheme-unavailable-note">
           Not available for this model/variant: {hiddenFields.map(([, l]) => l).join(", ")}
