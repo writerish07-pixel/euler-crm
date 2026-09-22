@@ -857,6 +857,8 @@ async def recompute_lead(lead_id):
     lead = await db.leads.find_one({"leadId": lead_id})
     if not lead:
         return None
+    if oem_sync.is_same_order_pack(lead):
+        lead, _hydrated = await _hydrate_pack_unit_prices(lead)
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
     totals = ce.compute_commercial_totals(snap, scheme_rows)
@@ -4736,9 +4738,21 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
             "fieldView": True,
             "whatsapp": {"count": 0, "lastAt": None, "optOut": False, "sessionOpen": False},
         }
+    if oem_sync.is_same_order_pack(lead):
+        lead, hydrated = await _hydrate_pack_unit_prices(lead)
+        if hydrated:
+            lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
+            await recompute_lead(lead_id)
+            lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
     commercials = ce.compute_full_commercials(snap, scheme_rows)
+    if oem_sync.is_same_order_pack(lead):
+        pack_c = _pack_overview_commercials(lead, scheme_rows)
+        commercials = {**commercials, **pack_c}
+        # Drawer payable / outstanding follow the pack sum, not unit-1 minus pack discount.
+        if pack_c.get("customerPayable") is not None:
+            commercials["customerPayable"] = pack_c["customerPayable"]
     payments = [clean(p) for p in await db.payments.find({"leadId": lead_id}).sort("date", 1).to_list(500)]
     activities = [clean(a) for a in await db.activities.find({"leadId": lead_id}).sort("activityId", -1).to_list(500)]
     delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
@@ -5294,6 +5308,15 @@ def _unit_is_priced(lead, unit, index):
     return False
 
 
+def _unit_has_price_amount(lead, unit, index):
+    """True when this unit has a Price Master / saved ex-showroom to quote."""
+    if ce.num((unit or {}).get("exShowroom")) > 0:
+        return True
+    if index == 0 and ce.num((lead or {}).get("exShowroom")) > 0:
+        return True
+    return _unit_is_priced(lead, unit, index)
+
+
 def _unit_has_scheme(lead, unit, index):
     if _has_persisted_scheme(unit or {}):
         return True
@@ -5396,22 +5419,31 @@ def _lead_overlay_unit(lead, unit, index=0):
     """Lead-shaped dict for one unit so compute_commercial_totals can price it.
 
     Extra units do not inherit unit 1 / lead-level price or scheme. OEM Extra
-    Support stays lead-level and is applied once on unit 1.
+    Support stays lead-level and is applied once on unit 1. Pack-deal
+    additionalDiscount leftover on the lead is not a per-unit discount.
     """
     u = unit or {}
     out = dict(lead or {})
     out["interestedModel"] = u.get("model") or u.get("interestedModel") or out.get("interestedModel")
     out["variant"] = u.get("variant") or out.get("variant")
-    if index > 0:
+    pack = oem_sync.is_same_order_pack(lead or {})
+    if index > 0 or pack:
         for k in UNIT_COMMERCIAL_KEYS:
             out.pop(k, None)
-        out["oemExtraSupportReceived"] = 0
-        out["oemExtraSupportPassed"] = 0
-        out["schemeAllocationExplicit"] = False
-        out["schemeAllocationV2"] = False
-        out["benefitPassedBreakup"] = ""
-        out["schemeComponentsUsed"] = ""
-        out["schemeAllocation"] = ""
+        if index > 0:
+            out["oemExtraSupportReceived"] = 0
+            out["oemExtraSupportPassed"] = 0
+            out["schemeAllocationExplicit"] = False
+            out["schemeAllocationV2"] = False
+            out["benefitPassedBreakup"] = ""
+            out["schemeComponentsUsed"] = ""
+            out["schemeAllocation"] = ""
+        else:
+            _copy_unit_commercials(lead, out)
+            addl = ce.num(out.get("additionalDiscount"))
+            gvc = ce.num(u.get("exShowroom") or lead.get("exShowroom"))
+            if "additionalDiscount" not in u and addl > gvc > 0:
+                out["additionalDiscount"] = 0
     for k in UNIT_COMMERCIAL_KEYS:
         if k in u:
             out[k] = u[k]
@@ -5425,7 +5457,6 @@ def _refresh_unit_payables(lead, scheme_rows=None):
         units = [_unit1_from_lead(lead)]
     if not units:
         return None, units, 0, 0
-    filled_only = _pack_uses_unit_structures(lead)
     total = 0.0
     filled = 0
     pending = 0
@@ -5438,7 +5469,7 @@ def _refresh_unit_payables(lead, scheme_rows=None):
             filled += 1
         else:
             pending += 1
-        count = priced if filled_only else True
+        count = _unit_has_price_amount(lead, u, i)
         if not count:
             u["customerPayable"] = 0
             units[i] = u
@@ -5461,6 +5492,79 @@ def _sum_unit_payables(lead, scheme_rows=None):
         return None
     total, _units, _filled, _pending = _refresh_unit_payables(lead, scheme_rows)
     return total
+
+
+async def _hydrate_pack_unit_prices(lead):
+    """Write Price Master charges onto pack units that still have ₹0."""
+    if not oem_sync.is_same_order_pack(lead or {}):
+        return lead, False
+    units = _ensure_lead_units(lead)
+    as_of = str((lead or {}).get("bookingDate") or (lead or {}).get("createdDate") or today())[:10]
+    changed = False
+    for i, raw in enumerate(units):
+        u = dict(raw or {})
+        if ce.num(u.get("exShowroom")) > 0:
+            units[i] = u
+            continue
+        if i == 0 and ce.num((lead or {}).get("exShowroom")) > 0:
+            _copy_unit_commercials(lead, u)
+            units[i] = u
+            changed = True
+            continue
+        master = await _price_unit_from_master(u.get("model"), u.get("variant"), as_of)
+        if ce.num(master.get("exShowroom")) <= 0:
+            units[i] = u
+            continue
+        for k, v in master.items():
+            if k in ("chassisNumber", "invoiceNumber", "numberPlate",
+                     "consumerDiscount", "exchangeBonus", "loyaltyBonus",
+                     "referralBonus", "dsaDiscount", "additionalDiscount",
+                     "customerBenefitPassed"):
+                continue
+            if u.get(k) in (None, "", 0, 0.0) or k not in u:
+                if k == "model" or k == "variant":
+                    continue
+                u[k] = v
+        units[i] = u
+        changed = True
+    if not changed:
+        return lead, False
+    lead = dict(lead)
+    lead["units"] = units
+    lead["sameOrderMultiUnit"] = True
+    lead["vehicleCount"] = max(len(units), 1)
+    await db.leads.update_one(
+        {"leadId": lead["leadId"]},
+        {"$set": {
+            "units": units,
+            "sameOrderMultiUnit": True,
+            "vehicleCount": lead["vehicleCount"],
+            "lastUpdated": now_iso(),
+        }})
+    return lead, True
+
+
+def _pack_overview_commercials(lead, scheme_rows=None):
+    """Sum each unit's own GVC / discount / payable. Never apply unit-1 scheme to the pack."""
+    units = _ensure_lead_units(lead)
+    gvc = tcs = disc = passed = pay = 0.0
+    for i, u in enumerate(units):
+        if not _unit_has_price_amount(lead, u, i):
+            continue
+        snap = lead_to_snapshot(_lead_overlay_unit(lead, u, i))
+        totals = ce.compute_commercial_totals(snap, scheme_rows)
+        gvc += ce.num(totals.get("grossVehicleCost"))
+        tcs += ce.num(totals.get("tcs"))
+        disc += ce.num(totals.get("totalDiscount"))
+        passed += ce.num(totals.get("totalPassedToCustomer"))
+        pay += ce.num(totals.get("customerPayable"))
+    return {
+        "grossVehicleCost": ce.round2(gvc),
+        "tcs": ce.round2(tcs),
+        "totalDiscount": ce.round2(disc),
+        "totalPassedToCustomer": ce.round2(passed),
+        "customerPayable": ce.round2(pay),
+    }
 
 
 def _parse_scheme_pass_on(raw) -> dict:
