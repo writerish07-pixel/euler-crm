@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { Plus, ChevronRight, Upload } from "lucide-react";
 import ReportActions from "../components/ReportActions";
 import { toast } from "sonner";
-import { get, post, apiErrorMessage } from "../lib/api";
+import { get, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Button, Table, Badge, Input } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
@@ -18,7 +18,7 @@ import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
 export default function Leads() {
-  const { isField, isExecutive, isOwner } = useAuth();
+  const { isField, isExecutive } = useAuth();
   const [leads, setLeads] = useState([]);
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
@@ -28,7 +28,6 @@ export default function Leads() {
   const [showNew, setShowNew] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [masters, setMasters] = useState(null);
-  const [repairBusy, setRepairBusy] = useState(false);
   const period = usePeriodState();
 
   const load = useCallback(() => {
@@ -136,22 +135,6 @@ export default function Leads() {
         subtitle={`${leads.length} leads · ${leads.reduce((n, r) => n + (Number(r.vehicleCount || (r.units || []).length) || 1), 0)} vehicles${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}`}
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
-          {isOwner && (
-            <Button variant="secondary" data-testid="repair-dup-leads-btn" disabled={repairBusy}
-              onClick={async () => {
-                if (!window.confirm("Collapse New files created by the triple-id bug? Same customer, same day, no booking or payment. Identical SKU extras are deleted. Different models join one pack.")) return;
-                setRepairBusy(true);
-                try {
-                  const r = await post("/leads/repair-retry-duplicates", {});
-                  toast.success(r.repaired ? `Fixed ${r.repaired} customer group${r.repaired === 1 ? "" : "s"}` : "No duplicate New files to fix");
-                  load();
-                } catch (e) {
-                  toast.error(apiErrorMessage(e, "Could not repair duplicates"));
-                } finally { setRepairBusy(false); }
-              }}>
-              {repairBusy ? "Fixing…" : "Fix duplicate New files"}
-            </Button>
-          )}
           {!isField && !isExecutive && (
             <Button variant="secondary" data-testid="import-leads-btn" onClick={() => setShowImport(true)}><Upload size={16} /> Import</Button>
           )}
