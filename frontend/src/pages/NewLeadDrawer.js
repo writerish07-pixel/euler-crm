@@ -83,6 +83,21 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     return () => { alive = false; clearTimeout(t); };
   }, [form.mobile]);
 
+  const incomingExec = isExecutive ? (user?.name || form.executive) : form.executive;
+  const existingUnits = (matches && matches.existing) || [];
+  const pendingUnits = (matches && matches.pending) || [];
+  const sibling = existingUnits[0];
+  const copyDocsFromSibling = anotherVehicle && existingUnits.length > 0;
+
+  useEffect(() => {
+    if (!anotherVehicle || !sibling) return;
+    setForm((f) => ({
+      ...f,
+      customerType: sibling.customerType || f.customerType,
+      gstin: f.gstin || sibling.gstin || "",
+    }));
+  }, [anotherVehicle, sibling?.leadId, sibling?.customerType, sibling?.gstin]);
+
   const togglePassOn = (key, yes, available) => {
     setPassOn((p) => ({ ...p, [key]: yes }));
     setForm((f) => {
@@ -91,10 +106,6 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       return { ...f, budget: Math.max(0, cur + delta) };
     });
   };
-
-  const incomingExec = isExecutive ? (user?.name || form.executive) : form.executive;
-  const existingUnits = (matches && matches.existing) || [];
-  const pendingUnits = (matches && matches.pending) || [];
   const otherExecHold = existingUnits.some((l) => {
     const held = String(l.executive || "").trim();
     if (!held) return false;
@@ -158,7 +169,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     if (anotherVehicle && otherExecLock) {
       return toast.error("This mobile is already with another executive");
     }
-    const kycErr = kycReady(form.customerType, kyc, form.gstin);
+    const kycErr = copyDocsFromSibling ? "" : kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
     const extraErr = extraSupportReady(form.oemExtraSupportReceived, extraProof);
     if (extraErr) return toast.error(extraErr);
@@ -238,6 +249,11 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             />
             <span>This is another vehicle / additional unit on this mobile</span>
           </label>
+          {copyDocsFromSibling && (
+            <p className="text-[11px] text-emerald-700" data-testid="kyc-copy-hint">
+              KYC and OEM Extra Support papers copy from the first file. Attach replacements only if this unit is different.
+            </p>
+          )}
         </div>
         <div className="sm:col-span-2">
           <DealFormatCard
@@ -257,7 +273,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
         </Field>
         <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={form.oemExtraSupportReceived} />
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
-        <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} />
+        <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} copyFromSibling={copyDocsFromSibling} />
       </div>
     </Drawer>
     <MobileClashDialog

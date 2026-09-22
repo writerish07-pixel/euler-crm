@@ -318,6 +318,43 @@ async def test_tl_uploads_kyc_on_a_lead_for_any_executive(tl_client):
     assert {d["kind"] for d in docs} == {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"}
 
 
+@pytest.mark.asyncio
+async def test_another_vehicle_copies_create_docs_not_delivery(client):
+    mobile = next_mobile()
+    first = await client.post("/api/leads", json={
+        "customerName": "Fleet Buyer", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    assert first.status_code == 200, first.text
+    lid1 = first.json()["leadId"]
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        r = await upload(client, f"/api/leads/{lid1}/documents", kind)
+        assert r.status_code == 200, r.text
+    extra = await upload(client, f"/api/leads/{lid1}/documents", "oem_extra_support")
+    assert extra.status_code == 200, extra.text
+    rto = await upload(client, f"/api/leads/{lid1}/documents", "delivery_rto")
+    assert rto.status_code == 200, rto.text
+    second = await client.post("/api/leads", json={
+        "customerName": "Fleet Buyer", "mobile": mobile,
+        "interestedModel": "Hi-Load", "variant": "XR", "executive": "Amit",
+        "anotherVehicle": True})
+    assert second.status_code == 200, second.text
+    lid2 = second.json()["leadId"]
+    assert lid2 != lid1
+    docs2 = (await client.get(f"/api/leads/{lid2}/documents")).json()
+    kinds = {d["kind"] for d in docs2}
+    assert {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "oem_extra_support"} <= kinds
+    assert "delivery_rto" not in kinds
+    assert all(d.get("copiedFromLeadId") == lid1 for d in docs2)
+    assert all(d.get("documentId") for d in docs2)
+    src_pan = next(d for d in (await client.get(f"/api/leads/{lid1}/documents")).json()
+                   if d["kind"] == "kyc_pan")
+    dst_pan = next(d for d in docs2 if d["kind"] == "kyc_pan")
+    assert dst_pan["documentId"] != src_pan["documentId"]
+    raw1 = await client.get(f"/api/documents/{src_pan['documentId']}/file")
+    raw2 = await client.get(f"/api/documents/{dst_pan['documentId']}/file")
+    assert raw1.content == raw2.content == PNG
+
+
 def test_tl_kyc_permissions_do_not_need_own_lead():
     tl = {"role": "tl", "name": "Docs TL"}
     exec_u = {"role": "executive", "name": "Amit"}

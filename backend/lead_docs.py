@@ -235,6 +235,74 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
     return public_row(doc)
 
 
+CREATE_DOC_KINDS = (
+    *KYC_INDIVIDUAL, *KYC_B2B, *KYC_B2B_OPTIONAL, "oem_extra_support",
+)
+
+
+async def has_create_docs(db, lead_id: str) -> bool:
+    if not lead_id:
+        return False
+    return await db[COLLECTION].find_one({
+        "leadId": lead_id,
+        "kind": {"$in": list(CREATE_DOC_KINDS)},
+    }, _META_PROJ) is not None
+
+
+async def copy_create_docs(db, *, next_id, from_lead_id: str, to_lead_id: str = "",
+                           to_request_id: str = "", user=None) -> int:
+    """Clone KYC + OEM Extra Support from one live lead onto another vehicle.
+
+    Delivery, Tally and refund scans stay on the source file. Each copy is a
+    new documentId so deleting one unit does not drop the sibling's papers.
+    Pass to_request_id to park the copies on a pending approval request.
+    """
+    if not from_lead_id:
+        return 0
+    if to_lead_id and from_lead_id == to_lead_id:
+        return 0
+    if not to_lead_id and not to_request_id:
+        return 0
+    copied = 0
+    seen = set()
+    async for src in db[COLLECTION].find({"leadId": from_lead_id}):
+        kind = src.get("kind") or ""
+        if kind not in CREATE_DOC_KINDS or kind in seen:
+            continue
+        seen.add(kind)
+        raw = src.get("data") or b""
+        if isinstance(raw, Binary):
+            raw = bytes(raw)
+        if not raw:
+            continue
+        if KINDS.get(kind, {}).get("unique"):
+            q = {"kind": kind}
+            if to_lead_id:
+                q["leadId"] = to_lead_id
+            if to_request_id:
+                q["requestId"] = to_request_id
+            await db[COLLECTION].delete_many(q)
+        doc = {
+            "documentId": await next_id("lead_document", "DC26"),
+            "leadId": to_lead_id or "",
+            "requestId": to_request_id or "",
+            "kind": kind,
+            "filename": src.get("filename") or "document",
+            "contentType": src.get("contentType") or "application/octet-stream",
+            "size": len(raw),
+            "uploadedBy": (user or {}).get("email") or src.get("uploadedBy") or "",
+            "uploadedByName": (user or {}).get("name") or src.get("uploadedByName") or "",
+            "uploadedAt": datetime.now(timezone.utc).isoformat(),
+            "refundReceiptNumber": "",
+            "copiedFromLeadId": from_lead_id,
+            "copiedFromDocumentId": src.get("documentId") or "",
+            "data": Binary(raw),
+        }
+        await db[COLLECTION].insert_one(dict(doc))
+        copied += 1
+    return copied
+
+
 async def attach_request_docs_to_lead(db, request_id: str, lead_id: str):
     await db[COLLECTION].update_many(
         {"requestId": request_id}, {"$set": {"leadId": lead_id}})

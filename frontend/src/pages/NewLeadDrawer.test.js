@@ -47,7 +47,7 @@ jest.mock("../components/LeadDocuments", () => ({
   LocalOemExtraBlock: ({ amount }) => (
     Number(amount) > 0 ? <div data-testid="oem-extra-proof-block" /> : null
   ),
-  kycReady: () => "",
+  kycReady: jest.fn(() => "Attach Aadhaar front, Aadhaar back and PAN"),
   extraSupportReady: () => "",
   uploadKycFiles: () => Promise.resolve(),
 }));
@@ -134,6 +134,7 @@ test("typing a known mobile lists existing units and save sends anotherVehicle",
     document.querySelector('[data-testid="save-lead-btn"]').click();
   });
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(document.querySelector('[data-testid="kyc-copy-hint"]').textContent).toMatch(/copy from the first file/i);
   expect(post).toHaveBeenCalledWith("/leads", expect.objectContaining({
     customerName: "Ramesh",
     mobile: "9876543210",

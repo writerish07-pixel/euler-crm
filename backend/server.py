@@ -3318,6 +3318,8 @@ def _mobile_lead_summary(lead) -> dict:
         "interestedModel": (lead or {}).get("interestedModel") or "",
         "variant": (lead or {}).get("variant") or "",
         "executive": (lead or {}).get("executive") or "",
+        "customerType": lead_docs.normalize_customer_type((lead or {}).get("customerType")),
+        "gstin": str((lead or {}).get("gstin") or "").strip(),
         "bucket": _mobile_pipeline_bucket(lead),
     }
 
@@ -3497,7 +3499,7 @@ async def _raise_if_mobile_taken(mobile: str, *, incoming_name: str = "",
 
 
 async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created from CRM",
-                            allow_same_mobile: bool = False, viewer=None):
+                            allow_same_mobile: bool = False, viewer=None, copy_docs=None):
     payload = body.model_dump()
     another = bool(payload.pop("anotherVehicle", False))
     scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
@@ -3536,6 +3538,10 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     await db.activities.insert_one(dict(_act_doc))
     await sheet_sync("activities", _act_doc)
     await sheet_sync("leads", doc)
+    should_copy = (another or allow_same_mobile) if copy_docs is None else bool(copy_docs)
+    if should_copy:
+        await _copy_create_docs_from_sibling(
+            lead_id, mobile=body.mobile, name=body.customerName, viewer=viewer)
     cx = ce.round2(ce.num(payload.get("budget")))
     extra = ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived"))))
     if cx > 0:
@@ -3596,6 +3602,10 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             "schemePassOn": scheme_pass_on,
         }
         await db.lead_requests.insert_one(req)
+        if another:
+            await _copy_create_docs_from_sibling(
+                "", mobile=body.mobile, name=body.customerName, viewer=user,
+                request_id=request_id)
         name = (body.customerName or "Customer").strip()
         model = " ".join(x for x in (body.interestedModel, body.variant) if x).strip() or "vehicle"
         amt = f"₹{ce.num(body.budget):,.0f}"
@@ -3848,6 +3858,16 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         db, request_id=request_id,
         customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
     if missing:
+        await _copy_create_docs_from_sibling(
+            "", mobile=payload.get("mobile") or "", name=payload.get("customerName") or "",
+            viewer=user, request_id=request_id)
+        req_fresh = await db.lead_requests.find_one({"requestId": request_id})
+        if req_fresh:
+            payload = req_fresh.get("payload") or payload
+        missing = await lead_docs.missing_kyc(
+            db, request_id=request_id,
+            customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
+    if missing:
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
         labels = [lead_docs.KINDS.get(k, {}).get("label") or k for k in missing]
@@ -3892,7 +3912,7 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             body = LeadIn(**{**payload, "schemePassOn": scheme_pass_on, "anotherVehicle": True})
             lead = await _insert_live_lead(
                 body, source_note="Lead created after GM / Owner approval",
-                allow_same_mobile=True)
+                allow_same_mobile=True, copy_docs=False, viewer=user)
             extra = await _oem_extra_against_lead(lead, payload)
             if extra > 0:
                 await db.leads.update_one({"leadId": lead["leadId"]}, {
@@ -6694,6 +6714,11 @@ async def import_commit(file: UploadFile = File(...), mapping: Optional[str] = F
         created_exec.append(exec_name)
     if docs:
         await db.leads.insert_many(docs)
+        if allow_same:
+            for doc in docs:
+                await _copy_create_docs_from_sibling(
+                    doc["leadId"], mobile=doc.get("mobile"), name=doc.get("customerName"),
+                    viewer=user)
         for doc in docs:
             try:
                 await queue_sheet_sync("leads", doc, entity_id=doc["leadId"])
@@ -7380,8 +7405,96 @@ async def lead_oem_sold(lead_id: str, refresh: bool = False, user=Depends(curren
     return match
 
 
+async def _sibling_lead_for_docs(mobile="", name="", exclude_id=""):
+    """Best live sibling to copy KYC from — same mobile first, then same name."""
+    rows = await _leads_sharing_mobile(mobile, exclude_id)
+    live = [l for l in rows if oem_sync.live_occupies_vehicle_id(l)]
+    for lead in live:
+        if await lead_docs.has_create_docs(db, lead.get("leadId") or ""):
+            return lead
+    if live:
+        return live[0]
+    key = oem_sync._norm_person_name(name)
+    if not oem_sync._name_key_usable(key):
+        return None
+    async for lead in db.leads.find({}):
+        if (lead or {}).get("leadId") == exclude_id:
+            continue
+        if not oem_sync.live_occupies_vehicle_id(lead):
+            continue
+        if oem_sync._norm_person_name(lead.get("customerName")) != key:
+            continue
+        if await lead_docs.has_create_docs(db, lead.get("leadId") or ""):
+            return lead
+        return lead
+    return None
+
+
+async def _copy_create_docs_from_sibling(lead_id, *, mobile="", name="", viewer=None,
+                                         request_id=""):
+    src = await _sibling_lead_for_docs(mobile, name, exclude_id=lead_id)
+    if not src:
+        return 0
+    n = await lead_docs.copy_create_docs(
+        db, next_id=next_id, from_lead_id=src.get("leadId") or "",
+        to_lead_id=lead_id or "", to_request_id=request_id or "", user=viewer)
+    if request_id:
+        req_patch = {}
+        if lead_docs.normalize_customer_type(src.get("customerType")) == "B2B":
+            req_patch["payload.customerType"] = "B2B"
+            if str(src.get("gstin") or "").strip():
+                req_patch["payload.gstin"] = str(src.get("gstin") or "").strip().upper()
+        if req_patch:
+            await db.lead_requests.update_one({"requestId": request_id}, {"$set": req_patch})
+        return n
+    if not lead_id:
+        return n
+    patch = {}
+    live = await db.leads.find_one({"leadId": lead_id}) or {}
+    if str(src.get("executive") or "").strip() and not str(live.get("executive") or "").strip():
+        patch["executive"] = src.get("executive")
+    if lead_docs.normalize_customer_type(src.get("customerType")) == "B2B":
+        patch["customerType"] = "B2B"
+        if str(src.get("gstin") or "").strip() and not str(live.get("gstin") or "").strip():
+            patch["gstin"] = str(src.get("gstin") or "").strip().upper()
+    if patch:
+        await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    return n
+
+
+async def _apply_list_price_and_scheme(lead_id, model, variant, as_of=None):
+    """Fill Price Master + Scheme Master pools for this unit's model. No Cx deal."""
+    on = str(as_of or today())[:10]
+    row = await _price_master_row(model, variant) if model else None
+    patch = {}
+    if row:
+        patch.update(_price_structure_from_master(row, on))
+        patch["priceStructureSaved"] = False
+    scheme_rows = await get_scheme_rows()
+    rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
+        model or "", variant or "", on, scheme_rows)
+    for key, rule in (rules_ctx.get("rules") or {}).items():
+        if key == "additionalDiscount":
+            continue
+        if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+            patch[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
+        else:
+            patch[key] = 0
+    if patch:
+        patch["schemeAsOf"] = on
+        patch["lastUpdated"] = now_iso()
+        await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+        await recompute_lead(lead_id)
+    return clean(await db.leads.find_one({"leadId": lead_id}))
+
+
 async def _insert_oem_billing_lead(row, sold_rows=None):
-    """Create a New lead from an unmatched Coulson Sold chassis. No commercials."""
+    """Create a New lead from an unmatched Coulson Sold chassis.
+
+    KYC copies from the sibling file (same mobile, else same usable name).
+    Price and scheme come from Price Master + Scheme Master for this unit's
+    model — not the first unit's negotiated deal. Never auto-delivered.
+    """
     chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
     if not chassis:
         return None
@@ -7447,8 +7560,10 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     }
     await db.activities.insert_one(dict(act_doc))
     await sheet_sync("activities", act_doc)
-    await sheet_sync("leads", doc)
-    return clean(doc)
+    await _copy_create_docs_from_sibling(lead_id, mobile=mobile, name=name)
+    updated = await _apply_list_price_and_scheme(lead_id, model, variant, sold_date)
+    await sheet_sync("leads", updated)
+    return updated
 
 
 async def _create_leads_from_unmatched_oem_sold():
