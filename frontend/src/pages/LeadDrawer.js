@@ -32,6 +32,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const [editing, setEditing] = useState(false);
   const [proceedRow, setProceedRow] = useState(null);
   const [addUnit, setAddUnit] = useState(false);
+  const [addPackUnit, setAddPackUnit] = useState(false);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -135,6 +136,12 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             <Plus size={13} /> Add another vehicle
           </Button>
         )}
+        {!fieldView && !leadLocked && (isExecutive || isTl || isOwner || isSalesGm) && !actions.isDelivered && (
+          <Button variant="secondary" data-testid="add-pack-unit-btn"
+            onClick={() => setAddPackUnit(true)} className="!py-1 !px-2.5 text-xs">
+            <Plus size={13} /> Add unit to this order
+          </Button>
+        )}
         {!fieldView && isOwner && (
           <Button variant="secondary" data-testid="delete-lead-btn"
             onClick={async () => {
@@ -177,6 +184,14 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           row={proceedRow}
           onClose={() => setProceedRow(null)}
           onSaved={() => { setProceedRow(null); refresh(); }}
+        />
+      )}
+      {addPackUnit && (
+        <AddPackUnitModal
+          lead={lead}
+          masters={masters}
+          onClose={() => setAddPackUnit(false)}
+          onSaved={() => { setAddPackUnit(false); refresh(); }}
         />
       )}
       {addUnit && (
@@ -512,11 +527,17 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
                     Unit {u.sno || i + 1}
                     {u.model ? ` · ${u.model}` : ""}
                     {u.variant ? ` ${u.variant}` : ""}
+                    {u.customerPayable != null ? ` · ${inr(u.customerPayable)}` : ""}
                     {u.chassisNumber ? ` · ${u.chassisNumber}` : ""}
                     {u.invoiceNumber ? ` · ${u.invoiceNumber}` : ""}
                   </li>
                 ))}
               </ul>
+              {Number(lead.cxDemand || lead.customerPayable) > 0 && (
+                <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
+                  Pack payable {inr(lead.cxDemand || lead.customerPayable)}
+                </div>
+              )}
             </div>
           )}
           <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
@@ -2302,6 +2323,56 @@ function CancelModal({ lead, actions, amend = false, onClose, onDone }) {
         This counts against {lead.executive || "the executive"} on the Cancellations report,
         and keeps counting even after the lead comes back.
       </p>
+    </MiniModal>
+  );
+}
+
+function AddPackUnitModal({ lead, masters, onClose, onSaved }) {
+  const [model, setModel] = useState("");
+  const [variant, setVariant] = useState("");
+  const [variants, setVariants] = useState([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!model) { setVariants([]); return undefined; }
+    get("/price-master/variants", { model }).then(setVariants).catch(() => setVariants([]));
+    return undefined;
+  }, [model]);
+  const save = async () => {
+    if (!model) return toast.error("Pick a model for the extra unit");
+    setBusy(true);
+    try {
+      const saved = await post(`/leads/${lead.leadId}/units`, { model, variant });
+      toast.success(`Unit added · pack payable ${inr(saved.cxDemand || saved.customerPayable || 0)}`);
+      onSaved(saved);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not add unit"));
+    } finally { setBusy(false); }
+  };
+  const models = masters?.models || [];
+  return (
+    <MiniModal title="Add unit to this order" onClose={onClose} onSubmit={save}
+      submitLabel={busy ? "Saving…" : "Add unit"} testid="save-pack-unit-btn" submitDisabled={busy}>
+      <p className="text-sm text-ink-soft mb-3">
+        Price Master + scheme + TCS for this SKU are added to the pack payable. Unit 1 prices stay as they are.
+      </p>
+      <div className="grid grid-cols-1 gap-3 pb-2">
+        <Field label="Model">
+          <Select data-testid="pack-unit-model" value={model} onChange={(e) => { setModel(e.target.value); setVariant(""); }}>
+            <option value="">—</option>
+            {models.map((s) => <option key={s}>{s}</option>)}
+          </Select>
+        </Field>
+        <Field label="Variant">
+          <Select data-testid="pack-unit-variant" value={variant} onChange={(e) => setVariant(e.target.value)}>
+            <option value="">—</option>
+            {variants.map((v) => (
+              <option key={v.priceId || v.variant} value={v.variant}>
+                {v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      </div>
     </MiniModal>
   );
 }

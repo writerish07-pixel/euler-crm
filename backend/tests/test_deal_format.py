@@ -59,6 +59,25 @@ async def client():
         yield c
 
 
+def test_pack_deal_sums_units_and_keeps_tcs_per_unit():
+    under = ce.compute_deal_format({"exShowroom": 600000, "rto": 0, "insurance": 0}, 0)
+    over = ce.compute_deal_format({"exShowroom": 1200000, "rto": 0, "insurance": 0}, 0)
+    assert under["tcs"] == 0
+    assert over["tcs"] == 12000
+    pack = ce.sum_deal_formats([under, under], 0)
+    assert pack["pack"] is True
+    assert pack["unitCount"] == 2
+    assert pack["exShowroom"] == 1200000
+    assert pack["tcs"] == 0
+    assert pack["suggestedCxDemand"] == 1200000
+    mixed = ce.sum_deal_formats([under, over], 0)
+    assert mixed["tcs"] == 12000
+    assert mixed["netToCx"] == 1812000
+    cut = ce.sum_deal_formats([under, over], 1700000)
+    assert cut["cxDemand"] == 1700000
+    assert cut["additionalDiscount"] == max(0, 1800000 - 1700000)
+
+
 def test_deal_format_is_scheme_free_and_uses_billing_tcs():
     deal = ce.compute_deal_format({
         "exShowroom": 1410000, "rto": 10000, "insurance": 30000, "handlingCharges": 10000,
@@ -83,6 +102,21 @@ def test_cx_demand_above_net_is_extra_margin():
     assert deal["extraMargin"] == 25400
     assert deal["additionalDiscount"] == 0
     assert deal["needsOwnerApproval"] is True
+
+
+@pytest.mark.asyncio
+async def test_deal_preview_pack_units_json(client):
+    r = await client.get("/api/commercial/deal-preview", params={
+        "model": "Storm", "variant": "Storm LR Deal Test", "cxDemand": 0,
+        "units": '[{"model":"Storm","variant":"Storm LR Deal Test"},'
+                 '{"model":"Storm","variant":"Storm LR Deal Test"}]',
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("pack") is True
+    assert body.get("unitCount") == 2
+    assert body["tcs"] == 14600 * 2
+    assert body["suggestedCxDemand"] == 1474600 * 2
 
 
 @pytest.mark.asyncio

@@ -114,9 +114,17 @@ export function isBulkMutationPath(url) {
   );
 }
 
+/** POST /leads mints a new leadId. A timeout / 502 / HTML miss after the
+ *  first insert already landed used to replay the same create on Railway and
+ *  then again on the Cloudflare origin — three New files for one tap. */
+export function isCreateOncePath(url) {
+  const p = String(url || "").split("?")[0];
+  return p === "/leads";
+}
+
 function mutationOpts(url, opts = {}) {
   const bulk = isBulkMutationPath(url);
-  const retry = opts.retry !== undefined ? opts.retry !== false : !bulk;
+  const retry = opts.retry !== undefined ? opts.retry !== false : !(bulk || isCreateOncePath(url));
   let timeout = opts.timeout;
   if (timeout === undefined && bulk) {
     const p = String(url || "").split("?")[0];

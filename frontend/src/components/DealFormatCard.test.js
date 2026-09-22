@@ -106,3 +106,31 @@ test("shows OEM scheme available with pass-on radios", async () => {
   await act(async () => { root.unmount(); });
   host.remove();
 });
+
+test("pack card lists each unit net", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <DealFormatCard
+        snapshot={{
+          pack: true, unitCount: 2, exShowroom: 1200000, rto: 0, insurance: 0,
+          priceTotal: 1200000, netToCx: 1200000, suggestedCxDemand: 1200000,
+          units: [
+            { model: "Turbo Max", variant: "A", netToCx: 600000 },
+            { model: "Storm", variant: "B", netToCx: 600000 },
+          ],
+        }}
+        cxDemand={1200000}
+        readOnly
+      />,
+    );
+  });
+  const pack = host.querySelector('[data-testid="deal-pack-units"]');
+  expect(pack).toBeTruthy();
+  expect(pack.textContent).toMatch(/Turbo Max/);
+  expect(pack.textContent).toMatch(/Storm/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});

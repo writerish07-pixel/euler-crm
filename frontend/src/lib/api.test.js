@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, isBulkMutationPath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, isBulkMutationPath, isCreateOncePath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -111,6 +111,15 @@ describe("bulk mutations", () => {
     expect(isBulkMutationPath("/leads/import/commit")).toBe(true);
     expect(isBulkMutationPath("/insurance/mis/apply")).toBe(true);
     expect(isBulkMutationPath("/leads")).toBe(false);
+    expect(isCreateOncePath("/leads")).toBe(true);
+    expect(isCreateOncePath("/leads/allocate")).toBe(false);
+  });
+
+  test("create lead does not retry a dropped connection", async () => {
+    const err = Object.assign(new Error("Network Error"), { code: "ERR_NETWORK" });
+    const spy = jest.spyOn(api, "post").mockRejectedValue(err);
+    await expect(post("/leads", { customerName: "A", mobile: "9811100111" })).rejects.toBe(err);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   test("allocate does not retry a dropped connection", async () => {

@@ -305,6 +305,59 @@ async def test_oem_billing_creates_remaining_same_name_units(client):
 
 
 @pytest.mark.asyncio
+async def test_oem_billing_open_lead_one_sold_appends_not_new_id(client):
+    name = "Single Leftover"
+    lid = "LD-OPEN-ONE"
+    mobile = "9812200666"
+    chassis = "MD9OPENONE01"
+    await server.db.leads.delete_many({"$or": [{"leadId": lid}, {"mobile": mobile}]})
+    await server.db.oem_sold.delete_many({"mobile": mobile})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": name, "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "New",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-OPEN1",
+        "customerName": name, "model": "Turbo Max", "variant": "Maxx (PV)",
+        "soldDate": "2026-09-08", "coulsonStatus": "SOLD",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-09")
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 0
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 1
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert chassis in set(oem_sync.lead_chassis_list(lead))
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_split_siblings_do_not_mint_another_id(client):
+    name = "Already Split"
+    mobile = "9812200777"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.oem_sold.delete_many({"mobile": mobile})
+    await server.db.leads.insert_one({
+        "leadId": "LD-SPLIT-A", "customerName": name, "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "New",
+        "interestedModel": "Turbo Max", "chassisNumber": "MD9SPLITA01",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-SPLIT-B", "customerName": name, "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "New",
+        "interestedModel": "Turbo Max", "chassisNumber": "MD9SPLITB01",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9SPLITC01", "mobile": mobile, "invoiceNumber": "CINV-C",
+        "customerName": name, "model": "Turbo Max",
+        "soldDate": "2026-09-08", "coulsonStatus": "SOLD",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-09")
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 0
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 2
+
+
+@pytest.mark.asyncio
 async def test_oem_billing_accounts_can_read_not_sync(client):
     email = "acct.billing@euler.com"
     await server.client[os.environ["DB_NAME"]].users.delete_many({"email": email})
