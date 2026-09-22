@@ -24,6 +24,85 @@ const SCHEME_FIELDS = [
   ["dsaDiscount", "DSA Bonus"], ["additionalDiscount", "Additional (Dealer)"],
 ];
 
+function packUnitList(lead) {
+  const units = Array.isArray(lead?.units) ? lead.units : [];
+  if (lead?.sameOrderMultiUnit || units.length > 1) {
+    return units.length
+      ? units
+      : [{ sno: 1, model: lead.interestedModel, variant: lead.variant }];
+  }
+  return null;
+}
+
+function unitSource(lead, unit, index) {
+  const u = unit || {};
+  if (!index) {
+    return {
+      ...lead,
+      ...u,
+      interestedModel: u.model || lead.interestedModel,
+      variant: u.variant || lead.variant,
+    };
+  }
+  return {
+    ...lead,
+    ...u,
+    interestedModel: u.model || "",
+    variant: u.variant || "",
+    consumerDiscount: u.consumerDiscount || 0,
+    exchangeBonus: u.exchangeBonus || 0,
+    loyaltyBonus: u.loyaltyBonus || 0,
+    referralBonus: u.referralBonus || 0,
+    dsaDiscount: u.dsaDiscount || 0,
+    additionalDiscount: u.additionalDiscount || 0,
+    oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
+    oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
+    benefitPassedBreakup: u.benefitPassedBreakup,
+    schemeComponentsUsed: u.schemeComponentsUsed,
+    schemeAsOf: u.schemeAsOf || lead.schemeAsOf,
+    tcsApplicable: u.tcsApplicable || "No",
+    finalExchangeValue: u.finalExchangeValue || 0,
+    insuranceArrangedBy: u.insuranceArrangedBy === "self" ? "self" : "dealer",
+    priceStructureSaved: !!u.priceStructureSaved,
+  };
+}
+
+function PackUnitPicker({ lead, value, onChange }) {
+  const units = packUnitList(lead);
+  if (!units) return null;
+  return (
+    <div className="mb-4" data-testid="pack-unit-picker">
+      <div className="flex flex-wrap gap-2">
+        {units.map((u, i) => {
+          const sno = u.sno || i + 1;
+          const priced = !!(u.priceStructureSaved || (i === 0 && lead.priceStructureSaved));
+          const schemed = !!(u.schemeAllocationExplicit || (u.benefitPassedBreakup && String(u.benefitPassedBreakup) !== "{}")
+            || (i === 0 && (lead.schemeAllocationExplicit || lead.benefitPassedBreakup)));
+          return (
+            <button
+              type="button"
+              key={sno}
+              data-testid={`pack-unit-${sno}`}
+              onClick={() => onChange(sno)}
+              className={`rounded-full px-3 py-1 text-xs font-medium ring-1 ring-inset ${
+                value === sno
+                  ? "bg-cobalt text-white ring-cobalt"
+                  : "bg-white text-ink ring-line hover:bg-zinc-50"
+              }`}
+            >
+              Unit {sno}{u.model ? ` · ${u.model}` : ""}{u.variant ? ` ${u.variant}` : ""}
+              {priced && schemed ? " ✓" : ""}
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-xs text-ink-soft mt-2">
+        Each unit has its own Price Structure and Scheme. Final outstanding is calculated when every unit is filled.
+      </p>
+    </div>
+  );
+}
+
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isSalesGm } = useAuth();
   const [data, setData] = useState(null);
@@ -522,22 +601,33 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
                 Same-order units ({lead.vehicleCount || (lead.units || []).length})
               </div>
               <ul className="space-y-1">
-                {(lead.units || []).map((u, i) => (
-                  <li key={u.sno || i} className="text-xs text-ink">
-                    Unit {u.sno || i + 1}
-                    {u.model ? ` · ${u.model}` : ""}
-                    {u.variant ? ` ${u.variant}` : ""}
-                    {u.customerPayable != null ? ` · ${inr(u.customerPayable)}` : ""}
-                    {u.chassisNumber ? ` · ${u.chassisNumber}` : ""}
-                    {u.invoiceNumber ? ` · ${u.invoiceNumber}` : ""}
-                  </li>
-                ))}
+                {(lead.units || []).map((u, i) => {
+                  const priced = !!(u.priceStructureSaved || (i === 0 && lead.priceStructureSaved));
+                  const schemed = !!(u.schemeAllocationExplicit || (u.benefitPassedBreakup && String(u.benefitPassedBreakup) !== "{}")
+                    || (i === 0 && (lead.schemeAllocationExplicit || lead.benefitPassedBreakup)));
+                  return (
+                    <li key={u.sno || i} className="text-xs text-ink">
+                      Unit {u.sno || i + 1}
+                      {u.model ? ` · ${u.model}` : ""}
+                      {u.variant ? ` ${u.variant}` : ""}
+                      {priced && schemed
+                        ? (u.customerPayable != null ? ` · ${inr(u.customerPayable)}` : " · filled")
+                        : " · Price / Scheme pending"}
+                      {u.chassisNumber ? ` · ${u.chassisNumber}` : ""}
+                      {u.invoiceNumber ? ` · ${u.invoiceNumber}` : ""}
+                    </li>
+                  );
+                })}
               </ul>
-              {Number(lead.cxDemand || lead.customerPayable) > 0 && (
-                <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
-                  Pack payable {inr(lead.cxDemand || lead.customerPayable)}
+              {Number(lead.packUnitsPending || 0) > 0 ? (
+                <div className="text-xs text-ink-soft mt-1" data-testid="pack-total-payable">
+                  Outstanding updates when every unit has Price and Scheme. Running payable {inr(lead.customerPayable)}
                 </div>
-              )}
+              ) : Number(lead.customerPayable || lead.cxDemand) > 0 ? (
+                <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
+                  Pack payable {inr(lead.customerPayable || lead.cxDemand)}
+                </div>
+              ) : null}
             </div>
           )}
           <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
@@ -578,39 +668,56 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
 
 /* -------------------------------------------------- Price Structure */
 function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
+  const units = packUnitList(lead);
+  const [unitSno, setUnitSno] = useState(1);
+  const unitIdx = Math.max(0, unitSno - 1);
+  const src = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
+  const unitPriced = !!(src.priceStructureSaved || (!unitIdx && actions.priceCompleted));
   const inactive = !actions.canPrice;
-  const staffLocked = !isOwner && !!actions.priceCompleted;
+  const staffLocked = !isOwner && unitPriced;
   const locked = inactive || staffLocked;
   const [priceDate, setPriceDate] = useState(lead.bookingDate || lead.createdDate || todayISO());
   const [masterMsg, setMasterMsg] = useState("");
   const [form, setForm] = useState(() => {
     const f = {
-      tcsApplicable: lead.tcsApplicable || "No",
-      finalExchangeValue: lead.finalExchangeValue || 0,
-      insuranceArrangedBy: lead.insuranceArrangedBy === "self" ? "self" : "dealer",
+      tcsApplicable: src.tcsApplicable || "No",
+      finalExchangeValue: src.finalExchangeValue || 0,
+      insuranceArrangedBy: src.insuranceArrangedBy === "self" ? "self" : "dealer",
     };
-    CHARGE_FIELDS.forEach(([k]) => (f[k] = lead[k] || 0));
+    CHARGE_FIELDS.forEach(([k]) => (f[k] = src[k] || 0));
     return f;
   });
   const [preview, setPreview] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  // Ex-Showroom is locked to Price Master for the lead's model/variant.
+  useEffect(() => {
+    const next = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
+    const f = {
+      tcsApplicable: next.tcsApplicable || "No",
+      finalExchangeValue: next.finalExchangeValue || 0,
+      insuranceArrangedBy: next.insuranceArrangedBy === "self" ? "self" : "dealer",
+    };
+    CHARGE_FIELDS.forEach(([k]) => (f[k] = next[k] || 0));
+    setForm(f);
+  }, [lead.leadId, unitSno]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Ex-Showroom is locked to Price Master for this unit's model/variant.
   useEffect(() => {
     let alive = true;
-    get(`/leads/${lead.leadId}/price-preview`)
+    const q = units ? { unit: unitSno } : undefined;
+    get(`/leads/${lead.leadId}/price-preview`, q)
       .then((d) => {
         if (!alive) return;
         if (d?.found && d.priceStructure) {
           setForm((f) => ({ ...f, exShowroom: d.priceStructure.exShowroom || 0 }));
-          setMasterMsg("Ex-Showroom is fixed from Price Master and cannot be edited.");
+          setMasterMsg(`Unit ${unitSno} · ${d.model || ""} ${d.variant || ""} — Ex-Showroom is fixed from Price Master and cannot be edited.`);
         } else {
           setMasterMsg(d?.message || "Price Master entry not found — select a valid model/variant.");
         }
       })
       .catch(() => { if (alive) setMasterMsg("Could not load Price Master for this vehicle."); });
     return () => { alive = false; };
-  }, [lead.leadId, lead.interestedModel, lead.variant]);
+  }, [lead.leadId, unitSno, src.interestedModel, src.variant]);
 
   const computePreview = useCallback(() => {
     post("/commercial/compute", {
@@ -620,11 +727,11 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
       extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
       rsaAmc: +form.rsaAmc,
       tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
-      consumerDiscount: lead.consumerDiscount, exchangeBonus: lead.exchangeBonus, loyaltyBonus: lead.loyaltyBonus,
-      referralBonus: lead.referralBonus, dsaDiscount: lead.dsaDiscount, additionalDiscount: lead.additionalDiscount,
-      benefitMode: lead.benefitMode || "Full Benefit",
+      consumerDiscount: src.consumerDiscount, exchangeBonus: src.exchangeBonus, loyaltyBonus: src.loyaltyBonus,
+      referralBonus: src.referralBonus, dsaDiscount: src.dsaDiscount, additionalDiscount: src.additionalDiscount,
+      benefitMode: src.benefitMode || "Full Benefit",
     }).then(setPreview);
-  }, [form, lead]);
+  }, [form, src]);
   useEffect(() => { computePreview(); }, [computePreview]);
 
   const save = async () => {
@@ -638,8 +745,11 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
         fastag: +form.fastag, extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
         rsaAmc: +form.rsaAmc,
         tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
+        ...(units ? { unitSno } : {}),
       });
-      toast.success("Price structure saved — continue with Scheme");
+      toast.success(units
+        ? `Unit ${unitSno} price saved — fill its Scheme next`
+        : "Price structure saved — continue with Scheme");
       onSaved();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Price save failed"));
@@ -648,6 +758,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
 
   return (
     <div>
+      <PackUnitPicker lead={lead} value={unitSno} onChange={setUnitSno} />
       {inactive && <StepLock text="This lead is not Active — price structure is read-only." />}
       {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner can edit a completed step." />}
       {masterMsg && <p className="text-xs text-ink-soft mb-3" data-testid="exshowroom-lock-note">{masterMsg}</p>}
@@ -721,40 +832,70 @@ function Prev({ label, v, highlight }) {
 
 /* -------------------------------------------------- Scheme */
 function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, onRefresh }) {
+  const units = packUnitList(lead);
+  const [unitSno, setUnitSno] = useState(1);
+  const unitIdx = Math.max(0, unitSno - 1);
+  const src = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
+  const unitSchemed = !!(src.schemeAllocationExplicit
+    || (src.benefitPassedBreakup && String(src.benefitPassedBreakup) !== "{}")
+    || (!unitIdx && actions.schemeCompleted));
   const inactive = !actions.canScheme;
-  const staffLocked = !isOwner && !!actions.schemeCompleted;
+  const staffLocked = !isOwner && unitSchemed;
   const locked = inactive || staffLocked;
   const [rules, setRules] = useState(null);
-  const [schemeDate, setSchemeDate] = useState(lead.schemeAsOf || lead.bookingDate || todayISO());
+  const [schemeDate, setSchemeDate] = useState(src.schemeAsOf || lead.bookingDate || todayISO());
   const [form, setForm] = useState(() => ({
     oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
     oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
-    additionalDiscount: lead.additionalDiscount || 0,
+    additionalDiscount: src.additionalDiscount || 0,
   }));
-  const [breakup, setBreakup] = useState(() => {
-    try { return lead.benefitPassedBreakup ? JSON.parse(lead.benefitPassedBreakup) : {}; }
+  const parseBreakup = (raw) => {
+    try { return raw ? (typeof raw === "string" ? JSON.parse(raw) : raw) : {}; }
     catch { return {}; }
-  });
+  };
+  const [breakup, setBreakup] = useState(() => parseBreakup(src.benefitPassedBreakup));
   const [usedMap, setUsedMap] = useState(() => {
     try {
-      if (lead.schemeComponentsUsed) return JSON.parse(lead.schemeComponentsUsed);
+      if (src.schemeComponentsUsed) {
+        return typeof src.schemeComponentsUsed === "string"
+          ? JSON.parse(src.schemeComponentsUsed) : src.schemeComponentsUsed;
+      }
     } catch { /* ignore */ }
-    // Historical: infer "used" from persisted customer benefit > 0. Never default to Yes.
     const inferred = {};
-    try {
-      const b = lead.benefitPassedBreakup ? JSON.parse(lead.benefitPassedBreakup) : {};
-      Object.keys(b).forEach((k) => { inferred[k] = Number(b[k]) > 0; });
-    } catch { /* ignore */ }
+    Object.entries(parseBreakup(src.benefitPassedBreakup)).forEach(([k, v]) => {
+      inferred[k] = Number(v) > 0;
+    });
     return inferred;
   });
 
-  useEffect(() => { setSchemeDate(lead.schemeAsOf || lead.bookingDate || todayISO()); }, [lead.schemeAsOf, lead.bookingDate]);
+  useEffect(() => {
+    const next = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
+    setSchemeDate(next.schemeAsOf || lead.bookingDate || todayISO());
+    setForm({
+      oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
+      oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
+      additionalDiscount: next.additionalDiscount || 0,
+    });
+    setBreakup(parseBreakup(next.benefitPassedBreakup));
+    try {
+      if (next.schemeComponentsUsed) {
+        setUsedMap(typeof next.schemeComponentsUsed === "string"
+          ? JSON.parse(next.schemeComponentsUsed) : next.schemeComponentsUsed);
+        return;
+      }
+    } catch { /* ignore */ }
+    const inferred = {};
+    Object.entries(parseBreakup(next.benefitPassedBreakup)).forEach(([k, v]) => {
+      inferred[k] = Number(v) > 0;
+    });
+    setUsedMap(inferred);
+  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!lead.leadId || !schemeDate) return;
-    get(`/leads/${lead.leadId}/scheme-rules`, { on: schemeDate })
+    get(`/leads/${lead.leadId}/scheme-rules`, { on: schemeDate, ...(units ? { unit: unitSno } : {}) })
       .then(setRules)
       .catch(() => setRules({ rules: {} }));
-  }, [lead.leadId, schemeDate]);
+  }, [lead.leadId, schemeDate, unitSno]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const r = rules?.rules || {};
@@ -838,8 +979,10 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       if (alreadyBooked && schemeDate !== (lead.bookingDate || "")) {
         await put(`/leads/${lead.leadId}`, { bookingDate: schemeDate });
       }
-      await put(`/leads/${lead.leadId}/scheme`, payload);
-      toast.success("Scheme updated — continue with Payments");
+      await put(`/leads/${lead.leadId}/scheme`, units ? { ...payload, unitSno } : payload);
+      toast.success(units
+        ? `Unit ${unitSno} scheme saved`
+        : "Scheme updated — continue with Payments");
       onSaved();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Scheme validation failed"));
@@ -874,6 +1017,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
 
   return (
     <div>
+      <PackUnitPicker lead={lead} value={unitSno} onChange={setUnitSno} />
       <OemClaimStrip leadId={lead.leadId} />
       {inactive && <StepLock text="This lead is not Active — scheme is read-only." />}
       {!inactive && staffLocked && <StepLock text="Scheme is saved. Only the owner can edit a completed step." />}
@@ -889,19 +1033,23 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         <Field label="Scheme Date">
           <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
         </Field>
-        <Field label="OEM Extra Support Received">
-          <Input data-testid="oem-extra-received" type="number" value={form.oemExtraSupportReceived}
-            onChange={set("oemExtraSupportReceived")} disabled={locked} />
-        </Field>
-        <Field label="OEM Extra Support Passed">
-          <Input data-testid="oem-extra-passed" type="number" value={form.oemExtraSupportPassed}
-            onChange={set("oemExtraSupportPassed")} disabled={locked} />
-        </Field>
+        {unitIdx === 0 && (
+          <Field label="OEM Extra Support Received">
+            <Input data-testid="oem-extra-received" type="number" value={form.oemExtraSupportReceived}
+              onChange={set("oemExtraSupportReceived")} disabled={locked} />
+          </Field>
+        )}
+        {unitIdx === 0 && (
+          <Field label="OEM Extra Support Passed">
+            <Input data-testid="oem-extra-passed" type="number" value={form.oemExtraSupportPassed}
+              onChange={set("oemExtraSupportPassed")} disabled={locked} />
+          </Field>
+        )}
         <Field label="Additional (Dealer)">
           <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount} onChange={set("additionalDiscount")} disabled={locked} />
         </Field>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
+      {unitIdx === 0 && <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
         <div>
           <div className="text-[11px] text-ink-faint uppercase">OEM Extra Claim (full Received)</div>
           <div className="font-mono text-amber-700" data-testid="oem-extra-claim">{inr(oemRecv)}</div>
@@ -1012,7 +1160,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           Summary follows Use Scheme = Yes only. Save to persist on the lead.
         </div>
       </Card>
-      {isOwner && <ExtraIncomeCard lead={lead} locked={locked} onSaved={onRefresh || onSaved} />}
+      {isOwner && unitIdx === 0 && <ExtraIncomeCard lead={lead} locked={locked} onSaved={onRefresh || onSaved} />}
       <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save} disabled={locked}>Update Scheme</Button></div>
     </div>
   );
@@ -2342,7 +2490,7 @@ function AddPackUnitModal({ lead, masters, onClose, onSaved }) {
     setBusy(true);
     try {
       const saved = await post(`/leads/${lead.leadId}/units`, { model, variant });
-      toast.success(`Unit added · pack payable ${inr(saved.cxDemand || saved.customerPayable || 0)}`);
+      toast.success(`Unit ${saved.vehicleCount || ""} added. Fill its Price Structure and Scheme.`);
       onSaved(saved);
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not add unit"));
@@ -2353,7 +2501,7 @@ function AddPackUnitModal({ lead, masters, onClose, onSaved }) {
     <MiniModal title="Add unit to this order" onClose={onClose} onSubmit={save}
       submitLabel={busy ? "Saving…" : "Add unit"} testid="save-pack-unit-btn" submitDisabled={busy}>
       <p className="text-sm text-ink-soft mb-3">
-        Price Master + scheme + TCS for this SKU are added to the pack payable. Unit 1 prices stay as they are.
+        Adds another vehicle on this file. Each unit has its own Price Structure and Scheme. Final outstanding is calculated after every unit is filled. Unit 1 prices stay as they are.
       </p>
       <div className="grid grid-cols-1 gap-3 pb-2">
         <Field label="Model">
