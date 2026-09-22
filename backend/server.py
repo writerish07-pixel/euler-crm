@@ -3394,13 +3394,31 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
             cap = max(1, min(int(limit), 3000))
         except (TypeError, ValueError):
             cap = 3000
-    leads = await db.leads.find(query).sort("leadId", -1).to_list(cap)
+    leads = await db.leads.find(query, {
+        "_id": 0,
+        "leadId": 1, "customerName": 1, "mobile": 1,
+        "interestedModel": 1, "variant": 1, "executive": 1,
+        "currentStatus": 1, "accountStatus": 1,
+        "customerPayable": 1, "customerOutstanding": 1,
+        "excessReceived": 1, "refundedAmount": 1,
+        "vehicleCount": 1, "units": 1, "sameOrderMultiUnit": 1,
+        "assignmentPending": 1, "cancelCount": 1,
+        "lastCancelReason": 1, "lastCancelDate": 1,
+        "createdDate": 1, "bookingDate": 1, "deliveryDate": 1,
+    }).sort("leadId", -1).to_list(cap)
     # An executive works their own leads only. Owner, Sales GM, TL and Accounts see all.
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
     period = _parse_period(month, year)
     leads = _rows_in_period(
         leads, period, lambda l: periodmod.lead_register_date(l, status or ""))
+    for lead in leads:
+        units = lead.get("units") or []
+        if units:
+            lead["units"] = [
+                {"sno": u.get("sno"), "model": u.get("model") or "", "variant": u.get("variant") or ""}
+                for u in units if isinstance(u, dict)
+            ]
     rows = [clean(l) for l in leads]
     rows = await _attach_approval_request_ids(rows)
     return [_lead_for_viewer(l, user) for l in rows]
@@ -5724,16 +5742,16 @@ async def _lead_has_money(lead_id):
 
 
 async def _purge_retry_duplicate_lead(lead_id):
-    """Remove a New file minted by a retried Create Lead. No sheet wait in tests."""
+    """Remove a New file minted by a retried Create Lead. Mongo only.
+
+    Google Sheet waits are what timed the desk out at 25s. Lead rows are
+    claims-only on the sheet, so skipping traces here is safe.
+    """
     lead = await db.leads.find_one({"leadId": lead_id})
     if not lead or not _is_retry_dup_candidate(lead):
         return False
     if await _lead_has_money(lead_id):
         return False
-    try:
-        await gsheets.delete_lead_traces(lead_id)
-    except Exception:
-        logging.exception("retry-dup sheet purge failed for %s", lead_id)
     for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
                  "activities", "dealer_earnings", "incentive_register", "billing_summaries",
                  "whatsapp_messages", "whatsapp_outbox"]:
@@ -5770,8 +5788,21 @@ async def _repair_retry_duplicate_leads():
     Same person + same day + 2+ open unbooked singles with no money:
     identical SKU → keep the first id, delete the rest.
     Different SKUs → one pack on the first id.
+    Runs in boot maintenance — no desk button, no 25s HTTP wait.
     """
-    rows = [l async for l in db.leads.find({})]
+    rows = await db.leads.find(
+        {
+            "currentStatus": {"$in": ["New", "Contacted", "Follow-up", "In Progress", ""]},
+            "dealCancelled": {"$ne": True},
+        },
+        {
+            "leadId": 1, "customerName": 1, "mobile": 1, "interestedModel": 1,
+            "variant": 1, "createdDate": 1, "currentStatus": 1, "accountStatus": 1,
+            "units": 1, "sameOrderMultiUnit": 1, "bookingDate": 1, "bookingId": 1,
+            "deliveryStatus": 1, "deliveryDate": 1, "chassisNumber": 1,
+            "invoiceNumber": 1, "numberPlate": 1, "exShowroom": 1, "dealCancelled": 1,
+        },
+    ).to_list(4000)
     groups = {}
     for lead in rows:
         if not _is_retry_dup_candidate(lead):
@@ -5786,12 +5817,9 @@ async def _repair_retry_duplicate_leads():
         if len(cluster) < 2:
             continue
         cluster = sorted(cluster, key=lambda l: str(l.get("leadId") or ""))
-        money = False
-        for row in cluster:
-            if await _lead_has_money(row["leadId"]):
-                money = True
-                break
-        if money:
+        ids = [r["leadId"] for r in cluster]
+        if await db.payments.find_one({"leadId": {"$in": ids}}) or \
+                await db.bookings.find_one({"leadId": {"$in": ids}}):
             continue
         keeper = cluster[0]
         extras = cluster[1:]
@@ -5815,14 +5843,6 @@ async def _repair_retry_duplicate_leads():
                     "vehicleCount": (updated or {}).get("vehicleCount"),
                 })
     return repaired
-
-
-@api.post("/leads/repair-retry-duplicates", dependencies=[Depends(owner_only)])
-async def repair_retry_duplicate_leads(act=Depends(actor)):
-    """Owner: collapse New files created by the triple-id bug."""
-    repaired = await _repair_retry_duplicate_leads()
-    await write_audit(act, "repair", "lead-retry-duplicates", new={"repaired": repaired})
-    return {"ok": True, "repaired": len(repaired), "groups": repaired}
 
 
 @api.delete("/leads/{lead_id}", dependencies=[Depends(owner_only)])

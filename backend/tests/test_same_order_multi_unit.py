@@ -190,9 +190,8 @@ async def test_repair_deletes_same_sku_retry_triples(client):
             "createdDate": "2026-09-22", "lastUpdated": "2026-09-22T08:00:00+00:00",
             "executive": "Amit",
         })
-    r = await client.post("/api/leads/repair-retry-duplicates")
-    assert r.status_code == 200, r.text
-    assert r.json()["repaired"] == 1
+    repaired = await server._repair_retry_duplicate_leads()
+    assert len(repaired) == 1
     left = [l async for l in server.db.leads.find({"mobile": mobile})]
     assert len(left) == 1
     assert left[0]["leadId"] == "LD26RPAIR01"
@@ -227,9 +226,8 @@ async def test_repair_merges_same_day_different_skus(client):
         "createdDate": "2026-09-22", "lastUpdated": "2026-09-22T08:01:00+00:00",
         "exShowroom": 500000,
     })
-    r = await client.post("/api/leads/repair-retry-duplicates")
-    assert r.status_code == 200, r.text
-    assert r.json()["repaired"] == 1
+    repaired = await server._repair_retry_duplicate_leads()
+    assert len(repaired) == 1
     left = [l async for l in server.db.leads.find({"mobile": mobile})]
     assert len(left) == 1
     assert left[0]["leadId"] == "LD26MERGE01"
