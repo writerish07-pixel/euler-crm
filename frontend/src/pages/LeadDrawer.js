@@ -101,7 +101,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       title={lead.customerName}
       subtitle={(
         <span className="flex flex-wrap items-center gap-2">
-          <span>{`${lead.leadId} · ${lead.interestedModel || ""} ${lead.variant || ""}`.trim()}</span>
+          <span>{`${lead.leadId} · ${Number(lead.vehicleCount || (lead.units || []).length) > 1 ? `${lead.vehicleCount || lead.units.length} units` : `${lead.interestedModel || ""} ${lead.variant || ""}`}`.trim()}</span>
           <CallLink mobile={lead.mobile} />
         </span>
       )}
@@ -501,6 +501,24 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           <OwnerKV label="Model" field="interestedModel" value={lead.interestedModel || ""}
             options={["", ...(masters.models || [])]} leadId={lid} onSaved={onSaved} />
           <OwnerKV label="Variant" field="variant" value={lead.variant || ""} leadId={lid} onSaved={onSaved} />
+          {(lead.sameOrderMultiUnit || (lead.units || []).length > 1) && (
+            <div className="sm:col-span-2 lg:col-span-3 mt-2" data-testid="overview-units">
+              <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">
+                Same-order units ({lead.vehicleCount || (lead.units || []).length})
+              </div>
+              <ul className="space-y-1">
+                {(lead.units || []).map((u, i) => (
+                  <li key={u.sno || i} className="text-xs text-ink">
+                    Unit {u.sno || i + 1}
+                    {u.model ? ` · ${u.model}` : ""}
+                    {u.variant ? ` ${u.variant}` : ""}
+                    {u.chassisNumber ? ` · ${u.chassisNumber}` : ""}
+                    {u.invoiceNumber ? ` · ${u.invoiceNumber}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
             display={inr(lead.budget || lead.cxDemand || 0)} numeric leadId={lid} onSaved={onSaved} />
           <OwnerKV label="Remarks" field="remarks" value={lead.remarks || ""} leadId={lid} onSaved={onSaved} />
@@ -1377,6 +1395,18 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   // that Mark Delivered opens.
   const [agents, setAgents] = useState([]);
   const [sold, setSold] = useState(oemSold && oemSold.matched ? oemSold : null);
+  const [packUnits, setPackUnits] = useState(() => (
+    (lead.units && lead.units.length > 1) || lead.sameOrderMultiUnit
+      ? (lead.units || []).map((u, i) => ({
+        sno: u.sno || i + 1,
+        model: u.model || "",
+        variant: u.variant || "",
+        chassisNumber: u.chassisNumber || "",
+        invoiceNumber: u.invoiceNumber || "",
+        numberPlate: u.numberPlate || "",
+      }))
+      : []
+  ));
   // Customer-arranged insurance earns no payout, so no agent is required there.
   const selfArranged = String(lead.insuranceArrangedBy || "dealer").toLowerCase() === "self";
 
@@ -1413,7 +1443,49 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
       }
       return changed ? next : f;
     });
-  }, [sold, lead.customerOutstanding, locked]);
+    const family = sold.units || [];
+    if (family.length > 1 || (lead.units || []).length > 1 || lead.sameOrderMultiUnit) {
+      setPackUnits((cur) => {
+        const base = (cur.length ? cur : (lead.units || [])).map((u, i) => ({
+          sno: u.sno || i + 1,
+          model: u.model || "",
+          variant: u.variant || "",
+          chassisNumber: u.chassisNumber || "",
+          invoiceNumber: u.invoiceNumber || "",
+          numberPlate: u.numberPlate || "",
+        }));
+        const rows = base.length ? base : family.map((u, i) => ({
+          sno: u.sno || i + 1,
+          model: u.model || "",
+          variant: u.variant || "",
+          chassisNumber: u.chassis || u.chassisNumber || "",
+          invoiceNumber: u.invoiceNumber || "",
+          numberPlate: u.numberPlate || "",
+        }));
+        const taken = new Set();
+        return rows.map((row, idx) => {
+          if (String(row.chassisNumber || "").trim()) return { ...row, sno: idx + 1 };
+          const hit = family.find((u, i) => {
+            if (taken.has(i)) return false;
+            const ch = u.chassis || u.chassisNumber;
+            if (!ch) return false;
+            taken.add(i);
+            return true;
+          });
+          if (!hit) return { ...row, sno: idx + 1 };
+          return {
+            ...row,
+            sno: idx + 1,
+            chassisNumber: hit.chassis || hit.chassisNumber || "",
+            invoiceNumber: row.invoiceNumber || hit.invoiceNumber || "",
+            numberPlate: row.numberPlate || hit.numberPlate || "",
+            model: row.model || hit.model || "",
+            variant: row.variant || hit.variant || "",
+          };
+        });
+      });
+    }
+  }, [sold, lead.customerOutstanding, locked, lead.units, lead.sameOrderMultiUnit]);
   useEffect(() => {
     if (!alreadyDelivered) return;
     if (billingSummary && billingSummary.leadId) return;
@@ -1438,7 +1510,10 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
       return toast.error("Select the insurance agent before marking delivered");
     }
     try {
-      await put(`/leads/${lead.leadId}/delivery`, form);
+      await put(`/leads/${lead.leadId}/delivery`, {
+        ...form,
+        ...(packUnits.length > 1 ? { units: packUnits } : {}),
+      });
       toast.success(form.delivered === "Yes"
         ? "Delivered — billing summary ready for Tally cross-check"
         : "Delivery status updated");
@@ -1490,7 +1565,51 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         </p>
       )}
       <OemClaimStrip leadId={lead.leadId} />
+      {packUnits.length > 1 && (
+        <div className="mb-3 overflow-x-auto" data-testid="delivery-units-table">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-ink-faint uppercase tracking-wide">
+                <th className="py-1 pr-2">S.No.</th>
+                <th className="py-1 pr-2">Model</th>
+                <th className="py-1 pr-2">Variant</th>
+                <th className="py-1 pr-2">Chassis</th>
+                <th className="py-1">Invoice</th>
+              </tr>
+            </thead>
+            <tbody>
+              {packUnits.map((u, i) => (
+                <tr key={u.sno || i} data-testid={`delivery-unit-row-${i + 1}`}>
+                  <td className="py-1 pr-2 font-mono">{u.sno || i + 1}</td>
+                  <td className="py-1 pr-2">{u.model || "—"}</td>
+                  <td className="py-1 pr-2">{u.variant || "—"}</td>
+                  <td className="py-1 pr-2">
+                    <Input data-testid={`delivery-unit-chassis-${i + 1}`}
+                      value={u.chassisNumber || ""} disabled={oemIdsLocked} placeholder="From OEM Sold"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, chassisNumber: v } : row)));
+                        if (i === 0) setForm((f) => ({ ...f, chassisNumber: v }));
+                      }} />
+                  </td>
+                  <td className="py-1">
+                    <Input data-testid={`delivery-unit-invoice-${i + 1}`}
+                      value={u.invoiceNumber || ""} disabled={oemIdsLocked} placeholder="From OEM Sold"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, invoiceNumber: v } : row)));
+                        if (i === 0) setForm((f) => ({ ...f, invoiceNumber: v }));
+                      }} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {packUnits.length <= 1 && (
+          <>
         <Field label="Invoice Number (OEM)">
           <Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")}
             disabled={oemIdsLocked} placeholder="From OEM Sold" />
@@ -1499,6 +1618,8 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           <Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")}
             disabled={oemIdsLocked} placeholder="From OEM Sold" />
         </Field>
+          </>
+        )}
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>
         <Field label="Insurance Agent *">

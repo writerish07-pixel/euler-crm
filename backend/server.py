@@ -605,17 +605,94 @@ async def _refresh_sold_then_fill_delivery(lead, body):
     return await _fill_delivery_from_sold(lead, body)
 
 
+def _merge_delivery_units(existing, sold_units, lead=None):
+    """Fill empty chassis/invoice on pack lines from OEM Sold family rows."""
+    base = _normalize_lead_units(
+        existing or ((lead or {}).get("units") or []),
+        model=(lead or {}).get("interestedModel") or "",
+        variant=(lead or {}).get("variant") or "",
+        chassis=(lead or {}).get("chassisNumber") or "",
+        invoice=(lead or {}).get("invoiceNumber") or "",
+        plate=(lead or {}).get("numberPlate") or "",
+    )
+    sold = [_dump_unit(u) for u in (sold_units or [])]
+    sold = [u for u in sold if oem_sync._norm_chassis(u.get("chassis") or u.get("chassisNumber"))]
+    if not sold and not base:
+        return []
+    if not base:
+        return [{
+            "sno": i + 1,
+            "model": u.get("model") or "",
+            "variant": u.get("variant") or "",
+            "chassisNumber": u.get("chassis") or u.get("chassisNumber") or "",
+            "invoiceNumber": u.get("invoiceNumber") or "",
+            "numberPlate": u.get("numberPlate") or "",
+        } for i, u in enumerate(sold)]
+    taken = set()
+    for unit in base:
+        if oem_sync._norm_chassis(unit.get("chassisNumber")):
+            continue
+        pick = None
+        want = oem_sync.inventory_family_key(unit.get("model"), unit.get("variant") or "")
+        for i, s in enumerate(sold):
+            if i in taken:
+                continue
+            sch = oem_sync._norm_chassis(s.get("chassis") or s.get("chassisNumber"))
+            if sch in taken:
+                continue
+            got = oem_sync.inventory_family_key(s.get("model"), s.get("variant") or "")
+            if want and got and want != got:
+                continue
+            pick = s
+            taken.add(i)
+            break
+        if pick is None:
+            for i, s in enumerate(sold):
+                if i in taken:
+                    continue
+                pick = s
+                taken.add(i)
+                break
+        if pick is None:
+            continue
+        unit["chassisNumber"] = pick.get("chassis") or pick.get("chassisNumber") or ""
+        if pick.get("invoiceNumber"):
+            unit["invoiceNumber"] = pick.get("invoiceNumber")
+        if pick.get("numberPlate"):
+            unit["numberPlate"] = pick.get("numberPlate")
+        if not unit.get("model") and pick.get("model"):
+            unit["model"] = pick.get("model")
+            unit["variant"] = pick.get("variant") or ""
+    for i, s in enumerate(sold):
+        if i in taken:
+            continue
+        ch = oem_sync._norm_chassis(s.get("chassis") or s.get("chassisNumber"))
+        if ch and ch in set(oem_sync.lead_chassis_list({"units": base})):
+            continue
+        base.append({
+            "sno": len(base) + 1,
+            "model": s.get("model") or "",
+            "variant": s.get("variant") or "",
+            "chassisNumber": s.get("chassis") or s.get("chassisNumber") or "",
+            "invoiceNumber": s.get("invoiceNumber") or "",
+            "numberPlate": s.get("numberPlate") or "",
+        })
+    for i, u in enumerate(base):
+        u["sno"] = i + 1
+    return base
+
+
 async def _fill_delivery_from_sold(lead, body):
     """Copy chassis/invoice from Coulson Sold by unique customer mobile.
 
     TL / GM / Owner mark delivered without typing those ids. Billing in Coulson
     drops the unit from yard PRESENT; the Sold tab still has chassis + invoice
     keyed by the same unique mobile as the CRM lead. Empty ids are allowed —
-    the next Sold sync backfills them.
+    the next Sold sync backfills them. A same-order pack fills every S.No. line.
     """
     if ce.num((lead or {}).get("customerOutstanding")) > 0.01:
         return body
-    match = await oem_sync.match_sold_for_lead(db, lead)
+    match = await oem_sync.match_sold_family_for_lead(db, lead)
     if not match or not match.get("chassis"):
         return body
     if not str(getattr(body, "chassisNumber", "") or "").strip():
@@ -624,6 +701,15 @@ async def _fill_delivery_from_sold(lead, body):
         body.invoiceNumber = match["invoiceNumber"]
     if not str(getattr(body, "numberPlate", "") or "").strip() and match.get("numberPlate"):
         body.numberPlate = match["numberPlate"]
+    sold_units = match.get("units") or []
+    existing = list(getattr(body, "units", None) or (lead or {}).get("units") or [])
+    if oem_sync.is_same_order_pack(lead) or len(existing) > 1 or len(sold_units) > 1:
+        body.units = _merge_delivery_units(existing, sold_units, lead)
+        if body.units:
+            if not str(getattr(body, "chassisNumber", "") or "").strip():
+                body.chassisNumber = body.units[0].get("chassisNumber") or body.chassisNumber
+            if not str(getattr(body, "invoiceNumber", "") or "").strip():
+                body.invoiceNumber = body.units[0].get("invoiceNumber") or body.invoiceNumber
     return body
 
 
@@ -638,25 +724,41 @@ def _vehicle_id_blocks_reuse(other):
 
 
 async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chassis_number="",
-                                             number_plate=""):
+                                             number_plate="", units=None):
     """Invoice / chassis / number plate must be unique across live leads.
     Blank values are ignored. The current lead is excluded so re-saves are allowed.
     Cancelled files and deliveries before 1 Sep do not count as conflicts."""
-    checks = (
+    checks = [
         ("invoiceNumber", invoice_number, "Invoice number"),
         ("chassisNumber", chassis_number, "Chassis number"),
         ("numberPlate", number_plate, "Number plate"),
-    )
+    ]
+    for u in units or []:
+        rec = _dump_unit(u)
+        checks.append(("invoiceNumber", rec.get("invoiceNumber"), "Invoice number"))
+        checks.append(("chassisNumber", rec.get("chassisNumber"), "Chassis number"))
+        checks.append(("numberPlate", rec.get("numberPlate"), "Number plate"))
+    seen = set()
     for field, raw, label in checks:
         val = str(raw or "").strip()
         if not val:
             continue
+        key = (field, val.lower())
+        if key in seen:
+            continue
+        seen.add(key)
         cursor = db.leads.find({
             "leadId": {"$ne": lead_id},
-            field: {"$regex": f"^{re.escape(val)}$", "$options": "i"},
+            "$or": [
+                {field: {"$regex": f"^{re.escape(val)}$", "$options": "i"}},
+                {f"units.{field}": {"$regex": f"^{re.escape(val)}$", "$options": "i"}},
+            ],
         })
         async for existing in cursor:
             if not _vehicle_id_blocks_reuse(existing):
+                continue
+            if field == "chassisNumber" and oem_sync._norm_chassis(val) not in set(
+                    oem_sync.lead_chassis_list(existing)):
                 continue
             raise HTTPException(
                 409,
@@ -777,6 +879,8 @@ async def recompute_lead(lead_id):
     # Do NOT subtract entitlement benefits again — that double-counted after the
     # allocation engines were merged onto one path.
     customer_payable = _deal_price_payable(lead)
+    if customer_payable is None and oem_sync.is_same_order_pack(lead):
+        customer_payable = _sum_unit_payables(lead, scheme_rows)
     if customer_payable is None:
         customer_payable = totals["customerPayable"]
     if lead.get("dealCancelled"):
@@ -884,7 +988,10 @@ async def recompute_lead(lead_id):
             "schemeMonth": alloc.get("schemeMonth"),
         },
         "lastUpdated": now_iso(),
+        "vehicleCount": oem_sync.vehicle_count(lead),
     }
+    if oem_sync.is_same_order_pack(lead):
+        updates["sameOrderMultiUnit"] = True
     # Authoritative Insurance Benefit projection (parallel to loyaltyBonus offer field).
     # Available amount is stored on insuranceBenefit; CB feeds the Dealer Earnings sheet
     # column Customer Insurance Benefit Passed. Historical leads without auth allocation
@@ -1119,8 +1226,20 @@ class LeadIn(BaseModel):
     oemExtraSupportReceived: float = 0
     # Staff confirm: this is another vehicle on a mobile already in the CRM.
     anotherVehicle: bool = False
+    # Same-order fleet: N vehicles on ONE lead id, one payment, one Bank DO.
+    sameOrderMultiUnit: bool = False
+    units: Optional[List["LeadUnitIn"]] = None
     # Executive create-lead: which OEM scheme lines to pass to the customer.
     schemePassOn: Optional[Dict[str, bool]] = None
+
+
+class LeadUnitIn(BaseModel):
+    """One vehicle line on a same-order pack (Unit 1 Turbo, Unit 2 Storm…)."""
+    model: str = ""
+    variant: str = ""
+    chassisNumber: str = ""
+    invoiceNumber: str = ""
+    numberPlate: str = ""
 
 
 class LeadUpdateIn(BaseModel):
@@ -1244,6 +1363,7 @@ class DeliveryIn(BaseModel):
     insurerName: str = ""
     insuranceAgentId: str = ""     # broker paying the payout; picked at delivery
     feedback: str = ""
+    units: Optional[List[Dict[str, Any]]] = None
 
 
 class CloseIn(BaseModel):
@@ -1801,6 +1921,7 @@ def _lead_in_payload(lead: dict) -> dict:
         "interestedModel", "variant", "executive", "currentStatus", "priority",
         "budget", "remarks", "financeRequired", "exchangeRequired",
         "nextFollowupDate", "createdDate", "customerType", "gstin",
+        "sameOrderMultiUnit", "units",
     )
     out = {}
     for k in keys:
@@ -1837,12 +1958,23 @@ FIELD_LEAD_SAFE_KEYS = {
     "accountStatus", "priority", "createdDate", "bookingDate", "deliveryDate",
     "nextFollowupDate", "nextFollowup", "financeRequired", "exchangeRequired",
     "remarks", "deliveryStatus", "bookingId",
+    "sameOrderMultiUnit", "units", "vehicleCount",
 }
 
 
 def _field_safe_lead(lead: dict) -> dict:
     """Pipeline-only snapshot for ASM/RM — no commercial / money fields."""
-    return {k: lead.get(k) for k in FIELD_LEAD_SAFE_KEYS if k in lead or lead.get(k) is not None}
+    out = {k: lead.get(k) for k in FIELD_LEAD_SAFE_KEYS if k in lead or lead.get(k) is not None}
+    raw_units = out.get("units") or []
+    if raw_units:
+        out["units"] = [
+            {k: (u or {}).get(k) for k in ("sno", "model", "variant", "chassisNumber",
+                                           "invoiceNumber", "numberPlate")
+             if (u or {}).get(k) not in (None, "")}
+            for u in raw_units if isinstance(u, dict)
+        ]
+    out["vehicleCount"] = oem_sync.vehicle_count(lead)
+    return out
 
 
 # Dealer P&L — owner only. Exec / GM / TL / Accounts see customer money (payable,
@@ -1937,6 +2069,10 @@ def _staff_safe_billing(summary):
 def _lead_for_viewer(lead: dict, user) -> dict:
     if not lead:
         return lead
+    lead = dict(lead)
+    lead["vehicleCount"] = oem_sync.vehicle_count(lead)
+    if oem_sync.is_same_order_pack(lead):
+        lead["sameOrderMultiUnit"] = True
     role = ((user or {}).get("role") or "").strip().lower()
     if role in authmod.FIELD_ROLES:
         return _field_safe_lead(lead)
@@ -1947,12 +2083,14 @@ def _lead_for_viewer(lead: dict, user) -> dict:
 
 def _volume_slice(leads, payments, period, cancel_events, *, include_money=True):
     """One MTD or YTD pack: event-dated counts (and receipts when allowed)."""
-    leads_n = sum(1 for l in leads if periodmod.in_period(l.get("createdDate"), period))
+    leads_n = sum(
+        oem_sync.vehicle_count(l)
+        for l in leads if periodmod.in_period(l.get("createdDate"), period))
     bookings_n = sum(
-        1 for l in leads
+        oem_sync.vehicle_count(l) for l in leads
         if _is_booked_lead(l) and periodmod.in_period(l.get("bookingDate"), period))
     deliveries_n = sum(
-        1 for l in leads
+        oem_sync.vehicle_count(l) for l in leads
         if _is_delivered_lead(l) and periodmod.in_period(_retail_date(l), period))
     conv = round((bookings_n / leads_n * 100), 1) if leads_n else 0.0
     del_conv = round((deliveries_n / bookings_n * 100), 1) if bookings_n else 0.0
@@ -3502,7 +3640,11 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
                             allow_same_mobile: bool = False, viewer=None, copy_docs=None):
     payload = body.model_dump()
     another = bool(payload.pop("anotherVehicle", False))
+    same_order = bool(payload.pop("sameOrderMultiUnit", False))
+    raw_units = payload.pop("units", None)
     scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
+    if same_order:
+        another = False
     await _raise_if_mobile_taken(
         body.mobile, incoming_name=body.customerName,
         incoming_executive=body.executive, allow=another or allow_same_mobile,
@@ -3513,6 +3655,22 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
     if payload["customerType"] != "B2B":
         payload["gstin"] = ""
+    extra_units = _normalize_lead_units(raw_units)
+    pack_units = []
+    if same_order or len(extra_units) > 1:
+        unit1 = {
+            "sno": 1,
+            "model": payload.get("interestedModel") or "",
+            "variant": payload.get("variant") or "",
+        }
+        rest = extra_units
+        if rest and (
+            (rest[0].get("model") or "").strip().lower() == (unit1["model"] or "").strip().lower()
+            and (rest[0].get("variant") or "").strip().lower() == (unit1["variant"] or "").strip().lower()
+        ):
+            rest = rest[1:]
+        pack_units = [unit1] + rest
+        same_order = len(pack_units) > 1
     doc = {
         "leadId": lead_id,
         **payload,
@@ -3527,6 +3685,9 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
         "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(),
         "oemExtraSupportReceived": ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived")))),
         "oemExtraSupportPassed": 0,
+        "sameOrderMultiUnit": bool(same_order and len(pack_units) > 1),
+        "units": pack_units if same_order and len(pack_units) > 1 else [],
+        "vehicleCount": max(len(pack_units), 1) if same_order and pack_units else 1,
     }
     await db.leads.insert_one(doc)
     _act_doc = {
@@ -3545,11 +3706,40 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     cx = ce.round2(ce.num(payload.get("budget")))
     extra = ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived"))))
     if cx > 0:
-        row = await _apply_quoted_deal(
+        await _apply_quoted_deal(
             lead_id, payload.get("interestedModel"), payload.get("variant"), cx,
             created_date, oem_extra_received=extra if extra > 0 else None,
             scheme_pass_on=scheme_pass_on)
-        return _lead_for_viewer(row, viewer)
+    elif extra > 0:
+        await recompute_lead(lead_id)
+    if same_order and len(pack_units) > 1:
+        live = await db.leads.find_one({"leadId": lead_id}) or {}
+        priced = [_unit1_from_lead(live)]
+        if cx > 0:
+            priced[0]["useDealPrice"] = True
+            priced[0]["cxDemand"] = cx
+            priced[0]["customerPayable"] = cx
+        for extra_u in pack_units[1:]:
+            rec = await _price_unit_from_master(
+                extra_u.get("model"), extra_u.get("variant"), created_date)
+            priced.append({
+                "sno": len(priced) + 1,
+                "model": extra_u.get("model") or "",
+                "variant": extra_u.get("variant") or "",
+                "chassisNumber": extra_u.get("chassisNumber") or "",
+                "invoiceNumber": extra_u.get("invoiceNumber") or "",
+                "numberPlate": extra_u.get("numberPlate") or "",
+                **rec,
+            })
+        for i, u in enumerate(priced):
+            u["sno"] = i + 1
+        await db.leads.update_one({"leadId": lead_id}, {"$set": {
+            "units": priced,
+            "sameOrderMultiUnit": True,
+            "vehicleCount": len(priced),
+            "lastUpdated": now_iso(),
+        }})
+        await recompute_lead(lead_id)
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), viewer)
 
 
@@ -4393,7 +4583,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         "billingSummary": billing_summary or None,
         "documents": await lead_docs.list_docs(
             db, user, lead_id=lead_id, own=_is_own_lead(lead, user)),
-        "oemSold": await oem_sync.match_sold_for_lead(db, lead),
+        "oemSold": await oem_sync.match_sold_family_for_lead(db, lead),
         "whatsapp": await wa.summary_for_lead(lead_id),
     }
 
@@ -4866,12 +5056,127 @@ def _charges_from_price_structure(ps):
 
 
 def _deal_price_payable(lead):
-    """Agreed Cx Demand is customer payable while useDealPrice is on."""
+    """Agreed Cx Demand is customer payable while useDealPrice is on.
+
+    Same-order packs use the sum of unit payables instead of one quote.
+    """
     if not lead or lead.get("dealCancelled"):
+        return None
+    if oem_sync.is_same_order_pack(lead) and (lead.get("units") or []):
         return None
     if lead.get("useDealPrice") and ce.num(lead.get("cxDemand")) > 0:
         return ce.round2(ce.num(lead.get("cxDemand")))
     return None
+
+
+UNIT_MONEY_KEYS = (
+    "exShowroom", "rto", "insuranceAmount", "accessoriesAmount",
+    "handlingCharges", "trc", "fastag", "extendedWarranty", "otherCharges",
+    "rsaAmc", "tcsApplicable", "consumerDiscount", "exchangeBonus",
+    "loyaltyBonus", "referralBonus", "dsaDiscount", "additionalDiscount",
+    "customerPayable", "customerBenefitPassed", "useDealPrice", "cxDemand",
+    "budget", "grossVehicleCost",
+)
+
+
+def _dump_unit(u):
+    if u is None:
+        return {}
+    if hasattr(u, "model_dump"):
+        return u.model_dump()
+    return dict(u) if isinstance(u, dict) else {}
+
+
+def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
+                          invoice="", plate=""):
+    """Clean unit lines. Unit 1 can be seeded from the top-level SKU."""
+    units = []
+    raw = [_dump_unit(u) for u in (raw_units or [])]
+    raw = [u for u in raw if isinstance(u, dict)]
+    if not raw and (model or variant or chassis):
+        raw = [{
+            "model": model, "variant": variant, "chassisNumber": chassis,
+            "invoiceNumber": invoice, "numberPlate": plate,
+        }]
+    for i, u in enumerate(raw):
+        rec = {
+            "sno": int(u.get("sno") or i + 1),
+            "model": str(u.get("model") or u.get("interestedModel") or "").strip(),
+            "variant": str(u.get("variant") or "").strip(),
+            "chassisNumber": str(u.get("chassisNumber") or "").strip(),
+            "invoiceNumber": str(u.get("invoiceNumber") or "").strip(),
+            "numberPlate": str(u.get("numberPlate") or "").strip(),
+        }
+        for k in UNIT_MONEY_KEYS:
+            if k in u and u.get(k) is not None:
+                rec[k] = u[k]
+        if rec["model"] or rec["variant"] or rec["chassisNumber"]:
+            units.append(rec)
+    if units and not units[0].get("model") and model:
+        units[0]["model"] = model
+        units[0]["variant"] = variant
+    for i, u in enumerate(units):
+        u["sno"] = i + 1
+    return units
+
+
+def _unit1_from_lead(lead):
+    rec = {
+        "sno": 1,
+        "model": (lead or {}).get("interestedModel") or "",
+        "variant": (lead or {}).get("variant") or "",
+        "chassisNumber": (lead or {}).get("chassisNumber") or "",
+        "invoiceNumber": (lead or {}).get("invoiceNumber") or "",
+        "numberPlate": (lead or {}).get("numberPlate") or "",
+    }
+    for k in UNIT_MONEY_KEYS:
+        if k in (lead or {}) and (lead or {}).get(k) is not None:
+            rec[k] = lead[k]
+    return rec
+
+
+def _ensure_lead_units(lead):
+    """Guarantee units[] includes unit 1 from the current lead fields."""
+    units = _normalize_lead_units((lead or {}).get("units") or [])
+    if units:
+        if not units[0].get("model"):
+            units[0]["model"] = (lead or {}).get("interestedModel") or units[0].get("model")
+            units[0]["variant"] = (lead or {}).get("variant") or units[0].get("variant")
+        if not units[0].get("chassisNumber"):
+            units[0]["chassisNumber"] = (lead or {}).get("chassisNumber") or ""
+            units[0]["invoiceNumber"] = units[0].get("invoiceNumber") or (lead or {}).get("invoiceNumber") or ""
+            units[0]["numberPlate"] = units[0].get("numberPlate") or (lead or {}).get("numberPlate") or ""
+        return units
+    return [_unit1_from_lead(lead)]
+
+
+def _lead_overlay_unit(lead, unit):
+    """Lead-shaped dict for one unit so compute_commercial_totals can price it."""
+    u = unit or {}
+    out = dict(lead or {})
+    out["interestedModel"] = u.get("model") or u.get("interestedModel") or out.get("interestedModel")
+    out["variant"] = u.get("variant") or out.get("variant")
+    for k in UNIT_MONEY_KEYS:
+        if k in u:
+            out[k] = u[k]
+    return out
+
+
+def _sum_unit_payables(lead, scheme_rows=None):
+    units = (lead or {}).get("units") or []
+    if not units and not (lead or {}).get("sameOrderMultiUnit"):
+        return None
+    if not units:
+        units = [_unit1_from_lead(lead)]
+    total = 0.0
+    for u in units:
+        if (u or {}).get("useDealPrice") and ce.num((u or {}).get("cxDemand")) > 0:
+            total += ce.round2(ce.num(u.get("cxDemand")))
+            continue
+        snap = lead_to_snapshot(_lead_overlay_unit(lead, u))
+        totals = ce.compute_commercial_totals(snap, scheme_rows)
+        total += ce.round2(ce.num(totals.get("customerPayable")))
+    return ce.round2(total)
 
 
 def _parse_scheme_pass_on(raw) -> dict:
@@ -7397,7 +7702,7 @@ async def lead_oem_sold(lead_id: str, refresh: bool = False, user=Depends(curren
             await oem_sync.refresh_sold_inventory(db)
         except Exception:
             logging.exception("Coulson sold refresh failed for %s", lead_id)
-    match = await oem_sync.match_sold_for_lead(db, lead)
+    match = await oem_sync.match_sold_family_for_lead(db, lead)
     outstanding = ce.round2(ce.num(lead.get("customerOutstanding")))
     if not match:
         return {
@@ -7496,6 +7801,139 @@ async def _apply_list_price_and_scheme(lead_id, model, variant, as_of=None):
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
+async def _price_unit_from_master(model, variant, as_of=None):
+    """Price Master + Scheme Master for one SKU. Does not write the lead."""
+    on = str(as_of or today())[:10]
+    out = {"model": model or "", "variant": variant or ""}
+    row = await _price_master_row(model, variant) if model else None
+    if row:
+        out.update(_price_structure_from_master(row, on))
+    scheme_rows = await get_scheme_rows()
+    rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
+        model or "", variant or "", on, scheme_rows)
+    for key, rule in (rules_ctx.get("rules") or {}).items():
+        if key == "additionalDiscount":
+            continue
+        if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+            out[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
+        else:
+            out[key] = 0
+    snap = lead_to_snapshot({
+        **out, "interestedModel": model or "", "variant": variant or "",
+    })
+    totals = ce.compute_commercial_totals(snap, scheme_rows)
+    out["customerPayable"] = totals.get("customerPayable") or 0
+    out["grossVehicleCost"] = totals.get("grossVehicleCost") or 0
+    return out
+
+
+def _same_sold_person(a, b):
+    """True when two sold/lead dicts share a unique mobile or usable name."""
+    am = oem_sync._digits10(
+        (a or {}).get("mobile") or (a or {}).get("altMobile"))
+    bm = oem_sync._digits10(
+        (b or {}).get("mobile") or (b or {}).get("altMobile"))
+    if am and len(am) == 10 and am == bm:
+        return True
+    ak = oem_sync._norm_person_name((a or {}).get("customerName"))
+    bk = oem_sync._norm_person_name((b or {}).get("customerName"))
+    return bool(oem_sync._name_key_usable(ak) and ak == bk)
+
+
+def _pack_target_for_sold(row, leads, sold_rows):
+    """Existing same-name/mobile file this leftover Sold should join, or None.
+
+    Pack / 2+ family Sold on one open CRM file → append. Delivered single-unit
+    or already-split sibling files stay separate (repeat buyer / #169).
+    """
+    live = [l for l in (leads or []) if oem_sync.live_occupies_vehicle_id(l)]
+    same = oem_sync._live_same_mobile(live, (row or {}).get("mobile"))
+    if not same:
+        same = oem_sync._live_same_name(live, (row or {}).get("customerName"))
+    chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
+    same = [l for l in same if chassis not in set(oem_sync.lead_chassis_list(l))]
+    if not same:
+        return None
+    packs = [l for l in same if oem_sync.is_same_order_pack(l)]
+    if packs:
+        return packs[0]
+    if len(same) > 1:
+        return None
+    lead = same[0]
+    if oem_sync._lead_is_delivered(lead) and oem_sync.vehicle_count(lead) <= 1:
+        return None
+    family = [
+        s for s in (sold_rows or [])
+        if _same_sold_person(s, row) or _same_sold_person(s, lead)
+    ]
+    if len(family) >= 2:
+        return lead
+    return None
+
+
+def _family_sold_for_pack(row, sold_rows, leads, target):
+    occupied = oem_sync.occupied_chassis_numbers(leads, (target or {}).get("leadId"))
+    out = []
+    seen = set()
+    for s in sold_rows or []:
+        ch = oem_sync._norm_chassis((s or {}).get("chassis"))
+        if not ch or ch in seen or ch in occupied:
+            continue
+        if _same_sold_person(s, row) or _same_sold_person(s, target):
+            seen.add(ch)
+            out.append(s)
+    return out
+
+
+async def _append_oem_unit(lead, row):
+    """Add one OEM billed chassis as a unit. Never rewrite unit 1 prices."""
+    chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
+    if not chassis:
+        return lead
+    if chassis in set(oem_sync.lead_chassis_list(lead)):
+        return lead
+    invoice = str((row or {}).get("invoiceNumber") or "").strip()
+    plate = str((row or {}).get("numberPlate") or "").strip()
+    model = (row or {}).get("model") or ""
+    variant = (row or {}).get("variant") or ""
+    sold_date = str((row or {}).get("soldDate") or "")[:10] or today()
+    units = _ensure_lead_units(lead)
+    if units and not oem_sync._norm_chassis(units[0].get("chassisNumber")):
+        units[0]["chassisNumber"] = chassis
+        units[0]["invoiceNumber"] = invoice or units[0].get("invoiceNumber") or ""
+        units[0]["numberPlate"] = plate or units[0].get("numberPlate") or ""
+        if not units[0].get("model"):
+            units[0]["model"] = model
+            units[0]["variant"] = variant
+    else:
+        priced = await _price_unit_from_master(model, variant, sold_date)
+        units.append({
+            "sno": len(units) + 1,
+            "model": model,
+            "variant": variant,
+            "chassisNumber": chassis,
+            "invoiceNumber": invoice,
+            "numberPlate": plate,
+            **priced,
+        })
+    for i, u in enumerate(units):
+        u["sno"] = i + 1
+    patch = {
+        "units": units,
+        "sameOrderMultiUnit": True,
+        "lastUpdated": now_iso(),
+        "oemSoldSyncedAt": now_iso(),
+        "vehicleCount": max(len(units), 1),
+    }
+    if not oem_sync._norm_chassis((lead or {}).get("chassisNumber")):
+        patch["chassisNumber"] = units[0].get("chassisNumber") or chassis
+        patch["invoiceNumber"] = units[0].get("invoiceNumber") or invoice
+        patch["numberPlate"] = units[0].get("numberPlate") or plate
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    await recompute_lead(lead["leadId"])
+    return clean(await db.leads.find_one({"leadId": lead["leadId"]}))
+
+
 async def _insert_oem_billing_lead(row, sold_rows=None):
     """Create a New lead from an unmatched Coulson Sold chassis.
 
@@ -7508,7 +7946,7 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
         return None
     async for existing in db.leads.find({}):
         if (oem_sync.live_occupies_vehicle_id(existing)
-                and oem_sync._norm_chassis(existing.get("chassisNumber")) == chassis):
+                and chassis in set(oem_sync.lead_chassis_list(existing))):
             return None
     sold = None
     for s in sold_rows or []:
@@ -7578,13 +8016,34 @@ async def _create_leads_from_unmatched_oem_sold():
     sold = [r async for r in db.oem_sold.find({})]
     leads = [l async for l in db.leads.find({})]
     created = []
-    for row in oem_sync.classify_oem_billing(sold, leads):
-        if row.get("bucket") != oem_sync.BUCKET_UNMATCHED:
+    consumed = set()
+    classified = oem_sync.classify_oem_billing(sold, leads)
+    unmatched = [r for r in classified if r.get("bucket") == oem_sync.BUCKET_UNMATCHED]
+    for row in unmatched:
+        chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
+        if not chassis or chassis in consumed:
+            continue
+        target = _pack_target_for_sold(row, leads, sold)
+        if target:
+            family = _family_sold_for_pack(row, sold, leads, target)
+            live = target
+            for sold_row in family:
+                ch = oem_sync._norm_chassis((sold_row or {}).get("chassis"))
+                if not ch or ch in consumed:
+                    continue
+                if ch in set(oem_sync.lead_chassis_list(live)):
+                    consumed.add(ch)
+                    continue
+                live = await _append_oem_unit(live, sold_row) or live
+                consumed.add(ch)
+            leads = [live if (l or {}).get("leadId") == (target or {}).get("leadId") else l
+                     for l in leads]
             continue
         lead = await _insert_oem_billing_lead(row, sold)
         if lead:
             created.append(lead.get("leadId"))
             leads.append(lead)
+            consumed.add(chassis)
     return created
 
 
@@ -7679,13 +8138,29 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
     else:
         await _refresh_sold_then_fill_delivery(lead, body)
+    unit_docs = _normalize_lead_units(
+        getattr(body, "units", None) or (lead or {}).get("units") or [],
+        model=(lead or {}).get("interestedModel") or "",
+        variant=(lead or {}).get("variant") or "",
+        chassis=body.chassisNumber or (lead or {}).get("chassisNumber") or "",
+        invoice=body.invoiceNumber or (lead or {}).get("invoiceNumber") or "",
+        plate=body.numberPlate or (lead or {}).get("numberPlate") or "",
+    )
+    if oem_sync.is_same_order_pack(lead) or len(unit_docs) > 1:
+        if unit_docs:
+            body.chassisNumber = body.chassisNumber or unit_docs[0].get("chassisNumber") or ""
+            body.invoiceNumber = body.invoiceNumber or unit_docs[0].get("invoiceNumber") or ""
+            body.numberPlate = body.numberPlate or unit_docs[0].get("numberPlate") or ""
     await _assert_unique_vehicle_identifiers(
         lead_id,
         invoice_number=body.invoiceNumber,
         chassis_number=body.chassisNumber,
         number_plate=body.numberPlate,
+        units=unit_docs if len(unit_docs) > 1 else None,
     )
-    doc = {"leadId": lead_id, "customerName": lead.get("customerName"), **body.model_dump(),
+    dump = body.model_dump()
+    dump["units"] = unit_docs if len(unit_docs) > 1 else dump.get("units") or []
+    doc = {"leadId": lead_id, "customerName": lead.get("customerName"), **dump,
            "deliveryId": f"DL{uuid.uuid4().hex[:8]}"}
     await db.deliveries.update_one({"leadId": lead_id}, {"$set": doc}, upsert=True)
     lead_updates = {
@@ -7694,6 +8169,10 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber,
         "numberPlate": body.numberPlate, "insurerName": body.insurerName, "lastUpdated": now_iso(),
     }
+    if len(unit_docs) > 1:
+        lead_updates["units"] = unit_docs
+        lead_updates["sameOrderMultiUnit"] = True
+        lead_updates["vehicleCount"] = len(unit_docs)
     # Insurance agent is chosen at delivery. Blank keeps whatever the lead already
     # had, so re-saving delivery paperwork never wipes the agent off a booked payout.
     if (body.insuranceAgentId or "").strip():
@@ -7721,7 +8200,13 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             # WhatsApp delivery + review is fire-and-forget — must never fail this save.
             wa.schedule(wa.notify_delivery(lead_id))
             try:
-                await oem_sync.take_chassis_from_inventory(db, body.chassisNumber)
+                seen = set()
+                for raw in [body.chassisNumber] + [u.get("chassisNumber") for u in unit_docs]:
+                    ch = oem_sync._norm_chassis(raw)
+                    if not ch or ch in seen:
+                        continue
+                    seen.add(ch)
+                    await oem_sync.take_chassis_from_inventory(db, raw)
             except Exception:
                 logging.exception("Could not drop delivered chassis from yard inventory")
             try:

@@ -41,6 +41,13 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const [clash, setClash] = useState(null);
   const [passOn, setPassOn] = useState({});
   const [anotherVehicle, setAnotherVehicle] = useState(!!initial.anotherVehicle);
+  const [sameOrder, setSameOrder] = useState(!!initial.sameOrderMultiUnit);
+  const [extraUnits, setExtraUnits] = useState(() => (
+    Array.isArray(initial.units)
+      ? initial.units.map((u) => ({ model: u.model || "", variant: u.variant || "" }))
+      : []
+  ));
+  const [unitVariants, setUnitVariants] = useState({});
   const [matches, setMatches] = useState(null);
   const [siblingDocs, setSiblingDocs] = useState([]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -50,6 +57,15 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     else setVariants([]);
     setPassOn({});
   }, [form.interestedModel, form.variant]);
+
+  useEffect(() => {
+    extraUnits.forEach((u, i) => {
+      if (!u.model) return;
+      get("/price-master/variants", { model: u.model }).then((rows) => {
+        setUnitVariants((cur) => ({ ...cur, [i]: rows || [] }));
+      }).catch(() => {});
+    });
+  }, [extraUnits.map((u) => u.model).join("|")]);
 
   const passOnKeys = Object.keys(passOn).filter((k) => passOn[k]).join(",");
 
@@ -142,7 +158,11 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
         budget: Number(form.budget),
         oemExtraSupportReceived: Number(form.oemExtraSupportReceived) || 0,
         schemePassOn: passOn,
-        anotherVehicle: !!(extra.anotherVehicle || anotherVehicle),
+        anotherVehicle: !!(extra.anotherVehicle || anotherVehicle) && !sameOrder,
+        sameOrderMultiUnit: !!(extra.sameOrderMultiUnit || sameOrder),
+        units: (extra.sameOrderMultiUnit || sameOrder)
+          ? extraUnits.filter((u) => u.model || u.variant)
+          : undefined,
         ...extra,
       });
       setClash(null);
@@ -184,13 +204,16 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     if (anotherVehicle && otherExecLock) {
       return toast.error("This mobile is already with another executive");
     }
+    if (sameOrder && extraUnits.filter((u) => u.model).length < 1) {
+      return toast.error("Add at least one more unit for a same-order pack");
+    }
     const kycErr = copyDocsFromSibling ? "" : kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
     const extraErr = extraSupportReady(
       form.oemExtraSupportReceived, extraProof, siblingDocs,
       { copyFromSibling: copyDocsFromSibling });
     if (extraErr) return toast.error(extraErr);
-    await saveLead({ anotherVehicle });
+    await saveLead({ anotherVehicle: anotherVehicle && !sameOrder, sameOrderMultiUnit: sameOrder });
   };
 
   if (!masters) return null;
@@ -227,10 +250,10 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
         <Field label="Variant"><Select data-testid="lead-variant" value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
         <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <div className="sm:col-span-2 rounded-lg ring-1 ring-inset ring-line bg-zinc-50/70 p-3 space-y-2" data-testid="another-vehicle-block">
-          <div className="text-xs font-semibold text-ink">Multi-unit on this mobile</div>
+          <div className="text-xs font-semibold text-ink">Multi-unit buyer</div>
           <p className="text-[11px] text-ink-soft">
-            One file is one vehicle. Same customer buying another unit (fleet / repeat)? Tick below
-            so Euler keeps both files on this mobile.
+            Repeat buyer over days: tick “another vehicle” — new lead id, separate payment and Bank DO.
+            Same-order fleet: tick below — Unit 1 / Unit 2 on one lead id, one payment, one Bank DO.
           </p>
           {existingUnits.length > 0 && (
             <ul className="space-y-1" data-testid="mobile-unit-list">
@@ -260,12 +283,84 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             <input
               type="checkbox"
               className="mt-0.5"
-              checked={anotherVehicle && !otherExecLock}
-              disabled={otherExecLock}
-              onChange={(e) => setAnotherVehicle(e.target.checked)}
+              checked={anotherVehicle && !otherExecLock && !sameOrder}
+              disabled={otherExecLock || sameOrder}
+              onChange={(e) => {
+                setAnotherVehicle(e.target.checked);
+                if (e.target.checked) setSameOrder(false);
+              }}
             />
             <span>This is another vehicle / additional unit on this mobile</span>
           </label>
+          <label className="flex items-start gap-2 text-sm text-ink" data-testid="same-order-check">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={sameOrder && !anotherVehicle}
+              disabled={anotherVehicle}
+              onChange={(e) => {
+                setSameOrder(e.target.checked);
+                if (e.target.checked) {
+                  setAnotherVehicle(false);
+                  setExtraUnits((rows) => (rows.length ? rows : [{ model: "", variant: "" }]));
+                }
+              }}
+            />
+            <span>Same-order multi-unit — one file, one payment, one Bank DO</span>
+          </label>
+          {sameOrder && (
+            <div className="space-y-2" data-testid="same-order-units">
+              <p className="text-[11px] text-ink-soft">
+                Unit 1 is the model above. Add Unit 2, 3… Price and scheme for each extra SKU come from Price Master + Scheme Master. Payable is the sum.
+              </p>
+              {extraUnits.map((u, i) => (
+                <div key={i} className="grid grid-cols-1 sm:grid-cols-2 gap-2" data-testid={`same-order-unit-${i + 2}`}>
+                  <Field label={`Unit ${i + 2} model`}>
+                    <Select
+                      data-testid={`same-order-model-${i + 2}`}
+                      value={u.model}
+                      onChange={(e) => {
+                        const model = e.target.value;
+                        setExtraUnits((rows) => rows.map((row, idx) => (idx === i ? { model, variant: "" } : row)));
+                      }}
+                    >
+                      <option value="">—</option>
+                      {models.map((s) => <option key={s}>{s}</option>)}
+                    </Select>
+                  </Field>
+                  <Field label={`Unit ${i + 2} variant`}>
+                    <Select
+                      data-testid={`same-order-variant-${i + 2}`}
+                      value={u.variant}
+                      onChange={(e) => {
+                        const variant = e.target.value;
+                        setExtraUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, variant } : row)));
+                      }}
+                    >
+                      <option value="">—</option>
+                      {(unitVariants[i] || []).map((v) => (
+                        <option key={v.priceId || v.variant} value={v.variant}>
+                          {v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                </div>
+              ))}
+              <div className="flex gap-2">
+                <Button type="button" variant="secondary" className="!py-1 !px-2.5 text-xs" data-testid="same-order-add-unit"
+                  onClick={() => setExtraUnits((rows) => [...rows, { model: "", variant: "" }])}>
+                  Add unit
+                </Button>
+                {extraUnits.length > 1 && (
+                  <Button type="button" variant="ghost" className="!py-1 !px-2.5 text-xs" data-testid="same-order-remove-unit"
+                    onClick={() => setExtraUnits((rows) => rows.slice(0, -1))}>
+                    Remove last
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
           {copyDocsFromSibling && (
             <p className="text-[11px] text-emerald-700" data-testid="kyc-copy-hint">
               KYC and OEM Extra Support papers copy from the first file. Attach replacements only if this unit is different.
