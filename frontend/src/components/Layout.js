@@ -42,7 +42,10 @@ const NAV = [
     { to: "/insurance-agents", label: "Insurance Agents", icon: Handshake, ownerOnly: true },
     { to: "/insurance-report", label: "Payout Report", icon: TrendingUp, ownerOnly: true },
   ]},
-  { section: "Fulfilment", items: [{ to: "/deliveries", label: "Delivery Tracker", icon: Truck }] },
+  { section: "Fulfilment", items: [
+    { to: "/deliveries", label: "Delivery Tracker", icon: Truck },
+    { to: "/oem-billing", label: "OEM Billing", icon: ReceiptText, oemClaimDesk: true },
+  ]},
   { section: "OEM & Commercial", items: [
     // Two different registers, deliberately named apart: the first is the dealer's
     // own scheme entitlement, the second is Euler's claim workflow mirrored in.

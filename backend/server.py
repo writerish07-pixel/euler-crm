@@ -7380,6 +7380,152 @@ async def lead_oem_sold(lead_id: str, refresh: bool = False, user=Depends(curren
     return match
 
 
+async def _insert_oem_billing_lead(row, sold_rows=None):
+    """Create a New lead from an unmatched Coulson Sold chassis. No commercials."""
+    chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
+    if not chassis:
+        return None
+    async for existing in db.leads.find({}):
+        if (oem_sync.live_occupies_vehicle_id(existing)
+                and oem_sync._norm_chassis(existing.get("chassisNumber")) == chassis):
+            return None
+    sold = None
+    for s in sold_rows or []:
+        if oem_sync._norm_chassis((s or {}).get("chassis")) == chassis:
+            sold = s
+            break
+    src = sold or row or {}
+    name = str(src.get("customerName") or "").strip() or f"OEM billed {chassis}"
+    mobile = oem_sync._digits10(src.get("mobile") or row.get("mobile"))
+    invoice = str(src.get("invoiceNumber") or row.get("invoiceNumber") or "").strip()
+    plate = str(src.get("numberPlate") or "").strip()
+    model = src.get("model") or row.get("model") or ""
+    variant = src.get("variant") or row.get("variant") or ""
+    sold_date = str(src.get("soldDate") or row.get("soldDate") or "").strip()[:10] or today()
+    lead_id = await next_id("lead", "LD26")
+    doc = {
+        "leadId": lead_id,
+        "customerName": name,
+        "mobile": mobile,
+        "altMobile": "",
+        "village": "",
+        "city": "",
+        "leadSource": "OEM Billing",
+        "interestedModel": model,
+        "variant": variant,
+        "executive": "",
+        "currentStatus": "New",
+        "priority": "Normal",
+        "budget": 0,
+        "remarks": "",
+        "financeRequired": "No",
+        "exchangeRequired": "No",
+        "createdDate": sold_date,
+        "customerType": "Individual",
+        "gstin": "",
+        "accountStatus": "Active",
+        "deliveryStatus": "",
+        "outstandingAmount": 0, "customerOutstanding": 0, "companyOutstanding": 0,
+        "totalReceived": 0, "customerPayable": 0, "grossVehicleCost": 0, "totalDiscount": 0,
+        "consumerDiscount": 0, "exchangeBonus": 0, "loyaltyBonus": 0, "referralBonus": 0,
+        "dsaDiscount": 0, "additionalDiscount": 0, "exShowroom": 0, "rto": 0, "insuranceAmount": 0,
+        "accessoriesAmount": 0, "handlingCharges": 0, "trc": 0, "fastag": 0, "extendedWarranty": 0,
+        "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(),
+        "oemExtraSupportReceived": 0, "oemExtraSupportPassed": 0,
+        "chassisNumber": chassis,
+        "invoiceNumber": invoice,
+        "numberPlate": plate,
+        "oemBillingCreated": True,
+        "oemSoldSyncedAt": now_iso(),
+    }
+    await db.leads.insert_one(doc)
+    act_doc = {
+        "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": sold_date,
+        "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Note",
+        "discussion": "Created from OEM billing", "executive": "",
+        "customerName": name, "mobile": mobile, "model": model,
+    }
+    await db.activities.insert_one(dict(act_doc))
+    await sheet_sync("activities", act_doc)
+    await sheet_sync("leads", doc)
+    return clean(doc)
+
+
+async def _create_leads_from_unmatched_oem_sold():
+    sold = [r async for r in db.oem_sold.find({})]
+    leads = [l async for l in db.leads.find({})]
+    created = []
+    for row in oem_sync.classify_oem_billing(sold, leads):
+        if row.get("bucket") != oem_sync.BUCKET_UNMATCHED:
+            continue
+        lead = await _insert_oem_billing_lead(row, sold)
+        if lead:
+            created.append(lead.get("leadId"))
+            leads.append(lead)
+    return created
+
+
+def _oem_billing_payload(rows, period):
+    visible = [r for r in rows if oem_sync.sold_row_in_period(r, period)]
+    counts = {
+        oem_sync.BUCKET_PENDING: 0,
+        oem_sync.BUCKET_CREATED: 0,
+        oem_sync.BUCKET_DELIVERED: 0,
+        oem_sync.BUCKET_REVIEW: 0,
+        oem_sync.BUCKET_UNMATCHED: 0,
+    }
+    for r in visible:
+        b = r.get("bucket")
+        if b in counts:
+            counts[b] += 1
+    return {
+        "soldCount": len(visible),
+        "counts": counts,
+        "rows": visible,
+        "period": getattr(period, "label", "") or "All",
+    }
+
+
+@api.get("/oem-billing", dependencies=[Depends(oem_claim_desk_only)])
+async def list_oem_billing(month: Optional[str] = None, year: Optional[str] = None,
+                           bucket: str = ""):
+    """Monthly OEM Sold list joined to CRM leads."""
+    period = _parse_period(month, year)
+    rows = await oem_sync.list_oem_billing(db)
+    if bucket:
+        rows = [r for r in rows if r.get("bucket") == bucket]
+    return _oem_billing_payload(rows, period)
+
+
+@api.post("/oem-billing/sync", dependencies=[Depends(deal_desk_only)])
+async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = None,
+                           act=Depends(actor)):
+    """Refresh Coulson Sold, stamp ids onto matching leads, create missing files."""
+    try:
+        await oem_sync.refresh_sold_inventory(db)
+    except Exception:
+        logging.exception("Coulson sold refresh failed for OEM billing")
+    stamped = {}
+    try:
+        stamped = await oem_sync.apply_sold_vehicle_ids_to_leads(db)
+    except Exception:
+        logging.exception("OEM billing could not backfill chassis/invoice")
+        stamped = {}
+    created = await _create_leads_from_unmatched_oem_sold()
+    period = _parse_period(month, year)
+    rows = await oem_sync.list_oem_billing(db)
+    payload = _oem_billing_payload(rows, period)
+    payload["createdLeadIds"] = created
+    payload["created"] = len(created)
+    payload["leadsVehicleIds"] = stamped
+    await write_audit(act, "sync", "oem-billing", new={
+        "soldCount": payload.get("soldCount"),
+        "created": payload.get("created"),
+        "leadsVehicleIds": stamped,
+    })
+    return payload
+
+
 @api.put("/leads/{lead_id}/delivery")
 async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
@@ -8040,12 +8186,21 @@ async def coulson_sync(act=Depends(actor)):
     except Exception:
         logging.exception("OEM reprice after sync failed")
     result["leadsRepriced"] = repriced
+    try:
+        created = await _create_leads_from_unmatched_oem_sold()
+        result["oemBillingCreated"] = len(created)
+        result["oemBillingLeadIds"] = created
+    except Exception:
+        logging.exception("OEM billing auto-create after Coulson sync failed")
+        result["oemBillingCreated"] = 0
+        result["oemBillingLeadIds"] = []
     # Don't leak price-id lists or credential source internals to the client more than needed.
     result.pop("changedPriceIds", None)
     await write_audit(act, "sync", "coulson", new={"ok": result.get("ok"),
                                                    "inventoryCount": result.get("inventoryCount"),
                                                    "pricesUpdated": result.get("pricesUpdated"),
-                                                   "leadsVehicleIds": result.get("leadsVehicleIds")})
+                                                   "leadsVehicleIds": result.get("leadsVehicleIds"),
+                                                   "oemBillingCreated": result.get("oemBillingCreated")})
     return result
 
 
