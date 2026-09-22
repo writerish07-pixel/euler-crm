@@ -3379,6 +3379,7 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      month: Optional[str] = None, year: Optional[str] = None,
                      limit: Optional[int] = None,
                      user=Depends(current_user)):
+    await _ensure_retry_dups_repaired()
     query = {}
     if status and status != "all":
         query["currentStatus"] = status
@@ -5701,6 +5702,25 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
 _RETRY_DUP_OPEN = {
     "", "new", "contacted", "follow-up", "followup", "in progress", "inprogress",
 }
+_retry_dup_repair_done = False
+_retry_dup_repair_lock = asyncio.Lock()
+
+
+async def _ensure_retry_dups_repaired():
+    """First Lead Register load heals triples so the desk sees one id per customer."""
+    global _retry_dup_repair_done
+    if _retry_dup_repair_done:
+        return
+    async with _retry_dup_repair_lock:
+        if _retry_dup_repair_done:
+            return
+        try:
+            repaired = await _repair_retry_duplicate_leads()
+            if repaired:
+                logging.info("RETRY_DUP_LEADS_REPAIRED: %s", len(repaired))
+        except Exception:
+            logging.exception("RETRY_DUP_LEADS_REPAIR_ERROR")
+        _retry_dup_repair_done = True
 
 
 def _person_group_key(lead):
@@ -5785,46 +5805,54 @@ async def _merge_retry_siblings_into_pack(keeper, extras):
 async def _repair_retry_duplicate_leads():
     """Collapse New files minted by the Create Lead retry / OEM leftover bug.
 
-    Same person + same day + 2+ open unbooked singles with no money:
-    identical SKU → keep the first id, delete the rest.
-    Different SKUs → one pack on the first id.
-    Runs in boot maintenance — no desk button, no 25s HTTP wait.
+    Same person + same SKU + 2+ open unbooked singles with no money → keep the
+    first id. createdDate is not required (many retried rows have it blank).
+    Different SKUs on the same day still join one pack.
     """
     rows = await db.leads.find(
         {
-            "currentStatus": {"$in": ["New", "Contacted", "Follow-up", "In Progress", ""]},
             "dealCancelled": {"$ne": True},
+            "$or": [
+                {"currentStatus": {"$in": ["New", "Contacted", "Follow-up", "In Progress", ""]}},
+                {"currentStatus": {"$exists": False}},
+            ],
         },
         {
             "leadId": 1, "customerName": 1, "mobile": 1, "interestedModel": 1,
-            "variant": 1, "createdDate": 1, "currentStatus": 1, "accountStatus": 1,
-            "units": 1, "sameOrderMultiUnit": 1, "bookingDate": 1, "bookingId": 1,
-            "deliveryStatus": 1, "deliveryDate": 1, "chassisNumber": 1,
-            "invoiceNumber": 1, "numberPlate": 1, "exShowroom": 1, "dealCancelled": 1,
+            "variant": 1, "createdDate": 1, "lastUpdated": 1, "currentStatus": 1,
+            "accountStatus": 1, "units": 1, "sameOrderMultiUnit": 1,
+            "bookingDate": 1, "bookingId": 1, "deliveryStatus": 1, "deliveryDate": 1,
+            "chassisNumber": 1, "invoiceNumber": 1, "numberPlate": 1,
+            "exShowroom": 1, "dealCancelled": 1,
         },
-    ).to_list(4000)
-    groups = {}
+    ).to_list(8000)
+    by_person = {}
     for lead in rows:
         if not _is_retry_dup_candidate(lead):
             continue
         key = _person_group_key(lead)
-        day = _lead_created_day(lead)
-        if not key or not day:
+        if not key:
             continue
-        groups.setdefault((key, day), []).append(lead)
+        by_person.setdefault(key, []).append(lead)
     repaired = []
-    for (_key, day), cluster in groups.items():
+    for _key, cluster in by_person.items():
         if len(cluster) < 2:
             continue
-        cluster = sorted(cluster, key=lambda l: str(l.get("leadId") or ""))
-        ids = [r["leadId"] for r in cluster]
-        if await db.payments.find_one({"leadId": {"$in": ids}}) or \
-                await db.bookings.find_one({"leadId": {"$in": ids}}):
-            continue
-        keeper = cluster[0]
-        extras = cluster[1:]
-        skus = {_sku_key(l) for l in cluster}
-        if len(skus) == 1:
+        by_sku = {}
+        for lead in cluster:
+            by_sku.setdefault(_sku_key(lead), []).append(lead)
+        leftover = []
+        for _sku, same in by_sku.items():
+            if len(same) < 2:
+                leftover.extend(same)
+                continue
+            same = sorted(same, key=lambda l: str(l.get("leadId") or ""))
+            ids = [r["leadId"] for r in same]
+            if await db.payments.find_one({"leadId": {"$in": ids}}) or \
+                    await db.bookings.find_one({"leadId": {"$in": ids}}):
+                leftover.extend(same)
+                continue
+            keeper, extras = same[0], same[1:]
             removed = []
             for extra in extras:
                 if await _purge_retry_duplicate_lead(extra["leadId"]):
@@ -5834,12 +5862,27 @@ async def _repair_retry_duplicate_leads():
                     "kept": keeper["leadId"], "removed": removed, "action": "delete-retry",
                     "customerName": keeper.get("customerName") or "",
                 })
-        else:
-            updated, removed = await _merge_retry_siblings_into_pack(keeper, extras)
+            leftover.append(keeper)
+        days = {}
+        for lead in leftover:
+            day = _lead_created_day(lead) or str(lead.get("lastUpdated") or "")[:10]
+            if not day:
+                continue
+            days.setdefault(day, []).append(lead)
+        for _day, same_day in days.items():
+            skus = {_sku_key(l) for l in same_day}
+            if len(same_day) < 2 or len(skus) < 2:
+                continue
+            same_day = sorted(same_day, key=lambda l: str(l.get("leadId") or ""))
+            ids = [r["leadId"] for r in same_day]
+            if await db.payments.find_one({"leadId": {"$in": ids}}) or \
+                    await db.bookings.find_one({"leadId": {"$in": ids}}):
+                continue
+            updated, removed = await _merge_retry_siblings_into_pack(same_day[0], same_day[1:])
             if removed:
                 repaired.append({
-                    "kept": keeper["leadId"], "removed": removed, "action": "merge-pack",
-                    "customerName": keeper.get("customerName") or "",
+                    "kept": same_day[0]["leadId"], "removed": removed, "action": "merge-pack",
+                    "customerName": same_day[0].get("customerName") or "",
                     "vehicleCount": (updated or {}).get("vehicleCount"),
                 })
     return repaired
@@ -13611,7 +13654,7 @@ async def _run_boot_maintenance():
     Google Sheet; a few thousand rows plus the OEM catalog took minutes, Railway
     healthchecks 502'd, and the replica was killed mid-boot (RAM spike then drop).
     """
-    global _finance_index_status
+    global _finance_index_status, _retry_dup_repair_done
     _boot_state["maintenance"] = "running"
     logging.info("BOOT_MAINTENANCE: starting (process is already listening)")
     try:
@@ -13666,6 +13709,7 @@ async def _run_boot_maintenance():
                 repaired = await _repair_retry_duplicate_leads()
                 if repaired:
                     logging.info("RETRY_DUP_LEADS_REPAIRED: %s", len(repaired))
+                _retry_dup_repair_done = True
         except Exception:
             logging.exception("RETRY_DUP_LEADS_REPAIR_ERROR")
         try:

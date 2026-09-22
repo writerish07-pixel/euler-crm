@@ -198,6 +198,24 @@ async def test_repair_deletes_same_sku_retry_triples(client):
 
 
 @pytest.mark.asyncio
+async def test_repair_same_mobile_without_created_date(client):
+    mobile = "9813301010"
+    await server.db.leads.delete_many({"mobile": mobile})
+    for lid in ("LD26NODATE1", "LD26NODATE2", "LD26NODATE3"):
+        await server.db.leads.insert_one({
+            "leadId": lid, "customerName": "No Date Triple", "mobile": mobile,
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "accountStatus": "Active", "currentStatus": "New",
+        })
+    server._retry_dup_repair_done = False
+    listed = await client.get("/api/leads", params={"q": "No Date Triple"})
+    assert listed.status_code == 200, listed.text
+    left = [l async for l in server.db.leads.find({"mobile": mobile})]
+    assert len(left) == 1
+    assert left[0]["leadId"] == "LD26NODATE1"
+
+
+@pytest.mark.asyncio
 async def test_repair_merges_same_day_different_skus(client):
     mobile = "9813300999"
     await server.db.leads.delete_many({"mobile": mobile})
