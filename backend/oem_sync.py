@@ -1095,11 +1095,50 @@ def _billing_row(sold, bucket, lead=None, review_reason=""):
     }
 
 
+def _live_same_mobile(live, mobile):
+    want = _digits10(mobile)
+    if len(want) != 10:
+        return []
+    return [
+        l for l in live
+        if _digits10((l or {}).get("mobile") or (l or {}).get("altMobile")) == want
+    ]
+
+
+def _live_same_name(live, name):
+    key = _norm_person_name(name)
+    if not _name_key_usable(key):
+        return []
+    return [l for l in live if _norm_person_name((l or {}).get("customerName")) == key]
+
+
+def _empty_unclaimed(leads, claimed):
+    return [
+        l for l in leads
+        if not _norm_chassis((l or {}).get("chassisNumber"))
+        and (l or {}).get("leadId") not in claimed
+    ]
+
+
 def classify_oem_billing(sold_rows, leads):
-    """Join each Sold chassis to a live CRM lead, or mark it unmatched / review."""
+    """Join each Sold chassis to a live CRM lead, or mark it unmatched / review.
+
+    One empty CRM file can take only one Sold row. Extra billed chassis on the
+    same mobile or the same usable name (Messenger SCS × 5) stay unmatched so
+    sync can create the remaining units.
+    """
     live = [l for l in (leads or []) if live_occupies_vehicle_id(l)]
     occupied = occupied_chassis_numbers(leads)
+    claimed = {}
     out = []
+
+    def take(sold, lead, bucket, reason=""):
+        lid = (lead or {}).get("leadId") or ""
+        if lid:
+            claimed[lid] = _norm_chassis((sold or {}).get("chassis"))
+        out.append(_billing_row(sold, bucket, lead, reason))
+
+    remaining = []
     for sold in sold_rows or []:
         chassis = _norm_chassis(sold.get("chassis"))
         if not chassis:
@@ -1111,12 +1150,20 @@ def classify_oem_billing(sold_rows, leads):
                 "several live leads hold this chassis"))
             continue
         if len(holders) == 1:
-            out.append(_billing_row(sold, _bucket_for_matched_lead(holders[0]), holders[0]))
+            take(sold, holders[0], _bucket_for_matched_lead(holders[0]))
             continue
+        remaining.append(sold)
+
+    still = []
+    for sold in remaining:
+        chassis = _norm_chassis(sold.get("chassis"))
         matches = []
         for lead in live:
             have = _norm_chassis(lead.get("chassisNumber"))
             if have and have != chassis:
+                continue
+            lid = (lead or {}).get("leadId")
+            if lid in claimed and claimed[lid] != chassis:
                 continue
             mine = occupied - {have}
             hit = match_sold_row(lead, [sold], mine)
@@ -1125,38 +1172,82 @@ def classify_oem_billing(sold_rows, leads):
         uniq = {(m or {}).get("leadId"): m for m in matches if (m or {}).get("leadId")}
         if len(uniq) == 1:
             lead = next(iter(uniq.values()))
-            out.append(_billing_row(sold, _bucket_for_matched_lead(lead), lead))
+            take(sold, lead, _bucket_for_matched_lead(lead))
             continue
         if len(uniq) > 1:
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
                 "more than one lead matches this Sold row"))
             continue
-        mobile = _digits10(sold.get("mobile"))
-        same = [
-            l for l in live
-            if mobile and len(mobile) == 10
-            and _digits10(l.get("mobile") or l.get("altMobile")) == mobile
-        ]
-        empty = [l for l in same if not _norm_chassis(l.get("chassisNumber"))]
+        still.append(sold)
+
+    def _empty_score(sold):
+        pool = _empty_unclaimed(_live_same_mobile(live, sold.get("mobile")), claimed)
+        if not pool:
+            pool = _empty_unclaimed(_live_same_name(live, sold.get("customerName")), claimed)
+        if len(pool) != 1:
+            return 0
+        return sold_match_score(sold, pool[0]) or (
+            1 if _norm_person_name(sold.get("customerName"))
+            == _norm_person_name(pool[0].get("customerName")) else 0)
+
+    still.sort(key=lambda s: (-_empty_score(s), _norm_chassis(s.get("chassis"))))
+
+    leftover = []
+    for sold in still:
+        chassis = _norm_chassis(sold.get("chassis"))
+        same = _live_same_mobile(live, sold.get("mobile"))
+        empty = _empty_unclaimed(same, claimed)
         if len(empty) == 1:
-            out.append(_billing_row(sold, _bucket_for_matched_lead(empty[0]), empty[0]))
+            take(sold, empty[0], _bucket_for_matched_lead(empty[0]))
             continue
         if len(empty) > 1:
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
                 "same mobile, more than one lead without chassis"))
             continue
-        if same and all(
-                _norm_chassis(l.get("chassisNumber"))
-                and _norm_chassis(l.get("chassisNumber")) != chassis
-                for l in same):
-            out.append(_billing_row(sold, BUCKET_UNMATCHED))
-            continue
         if same:
+            if any((l or {}).get("leadId") in claimed for l in same):
+                out.append(_billing_row(sold, BUCKET_UNMATCHED))
+                continue
+            if all(
+                    _norm_chassis(l.get("chassisNumber"))
+                    and _norm_chassis(l.get("chassisNumber")) != chassis
+                    for l in same):
+                out.append(_billing_row(sold, BUCKET_UNMATCHED))
+                continue
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
                 "same mobile already on a live lead"))
+            continue
+        leftover.append(sold)
+
+    leftover.sort(key=lambda s: (-_empty_score(s), _norm_chassis(s.get("chassis"))))
+    for sold in leftover:
+        chassis = _norm_chassis(sold.get("chassis"))
+        same = _live_same_name(live, sold.get("customerName"))
+        empty = _empty_unclaimed(same, claimed)
+        if len(empty) == 1:
+            take(sold, empty[0], _bucket_for_matched_lead(empty[0]))
+            continue
+        if len(empty) > 1:
+            out.append(_billing_row(
+                sold, BUCKET_REVIEW, None,
+                "same name, more than one lead without chassis"))
+            continue
+        if same:
+            if any((l or {}).get("leadId") in claimed for l in same):
+                out.append(_billing_row(sold, BUCKET_UNMATCHED))
+                continue
+            if all(
+                    _norm_chassis(l.get("chassisNumber"))
+                    and _norm_chassis(l.get("chassisNumber")) != chassis
+                    for l in same):
+                out.append(_billing_row(sold, BUCKET_UNMATCHED))
+                continue
+            out.append(_billing_row(
+                sold, BUCKET_REVIEW, None,
+                "same name already on a live lead"))
             continue
         out.append(_billing_row(sold, BUCKET_UNMATCHED))
     return out

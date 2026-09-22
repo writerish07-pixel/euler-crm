@@ -141,14 +141,9 @@ async def test_oem_billing_sync_creates_missing_lead(client):
     assert lead["currentStatus"] == "New"
     assert lead["invoiceNumber"] == "CINV-NEW"
     assert not server._is_delivered(lead)
-    assert ce_num_zero(lead.get("exShowroom"))
     created = next(row for row in body["rows"] if row["chassis"] == chassis)
     assert created["bucket"] == "created_from_oem"
     assert created["leadId"] == lead["leadId"]
-
-
-def ce_num_zero(v):
-    return float(v or 0) == 0
 
 
 @pytest.mark.asyncio
@@ -205,6 +200,107 @@ async def test_oem_billing_creates_second_unit_on_same_mobile(client):
     assert second["leadId"] != "LD-BILL-UNIT1"
     assert second["mobile"] == "9812200444"
     assert second["currentStatus"] == "New"
+
+
+def test_classify_same_name_fleet_leaves_remaining_unmatched():
+    sold = [
+        {
+            "chassis": f"MD9MSC{i:02d}", "customerName": "Messenger SCS",
+            "model": "Turbo Max" if i == 1 else "Hi-Load",
+            "variant": "Maxx (PV)" if i == 1 else "XR",
+            "soldDate": "2026-09-03",
+        }
+        for i in range(1, 6)
+    ]
+    leads = [{
+        "leadId": "LD-MSC-1", "customerName": "Messenger SCS",
+        "accountStatus": "Active", "currentStatus": "New",
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert len(rows) == 5
+    pending = [r for r in rows if r["bucket"] == oem_sync.BUCKET_PENDING]
+    unmatched = [r for r in rows if r["bucket"] == oem_sync.BUCKET_UNMATCHED]
+    assert len(pending) == 1
+    assert pending[0]["leadId"] == "LD-MSC-1"
+    assert len(unmatched) == 4
+    assert all(not r["leadId"] for r in unmatched)
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_creates_remaining_same_name_units(client):
+    name = "Messenger SCS"
+    first_id = "LD-MSC-LIVE"
+    await server.db.leads.delete_many({"customerName": name})
+    await server.db.leads.delete_many({"leadId": first_id})
+    await server.db.oem_sold.delete_many({"customerName": name})
+    await server.db[server.lead_docs.COLLECTION].delete_many({"leadId": first_id})
+    await server.db.leads.insert_one({
+        "leadId": first_id, "customerName": name, "mobile": "9812200555",
+        "accountStatus": "Active", "currentStatus": "New",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Amit", "additionalDiscount": 50000, "exShowroom": 999999,
+        "customerType": "Individual",
+    })
+    await server.db[server.lead_docs.COLLECTION].insert_one({
+        "documentId": "DC-MSC-PAN", "leadId": first_id, "requestId": "",
+        "kind": "kyc_pan", "filename": "pan.png", "contentType": "image/png",
+        "size": 12, "uploadedBy": "owner@euler.com", "uploadedByName": "Owner",
+        "uploadedAt": "2026-09-01T00:00:00+00:00", "refundReceiptNumber": "",
+        "data": b"pan-bytes-ok",
+    })
+    await server.db[server.lead_docs.COLLECTION].insert_one({
+        "documentId": "DC-MSC-RTO", "leadId": first_id, "requestId": "",
+        "kind": "delivery_rto", "filename": "rto.pdf", "contentType": "application/pdf",
+        "size": 12, "uploadedBy": "owner@euler.com", "uploadedByName": "Owner",
+        "uploadedAt": "2026-09-01T00:00:00+00:00", "refundReceiptNumber": "",
+        "data": b"rto-bytes-no",
+    })
+    chassis_rows = [
+        ("MD9MSCFLEET01", "Turbo Max", "Maxx (PV)"),
+        ("MD9MSCFLEET02", "Hi-Load", "XR"),
+        ("MD9MSCFLEET03", "Hi-Load", "XR"),
+        ("MD9MSCFLEET04", "Turbo Max", "Maxx (PV)"),
+        ("MD9MSCFLEET05", "Hi-Load", "XR"),
+    ]
+    for chassis, model, variant in chassis_rows:
+        await server.db.leads.delete_many({"chassisNumber": chassis})
+        await server.db.oem_sold.delete_many({"chassis": chassis})
+        await server.db.oem_sold.insert_one({
+            "chassis": chassis, "customerName": name, "mobile": "",
+            "invoiceNumber": f"CINV-{chassis[-2:]}", "model": model, "variant": variant,
+            "soldDate": "2026-09-07", "coulsonStatus": "SOLD",
+        })
+    r = await client.post("/api/oem-billing/sync?month=2026-09")
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] >= 4
+    created = []
+    async for lead in server.db.leads.find({"customerName": name}):
+        created.append(lead)
+    assert len(created) == 5
+    first = await server.db.leads.find_one({"leadId": first_id})
+    assert first["additionalDiscount"] == 50000
+    assert not server._is_delivered(first)
+    extras = [l for l in created if l["leadId"] != first_id]
+    assert len(extras) == 4
+    for lead in extras:
+        assert lead["currentStatus"] == "New"
+        assert lead["oemBillingCreated"] is True
+        assert not server._is_delivered(lead)
+        assert float(lead.get("additionalDiscount") or 0) == 0
+        assert float(lead.get("exShowroom") or 0) != 999999
+        assert lead.get("executive") == "Amit"
+        docs = [d async for d in server.db[server.lead_docs.COLLECTION].find(
+            {"leadId": lead["leadId"]})]
+        kinds = {d["kind"] for d in docs}
+        assert "kyc_pan" in kinds
+        assert "delivery_rto" not in kinds
+        assert all(d.get("copiedFromLeadId") == first_id for d in docs if d["kind"] == "kyc_pan")
+        assert all(d.get("documentId") != "DC-MSC-PAN" for d in docs)
+    hiload = [l for l in extras if (l.get("interestedModel") or "").lower().startswith("hi")]
+    turbo = [l for l in extras if "turbo" in (l.get("interestedModel") or "").lower()]
+    assert hiload and turbo
+    if hiload and turbo and float(hiload[0].get("exShowroom") or 0) and float(turbo[0].get("exShowroom") or 0):
+        assert float(hiload[0]["exShowroom"]) != float(turbo[0]["exShowroom"])
 
 
 @pytest.mark.asyncio

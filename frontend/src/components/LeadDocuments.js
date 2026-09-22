@@ -170,14 +170,16 @@ export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onCha
   );
 }
 
-export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin }) {
+export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, copyFromSibling }) {
   const kinds = kycKinds(customerType);
   const b2b = customerType === "B2B";
   return (
     <div className="sm:col-span-2 space-y-2" data-testid="kyc-block">
       <div className="text-xs font-semibold text-ink">KYC documents</div>
       <p className="text-[11px] text-ink-soft">
-        {b2b
+        {copyFromSibling
+          ? "KYC copies from the first file on this mobile. Attach replacements only if this unit is different."
+          : b2b
           ? "B2B needs PAN, GST certificate and GSTIN. Aadhaar is optional."
           : "Aadhaar front & back and PAN are required. Phone camera uses the rear lens."}
       </p>
