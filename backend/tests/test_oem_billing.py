@@ -272,32 +272,33 @@ async def test_oem_billing_creates_remaining_same_name_units(client):
         })
     r = await client.post("/api/oem-billing/sync?month=2026-09")
     assert r.status_code == 200, r.text
-    assert r.json()["created"] >= 4
+    assert r.json()["created"] == 0
     created = []
     async for lead in server.db.leads.find({"customerName": name}):
         created.append(lead)
-    assert len(created) == 5
+    assert len(created) == 1
     first = await server.db.leads.find_one({"leadId": first_id})
     assert first["additionalDiscount"] == 50000
+    assert first.get("exShowroom") == 999999
     assert not server._is_delivered(first)
-    extras = [l for l in created if l["leadId"] != first_id]
+    assert first.get("sameOrderMultiUnit") is True
+    units = first.get("units") or []
+    assert len(units) == 5
+    chassis = {oem_sync._norm_chassis(first.get("chassisNumber"))}
+    chassis.update(oem_sync._norm_chassis(u.get("chassisNumber")) for u in units)
+    chassis.discard("")
+    assert chassis == {row[0] for row in chassis_rows}
+    extras = units[1:]
     assert len(extras) == 4
-    for lead in extras:
-        assert lead["currentStatus"] == "New"
-        assert lead["oemBillingCreated"] is True
-        assert not server._is_delivered(lead)
-        assert float(lead.get("additionalDiscount") or 0) == 0
-        assert float(lead.get("exShowroom") or 0) != 999999
-        assert lead.get("executive") == "Amit"
-        docs = [d async for d in server.db[server.lead_docs.COLLECTION].find(
-            {"leadId": lead["leadId"]})]
-        kinds = {d["kind"] for d in docs}
-        assert "kyc_pan" in kinds
-        assert "delivery_rto" not in kinds
-        assert all(d.get("copiedFromLeadId") == first_id for d in docs if d["kind"] == "kyc_pan")
-        assert all(d.get("documentId") != "DC-MSC-PAN" for d in docs)
-    hiload = [l for l in extras if (l.get("interestedModel") or "").lower().startswith("hi")]
-    turbo = [l for l in extras if "turbo" in (l.get("interestedModel") or "").lower()]
+    for unit in extras:
+        assert float(unit.get("additionalDiscount") or 0) == 0
+        assert float(unit.get("exShowroom") or 0) != 999999
+    docs = [d async for d in server.db[server.lead_docs.COLLECTION].find(
+        {"leadId": first_id})]
+    kinds = {d["kind"] for d in docs}
+    assert "kyc_pan" in kinds
+    hiload = [u for u in extras if (u.get("model") or "").lower().startswith("hi")]
+    turbo = [u for u in extras if "turbo" in (u.get("model") or "").lower()]
     assert hiload and turbo
     if hiload and turbo and float(hiload[0].get("exShowroom") or 0) and float(turbo[0].get("exShowroom") or 0):
         assert float(hiload[0]["exShowroom"]) != float(turbo[0]["exShowroom"])

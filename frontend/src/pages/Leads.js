@@ -65,7 +65,21 @@ export default function Leads() {
         <CallLink mobile={r.mobile} compact />
       </div>
     )},
-    { key: "vehicle", label: "Vehicle", render: (r) => <div className="text-sm"><div>{r.interestedModel || "—"}</div><div className="text-xs text-ink-faint">{r.variant}</div></div> },
+    { key: "vehicle", label: "Vehicle", render: (r) => {
+      const n = Number(r.vehicleCount || (r.units || []).length || 1);
+      if (n > 1) {
+        return (
+          <div className="text-sm" data-testid={`lead-units-${r.leadId}`}>
+            <div className="font-medium">{n} units</div>
+            <div className="text-xs text-ink-faint">
+              {(r.units || []).map((u) => [u.model, u.variant].filter(Boolean).join(" ")).filter(Boolean).join(" · ")
+                || `${r.interestedModel || "—"} ${r.variant || ""}`}
+            </div>
+          </div>
+        );
+      }
+      return <div className="text-sm"><div>{r.interestedModel || "—"}</div><div className="text-xs text-ink-faint">{r.variant}</div></div>;
+    } },
     { key: "executive", label: "Executive", render: (r) => (
       r.executive ? (
         <div>
@@ -118,7 +132,7 @@ export default function Leads() {
     <div>
       <PageHeader
         title="Lead Register"
-        subtitle={`${leads.length} leads in pipeline${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}`}
+        subtitle={`${leads.length} leads · ${leads.reduce((n, r) => n + (Number(r.vehicleCount || (r.units || []).length) || 1), 0)} vehicles${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}`}
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
           {!isField && !isExecutive && (

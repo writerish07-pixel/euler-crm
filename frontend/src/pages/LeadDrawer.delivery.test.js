@@ -73,6 +73,38 @@ test("TL delivery tab does not ask for a chassis dropdown", async () => {
   host.remove();
 });
 
+test("same-order pack shows S.No. chassis table from OEM Sold", async () => {
+  mockOemSold.current = {
+    matched: true,
+    chassis: "MD9PACK1",
+    invoiceNumber: "CINV-1",
+    units: [
+      { sno: 1, chassis: "MD9PACK1", invoiceNumber: "CINV-1", model: "Turbo Max", variant: "Maxx (PV)" },
+      { sno: 2, chassis: "MD9PACK2", invoiceNumber: "CINV-2", model: "Turbo Max", variant: "Maxx (PV)" },
+      { sno: 3, chassis: "MD9PACK3", invoiceNumber: "CINV-3", model: "Storm", variant: "Storm LR (PV)" },
+    ],
+  };
+  const { host, root } = await renderDelivery({
+    lead: bookedLead({
+      sameOrderMultiUnit: true,
+      vehicleCount: 3,
+      units: [
+        { sno: 1, model: "Turbo Max", variant: "Maxx (PV)" },
+        { sno: 2, model: "Turbo Max", variant: "Maxx (PV)" },
+        { sno: 3, model: "Storm", variant: "Storm LR (PV)" },
+      ],
+    }),
+    oemSold: mockOemSold.current,
+  });
+  expect(host.querySelector('[data-testid="delivery-units-table"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="delivery-unit-chassis-1"]').value).toBe("MD9PACK1");
+  expect(host.querySelector('[data-testid="delivery-unit-chassis-2"]').value).toBe("MD9PACK2");
+  expect(host.querySelector('[data-testid="delivery-unit-invoice-3"]').value).toBe("CINV-3");
+  expect(host.querySelector('[data-testid="delivery-chassis"]')).toBeFalsy();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("OEM Sold match fills chassis without typing", async () => {
   mockOemSold.current = {
     matched: true,

@@ -732,6 +732,71 @@ def sold_match_score(row, lead):
     return score
 
 
+def lead_chassis_list(lead):
+    """Every chassis on this file — top-level plus same-order unit lines."""
+    out = []
+    seen = set()
+    for raw in [(lead or {}).get("chassisNumber")] + [
+            (u or {}).get("chassisNumber") for u in ((lead or {}).get("units") or [])]:
+        ch = _norm_chassis(raw)
+        if ch and ch not in seen:
+            seen.add(ch)
+            out.append(ch)
+    return out
+
+
+def vehicle_count(lead):
+    """How many vehicles this lead file represents (pack or one)."""
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    if len(units) > 1:
+        return len(units)
+    if (lead or {}).get("sameOrderMultiUnit"):
+        return max(len(units), 1)
+    return 1
+
+
+def is_same_order_pack(lead):
+    """True when this file is a same-order fleet (one lead id, many units)."""
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    return bool((lead or {}).get("sameOrderMultiUnit") or len(units) > 1)
+
+
+def lead_invoice_list(lead):
+    out = []
+    seen = set()
+    for raw in [(lead or {}).get("invoiceNumber")] + [
+            (u or {}).get("invoiceNumber") for u in ((lead or {}).get("units") or [])]:
+        inv = _norm_invoice(raw)
+        if inv and inv not in seen:
+            seen.add(inv)
+            out.append(inv)
+    return out
+
+
+def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate=""):
+    """Write chassis / invoice / plate onto the matching or next empty unit line."""
+    units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    ch = _norm_chassis(chassis)
+    if not ch:
+        return units
+    for u in units:
+        if _norm_chassis(u.get("chassisNumber")) == ch:
+            if invoice:
+                u["invoiceNumber"] = invoice
+            if plate:
+                u["numberPlate"] = plate
+            return units
+    for u in units:
+        if not _norm_chassis(u.get("chassisNumber")):
+            u["chassisNumber"] = chassis
+            if invoice:
+                u["invoiceNumber"] = invoice
+            if plate:
+                u["numberPlate"] = plate
+            return units
+    return units
+
+
 def occupied_chassis_numbers(leads, except_id=""):
     """Chassis already sitting on another live lead — skip these when matching Sold."""
     out = set()
@@ -740,10 +805,64 @@ def occupied_chassis_numbers(leads, except_id=""):
             continue
         if not live_occupies_vehicle_id(other):
             continue
-        ch = _norm_chassis(other.get("chassisNumber"))
-        if ch:
+        for ch in lead_chassis_list(other):
             out.add(ch)
     return out
+
+
+def sold_rows_for_lead(lead, sold_rows, occupied_chassis=None):
+    """Sold rows that belong on this file.
+
+    Held chassis always come back. A same-order pack also picks up leftover
+    family Sold (same mobile or usable name) that no other live lead owns.
+    A single-unit file stays unique-match only so five Turbos on one mobile
+    do not flood a repeat-buyer drawer.
+    """
+    occupied = set(occupied_chassis or ())
+    held = set(lead_chassis_list(lead))
+    out = []
+    seen = set()
+    for row in sold_rows or []:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if ch and ch in held and ch not in seen:
+            seen.add(ch)
+            out.append(row)
+    if not is_same_order_pack(lead):
+        if out:
+            return out
+        row = match_sold_row(lead, sold_rows, occupied)
+        return [row] if row else []
+    mobile = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
+    name_key = _norm_person_name((lead or {}).get("customerName"))
+    name_ok = _name_key_usable(name_key)
+    for row in sold_rows or []:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if not ch or ch in seen or (ch in occupied and ch not in held):
+            continue
+        row_m = _digits10((row or {}).get("mobile"))
+        if mobile and len(mobile) == 10 and row_m == mobile:
+            seen.add(ch)
+            out.append(row)
+            continue
+        if name_ok and _norm_person_name((row or {}).get("customerName")) == name_key:
+            seen.add(ch)
+            out.append(row)
+    return out
+
+
+def _family_payload(lead, family):
+    if not family:
+        return None
+    first = family[0]
+    payload = _sold_match_payload(
+        first, _digits10(first.get("mobile") or (lead or {}).get("mobile")))
+    payload["units"] = []
+    for i, row in enumerate(family):
+        item = _sold_match_payload(
+            row, _digits10(row.get("mobile") or (lead or {}).get("mobile")))
+        item["sno"] = i + 1
+        payload["units"].append(item)
+    return payload
 
 
 async def match_sold_for_lead(db, lead):
@@ -755,6 +874,15 @@ async def match_sold_for_lead(db, lead):
     if not row:
         return None
     return _sold_match_payload(row, _digits10(row.get("mobile")))
+
+
+async def match_sold_family_for_lead(db, lead):
+    """Pack-aware Sold match: one row for a single file, every unit for a pack."""
+    rows = [r async for r in db.oem_sold.find({})]
+    leads = [l async for l in db.leads.find({})]
+    occupied = occupied_chassis_numbers(leads, (lead or {}).get("leadId"))
+    family = sold_rows_for_lead(lead, rows, occupied)
+    return _family_payload(lead, family)
 
 
 def _norm_person_name(s):
@@ -772,10 +900,11 @@ def _name_key_usable(key):
 
 
 def _match_sold_by_mobile(lead, sold_rows, occupied_chassis=None):
-    have = _norm_chassis((lead or {}).get("chassisNumber"))
+    have_list = lead_chassis_list(lead)
+    have = have_list[0] if have_list else ""
     occupied = set(occupied_chassis or ())
     if have:
-        occupied.discard(have)
+        occupied.difference_update(have_list)
         for row in sold_rows or []:
             if _norm_chassis(row.get("chassis")) != have:
                 continue
@@ -813,9 +942,10 @@ def _match_sold_by_name(lead, sold_rows, occupied_chassis=None):
     if not _name_key_usable(key):
         return None
     occupied = set(occupied_chassis or ())
-    have = _norm_chassis((lead or {}).get("chassisNumber"))
-    if have:
-        occupied.discard(have)
+    have_list = lead_chassis_list(lead)
+    have = have_list[0] if have_list else ""
+    if have_list:
+        occupied.difference_update(have_list)
     hits = []
     for row in sold_rows or []:
         ch = _norm_chassis(row.get("chassis"))
@@ -916,10 +1046,18 @@ def _field_taken(leads, field, value, except_id, *, chassis=False):
             continue
         if not live_occupies_vehicle_id(other):
             continue
+        if chassis and want in set(lead_chassis_list(other)):
+            return True
         got = other.get(field)
         got_n = _norm_chassis(got) if chassis else _norm_invoice(got)
         if got_n and got_n == want:
             return True
+        if not chassis:
+            for u in ((other or {}).get("units") or []):
+                got_u = (u or {}).get(field)
+                got_n = _norm_invoice(got_u)
+                if got_n and got_n == want:
+                    return True
     return False
 
 
@@ -950,7 +1088,7 @@ async def apply_sold_vehicle_ids_to_leads(db):
     no_match = 0
     occupied = occupied_chassis_numbers(leads)
     for lead in leads:
-        mine = occupied - {_norm_chassis((lead or {}).get("chassisNumber"))}
+        mine = occupied - set(lead_chassis_list(lead))
         row = match_sold_row(lead, sold, mine)
         ch = _norm_chassis((row or {}).get("chassis"))
         if not row or not ch:
@@ -988,11 +1126,17 @@ async def apply_sold_vehicle_ids_to_leads(db):
         lead_mobile = _digits10(lead.get("mobile") or lead.get("altMobile"))
         patch = {}
         if chassis and _norm_chassis(lead.get("chassisNumber")) != chassis:
-            patch["chassisNumber"] = chassis
+            if not is_same_order_pack(lead) or not lead_chassis_list(lead):
+                patch["chassisNumber"] = chassis
         if invoice and _norm_invoice(lead.get("invoiceNumber")) != _norm_invoice(invoice):
-            patch["invoiceNumber"] = invoice
+            if not is_same_order_pack(lead) or not lead_invoice_list(lead):
+                patch["invoiceNumber"] = invoice
         if plate and _norm_invoice(lead.get("numberPlate")) != _norm_invoice(plate):
-            patch["numberPlate"] = plate
+            if not is_same_order_pack(lead) or not str(lead.get("numberPlate") or "").strip():
+                patch["numberPlate"] = plate
+        stamped_units = stamp_unit_vehicle_ids(lead, chassis, invoice, plate)
+        if stamped_units and stamped_units != list((lead or {}).get("units") or []):
+            patch["units"] = stamped_units
         if oem_mobile and len(oem_mobile) == 10 and oem_mobile != lead_mobile:
             old = str(lead.get("mobile") or "").strip()
             old10 = _digits10(old)
@@ -1035,6 +1179,12 @@ def _delivered_missing_vehicle_ids(lead):
         return False
     if _lead_is_cancelled(lead):
         return False
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    if is_same_order_pack(lead) and units:
+        return any(
+            not _norm_chassis((u or {}).get("chassisNumber"))
+            or not _norm_invoice((u or {}).get("invoiceNumber"))
+            for u in units)
     ch = _norm_chassis((lead or {}).get("chassisNumber"))
     inv = _norm_invoice((lead or {}).get("invoiceNumber"))
     return not ch or not inv
@@ -1115,7 +1265,7 @@ def _live_same_name(live, name):
 def _empty_unclaimed(leads, claimed):
     return [
         l for l in leads
-        if not _norm_chassis((l or {}).get("chassisNumber"))
+        if not lead_chassis_list(l)
         and (l or {}).get("leadId") not in claimed
     ]
 
@@ -1143,7 +1293,7 @@ def classify_oem_billing(sold_rows, leads):
         chassis = _norm_chassis(sold.get("chassis"))
         if not chassis:
             continue
-        holders = [l for l in live if _norm_chassis(l.get("chassisNumber")) == chassis]
+        holders = [l for l in live if chassis in lead_chassis_list(l)]
         if len(holders) > 1:
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, holders[0],
@@ -1159,13 +1309,13 @@ def classify_oem_billing(sold_rows, leads):
         chassis = _norm_chassis(sold.get("chassis"))
         matches = []
         for lead in live:
-            have = _norm_chassis(lead.get("chassisNumber"))
-            if have and have != chassis:
+            have_set = set(lead_chassis_list(lead))
+            if have_set and chassis not in have_set:
                 continue
             lid = (lead or {}).get("leadId")
             if lid in claimed and claimed[lid] != chassis:
                 continue
-            mine = occupied - {have}
+            mine = occupied - have_set
             hit = match_sold_row(lead, [sold], mine)
             if hit and _norm_chassis(hit.get("chassis")) == chassis:
                 matches.append(lead)
@@ -1211,8 +1361,8 @@ def classify_oem_billing(sold_rows, leads):
                 out.append(_billing_row(sold, BUCKET_UNMATCHED))
                 continue
             if all(
-                    _norm_chassis(l.get("chassisNumber"))
-                    and _norm_chassis(l.get("chassisNumber")) != chassis
+                    lead_chassis_list(l)
+                    and chassis not in lead_chassis_list(l)
                     for l in same):
                 out.append(_billing_row(sold, BUCKET_UNMATCHED))
                 continue
@@ -1240,8 +1390,8 @@ def classify_oem_billing(sold_rows, leads):
                 out.append(_billing_row(sold, BUCKET_UNMATCHED))
                 continue
             if all(
-                    _norm_chassis(l.get("chassisNumber"))
-                    and _norm_chassis(l.get("chassisNumber")) != chassis
+                    lead_chassis_list(l)
+                    and chassis not in lead_chassis_list(l)
                     for l in same):
                 out.append(_billing_row(sold, BUCKET_UNMATCHED))
                 continue
@@ -1319,11 +1469,10 @@ async def drop_delivered_from_inventory(db):
     recreated lead with a delivery date after 1 Sep.
     """
     gone = set()
-    async for l in db.leads.find({"chassisNumber": {"$exists": True, "$nin": ["", None]}}):
+    async for l in db.leads.find({}):
         if not _lead_holds_live_yard_chassis(l):
             continue
-        ch = _norm_chassis(l.get("chassisNumber"))
-        if ch:
+        for ch in lead_chassis_list(l):
             gone.add(ch)
     if not gone:
         return 0

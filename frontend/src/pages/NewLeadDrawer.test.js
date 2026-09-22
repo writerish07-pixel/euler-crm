@@ -107,6 +107,7 @@ test("executive create form shows OEM extra support and another-vehicle checkbox
   expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="another-vehicle-block"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="another-vehicle-check"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="same-order-check"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="another-vehicle-block"]').textContent).toMatch(/another unit/i);
   await act(async () => { root.unmount(); });
 });
@@ -163,6 +164,34 @@ test("another vehicle with extra support amount saves without a new proof file",
   expect(post).toHaveBeenCalledWith("/leads", expect.objectContaining({
     anotherVehicle: true,
     oemExtraSupportReceived: 7000,
+  }));
+  await act(async () => { root.unmount(); });
+});
+
+test("same-order pack is mutex with another vehicle and save sends units", async () => {
+  mockAuth.isExecutive = false;
+  mockAuth.isTl = false;
+  mockAuth.user = { name: "Owner" };
+  const { root } = await renderDrawer();
+  await act(async () => {
+    setInput(document.querySelector('[data-testid="lead-name"]'), "Fleet Pack");
+    document.querySelector('[data-testid="same-order-check"] input').click();
+  });
+  expect(document.querySelector('[data-testid="same-order-units"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="another-vehicle-check"] input').disabled).toBe(true);
+  await act(async () => {
+    const model = document.querySelector('[data-testid="same-order-model-2"]');
+    model.value = "Turbo Max";
+    model.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => {
+    document.querySelector('[data-testid="save-lead-btn"]').click();
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(post).toHaveBeenCalledWith("/leads", expect.objectContaining({
+    sameOrderMultiUnit: true,
+    anotherVehicle: false,
+    units: expect.arrayContaining([expect.objectContaining({ model: "Turbo Max" })]),
   }));
   await act(async () => { root.unmount(); });
 });
