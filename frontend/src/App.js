@@ -20,6 +20,7 @@ import IncentiveMaster from "./pages/IncentiveMaster";
 import ExecutiveIncentive from "./pages/ExecutiveIncentive";
 import Payments from "./pages/Payments";
 import Deliveries from "./pages/Deliveries";
+import OemBilling from "./pages/OemBilling";
 import Finance from "./pages/Finance";
 import Insurance from "./pages/Insurance";
 import Claims from "./pages/Claims";
@@ -160,6 +161,7 @@ function AppRoutes() {
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
       <Route path="/insurance-agents" element={P(<InsuranceAgents />, { ownerOnly: true })} />
       <Route path="/deliveries" element={P(<Deliveries />)} />
+      <Route path="/oem-billing" element={P(<OemBilling />, { oemClaimDesk: true })} />
       <Route path="/claims" element={P(<Claims />, { oemClaimDesk: true })} />
       {/* Euler's own claim workflow, mirrored read-only. Deliberately a different
           page from the Scheme Claim Register above — different money, different

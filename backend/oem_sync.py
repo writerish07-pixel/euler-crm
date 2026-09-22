@@ -596,6 +596,55 @@ def vehicle_customer_name(row, *, nested=False):
     return ""
 
 
+_SOLD_DATE_KEYS = (
+    "invoice_date", "invoiceDate", "billed_at", "billedAt",
+    "sold_date", "soldDate", "billing_date", "billingDate",
+    "retail_date", "retailDate", "created_at", "createdAt",
+)
+
+
+def _iso_date(raw):
+    """Normalize a Coulson timestamp to YYYY-MM-DD."""
+    if raw is None:
+        return ""
+    if hasattr(raw, "strftime"):
+        try:
+            return raw.strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", s)
+    if not m:
+        return ""
+    a, b, y = int(m.group(1)), int(m.group(2)), m.group(3)
+    if a > 12:
+        return f"{y}-{b:02d}-{a:02d}"
+    if b > 12:
+        return f"{y}-{a:02d}-{b:02d}"
+    return f"{y}-{b:02d}-{a:02d}"
+
+
+def vehicle_sold_date(row):
+    """Invoice / billed date on a Coulson Sold row, if the portal sent one."""
+    if not isinstance(row, dict):
+        return ""
+    for k in _SOLD_DATE_KEYS:
+        d = _iso_date(row.get(k))
+        if d:
+            return d
+    for nested_key in _NESTED_CUSTOMER_KEYS + ("invoice", "billing", "sale"):
+        sub = row.get(nested_key)
+        if isinstance(sub, dict):
+            d = vehicle_sold_date(sub)
+            if d:
+                return d
+    return ""
+
+
 def _sold_doc(vehicle, sku, price):
     inv = _inventory_doc(vehicle, sku, price)
     mobile = vehicle_mobile(vehicle)
@@ -606,6 +655,7 @@ def _sold_doc(vehicle, sku, price):
         "invoiceNumber": vehicle_invoice(vehicle),
         "numberPlate": vehicle_plate(vehicle) or inv.get("emch") or "",
         "customerName": vehicle_customer_name(vehicle),
+        "soldDate": vehicle_sold_date(vehicle),
         "coulsonStatus": vehicle.get("_coulsonStatus") or "SOLD",
         "source": "coulson_sold",
     }
@@ -1004,6 +1054,129 @@ async def delivered_missing_vehicle_ids(db):
             "missingInvoice": not _norm_invoice(l.get("invoiceNumber")),
         })
     return rows
+
+
+BUCKET_PENDING = "pending_delivery"
+BUCKET_CREATED = "created_from_oem"
+BUCKET_DELIVERED = "matched_delivered"
+BUCKET_REVIEW = "needs_review"
+BUCKET_UNMATCHED = "unmatched"
+
+
+def _lead_crm_status(lead):
+    return str((lead or {}).get("currentStatus") or "New")
+
+
+def _bucket_for_matched_lead(lead):
+    if _lead_is_delivered(lead):
+        return BUCKET_DELIVERED
+    if (lead or {}).get("oemBillingCreated"):
+        return BUCKET_CREATED
+    return BUCKET_PENDING
+
+
+def _billing_row(sold, bucket, lead=None, review_reason=""):
+    sold_date = str((sold or {}).get("soldDate") or "").strip()[:10]
+    return {
+        "chassis": _norm_chassis((sold or {}).get("chassis")),
+        "invoiceNumber": str((sold or {}).get("invoiceNumber") or "").strip(),
+        "mobile": _digits10((sold or {}).get("mobile")),
+        "customerName": str((sold or {}).get("customerName") or "").strip(),
+        "model": (sold or {}).get("model") or "",
+        "variant": (sold or {}).get("variant") or "",
+        "soldDate": sold_date,
+        "undated": not sold_date,
+        "bucket": bucket,
+        "leadId": (lead or {}).get("leadId") or "",
+        "crmStatus": _lead_crm_status(lead) if lead else "",
+        "crmExecutive": (lead or {}).get("executive") or "",
+        "oemBillingCreated": bool((lead or {}).get("oemBillingCreated")),
+        "reviewReason": review_reason,
+    }
+
+
+def classify_oem_billing(sold_rows, leads):
+    """Join each Sold chassis to a live CRM lead, or mark it unmatched / review."""
+    live = [l for l in (leads or []) if live_occupies_vehicle_id(l)]
+    occupied = occupied_chassis_numbers(leads)
+    out = []
+    for sold in sold_rows or []:
+        chassis = _norm_chassis(sold.get("chassis"))
+        if not chassis:
+            continue
+        holders = [l for l in live if _norm_chassis(l.get("chassisNumber")) == chassis]
+        if len(holders) > 1:
+            out.append(_billing_row(
+                sold, BUCKET_REVIEW, holders[0],
+                "several live leads hold this chassis"))
+            continue
+        if len(holders) == 1:
+            out.append(_billing_row(sold, _bucket_for_matched_lead(holders[0]), holders[0]))
+            continue
+        matches = []
+        for lead in live:
+            have = _norm_chassis(lead.get("chassisNumber"))
+            if have and have != chassis:
+                continue
+            mine = occupied - {have}
+            hit = match_sold_row(lead, [sold], mine)
+            if hit and _norm_chassis(hit.get("chassis")) == chassis:
+                matches.append(lead)
+        uniq = {(m or {}).get("leadId"): m for m in matches if (m or {}).get("leadId")}
+        if len(uniq) == 1:
+            lead = next(iter(uniq.values()))
+            out.append(_billing_row(sold, _bucket_for_matched_lead(lead), lead))
+            continue
+        if len(uniq) > 1:
+            out.append(_billing_row(
+                sold, BUCKET_REVIEW, None,
+                "more than one lead matches this Sold row"))
+            continue
+        mobile = _digits10(sold.get("mobile"))
+        same = [
+            l for l in live
+            if mobile and len(mobile) == 10
+            and _digits10(l.get("mobile") or l.get("altMobile")) == mobile
+        ]
+        empty = [l for l in same if not _norm_chassis(l.get("chassisNumber"))]
+        if len(empty) == 1:
+            out.append(_billing_row(sold, _bucket_for_matched_lead(empty[0]), empty[0]))
+            continue
+        if len(empty) > 1:
+            out.append(_billing_row(
+                sold, BUCKET_REVIEW, None,
+                "same mobile, more than one lead without chassis"))
+            continue
+        if same and all(
+                _norm_chassis(l.get("chassisNumber"))
+                and _norm_chassis(l.get("chassisNumber")) != chassis
+                for l in same):
+            out.append(_billing_row(sold, BUCKET_UNMATCHED))
+            continue
+        if same:
+            out.append(_billing_row(
+                sold, BUCKET_REVIEW, None,
+                "same mobile already on a live lead"))
+            continue
+        out.append(_billing_row(sold, BUCKET_UNMATCHED))
+    return out
+
+
+async def list_oem_billing(db):
+    sold = [r async for r in db.oem_sold.find({})]
+    leads = [l async for l in db.leads.find({})]
+    return classify_oem_billing(sold, leads)
+
+
+def sold_row_in_period(row, period):
+    """Undated Sold rows stay visible in every month so they are not hidden."""
+    if getattr(period, "is_all", True):
+        return True
+    d = str((row or {}).get("soldDate") or "").strip()
+    if len(d) < 7:
+        return True
+    import period as periodmod
+    return periodmod.in_period(d, period)
 
 
 def inventory_family_key(model, variant=""):
