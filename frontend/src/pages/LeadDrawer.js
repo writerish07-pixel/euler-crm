@@ -117,6 +117,39 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
   );
 }
 
+function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme }) {
+  return (
+    <div className="space-y-3" data-testid="pack-units-tab">
+      <p className="text-sm text-ink-soft">
+        This order has {units.length} units. Open Price Structure and Scheme on each vehicle.
+        Payable {inr(lead.customerPayable)} · Outstanding {inr(lead.customerOutstanding)}.
+      </p>
+      {units.map((u, i) => {
+        const sno = u.sno || i + 1;
+        return (
+          <Card key={sno} className={`p-4 ${activeUnit === sno ? "ring-1 ring-cobalt" : ""}`} data-testid={`units-tab-row-${sno}`}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-ink">
+                  Unit {sno}{u.model ? ` · ${u.model}` : ""}{u.variant ? ` ${u.variant}` : ""}
+                </div>
+                <div className="font-mono font-bold text-cobalt mt-1" data-testid={`units-tab-payable-${sno}`}>
+                  {inr(u.customerPayable)}
+                </div>
+                {u.chassisNumber ? <div className="text-xs text-ink-soft mt-1">Chassis {u.chassisNumber}</div> : null}
+              </div>
+              <div className="flex gap-2">
+                <Button data-testid={`units-tab-price-${sno}`} onClick={() => onOpenPrice(sno)}>Price Structure</Button>
+                <Button variant="secondary" data-testid={`units-tab-scheme-${sno}`} onClick={() => onOpenScheme(sno)}>Scheme</Button>
+              </div>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isSalesGm } = useAuth();
   const [data, setData] = useState(null);
@@ -185,6 +218,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       : [
           { key: "overview", label: "Overview" },
           { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
+          ...(packUnits ? [{ key: "units", label: `Units (${packUnits.length})` }] : []),
           { key: "price", label: "Price Structure" },
           { key: "scheme", label: "Scheme" },
           { key: "payments", label: `Payments (${data.payments.length})` },
@@ -361,6 +395,15 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
       <Tabs tabs={tabs} active={execHandover && !["overview", "whatsapp", "activity"].includes(tab) ? "overview" : tab} onChange={setTab} />
 
+      {tab === "units" && !fieldView && packUnits && (
+        <UnitsTab
+          lead={lead}
+          units={packUnits}
+          activeUnit={activeUnit}
+          onOpenPrice={(sno) => { setFocusUnit(sno); setTab("price"); }}
+          onOpenScheme={(sno) => { setFocusUnit(sno); setTab("scheme"); }}
+        />
+      )}
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
         : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters}

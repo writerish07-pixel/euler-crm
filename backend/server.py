@@ -1002,10 +1002,14 @@ async def recompute_lead(lead_id):
             updates["packUnitsFilled"] = pack_filled
             updates["packUnitsPending"] = pack_pending
             updates["packUnitsTotal"] = len(pack_units)
-            if pack_total is not None and _pack_uses_unit_structures({**lead, **updates, "units": pack_units}):
-                updates["cxDemand"] = pack_total
-                updates["budget"] = pack_total
-                updates["useDealPrice"] = pack_pending == 0 and pack_total > 0
+        if pack_total is not None:
+            updates["customerPayable"] = pack_total
+            updates["cxDemand"] = pack_total
+            updates["budget"] = pack_total
+            if not lead.get("dealCancelled"):
+                updates["customerOutstanding"] = ce.round2(max(0.0, pack_total - total_received)) if pack_total > 0 else 0.0
+                updates["outstandingAmount"] = updates["customerOutstanding"]
+                updates["excessReceived"] = ce.round2(max(0.0, total_received - pack_total)) if pack_total > 0 else 0.0
     # Authoritative Insurance Benefit projection (parallel to loyaltyBonus offer field).
     # Available amount is stored on insuranceBenefit; CB feeds the Dealer Earnings sheet
     # column Customer Insurance Benefit Passed. Historical leads without auth allocation
@@ -4739,11 +4743,12 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
             "whatsapp": {"count": 0, "lastAt": None, "optOut": False, "sessionOpen": False},
         }
     if oem_sync.is_same_order_pack(lead):
-        lead, hydrated = await _hydrate_pack_unit_prices(lead)
-        if hydrated:
-            lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
-            await recompute_lead(lead_id)
-            lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
+        # Always rewrite unit amounts + pack payable. Extra units already had
+        # Price Master ex-showroom from Add unit but customerPayable stayed ₹0
+        # because 360 only recomputed when hydrate inserted a missing price.
+        await _hydrate_pack_unit_prices(lead)
+        await recompute_lead(lead_id)
+        lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
     commercials = ce.compute_full_commercials(snap, scheme_rows)
@@ -5513,6 +5518,18 @@ async def _hydrate_pack_unit_prices(lead):
             continue
         master = await _price_unit_from_master(u.get("model"), u.get("variant"), as_of)
         if ce.num(master.get("exShowroom")) <= 0:
+            src = units[0] if units else {}
+            if i > 0 and ce.num(src.get("exShowroom") or (lead or {}).get("exShowroom")) > 0:
+                for k in ("exShowroom", "rto", "insuranceAmount", "accessoriesAmount",
+                          "handlingCharges", "trc", "fastag", "extendedWarranty",
+                          "otherCharges", "rsaAmc", "tcsApplicable",
+                          "insuranceArrangedBy"):
+                    if u.get(k) in (None, "", 0, 0.0) or k not in u:
+                        if k in src and src.get(k) not in (None, ""):
+                            u[k] = src[k]
+                        elif (lead or {}).get(k) not in (None, ""):
+                            u[k] = lead[k]
+                changed = True
             units[i] = u
             continue
         for k, v in master.items():
