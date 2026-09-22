@@ -235,7 +235,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
-        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters} />}
+        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
@@ -1272,35 +1272,6 @@ function GoogleReviewSend({ leadId, already, onSent }) {
 }
 
 const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"], ["invoice", "Invoice"], ["rc", "RC"], ["pdi", "PDI"]];
-/** Live yard chassis pick applies to deliveries on/after this date (ISO). */
-const YARD_LIVE_FROM = "2026-09-01";
-
-function modelFamily(model, variant) {
-  const s = String(model || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const v = String(variant || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (s.includes("storm") || s.includes("strom")) return "storm";
-  if (s.includes("turbo") || s.includes("tyrbo")) return "turbo";
-  if (s.includes("hirange") || s.includes("highrange") || s.includes("neohirange")) return "hirange";
-  if (s.includes("hicity")) return "hicity";
-  if (s.includes("hiload")) return (v === "xr" || v.includes("hicity")) ? "hicity" : "hiload";
-  return s;
-}
-
-function isLiveYardDelivery(iso) {
-  return String(iso || "").slice(0, 10) >= YARD_LIVE_FROM;
-}
-
-function yardRowsForLead(yard, lead, selectedChassis) {
-  const fam = modelFamily(lead.interestedModel, lead.variant);
-  const selected = String(selectedChassis || "");
-  const familyRows = yard.filter((r) => (
-    r.chassis === selected
-    || !fam
-    || modelFamily(r.model, r.variant) === fam
-  ));
-  if (familyRows.length) return { rows: familyRows, fallback: false };
-  return { rows: yard, fallback: yard.length > 0 };
-}
 
 // What Euler's own claim desk is doing with this vehicle, next to the scheme
 // register rows this drawer created. Silent when both sides are empty.
@@ -1388,7 +1359,7 @@ function OemClaimStrip({ leadId }) {
   );
 }
 
-function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], onSaved }) {
+export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], onSaved }) {
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
   // Staff freeze after Mark Delivered; owner may edit delivery paperwork until closed.
@@ -1404,7 +1375,6 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
   // Insurance agent is chosen here; it decides the payout slab on the entry
   // that Mark Delivered opens.
   const [agents, setAgents] = useState([]);
-  const [yard, setYard] = useState([]);
   const [sold, setSold] = useState(oemSold && oemSold.matched ? oemSold : null);
   // Customer-arranged insurance earns no payout, so no agent is required there.
   const selfArranged = String(lead.insuranceArrangedBy || "dealer").toLowerCase() === "self";
@@ -1444,26 +1414,6 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
     });
   }, [sold, lead.customerOutstanding, locked]);
   useEffect(() => {
-    const params = { family: true };
-    if (lead.interestedModel) params.model = lead.interestedModel;
-    if (lead.variant) params.variant = lead.variant;
-    let cancelled = false;
-    get("/inventory", params)
-      .then((rows) => {
-        if (cancelled) return;
-        const list = Array.isArray(rows) ? rows : [];
-        if (list.length) {
-          setYard(list);
-          return;
-        }
-        get("/inventory").then((all) => { if (!cancelled) setYard(Array.isArray(all) ? all : []); })
-          .catch(() => { if (!cancelled) setYard([]); });
-      })
-      .catch(() => { if (!cancelled) setYard([]); });
-    return () => { cancelled = true; };
-  }, [lead.interestedModel, lead.variant, form.deliveryDate]);
-
-  useEffect(() => {
     if (!alreadyDelivered) return;
     if (billingSummary && billingSummary.leadId) return;
     let cancelled = false;
@@ -1475,20 +1425,9 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
     return () => { cancelled = true; };
   }, [alreadyDelivered, lead.leadId, billingSummary]);
 
-  const liveYard = isLiveYardDelivery(form.deliveryDate || todayISO());
   const soldChassis = sold?.chassis || "";
-  const mergedYard = [...yard];
-  if (soldChassis && !yard.some((r) => r.chassis === soldChassis)) {
-    mergedYard.unshift({
-      chassis: soldChassis,
-      model: sold.model || lead.interestedModel,
-      variant: sold.variant || lead.variant || "",
-      source: "sold",
-    });
-  }
-  const { rows: yardChoices, fallback: yardFallback } = yardRowsForLead(mergedYard, lead, form.chassisNumber);
-  const showYardSelect = liveYard && mergedYard.length > 0;
   const outstandingCleared = Number(lead.customerOutstanding || 0) <= 0.01;
+  const oemIdsLocked = locked || !isOwner;
   const toggle = (k) => { if (!locked) setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" })); };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
@@ -1531,45 +1470,33 @@ function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials =
           onChanged={onSaved}
         />
       )}
-      <p className="text-xs text-ink-soft mb-3">
-        Invoice, chassis, and number plate must be unique on live leads from 1 Sep.
-        Last-month or cancelled files do not block a recreated delivery.
+      <p className="text-xs text-ink-soft mb-3" data-testid="delivery-oem-ids-hint">
+        Chassis and invoice come from the OEM Sold list, matched on this customer’s unique mobile.
+        TL / GM / Owner mark delivered here — Euler fills those numbers when Coulson bills this mobile.
       </p>
       {soldChassis && (
         <p className="text-xs text-emerald-800 bg-emerald-50 ring-1 ring-emerald-600/15 rounded-lg px-3 py-2 mb-3" data-testid="delivery-sold-match">
-          Coulson Sold tab matched this customer’s mobile to chassis <b>{soldChassis}</b>
+          OEM Sold matched this mobile to chassis <b>{soldChassis}</b>
           {sold.invoiceNumber ? ` · invoice ${sold.invoiceNumber}` : ""}.
           {outstandingCleared
-            ? " Outstanding is cleared — chassis is filled automatically."
-            : " Clear outstanding, then delivery will pick this chassis automatically."}
+            ? " Filled automatically — no need to type them."
+            : " Clear outstanding, then these ids fill automatically."}
         </p>
       )}
-      {liveYard && (
-        <p className="text-xs text-ink-soft mb-3" data-testid="delivery-yard-live-hint">
-          Delivery on/after 1 Sep uses live yard stock, plus any chassis already billed in Coulson for this mobile.
-          {yardFallback ? " No exact model match — showing all chassis currently in yard." : ""}
+      {!soldChassis && !alreadyDelivered && (
+        <p className="text-xs text-ink-soft bg-zinc-50 ring-1 ring-line rounded-lg px-3 py-2 mb-3" data-testid="delivery-oem-waiting">
+          Not billed in OEM Sold yet. You can still mark delivered; chassis and invoice will update from the OEM app when this mobile is billed.
         </p>
       )}
       <OemClaimStrip leadId={lead.leadId} />
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <Field label="Invoice Number"><Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")} disabled={locked} /></Field>
-        <Field label="Chassis">
-          {showYardSelect ? (
-            <Select data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked}>
-              <option value="">Select chassis…</option>
-              {yardChoices.map((r) => (
-                <option key={r.chassis} value={r.chassis}>
-                  {r.chassis} · {r.model} {r.variant || ""}{r.source === "sold" ? " · billed in Coulson" : ""}
-                </option>
-              ))}
-              {form.chassisNumber && !mergedYard.some((r) => r.chassis === form.chassisNumber) ? (
-                <option value={form.chassisNumber}>{form.chassisNumber}</option>
-              ) : null}
-            </Select>
-          ) : (
-            <Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")} disabled={locked}
-              placeholder={liveYard ? "No live yard or Coulson sold match — type chassis" : "Last-month delivery — type chassis"} />
-          )}
+        <Field label="Invoice Number (OEM)">
+          <Input data-testid="delivery-invoice" value={form.invoiceNumber} onChange={set("invoiceNumber")}
+            disabled={oemIdsLocked} placeholder="From OEM Sold" />
+        </Field>
+        <Field label="Chassis (OEM)">
+          <Input data-testid="delivery-chassis" value={form.chassisNumber} onChange={set("chassisNumber")}
+            disabled={oemIdsLocked} placeholder="From OEM Sold" />
         </Field>
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>

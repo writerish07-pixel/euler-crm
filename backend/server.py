@@ -588,10 +588,6 @@ def _validate_delivery_ready(lead, body):
         errs.append("Set Registration to Yes before marking delivered.")
     if not _yes_or_done(body.invoice):
         errs.append("Set Invoice to Yes before marking delivered.")
-    if not str(body.invoiceNumber or "").strip():
-        errs.append("Enter the invoice number before delivery.")
-    if not str(body.chassisNumber or "").strip():
-        errs.append("Enter the chassis number before delivery.")
     if not _yes_or_done(body.pdi):
         errs.append("Set PDI to Yes before marking delivered.")
     if ce.num(lead.get("customerOutstanding")) > 0.01:
@@ -599,11 +595,23 @@ def _validate_delivery_ready(lead, body):
     return errs
 
 
-async def _fill_delivery_from_sold(lead, body):
-    """When outstanding is cleared, copy chassis/invoice from Coulson Sold by mobile.
+async def _refresh_sold_then_fill_delivery(lead, body):
+    """Pull the latest OEM Sold list, then stamp chassis/invoice from unique mobile."""
+    try:
+        await oem_sync.refresh_sold_inventory(db)
+    except Exception:
+        logging.exception("Coulson sold refresh failed before delivery for %s",
+                          (lead or {}).get("leadId"))
+    return await _fill_delivery_from_sold(lead, body)
 
-    Billing in Coulson drops the unit from yard PRESENT. The Sold tab still has
-    the chassis keyed by the same unique customer mobile as the CRM lead.
+
+async def _fill_delivery_from_sold(lead, body):
+    """Copy chassis/invoice from Coulson Sold by unique customer mobile.
+
+    TL / GM / Owner mark delivered without typing those ids. Billing in Coulson
+    drops the unit from yard PRESENT; the Sold tab still has chassis + invoice
+    keyed by the same unique mobile as the CRM lead. Empty ids are allowed —
+    the next Sold sync backfills them.
     """
     if ce.num((lead or {}).get("customerOutstanding")) > 0.01:
         return body
@@ -7396,12 +7404,12 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
     first_delivery = delivered and not _is_delivered(lead)
     if first_delivery:
         _require_action(lead, "canDeliver", "delivery (not booked/active)", act)
-        await _fill_delivery_from_sold(lead, body)
+        await _refresh_sold_then_fill_delivery(lead, body)
         errs = _validate_delivery_ready(lead, body)
         if errs:
             raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
     else:
-        await _fill_delivery_from_sold(lead, body)
+        await _refresh_sold_then_fill_delivery(lead, body)
     await _assert_unique_vehicle_identifiers(
         lead_id,
         invoice_number=body.invoiceNumber,
@@ -7447,6 +7455,10 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
                 await oem_sync.take_chassis_from_inventory(db, body.chassisNumber)
             except Exception:
                 logging.exception("Could not drop delivered chassis from yard inventory")
+            try:
+                await oem_sync.apply_sold_vehicle_ids_to_leads(db)
+            except Exception:
+                logging.exception("Could not backfill chassis/invoice from OEM Sold")
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 
@@ -7885,6 +7897,8 @@ async def _coulson_status_payload(viewer=None):
         "claimsIncomplete": bool(doc.get("claimsIncomplete")),
         "claimsSyncedAt": doc.get("claimsSyncedAt"),
         "claimsSyncOk": doc.get("claimsSyncOk"),
+        "soldCount": await db.oem_sold.count_documents({}),
+        "deliveredMissingVehicleIds": len(await oem_sync.delivered_missing_vehicle_ids(db)),
     }
 
 
@@ -12532,6 +12546,14 @@ async def _run_boot_maintenance():
             await _oem_catalog_boot()
         except Exception:
             logging.exception("OEM_CATALOG_BOOT_ERROR")
+        try:
+            sold_stats = await oem_sync.apply_sold_vehicle_ids_to_leads(db)
+            missing = await oem_sync.delivered_missing_vehicle_ids(db)
+            logging.info(
+                "OEM_SOLD_LEAD_IDS: updated=%s remainingDeliveredMissing=%s",
+                sold_stats.get("updated"), len(missing))
+        except Exception:
+            logging.exception("OEM_SOLD_LEAD_IDS_BACKFILL_ERROR")
         try:
             await _apply_rto_insurance_defaults()
         except Exception:

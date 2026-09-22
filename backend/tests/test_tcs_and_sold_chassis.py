@@ -505,3 +505,132 @@ async def test_apply_sold_same_mobile_two_models_writes_both(client):
     assert b["chassisNumber"] == "MD9SMB" and b["invoiceNumber"] == "INV-B"
     assert stats["updated"] == 2
     await server.db.leads.delete_many({"leadId": {"$in": ["LD-SM-A", "LD-SM-B"]}})
+
+
+async def _booked_cleared_lead(lead_id, mobile, name="No Chassis Yet"):
+    await server.db.leads.delete_many({"leadId": lead_id})
+    await server.db.insurance_agents.update_one(
+        {"agentId": "IA-SOLD-1"},
+        {"$set": {"agentId": "IA-SOLD-1", "agentName": "Sold Test Agent", "status": "Active"}},
+        upsert=True,
+    )
+    await server.db.leads.insert_one({
+        "leadId": lead_id, "customerName": name, "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-09-02",
+        "deliveryStatus": "Pending", "customerOutstanding": 0, "customerPayable": 785000,
+        "totalReceived": 785000, "exShowroom": 785000, "insuranceArrangedBy": "dealer",
+    })
+
+
+def _delivery_yes(**over):
+    body = {
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes",
+        "rc": "Yes", "insurerName": "ICICI", "insuranceAgentId": "IA-SOLD-1",
+        "invoiceNumber": "", "chassisNumber": "", "numberPlate": "",
+        "delivered": "Yes", "deliveryDate": "2026-09-02",
+    }
+    body.update(over)
+    return body
+
+
+@pytest.mark.asyncio
+async def test_mark_delivered_without_chassis_when_oem_sold_is_empty(client):
+    """TL / GM / Owner mark delivered; chassis/invoice are not a gate."""
+    mobile = "9811100777"
+    await _booked_cleared_lead("LD-DEL-NO-OEM", mobile)
+    r = await client.put("/api/leads/LD-DEL-NO-OEM/delivery", json=_delivery_yes())
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": "LD-DEL-NO-OEM"})
+    assert server._is_delivered(lead) is True
+    assert not (lead.get("chassisNumber") or "").strip()
+    missing = await oem_sync.delivered_missing_vehicle_ids(server.db)
+    assert any(row["leadId"] == "LD-DEL-NO-OEM" for row in missing)
+
+
+@pytest.mark.asyncio
+async def test_delivered_lead_backfills_chassis_from_oem_sold(client):
+    mobile = "9811100666"
+    chassis = "MD9DELBACKFILL01"
+    await _booked_cleared_lead("LD-DEL-BACKFILL", mobile, "Backfill Delivered")
+    r = await client.put("/api/leads/LD-DEL-BACKFILL/delivery", json=_delivery_yes())
+    assert r.status_code == 200, r.text
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-DEL-BF",
+        "model": "Turbo Max", "variant": "Maxx (PV)", "coulsonStatus": "SOLD",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["updated"] >= 1
+    lead = await server.db.leads.find_one({"leadId": "LD-DEL-BACKFILL"})
+    assert lead["chassisNumber"] == chassis
+    assert lead["invoiceNumber"] == "CINV-DEL-BF"
+    missing = await oem_sync.delivered_missing_vehicle_ids(server.db)
+    assert not any(row["leadId"] == "LD-DEL-BACKFILL" for row in missing)
+
+
+@pytest.mark.asyncio
+async def test_tl_marks_delivered_without_typing_chassis(client):
+    mobile = "9811100555"
+    chassis = "MD9TLDELIVERY001"
+    await _booked_cleared_lead("LD-TL-DELIVER", mobile, "TL Delivery")
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-TL-DEL",
+        "model": "Turbo Max", "variant": "Maxx (PV)", "coulsonStatus": "SOLD",
+    })
+    email = "tl.delivery@euler.com"
+    await server.client[os.environ["DB_NAME"]].users.delete_many({"email": email})
+    created = await client.post("/api/auth/users", json={
+        "email": email, "password": "euler@123", "name": "Team Leader", "role": "tl",
+        "loginId": "tl.delivery"})
+    assert created.status_code == 200, created.text
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as tl:
+        login = await tl.post("/api/auth/login", json={"email": email, "password": "euler@123"})
+        assert login.status_code == 200, login.text
+        tl.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+        r = await tl.put("/api/leads/LD-TL-DELIVER/delivery", json=_delivery_yes())
+        assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": "LD-TL-DELIVER"})
+    assert server._is_delivered(lead) is True
+    assert lead["chassisNumber"] == chassis
+    assert lead["invoiceNumber"] == "CINV-TL-DEL"
+
+
+@pytest.mark.asyncio
+async def test_empty_sold_pull_keeps_existing_oem_sold(client, monkeypatch):
+    """A blank Coulson Sold response must not wipe chassis/invoice already synced."""
+    chassis = "MD9KEEPEXISTING01"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "9811100444", "invoiceNumber": "CINV-KEEP",
+        "model": "Turbo Max", "variant": "Maxx (PV)", "coulsonStatus": "SOLD",
+    })
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+    await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
+    kept = await oem_sync.refresh_sold_inventory(server.db)
+    assert kept >= 1
+    row = await server.db.oem_sold.find_one({"chassis": chassis})
+    assert row is not None
+    assert row["invoiceNumber"] == "CINV-KEEP"
+
+
+@pytest.mark.asyncio
+async def test_mark_delivered_fills_from_unique_mobile_even_if_model_differs(client):
+    """OEM Sold match is the unique 10-digit mobile, not a typed chassis."""
+    mobile = "9811100333"
+    chassis = "MD9UNIQUEMOBILE01"
+    await _booked_cleared_lead("LD-UNIQUE-MOB", mobile, "Unique Mobile")
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-UNIQ",
+        "model": "Hi-Load", "variant": "XR", "coulsonStatus": "SOLD",
+    })
+    r = await client.put("/api/leads/LD-UNIQUE-MOB/delivery", json=_delivery_yes())
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": "LD-UNIQUE-MOB"})
+    assert server._is_delivered(lead) is True
+    assert lead["chassisNumber"] == chassis
+    assert lead["invoiceNumber"] == "CINV-UNIQ"
