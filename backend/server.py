@@ -739,6 +739,23 @@ async def _assert_unique_vehicle_identifiers(lead_id, *, invoice_number="", chas
         checks.append(("invoiceNumber", rec.get("invoiceNumber"), "Invoice number"))
         checks.append(("chassisNumber", rec.get("chassisNumber"), "Chassis number"))
         checks.append(("numberPlate", rec.get("numberPlate"), "Number plate"))
+    on_order = {}
+    for rec in [_dump_unit(u) for u in (units or [])]:
+        for field, raw, label in (
+            ("invoiceNumber", rec.get("invoiceNumber"), "Invoice number"),
+            ("chassisNumber", rec.get("chassisNumber"), "Chassis number"),
+            ("numberPlate", rec.get("numberPlate"), "Number plate"),
+        ):
+            val = str(raw or "").strip()
+            if not val:
+                continue
+            key = (field, oem_sync._norm_chassis(val) if field == "chassisNumber" else val.lower())
+            if key in on_order:
+                raise HTTPException(
+                    409,
+                    f"{label} '{val}' is used on more than one unit of this order.",
+                )
+            on_order[key] = True
     seen = set()
     for field, raw, label in checks:
         val = str(raw or "").strip()
@@ -900,7 +917,11 @@ async def recompute_lead(lead_id):
         # Surplus still held for the customer. Refundable at any time, including after
         # delivery/closure, so it must be visible on the lead rather than inferred.
         excess_received = ce.round2(max(0.0, total_received - customer_payable)) if customer_payable > 0 else 0.0
-    oem_extra = ce.compute_oem_extra_support(lead)
+    oem_extra = (
+        _pack_oem_extra_totals(lead)
+        if oem_sync.is_same_order_pack(lead)
+        else ce.compute_oem_extra_support(lead)
+    )
     oem_extra_recv = oem_extra["oemExtraSupportReceived"]
     oem_extra_pass = oem_extra["oemExtraSupportPassed"]
     oem_extra_retained = oem_extra["oemExtraSupportRetained"]
@@ -1010,6 +1031,10 @@ async def recompute_lead(lead_id):
                 updates["customerOutstanding"] = ce.round2(max(0.0, pack_total - total_received)) if pack_total > 0 else 0.0
                 updates["outstandingAmount"] = updates["customerOutstanding"]
                 updates["excessReceived"] = ce.round2(max(0.0, total_received - pack_total)) if pack_total > 0 else 0.0
+        oem_pack = _pack_oem_extra_totals({**lead, **updates}, pack_units or (lead.get("units") or []))
+        updates["oemExtraSupportReceived"] = oem_pack["oemExtraSupportReceived"]
+        updates["oemExtraSupportPassed"] = oem_pack["oemExtraSupportPassed"]
+        updates["oemExtraSupportRetained"] = oem_pack["oemExtraSupportRetained"]
     # Authoritative Insurance Benefit projection (parallel to loyaltyBonus offer field).
     # Available amount is stored on insuranceBenefit; CB feeds the Dealer Earnings sheet
     # column Customer Insurance Benefit Passed. Historical leads without auth allocation
@@ -5102,10 +5127,22 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
         recv = ce.num(lead.get("oemExtraSupportReceived"))
         patch_val = ce.round2(min(patch_val, recv))
     old = {field: lead.get(field)}
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+    scheme_set = {
         field: patch_val, "lastUpdated": now_iso(),
         "lastUpdatedBy": act.get("email", ""),
-    }})
+    }
+    if oem_sync.is_same_order_pack(lead) and field in OWNER_SCHEME_FIELDS:
+        units = _ensure_lead_units(lead)
+        if units:
+            u0 = dict(units[0])
+            if field == "oemExtraSupportPassed":
+                recv = ce.num(u0.get("oemExtraSupportReceived") or lead.get("oemExtraSupportReceived"))
+                patch_val = ce.round2(min(patch_val, recv))
+                scheme_set[field] = patch_val
+            u0[field] = patch_val
+            units[0] = u0
+            scheme_set["units"] = units
+    await db.leads.update_one({"leadId": lead_id}, {"$set": scheme_set})
     await recompute_lead(lead_id)
     await write_audit(act, "update", "lead-field", leadId=lead_id, old=old, new={field: patch_val})
     updated = await db.leads.find_one({"leadId": lead_id})
@@ -5286,6 +5323,7 @@ UNIT_SCHEME_KEYS = (
     "benefitPassedBreakup", "schemeComponentsUsed", "schemeAllocationExplicit",
     "schemeAllocationV2", "schemeAsOf", "benefitMode",
     "priceStructureSaved", "insuranceArrangedBy", "finalExchangeValue",
+    "oemExtraSupportReceived", "oemExtraSupportPassed",
 )
 
 UNIT_COMMERCIAL_KEYS = UNIT_MONEY_KEYS + UNIT_SCHEME_KEYS
@@ -5420,12 +5458,53 @@ def _ensure_lead_units(lead):
     return [_unit1_from_lead(lead)]
 
 
+def _seed_unit1_oem_extra_from_lead(lead, units):
+    """Historical packs stored OEM extra only on the lead. Copy onto unit 1 once.
+
+    After any unit has its own extra keys, never copy the lead total back onto
+    unit 1 — that total is a roll-up and would double-count.
+    """
+    units = list(units or [])
+    if not units:
+        return units, False
+    if any(
+        "oemExtraSupportReceived" in (u or {}) or "oemExtraSupportPassed" in (u or {})
+        for u in units
+    ):
+        return units, False
+    recv = ce.round2(ce.num((lead or {}).get("oemExtraSupportReceived")))
+    passed = ce.round2(min(ce.num((lead or {}).get("oemExtraSupportPassed")), recv))
+    if recv <= 0 and passed <= 0:
+        return units, False
+    u0 = dict(units[0] or {})
+    u0["oemExtraSupportReceived"] = recv
+    u0["oemExtraSupportPassed"] = passed
+    units[0] = u0
+    return units, True
+
+
+def _pack_oem_extra_totals(lead, units=None):
+    """Sum each unit's OEM Extra. Received is a claim; Passed discounts that unit."""
+    rows = list(units) if units is not None else _ensure_lead_units(lead)
+    rows, _ = _seed_unit1_oem_extra_from_lead(lead, rows)
+    recv = 0.0
+    passed = 0.0
+    for u in rows:
+        recv += ce.num((u or {}).get("oemExtraSupportReceived"))
+        passed += ce.num((u or {}).get("oemExtraSupportPassed"))
+    return ce.compute_oem_extra_support({
+        "oemExtraSupportReceived": recv,
+        "oemExtraSupportPassed": passed,
+    })
+
+
 def _lead_overlay_unit(lead, unit, index=0):
     """Lead-shaped dict for one unit so compute_commercial_totals can price it.
 
     Extra units do not inherit unit 1 / lead-level price or scheme. OEM Extra
-    Support stays lead-level and is applied once on unit 1. Pack-deal
-    additionalDiscount leftover on the lead is not a per-unit discount.
+    Support is per unit (Received = claim, Passed = that unit's customer
+    discount). Pack-deal additionalDiscount leftover on the lead is not a
+    per-unit discount.
     """
     u = unit or {}
     out = dict(lead or {})
@@ -5449,6 +5528,19 @@ def _lead_overlay_unit(lead, unit, index=0):
             gvc = ce.num(u.get("exShowroom") or lead.get("exShowroom"))
             if "additionalDiscount" not in u and addl > gvc > 0:
                 out["additionalDiscount"] = 0
+            # Lead-level extra after a pack roll-up is the SUM. Unit 1 must
+            # not inherit that sum — only its own keys (or a historical seed).
+            if pack:
+                if "oemExtraSupportReceived" in u or "oemExtraSupportPassed" in u:
+                    out["oemExtraSupportReceived"] = ce.num(u.get("oemExtraSupportReceived"))
+                    out["oemExtraSupportPassed"] = ce.num(u.get("oemExtraSupportPassed"))
+                elif any(
+                    "oemExtraSupportReceived" in (other or {})
+                    or "oemExtraSupportPassed" in (other or {})
+                    for other in ((lead or {}).get("units") or [])
+                ):
+                    out["oemExtraSupportReceived"] = 0
+                    out["oemExtraSupportPassed"] = 0
     for k in UNIT_COMMERCIAL_KEYS:
         if k in u:
             out[k] = u[k]
@@ -5460,6 +5552,7 @@ def _refresh_unit_payables(lead, scheme_rows=None):
     units = list((lead or {}).get("units") or [])
     if not units and (lead or {}).get("sameOrderMultiUnit"):
         units = [_unit1_from_lead(lead)]
+    units, _ = _seed_unit1_oem_extra_from_lead(lead, units)
     if not units:
         return None, units, 0, 0
     total = 0.0
@@ -5563,7 +5656,7 @@ async def _hydrate_pack_unit_prices(lead):
 
 def _pack_overview_commercials(lead, scheme_rows=None):
     """Sum each unit's own GVC / discount / payable. Never apply unit-1 scheme to the pack."""
-    units = _ensure_lead_units(lead)
+    units, _ = _seed_unit1_oem_extra_from_lead(lead, _ensure_lead_units(lead))
     gvc = tcs = disc = passed = pay = 0.0
     for i, u in enumerate(units):
         if not _unit_has_price_amount(lead, u, i):
@@ -6395,15 +6488,11 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
         payload["schemeComponentsUsed"] = _json.dumps({k: (v > 0) for k, v in clean_bk.items()})
 
-    # OEM Extra Support is lead-level (one claim for the order), not per unit.
-    # Additional (Dealer) stays on the unit — separate dealer-funded discount.
-    _oem = ce.compute_oem_extra_support(payload if idx == 0 else lead)
-    if idx == 0:
-        payload["oemExtraSupportReceived"] = _oem["oemExtraSupportReceived"]
-        payload["oemExtraSupportPassed"] = _oem["oemExtraSupportPassed"]
-    else:
-        payload.pop("oemExtraSupportReceived", None)
-        payload.pop("oemExtraSupportPassed", None)
+    # OEM Extra Support is per unit. Received = OEM claim; Passed ≤ Received
+    # reduces that unit's customer payable. Additional (Dealer) stays separate.
+    _oem = ce.compute_oem_extra_support(payload)
+    payload["oemExtraSupportReceived"] = _oem["oemExtraSupportReceived"]
+    payload["oemExtraSupportPassed"] = _oem["oemExtraSupportPassed"]
 
     units = _ensure_lead_units(lead)
     if idx >= len(units):

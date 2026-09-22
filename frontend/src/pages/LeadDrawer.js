@@ -55,8 +55,8 @@ function unitSource(lead, unit, index) {
     referralBonus: u.referralBonus || 0,
     dsaDiscount: u.dsaDiscount || 0,
     additionalDiscount: u.additionalDiscount || 0,
-    oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
-    oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
+    oemExtraSupportReceived: u.oemExtraSupportReceived || 0,
+    oemExtraSupportPassed: u.oemExtraSupportPassed || 0,
     benefitPassedBreakup: u.benefitPassedBreakup,
     schemeComponentsUsed: u.schemeComponentsUsed,
     schemeAsOf: u.schemeAsOf || lead.schemeAsOf,
@@ -137,6 +137,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme }) {
                   {inr(u.customerPayable)}
                 </div>
                 {u.chassisNumber ? <div className="text-xs text-ink-soft mt-1">Chassis {u.chassisNumber}</div> : null}
+                {u.numberPlate ? <div className="text-xs text-ink-soft">Plate {u.numberPlate}</div> : null}
               </div>
               <div className="flex gap-2">
                 <Button data-testid={`units-tab-price-${sno}`} onClick={() => onOpenPrice(sno)}>Price Structure</Button>
@@ -939,8 +940,8 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
   const [rules, setRules] = useState(null);
   const [schemeDate, setSchemeDate] = useState(src.schemeAsOf || lead.bookingDate || todayISO());
   const [form, setForm] = useState(() => ({
-    oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
-    oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
+    oemExtraSupportReceived: src.oemExtraSupportReceived || 0,
+    oemExtraSupportPassed: src.oemExtraSupportPassed || 0,
     additionalDiscount: src.additionalDiscount || 0,
   }));
   const parseBreakup = (raw) => {
@@ -966,8 +967,8 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     const next = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
     setSchemeDate(next.schemeAsOf || lead.bookingDate || todayISO());
     setForm({
-      oemExtraSupportReceived: lead.oemExtraSupportReceived || 0,
-      oemExtraSupportPassed: lead.oemExtraSupportPassed || 0,
+      oemExtraSupportReceived: next.oemExtraSupportReceived || 0,
+      oemExtraSupportPassed: next.oemExtraSupportPassed || 0,
       additionalDiscount: next.additionalDiscount || 0,
     });
     setBreakup(parseBreakup(next.benefitPassedBreakup));
@@ -1133,23 +1134,19 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         <Field label="Scheme Date">
           <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
         </Field>
-        {unitIdx === 0 && (
-          <Field label="OEM Extra Support Received">
-            <Input data-testid="oem-extra-received" type="number" value={form.oemExtraSupportReceived}
-              onChange={set("oemExtraSupportReceived")} disabled={locked} />
-          </Field>
-        )}
-        {unitIdx === 0 && (
-          <Field label="OEM Extra Support Passed">
-            <Input data-testid="oem-extra-passed" type="number" value={form.oemExtraSupportPassed}
-              onChange={set("oemExtraSupportPassed")} disabled={locked} />
-          </Field>
-        )}
+        <Field label="OEM Extra Support Received">
+          <Input data-testid="oem-extra-received" type="number" value={form.oemExtraSupportReceived}
+            onChange={set("oemExtraSupportReceived")} disabled={locked} />
+        </Field>
+        <Field label="OEM Extra Support Passed">
+          <Input data-testid="oem-extra-passed" type="number" value={form.oemExtraSupportPassed}
+            onChange={set("oemExtraSupportPassed")} disabled={locked} />
+        </Field>
         <Field label="Additional (Dealer)">
           <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount} onChange={set("additionalDiscount")} disabled={locked} />
         </Field>
       </div>
-      {unitIdx === 0 && <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
         <div>
           <div className="text-[11px] text-ink-faint uppercase">OEM Extra Claim (full Received)</div>
           <div className="font-mono text-amber-700" data-testid="oem-extra-claim">{inr(oemRecv)}</div>
@@ -1163,7 +1160,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         <div className="text-[11px] text-ink-faint self-end">
           Passed comes from Received only. Additional (Dealer) is a customer discount — separate.
         </div>
-      </div>}
+      </div>
       {hiddenFields.length > 0 && (
         <div className="text-[11px] text-ink-faint mb-3" data-testid="scheme-unavailable-note">
           Not available for this model/variant: {hiddenFields.map(([, l]) => l).join(", ")}
@@ -1843,7 +1840,8 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                 <th className="py-1 pr-2">Model</th>
                 <th className="py-1 pr-2">Variant</th>
                 <th className="py-1 pr-2">Chassis</th>
-                <th className="py-1">Invoice</th>
+                <th className="py-1 pr-2">Invoice</th>
+                <th className="py-1">Number Plate</th>
               </tr>
             </thead>
             <tbody>
@@ -1861,13 +1859,22 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                         if (i === 0) setForm((f) => ({ ...f, chassisNumber: v }));
                       }} />
                   </td>
-                  <td className="py-1">
+                  <td className="py-1 pr-2">
                     <Input data-testid={`delivery-unit-invoice-${i + 1}`}
                       value={u.invoiceNumber || ""} disabled={oemIdsLocked} placeholder="From OEM Sold"
                       onChange={(e) => {
                         const v = e.target.value;
                         setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, invoiceNumber: v } : row)));
                         if (i === 0) setForm((f) => ({ ...f, invoiceNumber: v }));
+                      }} />
+                  </td>
+                  <td className="py-1">
+                    <Input data-testid={`delivery-unit-plate-${i + 1}`}
+                      value={u.numberPlate || ""} disabled={locked} placeholder="This unit’s plate"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, numberPlate: v } : row)));
+                        if (i === 0) setForm((f) => ({ ...f, numberPlate: v }));
                       }} />
                   </td>
                 </tr>
@@ -1889,7 +1896,9 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         </Field>
           </>
         )}
+        {packUnits.length <= 1 && (
         <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
+        )}
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>
         <Field label="Insurance Agent *">
           <Select data-testid="delivery-insurance-agent" value={form.insuranceAgentId}
