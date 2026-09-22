@@ -188,6 +188,11 @@ async def test_oem_billing_creates_second_unit_on_same_mobile(client):
         "deliveryStatus": "Delivered", "deliveryDate": "2026-09-02",
         "chassisNumber": "MD9BILLUNIT1", "invoiceNumber": "CINV-U1",
     })
+    await server.db.oem_sold.delete_many({"chassis": "MD9BILLUNIT1"})
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9BILLUNIT1", "mobile": "9812200444", "invoiceNumber": "CINV-U1",
+        "customerName": "Two Units", "soldDate": "2026-09-02", "coulsonStatus": "SOLD",
+    })
     await server.db.oem_sold.insert_one({
         "chassis": chassis, "mobile": "9812200444", "invoiceNumber": "CINV-U2",
         "customerName": "Two Units", "soldDate": "2026-09-06", "coulsonStatus": "SOLD",

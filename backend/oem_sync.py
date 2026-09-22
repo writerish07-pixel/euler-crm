@@ -1115,7 +1115,10 @@ def classify_oem_billing(sold_rows, leads):
             continue
         matches = []
         for lead in live:
-            mine = occupied - {_norm_chassis(lead.get("chassisNumber"))}
+            have = _norm_chassis(lead.get("chassisNumber"))
+            if have and have != chassis:
+                continue
+            mine = occupied - {have}
             hit = match_sold_row(lead, [sold], mine)
             if hit and _norm_chassis(hit.get("chassis")) == chassis:
                 matches.append(lead)
