@@ -703,7 +703,7 @@ async def _fill_delivery_from_sold(lead, body):
         body.numberPlate = match["numberPlate"]
     sold_units = match.get("units") or []
     existing = list(getattr(body, "units", None) or (lead or {}).get("units") or [])
-    if sold_units or oem_sync.is_same_order_pack(lead) or len(existing) > 1:
+    if oem_sync.is_same_order_pack(lead) or len(existing) > 1 or len(sold_units) > 1:
         body.units = _merge_delivery_units(existing, sold_units, lead)
         if body.units:
             if not str(getattr(body, "chassisNumber", "") or "").strip():
@@ -1363,16 +1363,7 @@ class DeliveryIn(BaseModel):
     insurerName: str = ""
     insuranceAgentId: str = ""     # broker paying the payout; picked at delivery
     feedback: str = ""
-    units: Optional[List["DeliveryUnitIn"]] = None
-
-
-class DeliveryUnitIn(BaseModel):
-    sno: int = 0
-    model: str = ""
-    variant: str = ""
-    chassisNumber: str = ""
-    invoiceNumber: str = ""
-    numberPlate: str = ""
+    units: Optional[List[Dict[str, Any]]] = None
 
 
 class CloseIn(BaseModel):

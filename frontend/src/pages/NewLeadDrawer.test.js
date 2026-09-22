@@ -108,7 +108,7 @@ test("executive create form shows OEM extra support and another-vehicle checkbox
   expect(document.querySelector('[data-testid="another-vehicle-block"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="another-vehicle-check"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="same-order-check"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="another-vehicle-block"]').textContent).toMatch(/another unit/i);
+  expect(document.querySelector('[data-testid="another-vehicle-block"]').textContent).toMatch(/another vehicle/i);
   await act(async () => { root.unmount(); });
 });
 
