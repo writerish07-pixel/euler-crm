@@ -832,3 +832,142 @@ async def test_pack_units_own_oem_extra_scheme(client):
     assert again.status_code == 200, again.text
     stable = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(stable.get("customerPayable")) == pack
+
+
+def _same_sku_pack_lead(n=5, extra_u1=48000, extra_lead=240000, addl_u1=11500,
+                        addl_lead=115000, extra_passed=None):
+    """Messenger-style same-SKU pack. Extra / additional only on unit 1 or lead."""
+    if extra_passed is None:
+        extra_passed = extra_u1
+    units = []
+    for i in range(n):
+        rec = {
+            "sno": i + 1,
+            "model": "Turbo Max",
+            "variant": "Maxx (PV)",
+            "exShowroom": 849499,
+            "rto": 0,
+            "insuranceAmount": 0,
+        }
+        if i == 0:
+            if extra_u1 is not None:
+                rec["oemExtraSupportReceived"] = extra_u1
+                rec["oemExtraSupportPassed"] = extra_passed
+            if addl_u1 is not None:
+                rec["additionalDiscount"] = addl_u1
+        units.append(rec)
+    return {
+        "leadId": "LD-SAME-SKU",
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)",
+        "exShowroom": 849499,
+        "oemExtraSupportReceived": extra_lead,
+        "oemExtraSupportPassed": extra_lead if extra_u1 and extra_passed == extra_u1 else extra_lead,
+        "additionalDiscount": addl_lead,
+        "units": units,
+    }
+
+
+def test_fill_copies_per_unit_extra_and_additional_to_same_sku_siblings():
+    lead = _same_sku_pack_lead()
+    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert changed is True
+    assert len(filled) == 5
+    for u in filled:
+        assert ce.num(u.get("oemExtraSupportReceived")) == 48000
+        assert ce.num(u.get("oemExtraSupportPassed")) == 48000
+        assert ce.num(u.get("additionalDiscount")) == 11500
+    rolled = server._pack_oem_extra_totals({**lead, "units": filled}, filled)
+    assert rolled["oemExtraSupportReceived"] == 240000
+    assert rolled["oemExtraSupportPassed"] == 240000
+
+
+def test_fill_splits_pack_oem_total_dumped_on_unit1():
+    lead = _same_sku_pack_lead(extra_u1=240000, extra_lead=240000, extra_passed=240000)
+    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert changed is True
+    for u in filled:
+        assert ce.num(u.get("oemExtraSupportReceived")) == 48000
+        assert ce.num(u.get("oemExtraSupportPassed")) == 48000
+        assert ce.num(u.get("additionalDiscount")) == 11500
+
+
+def test_fill_does_not_copy_pack_leftover_additional():
+    lead = _same_sku_pack_lead(addl_u1=None, addl_lead=115000)
+    lead["units"][0].pop("additionalDiscount", None)
+    filled, _changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    for u in filled:
+        assert ce.num(u.get("additionalDiscount")) == 0
+    lead2 = _same_sku_pack_lead(addl_u1=115000, addl_lead=115000)
+    filled2, _ = server._fill_same_sku_pack_scheme(lead2, lead2["units"])
+    assert ce.num(filled2[0].get("additionalDiscount")) == 115000
+    for u in filled2[1:]:
+        assert ce.num(u.get("additionalDiscount")) == 0
+
+
+def test_fill_does_not_overwrite_sibling_own_extra():
+    lead = _same_sku_pack_lead(n=3, extra_lead=58000)
+    lead["units"][1]["oemExtraSupportReceived"] = 10000
+    lead["units"][1]["oemExtraSupportPassed"] = 3000
+    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert changed is True
+    assert ce.num(filled[0].get("oemExtraSupportReceived")) == 48000
+    assert ce.num(filled[1].get("oemExtraSupportReceived")) == 10000
+    assert ce.num(filled[1].get("oemExtraSupportPassed")) == 3000
+    assert ce.num(filled[2].get("oemExtraSupportReceived")) == 48000
+    assert ce.num(filled[2].get("additionalDiscount")) == 11500
+
+
+def test_fill_skips_different_sku_pack():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max",
+        "exShowroom": 500000,
+        "oemExtraSupportReceived": 8000,
+        "additionalDiscount": 5000,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "A", "exShowroom": 500000,
+             "oemExtraSupportReceived": 8000, "oemExtraSupportPassed": 0,
+             "additionalDiscount": 5000},
+            {"sno": 2, "model": "Storm", "variant": "B", "exShowroom": 700000},
+        ],
+    }
+    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert changed is False
+    assert "oemExtraSupportReceived" not in filled[1]
+    assert ce.num(filled[1].get("additionalDiscount")) == 0
+
+
+def test_same_sku_pack_payables_each_get_extra_and_additional():
+    lead = _same_sku_pack_lead()
+    total, units, _filled, _pending = server._refresh_unit_payables(lead, None)
+    assert len(units) == 5
+    pays = [ce.num(u.get("customerPayable")) for u in units]
+    assert all(p == pays[0] for p in pays)
+    one = ce.compute_commercial_totals(server.lead_to_snapshot(
+        server._lead_overlay_unit({**lead, "units": units}, units[0], 0)
+    ), None)["customerPayable"]
+    assert pays[0] == one
+    # 8,49,499 − 48,000 OEM passed − 11,500 dealer funded
+    assert pays[0] == 789999
+    assert total == ce.round2(789999 * 5)
+    for u in units:
+        assert ce.num(u.get("oemExtraSupportPassed")) == 48000
+        assert ce.num(u.get("additionalDiscount")) == 11500
+
+
+def test_pack_billing_summary_uses_per_unit_48000_and_11500():
+    lead = _same_sku_pack_lead()
+    units, _ = server._prepare_pack_unit_scheme(lead, lead["units"])
+    overlays = [server._lead_overlay_unit({**lead, "units": units}, u, i)
+                for i, u in enumerate(units)]
+    s = ce.build_delivery_billing_summary({**lead, "units": units,
+                                           "customerPayable": 3949995},
+                                          pack_units=overlays)
+    assert len(s["units"]) == 5
+    for row in s["units"]:
+        assert ce.num(row["oemExtraSupportPassed"]) == 48000
+        assert ce.num(row["additionalDiscount"]) == 11500
+    assert ce.num(s["totals"]["oemExtraSupportPassed"]) == 240000
+    assert ce.num(s["totals"]["additionalDiscount"]) == 57500

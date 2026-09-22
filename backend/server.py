@@ -5483,10 +5483,199 @@ def _seed_unit1_oem_extra_from_lead(lead, units):
     return units, True
 
 
+def _unit_sku_key(lead, unit, index=0):
+    """Normalized (model, variant) for pack same-SKU checks."""
+    u = unit or {}
+    model = str(
+        u.get("model") or u.get("interestedModel")
+        or ((lead or {}).get("interestedModel") if index == 0 else "")
+        or ""
+    ).strip().lower()
+    variant = str(
+        u.get("variant") or ((lead or {}).get("variant") if index == 0 else "") or ""
+    ).strip().lower()
+    return (model, variant)
+
+
+def _pack_units_same_sku(lead, units):
+    rows = list(units or [])
+    if not oem_sync.is_same_order_pack(lead or {}) or len(rows) < 2:
+        return False
+    keys = [_unit_sku_key(lead, u, i) for i, u in enumerate(rows)]
+    if not keys[0][0]:
+        return False
+    return all(k == keys[0] for k in keys)
+
+
+def _evenly_split_amount(total, n):
+    n = int(n or 0)
+    if n <= 0:
+        return 0.0
+    per = ce.round2(ce.num(total) / n)
+    if abs(per * n - ce.round2(ce.num(total))) > 1:
+        return 0.0
+    return per
+
+
+def _is_round_rupees(amount):
+    return abs(ce.round2(amount) % 500) < 0.005
+
+
+def _looks_like_pack_oem_total(amount, n, gvc):
+    """True when unit-1 / lead extra is the pack roll-up, not one unit's extra.
+
+    ₹48,000 on a 3- or 5-unit order is a normal per-unit extra — do not split
+    it to ₹16,000 / ₹9,600. ₹2,40,000 on five units is the pack total.
+    """
+    amount = ce.round2(ce.num(amount))
+    n = int(n or 0)
+    if amount <= 0 or n < 2:
+        return False
+    per = _evenly_split_amount(amount, n)
+    if per < 1000:
+        return False
+    gvc = ce.num(gvc)
+    if gvc > 0 and amount > gvc:
+        return True
+    if amount >= 100000 and _is_round_rupees(per):
+        return True
+    gvc_cut = 0.10 * gvc if gvc > 0 else 0
+    if n == 2 and amount > gvc_cut and amount >= 50000 and _is_round_rupees(per):
+        return True
+    return False
+
+
+def _looks_like_per_unit_additional(amount, gvc):
+    """Dealer-funded additional that belongs on one unit, not a pack leftover."""
+    amount = ce.round2(ce.num(amount))
+    gvc = ce.num(gvc)
+    if amount <= 0:
+        return False
+    if gvc > 0 and amount > gvc:
+        return False
+    if gvc > 0 and amount > 0.08 * gvc:
+        return False
+    return True
+
+
+def _unit_extra_open(unit):
+    """Sibling can inherit extra: missing keys or both values still ₹0."""
+    u = unit or {}
+    return ce.num(u.get("oemExtraSupportReceived")) <= 0 and ce.num(u.get("oemExtraSupportPassed")) <= 0
+
+
+def _unit_addl_open(unit):
+    return ce.num((unit or {}).get("additionalDiscount")) <= 0
+
+
+def _fill_same_sku_pack_scheme(lead, units):
+    """Same-SKU pack: write unit-1 OEM extra + additional onto empty siblings.
+
+    OEM extra on the lead is a roll-up. If unit 1 still holds that pack total
+    (₹2,40,000 on a 5-unit order), split it. If unit 1 already holds the
+    per-unit figure (₹48,000), copy that. Additional (dealer-funded) is copied
+    from unit 1 only when it looks like a per-unit discount — never a leftover
+    pack figure on the lead (₹1,15,000).
+    """
+    rows = [dict(u or {}) for u in (units or [])]
+    if not _pack_units_same_sku(lead, rows):
+        return list(units or []), False
+    n = len(rows)
+    u0 = rows[0]
+    gvc = ce.num(u0.get("exShowroom") or (lead or {}).get("exShowroom"))
+    changed = False
+
+    u1_recv = ce.round2(ce.num(u0.get("oemExtraSupportReceived")))
+    u1_pass = ce.round2(min(ce.num(u0.get("oemExtraSupportPassed")), u1_recv))
+    lead_recv = ce.round2(ce.num((lead or {}).get("oemExtraSupportReceived")))
+    lead_pass = ce.round2(min(ce.num((lead or {}).get("oemExtraSupportPassed")), lead_recv))
+
+    per_recv = 0.0
+    per_pass = 0.0
+    split_unit1 = False
+    extra_open = [i for i in range(1, n) if _unit_extra_open(rows[i])]
+    all_siblings_open = len(extra_open) == n - 1
+
+    if extra_open:
+        if u1_recv > 0 and lead_recv > u1_recv + 0.005 and abs(lead_recv - u1_recv * n) < 1:
+            per_recv = u1_recv
+            if abs(lead_pass - lead_recv) < 1 and lead_pass > 0:
+                per_pass = per_recv
+            elif u1_pass > 0 and abs(u1_pass * n - lead_pass) < 1:
+                per_pass = u1_pass
+            else:
+                per_pass = u1_pass
+        elif all_siblings_open and u1_recv > 0 and _looks_like_pack_oem_total(u1_recv, n, gvc):
+            per_recv = _evenly_split_amount(u1_recv, n)
+            if u1_pass > 0 and (abs(u1_pass - u1_recv) < 1 or _looks_like_pack_oem_total(u1_pass, n, gvc)):
+                per_pass = per_recv if abs(u1_pass - u1_recv) < 1 else _evenly_split_amount(u1_pass, n)
+            elif lead_pass > 0 and (abs(lead_pass - lead_recv) < 1 or _looks_like_pack_oem_total(lead_pass, n, gvc)):
+                per_pass = per_recv if abs(lead_pass - lead_recv) < 1 else _evenly_split_amount(lead_pass, n)
+            else:
+                per_pass = 0.0
+            split_unit1 = per_recv > 0
+        elif u1_recv > 0 and not _looks_like_pack_oem_total(u1_recv, n, gvc):
+            per_recv = u1_recv
+            per_pass = u1_pass
+        elif all_siblings_open and lead_recv > 0 and _looks_like_pack_oem_total(lead_recv, n, gvc):
+            per_recv = _evenly_split_amount(lead_recv, n)
+            if lead_pass > 0 and (abs(lead_pass - lead_recv) < 1 or _looks_like_pack_oem_total(lead_pass, n, gvc)):
+                per_pass = per_recv if abs(lead_pass - lead_recv) < 1 else _evenly_split_amount(lead_pass, n)
+            split_unit1 = per_recv > 0
+        elif lead_recv > 0 and not _looks_like_pack_oem_total(lead_recv, n, gvc) and u1_recv <= 0:
+            per_recv = lead_recv
+            per_pass = lead_pass
+
+        if per_recv > 0:
+            per_pass = ce.round2(min(per_pass, per_recv))
+            if split_unit1:
+                if (ce.round2(ce.num(u0.get("oemExtraSupportReceived"))) != per_recv
+                        or ce.round2(ce.num(u0.get("oemExtraSupportPassed"))) != per_pass):
+                    u0["oemExtraSupportReceived"] = per_recv
+                    u0["oemExtraSupportPassed"] = per_pass
+                    rows[0] = u0
+                    changed = True
+            for i in extra_open:
+                rec = dict(rows[i])
+                rec["oemExtraSupportReceived"] = per_recv
+                rec["oemExtraSupportPassed"] = per_pass
+                rows[i] = rec
+                changed = True
+
+    u1_addl = None
+    if "additionalDiscount" in u0:
+        u1_addl = ce.round2(max(0.0, ce.num(u0.get("additionalDiscount"))))
+    elif _looks_like_per_unit_additional(ce.num((lead or {}).get("additionalDiscount")), gvc):
+        u1_addl = ce.round2(max(0.0, ce.num((lead or {}).get("additionalDiscount"))))
+        u0 = dict(u0)
+        u0["additionalDiscount"] = u1_addl
+        rows[0] = u0
+        changed = True
+
+    if u1_addl is not None and _looks_like_per_unit_additional(u1_addl, gvc):
+        for i in range(1, n):
+            if not _unit_addl_open(rows[i]):
+                continue
+            rec = dict(rows[i])
+            rec["additionalDiscount"] = u1_addl
+            rows[i] = rec
+            changed = True
+
+    return rows, changed
+
+
+def _prepare_pack_unit_scheme(lead, units):
+    """Seed historical lead extra onto unit 1, then fill empty same-SKU siblings."""
+    rows = list(units or [])
+    rows, seeded = _seed_unit1_oem_extra_from_lead(lead, rows)
+    rows, filled = _fill_same_sku_pack_scheme(lead, rows)
+    return rows, seeded or filled
+
+
 def _pack_oem_extra_totals(lead, units=None):
     """Sum each unit's OEM Extra. Received is a claim; Passed discounts that unit."""
     rows = list(units) if units is not None else _ensure_lead_units(lead)
-    rows, _ = _seed_unit1_oem_extra_from_lead(lead, rows)
+    rows, _ = _prepare_pack_unit_scheme(lead, rows)
     recv = 0.0
     passed = 0.0
     for u in rows:
@@ -5549,7 +5738,7 @@ def _refresh_unit_payables(lead, scheme_rows=None):
     units = list((lead or {}).get("units") or [])
     if not units and (lead or {}).get("sameOrderMultiUnit"):
         units = [_unit1_from_lead(lead)]
-    units, _ = _seed_unit1_oem_extra_from_lead(lead, units)
+    units, _ = _prepare_pack_unit_scheme(lead, units)
     if not units:
         return None, units, 0, 0
     total = 0.0
@@ -5635,6 +5824,9 @@ async def _hydrate_pack_unit_prices(lead):
                 u[k] = v
         units[i] = u
         changed = True
+    units, filled = _prepare_pack_unit_scheme(lead, units)
+    if filled:
+        changed = True
     if not changed:
         return lead, False
     lead = dict(lead)
@@ -5654,7 +5846,7 @@ async def _hydrate_pack_unit_prices(lead):
 
 def _pack_overview_commercials(lead, scheme_rows=None):
     """Sum each unit's own GVC / discount / payable. Never apply unit-1 scheme to the pack."""
-    units, _ = _seed_unit1_oem_extra_from_lead(lead, _ensure_lead_units(lead))
+    units, _ = _prepare_pack_unit_scheme(lead, _ensure_lead_units(lead))
     gvc = tcs = disc = passed = pay = 0.0
     for i, u in enumerate(units):
         if not _unit_has_price_amount(lead, u, i):
@@ -9007,7 +9199,7 @@ async def _upsert_delivery_billing_summary(lead_id):
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
     pack_overlays = None
     if oem_sync.is_same_order_pack(lead):
-        units, _ = _seed_unit1_oem_extra_from_lead(lead, _ensure_lead_units(lead))
+        units, _ = _prepare_pack_unit_scheme(lead, _ensure_lead_units(lead))
         pack_overlays = [_lead_overlay_unit(lead, u, i) for i, u in enumerate(units)]
     summary = ce.build_delivery_billing_summary(lead, pack_units=pack_overlays)
     now = now_iso()
