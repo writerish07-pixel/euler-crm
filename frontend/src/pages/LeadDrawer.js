@@ -785,7 +785,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
     };
     CHARGE_FIELDS.forEach(([k]) => (f[k] = next[k] || 0));
     setForm(f);
-  }, [lead.leadId, unitSno]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lead.leadId, unitSno]); // form reset is keyed only to the selected pack unit
 
   // Ex-Showroom is locked to Price Master for this unit's model/variant.
   useEffect(() => {
@@ -983,7 +983,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       inferred[k] = Number(v) > 0;
     });
     setUsedMap(inferred);
-  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate]); // scheme form reset is keyed to the selected pack unit
   useEffect(() => {
     if (!lead.leadId || !schemeDate) return;
     get(`/leads/${lead.leadId}/scheme-rules`, { on: schemeDate, ...(units ? { unit: unitSno } : {}) })
