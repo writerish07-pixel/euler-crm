@@ -5512,6 +5512,7 @@ def _lead_overlay_unit(lead, unit, index=0):
     out["variant"] = u.get("variant") or out.get("variant")
     pack = oem_sync.is_same_order_pack(lead or {})
     if index > 0 or pack:
+        out.pop("schemeAllocationSummary", None)
         for k in UNIT_COMMERCIAL_KEYS:
             out.pop(k, None)
         if index > 0:
@@ -5524,23 +5525,19 @@ def _lead_overlay_unit(lead, unit, index=0):
             out["schemeAllocation"] = ""
         else:
             _copy_unit_commercials(lead, out)
-            addl = ce.num(out.get("additionalDiscount"))
-            gvc = ce.num(u.get("exShowroom") or lead.get("exShowroom"))
-            if "additionalDiscount" not in u and addl > gvc > 0:
-                out["additionalDiscount"] = 0
-            # Lead-level extra after a pack roll-up is the SUM. Unit 1 must
-            # not inherit that sum — only its own keys (or a historical seed).
+            # Pack lead fields are roll-ups / leftovers. Unit 1 only keeps
+            # additional and OEM extra that are stored on the unit itself.
             if pack:
-                if "oemExtraSupportReceived" in u or "oemExtraSupportPassed" in u:
-                    out["oemExtraSupportReceived"] = ce.num(u.get("oemExtraSupportReceived"))
-                    out["oemExtraSupportPassed"] = ce.num(u.get("oemExtraSupportPassed"))
-                elif any(
-                    "oemExtraSupportReceived" in (other or {})
-                    or "oemExtraSupportPassed" in (other or {})
-                    for other in ((lead or {}).get("units") or [])
-                ):
+                if "additionalDiscount" not in u:
+                    out["additionalDiscount"] = 0
+                if "oemExtraSupportReceived" not in u and "oemExtraSupportPassed" not in u:
                     out["oemExtraSupportReceived"] = 0
                     out["oemExtraSupportPassed"] = 0
+            else:
+                addl = ce.num(out.get("additionalDiscount"))
+                gvc = ce.num(u.get("exShowroom") or lead.get("exShowroom"))
+                if "additionalDiscount" not in u and addl > gvc > 0:
+                    out["additionalDiscount"] = 0
     for k in UNIT_COMMERCIAL_KEYS:
         if k in u:
             out[k] = u[k]
@@ -5572,7 +5569,8 @@ def _refresh_unit_payables(lead, scheme_rows=None):
             u["customerPayable"] = 0
             units[i] = u
             continue
-        if u.get("useDealPrice") and ce.num(u.get("cxDemand")) > 0:
+        pack = oem_sync.is_same_order_pack(lead)
+        if (not pack) and u.get("useDealPrice") and ce.num(u.get("cxDemand")) > 0:
             pay = ce.round2(ce.num(u.get("cxDemand")))
         else:
             snap = lead_to_snapshot(_lead_overlay_unit(lead, u, i))
@@ -9007,7 +9005,11 @@ async def _upsert_delivery_billing_summary(lead_id):
     which broke /leads/{id}/360 for every Delivered lead in production.
     """
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
-    summary = ce.build_delivery_billing_summary(lead)
+    pack_overlays = None
+    if oem_sync.is_same_order_pack(lead):
+        units, _ = _seed_unit1_oem_extra_from_lead(lead, _ensure_lead_units(lead))
+        pack_overlays = [_lead_overlay_unit(lead, u, i) for i, u in enumerate(units)]
+    summary = ce.build_delivery_billing_summary(lead, pack_units=pack_overlays)
     now = now_iso()
     summary["updatedAt"] = now
     existing = await db.billing_summaries.find_one({"leadId": lead_id}) or {}

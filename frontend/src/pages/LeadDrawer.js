@@ -1999,10 +1999,53 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
             <div className="text-[10px] uppercase tracking-wide text-ink-faint">Invoice / Delivery</div>
             <div className="font-mono font-semibold">{summary.invoiceNumber || "—"}</div>
             <div className="text-xs text-ink-soft">{fmtDate(summary.deliveryDate) || "—"}</div>
-            <div className="text-xs text-ink-faint">{summary.leadId} · {veh.model} {veh.variant}</div>
+            <div className="text-xs text-ink-faint">{summary.leadId} · {veh.model} {veh.variant}{(summary.units || []).length > 1 ? ` · ${(summary.units || []).length} units` : ""}</div>
+            {(summary.units || []).length <= 1 && (
             <div className="text-xs text-ink-faint">Chassis: {veh.chassisNumber || "—"}</div>
+            )}
           </div>
         </div>
+
+        {(summary.units || []).length > 1 && (
+          <div className="mb-3 overflow-x-auto" data-testid="billing-summary-units">
+            <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-2 mb-1">Units on this order</h2>
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-left text-ink-faint uppercase tracking-wide">
+                  <th className="py-1 pr-2">S.No.</th>
+                  <th className="py-1 pr-2">Chassis</th>
+                  <th className="py-1 pr-2">Invoice</th>
+                  <th className="py-1 pr-2">Plate</th>
+                  <th className="py-1 pr-2 text-right">Deal</th>
+                  <th className="py-1 pr-2 text-right">Dealer funded</th>
+                  <th className="py-1 pr-2 text-right">OEM Extra passed</th>
+                  <th className="py-1 text-right">Payable</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.units.map((u) => (
+                  <tr key={u.sno} data-testid={`billing-summary-unit-${u.sno}`}>
+                    <td className="py-1 pr-2 font-mono">{u.sno}{u.model ? ` · ${u.model}` : ""}</td>
+                    <td className="py-1 pr-2 font-mono">{u.chassisNumber || "—"}</td>
+                    <td className="py-1 pr-2 font-mono">{u.invoiceNumber || "—"}</td>
+                    <td className="py-1 pr-2 font-mono">{u.numberPlate || "—"}</td>
+                    <td className="py-1 pr-2 text-right font-mono">{inr(u.grossVehicleCost)}</td>
+                    <td className="py-1 pr-2 text-right font-mono">{inr(u.additionalDiscount)}</td>
+                    <td className="py-1 pr-2 text-right font-mono">{inr(u.oemExtraSupportPassed)}</td>
+                    <td className="py-1 text-right font-mono">{inr(u.customerPayable)}</td>
+                  </tr>
+                ))}
+                <tr className="font-semibold">
+                  <td className="py-1 pr-2" colSpan={4}>Pack total</td>
+                  <td className="py-1 pr-2 text-right font-mono">{inr(t.grossVehicleCost)}</td>
+                  <td className="py-1 pr-2 text-right font-mono">{inr(t.additionalDiscount)}</td>
+                  <td className="py-1 pr-2 text-right font-mono">{inr(t.oemExtraSupportPassed)}</td>
+                  <td className="py-1 text-right font-mono">{inr(t.tallyBillTotal ?? t.customerPayable)}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
 
         <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Customer charges (full amount on Tally)</h2>
         <table className="w-full text-sm">

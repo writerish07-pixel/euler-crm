@@ -634,6 +634,79 @@ def test_pack_unit_overlay_keeps_own_oem_extra():
     assert p2["customerPayable"] == ce.round2(p2_plain["customerPayable"] - 3000)
 
 
+def test_overlay_does_not_dump_pack_extra_or_additional_on_unit1():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max",
+        "exShowroom": 849499,
+        "additionalDiscount": 115000,
+        "oemExtraSupportReceived": 240000,
+        "oemExtraSupportPassed": 240000,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "exShowroom": 849499,
+             "additionalDiscount": 115000,
+             "oemExtraSupportReceived": 48000, "oemExtraSupportPassed": 48000,
+             "chassisNumber": "CH1", "invoiceNumber": "INV1"},
+            {"sno": 2, "model": "Turbo Max", "exShowroom": 849499,
+             "additionalDiscount": 115000,
+             "oemExtraSupportReceived": 48000, "oemExtraSupportPassed": 48000,
+             "chassisNumber": "CH2", "invoiceNumber": "INV2"},
+        ],
+    }
+    o1 = server._lead_overlay_unit(lead, lead["units"][0], 0)
+    o2 = server._lead_overlay_unit(lead, lead["units"][1], 1)
+    assert ce.num(o1.get("oemExtraSupportPassed")) == 48000
+    assert ce.num(o2.get("oemExtraSupportPassed")) == 48000
+    assert ce.num(o1.get("additionalDiscount")) == 115000
+    assert ce.num(o2.get("additionalDiscount")) == 115000
+    p1 = ce.compute_commercial_totals(server.lead_to_snapshot(o1), None)["customerPayable"]
+    p2 = ce.compute_commercial_totals(server.lead_to_snapshot(o2), None)["customerPayable"]
+    assert p1 == p2
+    dumped = ce.compute_commercial_totals(server.lead_to_snapshot({
+        **o1, "oemExtraSupportReceived": 240000, "oemExtraSupportPassed": 240000,
+    }), None)["customerPayable"]
+    assert p1 > dumped
+
+
+def test_pack_billing_summary_lists_each_unit_then_totals():
+    lead = {
+        "leadId": "LD-PACK-BILL",
+        "customerName": "Messenger SCS",
+        "sameOrderMultiUnit": True,
+        "customerPayable": 1372998,
+        "totalReceived": 0,
+        "customerOutstanding": 1372998,
+        "oemExtraSupportReceived": 96000,
+        "oemExtraSupportPassed": 96000,
+        "additionalDiscount": 230000,
+    }
+    overlays = []
+    for i, (ch, inv) in enumerate((("CH1", "INV1"), ("CH2", "INV2")), start=1):
+        overlays.append({
+            "sno": i, "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "exShowroom": 849499, "rto": 0, "insuranceAmount": 0,
+            "additionalDiscount": 115000,
+            "oemExtraSupportReceived": 48000, "oemExtraSupportPassed": 48000,
+            "chassisNumber": ch, "invoiceNumber": inv, "numberPlate": f"P{i}",
+            "customerPayable": 686499,
+        })
+    s = ce.build_delivery_billing_summary(lead, pack_units=overlays)
+    assert s.get("pack") is True
+    assert len(s["units"]) == 2
+    assert s["units"][0]["chassisNumber"] == "CH1"
+    assert s["units"][0]["invoiceNumber"] == "INV1"
+    assert s["units"][1]["chassisNumber"] == "CH2"
+    assert ce.num(s["units"][0]["oemExtraSupportPassed"]) == 48000
+    assert ce.num(s["units"][1]["oemExtraSupportPassed"]) == 48000
+    assert ce.num(s["units"][0]["additionalDiscount"]) == 115000
+    assert ce.num(s["totals"]["oemExtraSupportPassed"]) == 96000
+    assert ce.num(s["totals"]["additionalDiscount"]) == 230000
+    assert ce.num(s["totals"]["grossVehicleCost"]) == 1698998
+    assert ce.num(s["units"][0]["tallyBillTotal"]) == ce.num(s["units"][1]["tallyBillTotal"])
+    assert ce.num(s["totals"]["tallyBillTotal"]) == ce.round2(
+        ce.num(s["units"][0]["tallyBillTotal"]) + ce.num(s["units"][1]["tallyBillTotal"]))
+
+
 def test_seed_unit1_oem_extra_once_from_lead():
     lead = {
         "sameOrderMultiUnit": True,

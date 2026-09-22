@@ -1644,39 +1644,23 @@ def _gst_rate_fraction():
     return max(0.0, min(v, 0.5))
 
 
-def build_delivery_billing_summary(lead, *, gst_rate=None):
-    """Build a Delivery Billing Summary for accounts to enter the customer bill in Tally.
-
-    Tally customer bill = full amount taken from the customer:
-      gross charges (ex-showroom + RTO + insurance + other customer charges)
-      − benefits actually passed to the customer only.
-
-    Scheme on the lead with ₹0 passed → no discount line on the invoice.
-    OEM retained / claims / dealer margins → doNotPostInTally (not on customer bill).
-
-    This is intentionally NOT a GST tax invoice — Tally remains the legal books.
-    """
-    lead = lead or {}
-    rate = _gst_rate_fraction() if gst_rate is None else float(gst_rate)
-    if rate > 1:
-        rate = rate / 100.0
-
-    ex = round2(num(lead.get("exShowroom")))
-    rto = round2(num(lead.get("rto")))
-    # Self-arranged insurance is not a dealer bill line.
-    if normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) == "self":
+def _billing_charge_lines(s):
+    """Customer charge lines for one vehicle snapshot (not a pack roll-up)."""
+    s = s or {}
+    ex = round2(num(s.get("exShowroom")))
+    rto = round2(num(s.get("rto")))
+    if normalize_insurance_arranged_by(s.get("insuranceArrangedBy")) == "self":
         insurance = 0.0
     else:
-        insurance = round2(num(lead.get("insuranceAmount")))
-    accessories = round2(num(lead.get("accessoriesAmount")))
-    handling = round2(num(lead.get("handlingCharges")))
-    trc = round2(num(lead.get("trc")))
-    fastag = round2(num(lead.get("fastag")))
-    ew = round2(num(lead.get("extendedWarranty")))
-    rsa = round2(num(lead.get("rsaAmc")))
-    other = round2(num(lead.get("otherCharges")))
+        insurance = round2(num(s.get("insuranceAmount")))
+    accessories = round2(num(s.get("accessoriesAmount")))
+    handling = round2(num(s.get("handlingCharges")))
+    trc = round2(num(s.get("trc")))
+    fastag = round2(num(s.get("fastag")))
+    ew = round2(num(s.get("extendedWarranty")))
+    rsa = round2(num(s.get("rsaAmc")))
+    other = round2(num(s.get("otherCharges")))
     gross = round2(ex + rto + insurance + accessories + handling + trc + fastag + ew + rsa + other)
-
     charge_lines = [
         {"code": "exShowroom", "label": "Ex-Showroom (incl. GST)", "amount": ex},
         {"code": "rto", "label": "RTO / Registration", "amount": rto},
@@ -1694,17 +1678,24 @@ def build_delivery_billing_summary(lead, *, gst_rate=None):
     ):
         if amt > 0:
             charge_lines.append({"code": code, "label": label, "amount": amt})
+    return charge_lines, gross, ex
 
+
+def _billing_discount_lines(s, *, use_allocation_summary=True):
+    """Benefits passed on one vehicle. Never use a pack roll-up here."""
+    s = s or {}
     discount_lines = []
     seen_codes = set()
-    alloc = lead.get("schemeAllocationSummary")
-    if isinstance(alloc, str):
-        try:
-            import json as _json
-            alloc = _json.loads(alloc)
-        except Exception:
-            alloc = None
-    comps = (alloc or {}).get("components") if isinstance(alloc, dict) else None
+    comps = None
+    if use_allocation_summary:
+        alloc = s.get("schemeAllocationSummary")
+        if isinstance(alloc, str):
+            try:
+                import json as _json
+                alloc = _json.loads(alloc)
+            except Exception:
+                alloc = None
+        comps = (alloc or {}).get("components") if isinstance(alloc, dict) else None
     if comps:
         for c in comps:
             passed = round2(num(c.get("customerBenefit")))
@@ -1727,7 +1718,7 @@ def build_delivery_billing_summary(lead, *, gst_rate=None):
                 "fundHint": fund,
             })
     else:
-        breakup = lead.get("benefitPassedBreakup")
+        breakup = s.get("benefitPassedBreakup")
         if isinstance(breakup, str):
             try:
                 import json as _json
@@ -1747,8 +1738,7 @@ def build_delivery_billing_summary(lead, *, gst_rate=None):
                     "fundHint": "Scheme (passed to customer)",
                 })
 
-    # Dealer Additional Discount is often stored on the lead even when not in breakup.
-    add_disc = round2(num(lead.get("additionalDiscount")))
+    add_disc = round2(num(s.get("additionalDiscount")))
     if add_disc > 0 and "additionalDiscount" not in seen_codes:
         discount_lines.append({
             "code": "additionalDiscount",
@@ -1758,7 +1748,7 @@ def build_delivery_billing_summary(lead, *, gst_rate=None):
         })
         seen_codes.add("additionalDiscount")
 
-    oem_extra = compute_oem_extra_support(lead)
+    oem_extra = compute_oem_extra_support(s)
     if oem_extra["customerBenefit"] > 0 and OEM_EXTRA_SUPPORT_KEY not in seen_codes:
         discount_lines.append({
             "code": OEM_EXTRA_SUPPORT_KEY,
@@ -1766,6 +1756,217 @@ def build_delivery_billing_summary(lead, *, gst_rate=None):
             "amount": round2(-oem_extra["customerBenefit"]),
             "fundHint": "OEM Extra Support",
         })
+    return discount_lines, oem_extra, add_disc
+
+
+def _sum_discount_lines(lines):
+    merged = {}
+    order = []
+    for ln in lines or []:
+        key = ln.get("code") or ln.get("label")
+        if key not in merged:
+            merged[key] = dict(ln)
+            order.append(key)
+        else:
+            merged[key]["amount"] = round2(num(merged[key]["amount"]) + num(ln.get("amount")))
+    return [merged[k] for k in order]
+
+
+def _build_pack_delivery_billing_summary(lead, pack_units, rate):
+    """One Tally summary for a same-order pack: each unit, then pack totals."""
+    unit_rows = []
+    all_charges = []
+    all_discounts = []
+    gross = 0.0
+    benefit_total = 0.0
+    add_total = 0.0
+    oem_pass_total = 0.0
+    oem_recv_total = 0.0
+    oem_retain_total = 0.0
+    ex_total = 0.0
+    unit_pay_total = 0.0
+    for i, snap in enumerate(pack_units):
+        charges, unit_gross, ex = _billing_charge_lines(snap)
+        discounts, oem_extra, add_disc = _billing_discount_lines(
+            snap, use_allocation_summary=False)
+        unit_benefit = round2(sum(-ln["amount"] for ln in discounts))
+        after = round2(max(0.0, unit_gross - unit_benefit))
+        tcs = calculate_tcs(after)
+        unit_tally = round2(after + tcs)
+        stored_pay = round2(num(snap.get("customerPayable")))
+        unit_pay = stored_pay if stored_pay > 0 else unit_tally
+        unit_rows.append({
+            "sno": int(snap.get("sno") or i + 1),
+            "model": snap.get("interestedModel") or snap.get("model") or "",
+            "variant": snap.get("variant") or "",
+            "chassisNumber": snap.get("chassisNumber") or "",
+            "invoiceNumber": snap.get("invoiceNumber") or "",
+            "numberPlate": snap.get("numberPlate") or "",
+            "chargeLines": charges,
+            "discountLines": discounts,
+            "grossVehicleCost": unit_gross,
+            "additionalDiscount": add_disc,
+            "oemExtraSupportReceived": oem_extra["oemExtraSupportReceived"],
+            "oemExtraSupportPassed": oem_extra["oemExtraSupportPassed"],
+            "oemExtraSupportRetained": oem_extra["oemExtraSupportRetained"],
+            "customerBenefitPassed": unit_benefit,
+            "tcs": tcs,
+            "tallyBillTotal": unit_tally,
+            "customerPayable": unit_pay,
+        })
+        all_charges.extend(charges)
+        all_discounts.extend(discounts)
+        gross = round2(gross + unit_gross)
+        benefit_total = round2(benefit_total + unit_benefit)
+        add_total = round2(add_total + add_disc)
+        oem_pass_total = round2(oem_pass_total + oem_extra["oemExtraSupportPassed"])
+        oem_recv_total = round2(oem_recv_total + oem_extra["oemExtraSupportReceived"])
+        oem_retain_total = round2(oem_retain_total + oem_extra["oemExtraSupportRetained"])
+        ex_total = round2(ex_total + ex)
+        unit_pay_total = round2(unit_pay_total + unit_pay)
+
+    charge_lines = _sum_discount_lines(all_charges)
+    discount_lines = _sum_discount_lines(all_discounts)
+    after_discount = round2(max(0.0, gross - benefit_total))
+    tcs = calculate_tcs(after_discount)
+    # Per-unit TCS already sits on each row; pack Tally is the sum of unit bills.
+    tally_total = round2(sum(r["tallyBillTotal"] for r in unit_rows))
+    payable = round2(num(lead.get("customerPayable")))
+    if payable <= 0:
+        payable = unit_pay_total or tally_total
+    received = round2(num(lead.get("totalReceived")))
+    cust_os = round2(num(lead.get("customerOutstanding")))
+    if cust_os < 0:
+        cust_os = 0.0
+    excess = round2(max(0.0, received - payable)) if received > payable else 0.0
+
+    vehicle_discounts = min(ex_total, benefit_total)
+    net_vehicle_incl = round2(max(0.0, ex_total - vehicle_discounts))
+    taxable = round2(net_vehicle_incl / (1 + rate)) if rate > 0 else net_vehicle_incl
+    gst_amt = round2(net_vehicle_incl - taxable)
+    cgst = round2(gst_amt / 2)
+    sgst = round2(gst_amt - cgst)
+
+    first = unit_rows[0] if unit_rows else {}
+    do_not_post = []
+    retained = round2(num(lead.get("dealerSchemeRetained")))
+    if retained > 0:
+        do_not_post.append({
+            "label": "Scheme retained (dealer earnings — not customer discount)",
+            "amount": retained,
+        })
+    if oem_retain_total > 0:
+        do_not_post.append({
+            "label": "OEM Extra Support retained (dealer earnings)",
+            "amount": oem_retain_total,
+        })
+    company_os = round2(num(lead.get("companyOutstanding")))
+    if company_os > 0:
+        do_not_post.append({
+            "label": "OEM / company claims outstanding (Claim Register)",
+            "amount": company_os,
+        })
+    if add_total > 0:
+        do_not_post.append({
+            "label": "Of which dealer-funded additional (already in unit discounts)",
+            "amount": add_total,
+        })
+
+    return {
+        "kind": "delivery_billing_summary",
+        "pack": True,
+        "title": "Delivery Billing Summary — Tally customer bill",
+        "disclaimer": (
+            "Tally customer bill = full amount taken from customer "
+            "(Ex-Showroom + RTO + Insurance + other charges − benefits passed only). "
+            "Each unit keeps its own dealer-funded additional and OEM Extra passed. "
+            "Not a GST tax invoice — enter the legal bill in Tally."
+        ),
+        "summaryId": f"BILL-{lead.get('leadId') or 'UNKNOWN'}",
+        "leadId": lead.get("leadId") or "",
+        "invoiceNumber": first.get("invoiceNumber") or lead.get("invoiceNumber") or "",
+        "deliveryDate": lead.get("deliveryDate") or "",
+        "bookingDate": lead.get("bookingDate") or "",
+        "customer": {
+            "name": lead.get("customerName") or "",
+            "mobile": lead.get("mobile") or "",
+            "village": lead.get("village") or "",
+            "city": lead.get("city") or "",
+            "executive": lead.get("executive") or "",
+            "leadSource": lead.get("leadSource") or "",
+        },
+        "vehicle": {
+            "model": lead.get("interestedModel") or "",
+            "variant": lead.get("variant") or "",
+            "chassisNumber": first.get("chassisNumber") or lead.get("chassisNumber") or "",
+            "numberPlate": first.get("numberPlate") or lead.get("numberPlate") or "",
+            "financerName": lead.get("financerName") or "",
+            "financeRequired": lead.get("financeRequired") or "",
+            "insurerName": lead.get("insurerName") or "",
+            "insuranceArrangedBy": lead.get("insuranceArrangedBy") or "",
+            "vehicleCount": len(unit_rows),
+        },
+        "units": unit_rows,
+        "chargeLines": charge_lines,
+        "discountLines": discount_lines,
+        "noBenefitPassed": benefit_total <= 0,
+        "totals": {
+            "grossVehicleCost": gross,
+            "customerBenefitPassed": benefit_total,
+            "additionalDiscount": add_total,
+            "oemExtraSupportReceived": oem_recv_total,
+            "oemExtraSupportPassed": oem_pass_total,
+            "tcs": round2(sum(r["tcs"] for r in unit_rows)),
+            "tcsBase": after_discount,
+            "netAfterBenefits": after_discount,
+            "tallyBillTotal": tally_total,
+            "customerPayable": payable,
+            "totalReceived": received,
+            "customerOutstanding": cust_os,
+            "excessReceived": excess,
+            "bookingAmount": round2(num(lead.get("bookingAmount"))),
+        },
+        "gstReference": {
+            "ratePct": round2(rate * 100),
+            "netVehicleInclGst": net_vehicle_incl,
+            "taxableValue": taxable,
+            "cgst": cgst,
+            "sgst": sgst,
+            "note": "GST figures are reference only on Ex-Showroom — enter the legal tax invoice in Tally.",
+        },
+        "doNotPostInTally": do_not_post,
+        "reconOk": abs(tally_total - payable) < 0.05
+                   or abs(payable - unit_pay_total) < 0.05,
+    }
+
+
+def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
+    """Build a Delivery Billing Summary for accounts to enter the customer bill in Tally.
+
+    Tally customer bill = full amount taken from the customer:
+      gross charges (ex-showroom + RTO + insurance + other customer charges)
+      − benefits actually passed to the customer only.
+
+    Scheme on the lead with ₹0 passed → no discount line on the invoice.
+    OEM retained / claims / dealer margins → doNotPostInTally (not on customer bill).
+
+    Same-order packs pass pack_units (one lead-shaped overlay per vehicle) so OEM
+    extra and dealer-funded additional stay on that unit — never the pack sum
+    dumped onto unit 1.
+
+    This is intentionally NOT a GST tax invoice — Tally remains the legal books.
+    """
+    lead = lead or {}
+    rate = _gst_rate_fraction() if gst_rate is None else float(gst_rate)
+    if rate > 1:
+        rate = rate / 100.0
+
+    rows = [u for u in (pack_units or []) if isinstance(u, dict)]
+    if len(rows) > 1:
+        return _build_pack_delivery_billing_summary(lead, rows, rate)
+
+    charge_lines, gross, ex = _billing_charge_lines(lead)
+    discount_lines, oem_extra, add_disc = _billing_discount_lines(lead)
 
     benefit_total = round2(sum(-ln["amount"] for ln in discount_lines))
     after_discount = round2(max(0.0, gross - benefit_total))
