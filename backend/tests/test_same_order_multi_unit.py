@@ -541,3 +541,166 @@ async def test_pack_360_hydrates_unit_amounts_and_sums_payable(client):
     assert ce.num(c.get("grossVehicleCost")) >= 1800000
     # Lead-level additionalDiscount must not turn pack payable negative.
     assert ce.num(c.get("customerPayable")) > 0
+
+
+def test_pack_unit_overlay_keeps_own_oem_extra():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max",
+        "exShowroom": 800000,
+        "oemExtraSupportReceived": 58000,
+        "oemExtraSupportPassed": 3000,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "exShowroom": 800000,
+             "oemExtraSupportReceived": 48000, "oemExtraSupportPassed": 0},
+            {"sno": 2, "model": "Turbo Max", "exShowroom": 800000,
+             "oemExtraSupportReceived": 10000, "oemExtraSupportPassed": 3000},
+        ],
+    }
+    o1 = server._lead_overlay_unit(lead, lead["units"][0], 0)
+    o2 = server._lead_overlay_unit(lead, lead["units"][1], 1)
+    assert ce.num(o1.get("oemExtraSupportReceived")) == 48000
+    assert ce.num(o1.get("oemExtraSupportPassed")) == 0
+    assert ce.num(o2.get("oemExtraSupportReceived")) == 10000
+    assert ce.num(o2.get("oemExtraSupportPassed")) == 3000
+    rolled = server._pack_oem_extra_totals(lead)
+    assert rolled["oemExtraSupportReceived"] == 58000
+    assert rolled["oemExtraSupportPassed"] == 3000
+    assert rolled["oemExtraSupportRetained"] == 55000
+    p1 = ce.compute_commercial_totals(server.lead_to_snapshot(o1), None)
+    p1_plain = ce.compute_commercial_totals(
+        server.lead_to_snapshot({**o1, "oemExtraSupportReceived": 0, "oemExtraSupportPassed": 0}),
+        None)
+    assert p1["customerPayable"] == p1_plain["customerPayable"]
+    p2 = ce.compute_commercial_totals(server.lead_to_snapshot(o2), None)
+    p2_plain = ce.compute_commercial_totals(
+        server.lead_to_snapshot({**o2, "oemExtraSupportReceived": 0, "oemExtraSupportPassed": 0}),
+        None)
+    assert p2["customerPayable"] == ce.round2(p2_plain["customerPayable"] - 3000)
+
+
+def test_seed_unit1_oem_extra_once_from_lead():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "oemExtraSupportReceived": 48000,
+        "oemExtraSupportPassed": 0,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "exShowroom": 800000},
+            {"sno": 2, "model": "Turbo Max", "exShowroom": 800000},
+        ],
+    }
+    seeded, changed = server._seed_unit1_oem_extra_from_lead(lead, lead["units"])
+    assert changed is True
+    assert ce.num(seeded[0].get("oemExtraSupportReceived")) == 48000
+    assert "oemExtraSupportReceived" not in seeded[1]
+    again, changed_again = server._seed_unit1_oem_extra_from_lead(
+        {**lead, "oemExtraSupportReceived": 58000}, seeded)
+    assert changed_again is False
+    assert ce.num(again[0].get("oemExtraSupportReceived")) == 48000
+
+
+@pytest.mark.asyncio
+async def test_pack_units_own_oem_extra_scheme(client):
+    mobile = "9813301555"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-EX-A", "PM-EX-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-EX-A", "model": "Turbo Max", "variant": "Extra A",
+        "exShowroom": 500000, "rto": 10000, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-EX-B", "model": "Storm", "variant": "Extra B",
+        "exShowroom": 500000, "rto": 10000, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    created = await client.post("/api/leads", json={
+        "customerName": "Per Unit Extra",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Extra A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    added = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Storm", "variant": "Extra B",
+    })
+    assert added.status_code == 200, added.text
+    for sno, ex, rto in ((1, 500000, 10000), (2, 500000, 10000)):
+        p = await client.put(f"/api/leads/{lid}/price-structure", json={
+            "exShowroom": ex, "rto": rto, "unitSno": sno,
+        })
+        assert p.status_code == 200, p.text
+        empty = await client.put(f"/api/leads/{lid}/scheme", json={
+            "benefitMode": "Partial Benefit",
+            "additionalDiscount": 0,
+            "oemExtraSupportReceived": 0,
+            "oemExtraSupportPassed": 0,
+            "benefitPassedBreakup": "{}",
+            "schemeComponentsUsed": "{}",
+            "unitSno": sno,
+        })
+        assert empty.status_code == 200, empty.text
+    baseline = await server.db.leads.find_one({"leadId": lid})
+    base_units = baseline.get("units") or []
+    base1 = ce.num(base_units[0].get("customerPayable"))
+    base2 = ce.num(base_units[1].get("customerPayable"))
+    assert base1 > 0 and base2 > 0
+
+    s1 = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 0,
+        "oemExtraSupportReceived": 8000,
+        "oemExtraSupportPassed": 0,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 1,
+    })
+    assert s1.status_code == 200, s1.text
+    after1 = await server.db.leads.find_one({"leadId": lid})
+    u1 = (after1.get("units") or [])[0]
+    u2 = (after1.get("units") or [])[1]
+    assert ce.num(u1.get("oemExtraSupportReceived")) == 8000
+    assert ce.num(u1.get("oemExtraSupportPassed")) == 0
+    assert ce.num(u1.get("customerPayable")) == base1
+    assert ce.num(u2.get("oemExtraSupportReceived")) == 0
+    pack1 = ce.num(after1.get("customerPayable"))
+
+    s2 = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 0,
+        "oemExtraSupportReceived": 5000,
+        "oemExtraSupportPassed": 2000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 2,
+    })
+    assert s2.status_code == 200, s2.text
+    done = await server.db.leads.find_one({"leadId": lid})
+    units = done.get("units") or []
+    assert ce.num(units[0].get("oemExtraSupportReceived")) == 8000
+    assert ce.num(units[1].get("oemExtraSupportReceived")) == 5000
+    assert ce.num(units[1].get("oemExtraSupportPassed")) == 2000
+    assert ce.num(units[0].get("customerPayable")) == base1
+    assert ce.num(units[1].get("customerPayable")) == ce.round2(base2 - 2000)
+    pack = ce.num(done.get("customerPayable"))
+    assert pack == ce.round2(
+        ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
+    assert pack == ce.round2(pack1 - 2000)
+    assert ce.num(done.get("oemExtraSupportReceived")) == 13000
+    assert ce.num(done.get("oemExtraSupportPassed")) == 2000
+    assert ce.num(done.get("oemExtraSupportRetained")) == 11000
+    again = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 0,
+        "oemExtraSupportReceived": 5000,
+        "oemExtraSupportPassed": 2000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 2,
+    })
+    assert again.status_code == 200, again.text
+    stable = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(stable.get("customerPayable")) == pack
