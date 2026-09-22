@@ -67,11 +67,14 @@ function unitSource(lead, unit, index) {
   };
 }
 
-function PackUnitPicker({ lead, value, onChange }) {
+function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
   const units = packUnitList(lead);
   if (!units) return null;
   return (
-    <div className="mb-4" data-testid="pack-unit-picker">
+    <div className="mb-4 rounded-xl ring-1 ring-inset ring-cobalt/20 bg-cobalt-tint/30 p-3" data-testid="pack-unit-picker">
+      <div className="text-xs font-semibold text-ink mb-2">
+        Select a unit — then open Price Structure or Scheme for that vehicle
+      </div>
       <div className="flex flex-wrap gap-2">
         {units.map((u, i) => {
           const sno = u.sno || i + 1;
@@ -91,13 +94,24 @@ function PackUnitPicker({ lead, value, onChange }) {
               }`}
             >
               Unit {sno}{u.model ? ` · ${u.model}` : ""}{u.variant ? ` ${u.variant}` : ""}
+              {u.customerPayable ? ` · ${inr(u.customerPayable)}` : ""}
               {priced && schemed ? " ✓" : ""}
             </button>
           );
         })}
       </div>
+      <div className="flex flex-wrap gap-2 mt-3">
+        <Button variant="secondary" className="!py-1 !px-2.5 text-xs" data-testid="open-unit-price-btn"
+          onClick={() => onOpenPrice && onOpenPrice(value)}>
+          Price Structure · Unit {value}
+        </Button>
+        <Button variant="secondary" className="!py-1 !px-2.5 text-xs" data-testid="open-unit-scheme-btn"
+          onClick={() => onOpenScheme && onOpenScheme(value)}>
+          Scheme · Unit {value}
+        </Button>
+      </div>
       <p className="text-xs text-ink-soft mt-2">
-        Each unit has its own Price Structure and Scheme. Final outstanding is calculated when every unit is filled.
+        Every added unit has its own Price Structure and Scheme. Outstanding is the sum of unit payables minus receipts.
       </p>
     </div>
   );
@@ -112,6 +126,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const [proceedRow, setProceedRow] = useState(null);
   const [addUnit, setAddUnit] = useState(false);
   const [addPackUnit, setAddPackUnit] = useState(false);
+  const [focusUnit, setFocusUnit] = useState(1);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -149,6 +164,8 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const lead = data.lead;
   const c = data.commercials;
   const actions = data.actions || {};
+  const packUnits = packUnitList(lead);
+  const activeUnit = packUnits ? Math.min(Math.max(1, focusUnit), packUnits.length) : 1;
   const fieldView = isField || !!data.fieldView || !!actions.fieldView;
   const execHandover = isExecutive || !!actions.execPipelineOnly;
   const leadLocked = !!actions.isLocked || !actions.isActive;
@@ -270,7 +287,13 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           lead={lead}
           masters={masters}
           onClose={() => setAddPackUnit(false)}
-          onSaved={() => { setAddPackUnit(false); refresh(); }}
+          onSaved={(saved) => {
+            setAddPackUnit(false);
+            const n = Number(saved?.vehicleCount || (saved?.units || []).length || 0);
+            if (n) setFocusUnit(n);
+            setTab("price");
+            refresh();
+          }}
         />
       )}
       {addUnit && (
@@ -326,13 +349,24 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         <StepLock text="This lead is Closed — commercial steps are locked. Active leads (including Delivered) can still be edited by the owner." />
       )}
 
+      {!fieldView && !execHandover && packUnits && (
+        <PackUnitPicker
+          lead={lead}
+          value={activeUnit}
+          onChange={setFocusUnit}
+          onOpenPrice={(sno) => { setFocusUnit(sno || activeUnit); setTab("price"); }}
+          onOpenScheme={(sno) => { setFocusUnit(sno || activeUnit); setTab("scheme"); }}
+        />
+      )}
+
       <Tabs tabs={tabs} active={execHandover && !["overview", "whatsapp", "activity"].includes(tab) ? "overview" : tab} onChange={setTab} />
 
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
-        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters} />)}
-      {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} onSaved={() => advance("scheme")} />}
-      {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} onSaved={() => advance("payments")} onRefresh={refresh} />}
+        : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters}
+            onOpenUnit={(sno, nextTab) => { setFocusUnit(sno); if (nextTab) setTab(nextTab); }} />)}
+      {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("scheme")} />}
+      {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
       {tab === "delivery" && (
         fieldView
@@ -524,7 +558,7 @@ function OwnerKV({ label, field, value, display, type = "text", options, leadId,
   );
 }
 
-function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {} }) {
+function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit }) {
   const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, canSeeOwnerCommercials } = useAuth();
   const booked = !!actions.isBooked;
   const kycDocKinds = kycKinds(lead.customerType);
@@ -543,7 +577,7 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           display={inr(lead.finalExchangeValue || 0)} numeric leadId={lid} onSaved={onSaved} />
         <div className="mt-2 pt-2 border-t border-line flex items-center justify-between">
           <span className="text-sm font-semibold text-ink">Customer Payable</span>
-          <span className="font-mono font-bold text-cobalt">{inr(c.customerPayable)}</span>
+          <span className="font-mono font-bold text-cobalt">{inr(lead.customerPayable ?? c.customerPayable)}</span>
         </div>
       </Card>
       <Card className="p-4">
@@ -600,34 +634,41 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
               <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">
                 Same-order units ({lead.vehicleCount || (lead.units || []).length})
               </div>
-              <ul className="space-y-1">
+              <ul className="space-y-2">
                 {(lead.units || []).map((u, i) => {
+                  const sno = u.sno || i + 1;
                   const priced = !!(u.priceStructureSaved || (i === 0 && lead.priceStructureSaved));
                   const schemed = !!(u.schemeAllocationExplicit || (u.benefitPassedBreakup && String(u.benefitPassedBreakup) !== "{}")
                     || (i === 0 && (lead.schemeAllocationExplicit || lead.benefitPassedBreakup)));
                   return (
-                    <li key={u.sno || i} className="text-xs text-ink">
-                      Unit {u.sno || i + 1}
-                      {u.model ? ` · ${u.model}` : ""}
-                      {u.variant ? ` ${u.variant}` : ""}
-                      {priced && schemed
-                        ? (u.customerPayable != null ? ` · ${inr(u.customerPayable)}` : " · filled")
-                        : " · Price / Scheme pending"}
-                      {u.chassisNumber ? ` · ${u.chassisNumber}` : ""}
-                      {u.invoiceNumber ? ` · ${u.invoiceNumber}` : ""}
+                    <li key={sno} className="flex flex-wrap items-center gap-2 text-xs text-ink" data-testid={`overview-unit-${sno}`}>
+                      <span className="min-w-0">
+                        Unit {sno}
+                        {u.model ? ` · ${u.model}` : ""}
+                        {u.variant ? ` ${u.variant}` : ""}
+                        {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
+                        {priced && schemed ? " · filled" : " · Price / Scheme open"}
+                      </span>
+                      {onOpenUnit && (
+                        <span className="flex gap-1">
+                          <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
+                            data-testid={`overview-unit-price-${sno}`}
+                            onClick={() => onOpenUnit(sno, "price")}>Price</Button>
+                          <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
+                            data-testid={`overview-unit-scheme-${sno}`}
+                            onClick={() => onOpenUnit(sno, "scheme")}>Scheme</Button>
+                        </span>
+                      )}
                     </li>
                   );
                 })}
               </ul>
-              {Number(lead.packUnitsPending || 0) > 0 ? (
-                <div className="text-xs text-ink-soft mt-1" data-testid="pack-total-payable">
-                  Outstanding updates when every unit has Price and Scheme. Running payable {inr(lead.customerPayable)}
-                </div>
-              ) : Number(lead.customerPayable || lead.cxDemand) > 0 ? (
+              {Number(lead.customerPayable || lead.cxDemand) > 0 && (
                 <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
                   Pack payable {inr(lead.customerPayable || lead.cxDemand)}
+                  {Number(lead.packUnitsPending || 0) > 0 ? " · edit each unit’s Price and Scheme if the quote should change" : ""}
                 </div>
-              ) : null}
+              )}
             </div>
           )}
           <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
@@ -667,9 +708,11 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
 }
 
 /* -------------------------------------------------- Price Structure */
-function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
+function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno: unitSnoProp, onUnitSno }) {
   const units = packUnitList(lead);
-  const [unitSno, setUnitSno] = useState(1);
+  const [unitSnoLocal, setUnitSnoLocal] = useState(unitSnoProp || 1);
+  const unitSno = unitSnoProp || unitSnoLocal;
+  const setUnitSno = onUnitSno || setUnitSnoLocal;
   const unitIdx = Math.max(0, unitSno - 1);
   const src = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
   const unitPriced = !!(src.priceStructureSaved || (!unitIdx && actions.priceCompleted));
@@ -758,7 +801,13 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved }) {
 
   return (
     <div>
-      <PackUnitPicker lead={lead} value={unitSno} onChange={setUnitSno} />
+      {units && (
+        <p className="text-sm font-semibold text-ink mb-3" data-testid="price-unit-heading">
+          Price Structure · Unit {unitSno}
+          {src.interestedModel ? ` · ${src.interestedModel}` : ""}
+          {src.variant ? ` ${src.variant}` : ""}
+        </p>
+      )}
       {inactive && <StepLock text="This lead is not Active — price structure is read-only." />}
       {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner can edit a completed step." />}
       {masterMsg && <p className="text-xs text-ink-soft mb-3" data-testid="exshowroom-lock-note">{masterMsg}</p>}
@@ -831,9 +880,11 @@ function Prev({ label, v, highlight }) {
 }
 
 /* -------------------------------------------------- Scheme */
-function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, onRefresh }) {
+function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, onRefresh, unitSno: unitSnoProp, onUnitSno }) {
   const units = packUnitList(lead);
-  const [unitSno, setUnitSno] = useState(1);
+  const [unitSnoLocal, setUnitSnoLocal] = useState(unitSnoProp || 1);
+  const unitSno = unitSnoProp || unitSnoLocal;
+  const setUnitSno = onUnitSno || setUnitSnoLocal;
   const unitIdx = Math.max(0, unitSno - 1);
   const src = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
   const unitSchemed = !!(src.schemeAllocationExplicit
@@ -1017,7 +1068,13 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
 
   return (
     <div>
-      <PackUnitPicker lead={lead} value={unitSno} onChange={setUnitSno} />
+      {units && (
+        <p className="text-sm font-semibold text-ink mb-3" data-testid="scheme-unit-heading">
+          Scheme · Unit {unitSno}
+          {src.interestedModel ? ` · ${src.interestedModel}` : ""}
+          {src.variant ? ` ${src.variant}` : ""}
+        </p>
+      )}
       <OemClaimStrip leadId={lead.leadId} />
       {inactive && <StepLock text="This lead is not Active — scheme is read-only." />}
       {!inactive && staffLocked && <StepLock text="Scheme is saved. Only the owner can edit a completed step." />}

@@ -451,11 +451,13 @@ async def test_pack_units_own_price_and_scheme(client):
     })
     assert s1.status_code == 200, s1.text
     mid = await server.db.leads.find_one({"leadId": lid})
-    # Unit 2 not filled yet — outstanding is unit 1 only.
     assert ce.num(mid.get("packUnitsPending")) >= 1
-    unit1_pay = ce.num((mid.get("units") or [{}])[0].get("customerPayable")) or ce.num(mid.get("customerPayable"))
+    units_mid = mid.get("units") or []
+    unit1_pay = ce.num(units_mid[0].get("customerPayable"))
+    unit2_pay = ce.num(units_mid[1].get("customerPayable"))
     assert unit1_pay > 0
-    assert ce.num(mid.get("customerPayable")) == unit1_pay
+    assert unit2_pay > 0
+    assert ce.num(mid.get("customerPayable")) == ce.round2(unit1_pay + unit2_pay)
 
     p2 = await client.put(f"/api/leads/{lid}/price-structure", json={
         "exShowroom": 700000, "rto": 20000, "unitSno": 2,
@@ -481,3 +483,48 @@ async def test_pack_units_own_price_and_scheme(client):
     assert ce.num(done.get("customerPayable")) == ce.round2(
         ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
     assert ce.num(done.get("customerOutstanding")) == ce.num(done.get("customerPayable"))
+
+
+@pytest.mark.asyncio
+async def test_pack_360_hydrates_unit_amounts_and_sums_payable(client):
+    lid = "LD-PACK-ZERO"
+    mobile = "9813301444"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-ZERO-A"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-ZERO-A", "model": "Turbo Max", "variant": "Zero A",
+        "exShowroom": 600000, "rto": 10000, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Zero Units", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Zero A",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-01",
+        "exShowroom": 600000, "rto": 10000,
+        "priceStructureSaved": True,
+        "additionalDiscount": 5000000,
+        "schemeAllocationExplicit": True,
+        "benefitPassedBreakup": "{}",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Zero A",
+             "exShowroom": 600000, "rto": 10000, "priceStructureSaved": True},
+            {"sno": 2, "model": "Turbo Max", "variant": "Zero A"},
+            {"sno": 3, "model": "Turbo Max", "variant": "Zero A"},
+        ],
+    })
+    r = await client.get(f"/api/leads/{lid}/360")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    lead = body["lead"]
+    c = body["commercials"]
+    units = lead.get("units") or []
+    assert len(units) == 3
+    assert all(ce.num(u.get("exShowroom")) > 0 for u in units)
+    assert all(ce.num(u.get("customerPayable")) > 0 for u in units)
+    assert ce.num(c.get("customerPayable")) > 0
+    assert ce.num(c.get("customerPayable")) == ce.num(lead.get("customerPayable"))
+    assert ce.num(c.get("grossVehicleCost")) >= 1800000
+    # Lead-level additionalDiscount must not turn pack payable negative.
+    assert ce.num(c.get("customerPayable")) > 0
