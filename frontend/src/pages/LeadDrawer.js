@@ -190,6 +190,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             gstin: lead.gstin,
             executive: isExecutive ? undefined : lead.executive,
             anotherVehicle: true,
+            siblingLeadId: lead.leadId,
           }}
           onClose={() => setAddUnit(false)}
           onCreated={(id) => {

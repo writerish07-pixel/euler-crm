@@ -42,6 +42,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const [passOn, setPassOn] = useState({});
   const [anotherVehicle, setAnotherVehicle] = useState(!!initial.anotherVehicle);
   const [matches, setMatches] = useState(null);
+  const [siblingDocs, setSiblingDocs] = useState([]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   useEffect(() => {
@@ -87,7 +88,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const existingUnits = (matches && matches.existing) || [];
   const pendingUnits = (matches && matches.pending) || [];
   const sibling = existingUnits[0];
-  const copyDocsFromSibling = anotherVehicle && existingUnits.length > 0;
+  const openedAsAnother = !!(initial.anotherVehicle || initial.siblingLeadId);
+  const siblingLeadId = initial.siblingLeadId || sibling?.leadId || "";
+  const copyDocsFromSibling = anotherVehicle && !!(existingUnits.length || openedAsAnother);
 
   useEffect(() => {
     if (!anotherVehicle || !sibling) return;
@@ -97,6 +100,18 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       gstin: f.gstin || sibling.gstin || "",
     }));
   }, [anotherVehicle, sibling?.leadId, sibling?.customerType, sibling?.gstin]);
+
+  useEffect(() => {
+    if (!anotherVehicle || !siblingLeadId) {
+      setSiblingDocs([]);
+      return undefined;
+    }
+    let alive = true;
+    get(`/leads/${siblingLeadId}/documents`)
+      .then((d) => { if (alive) setSiblingDocs(Array.isArray(d) ? d : []); })
+      .catch(() => { if (alive) setSiblingDocs([]); });
+    return () => { alive = false; };
+  }, [anotherVehicle, siblingLeadId]);
 
   const togglePassOn = (key, yes, available) => {
     setPassOn((p) => ({ ...p, [key]: yes }));
@@ -171,7 +186,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     }
     const kycErr = copyDocsFromSibling ? "" : kycReady(form.customerType, kyc, form.gstin);
     if (kycErr) return toast.error(kycErr);
-    const extraErr = extraSupportReady(form.oemExtraSupportReceived, extraProof);
+    const extraErr = extraSupportReady(
+      form.oemExtraSupportReceived, extraProof, siblingDocs,
+      { copyFromSibling: copyDocsFromSibling });
     if (extraErr) return toast.error(extraErr);
     await saveLead({ anotherVehicle });
   };
@@ -271,7 +288,13 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           <Input data-testid="lead-oem-extra" type="number" min="0" step="1"
             value={form.oemExtraSupportReceived} onChange={set("oemExtraSupportReceived")} />
         </Field>
-        <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={form.oemExtraSupportReceived} />
+        <LocalOemExtraBlock
+          files={extraProof}
+          setFiles={setExtraProof}
+          amount={form.oemExtraSupportReceived}
+          existingDocs={siblingDocs}
+          copyFromSibling={copyDocsFromSibling}
+        />
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} copyFromSibling={copyDocsFromSibling} />
       </div>

@@ -48,7 +48,11 @@ jest.mock("../components/LeadDocuments", () => ({
     Number(amount) > 0 ? <div data-testid="oem-extra-proof-block" /> : null
   ),
   kycReady: jest.fn(() => "Attach Aadhaar front, Aadhaar back and PAN"),
-  extraSupportReady: () => "",
+  extraSupportReady: jest.fn((amount, _files, _docs, opts) => {
+    if (opts && opts.copyFromSibling) return "";
+    if (!(Number(amount) > 0)) return "";
+    return "Attach the OEM Extra Support confirmation email from Siddharth Dubey (ASM) or Siddharth Sharma (RM)";
+  }),
   uploadKycFiles: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({
@@ -139,6 +143,26 @@ test("typing a known mobile lists existing units and save sends anotherVehicle",
     customerName: "Ramesh",
     mobile: "9876543210",
     anotherVehicle: true,
+  }));
+  await act(async () => { root.unmount(); });
+});
+
+test("another vehicle with extra support amount saves without a new proof file", async () => {
+  const { root } = await renderDrawer({
+    initial: { anotherVehicle: true, siblingLeadId: "LD26000001", customerName: "Ramesh", mobile: "9876543210" },
+  });
+  await act(async () => {
+    setInput(document.querySelector('[data-testid="lead-budget"]'), "185000");
+    setInput(document.querySelector('[data-testid="lead-oem-extra"]'), "7000");
+  });
+  await act(async () => { await new Promise((r) => setTimeout(r, 350)); });
+  await act(async () => {
+    document.querySelector('[data-testid="save-lead-btn"]').click();
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(post).toHaveBeenCalledWith("/leads", expect.objectContaining({
+    anotherVehicle: true,
+    oemExtraSupportReceived: 7000,
   }));
   await act(async () => { root.unmount(); });
 });

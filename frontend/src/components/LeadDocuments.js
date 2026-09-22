@@ -230,32 +230,38 @@ export function kycReady(customerType, files, gstin) {
   return "";
 }
 
-export function extraSupportReady(amount, files, existingDocs = []) {
+export function extraSupportReady(amount, files, existingDocs = [], { copyFromSibling } = {}) {
   if (!(Number(amount) > 0)) return "";
+  if (copyFromSibling) return "";
   if (files && files.oem_extra_support) return "";
   if ((existingDocs || []).some((d) => d.kind === "oem_extra_support")) return "";
   return "Attach the OEM Extra Support confirmation email from Siddharth Dubey (ASM) or Siddharth Sharma (RM)";
 }
 
-export function LocalOemExtraBlock({ files, setFiles, amount, existingDocs = [] }) {
+export function LocalOemExtraBlock({ files, setFiles, amount, existingDocs = [], copyFromSibling }) {
   if (!(Number(amount) > 0)) return null;
   const have = (existingDocs || []).find((d) => d.kind === "oem_extra_support");
   return (
     <div className="sm:col-span-2 space-y-2" data-testid="oem-extra-proof-block">
-      <div className="text-xs font-semibold text-ink">OEM Extra Support proof *</div>
+      <div className="text-xs font-semibold text-ink">
+        {copyFromSibling ? "OEM Extra Support proof" : "OEM Extra Support proof *"}
+      </div>
       <p className="text-[11px] text-ink-soft">
-        Email confirmation from Siddharth Dubey (ASM) or Siddharth Sharma (RM) is required when Extra Support is filled.
+        {copyFromSibling
+          ? "The ASM / RM confirmation email copies from the first file. Attach a replacement only if this unit is different."
+          : "Email confirmation from Siddharth Dubey (ASM) or Siddharth Sharma (RM) is required when Extra Support is filled."}
       </p>
-      {have ? (
-        <p className="text-[11px] text-emerald-700">Proof already attached · {have.filename || "file"}</p>
-      ) : (
-        <DocSlot
-          kind="oem_extra_support"
-          localFile={files.oem_extra_support}
-          onLocalFile={(f) => setFiles((prev) => ({ ...prev, oem_extra_support: f }))}
-          canUpload
-        />
+      {have && (
+        <p className="text-[11px] text-emerald-700" data-testid="oem-extra-copy-hint">
+          Proof already on the first file · {have.filename || "file"}
+        </p>
       )}
+      <DocSlot
+        kind="oem_extra_support"
+        localFile={files.oem_extra_support}
+        onLocalFile={(f) => setFiles((prev) => ({ ...prev, oem_extra_support: f }))}
+        canUpload
+      />
     </div>
   );
 }

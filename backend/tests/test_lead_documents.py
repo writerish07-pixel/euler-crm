@@ -355,6 +355,33 @@ async def test_another_vehicle_copies_create_docs_not_delivery(client):
     assert raw1.content == raw2.content == PNG
 
 
+@pytest.mark.asyncio
+async def test_another_vehicle_with_extra_amount_copies_support_email(client):
+    mobile = next_mobile()
+    first = await client.post("/api/leads", json={
+        "customerName": "Extra Fleet", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit",
+        "oemExtraSupportReceived": 7000})
+    assert first.status_code == 200, first.text
+    lid1 = first.json()["leadId"]
+    extra = await upload(client, f"/api/leads/{lid1}/documents", "oem_extra_support")
+    assert extra.status_code == 200, extra.text
+    second = await client.post("/api/leads", json={
+        "customerName": "Extra Fleet", "mobile": mobile,
+        "interestedModel": "Hi-Load", "variant": "XR", "executive": "Amit",
+        "anotherVehicle": True, "oemExtraSupportReceived": 7000})
+    assert second.status_code == 200, second.text
+    lid2 = second.json()["leadId"]
+    docs2 = (await client.get(f"/api/leads/{lid2}/documents")).json()
+    hit = next(d for d in docs2 if d["kind"] == "oem_extra_support")
+    assert hit["copiedFromLeadId"] == lid1
+    raw = await client.get(f"/api/documents/{hit['documentId']}/file")
+    assert raw.status_code == 200
+    assert raw.content == PNG
+    stored = await server.db.leads.find_one({"leadId": lid2})
+    assert float(stored.get("oemExtraSupportReceived") or 0) == 7000
+
+
 def test_tl_kyc_permissions_do_not_need_own_lead():
     tl = {"role": "tl", "name": "Docs TL"}
     exec_u = {"role": "executive", "name": "Amit"}
