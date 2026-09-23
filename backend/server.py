@@ -883,6 +883,31 @@ async def recompute_lead(lead_id):
     income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
     shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
     alloc = income.get("allocation") or ce.compute_scheme_allocation(snap, scheme_rows)
+    derived_pass = None
+    deal_cx = ce.round2(ce.num(lead.get("cxDemand") or lead.get("budget")))
+    if (deal_cx > 0 and lead.get("useDealPrice") and not lead.get("dealCancelled")
+            and not oem_sync.is_same_order_pack(lead)):
+        scheme_passed = ce.scheme_customer_benefit_ex_additional(alloc)
+        derived_pass = ce.derive_deal_customer_pass(
+            ce.deal_price_total(snap), deal_cx, scheme_passed,
+            lead.get("oemExtraSupportReceived"))
+        if derived_pass.get("applied"):
+            lead["oemExtraSupportPassed"] = derived_pass["oemExtraSupportPassed"]
+            lead["additionalDiscount"] = derived_pass["additionalDiscount"]
+            lead["extraIncomeFromCustomer"] = derived_pass["extraFromCustomer"]
+            units = list(lead.get("units") or [])
+            if len(units) == 1 and isinstance(units[0], dict):
+                u0 = dict(units[0])
+                u0["oemExtraSupportPassed"] = derived_pass["oemExtraSupportPassed"]
+                u0["additionalDiscount"] = derived_pass["additionalDiscount"]
+                units[0] = u0
+                lead["units"] = units
+            snap = lead_to_snapshot(lead)
+            totals = ce.compute_commercial_totals(snap, scheme_rows)
+            margin = ce.compute_dealer_margin(snap)
+            income = ce.compute_scheme_income_breakdown(snap, scheme_rows)
+            shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
+            alloc = income.get("allocation") or ce.compute_scheme_allocation(snap, scheme_rows)
     # total received from payments (refunds are negative rows, so this is already net)
     agg = await db.payments.aggregate([
         {"$match": {"leadId": lead_id}},
@@ -957,6 +982,9 @@ async def recompute_lead(lead_id):
     _ins_comp = (alloc.get("byKey") or {}).get("insuranceBenefit") or {}
     _ins_benefit_cb = ce.round2(ce.num(_ins_comp.get("customerBenefit"))) if _has_auth_alloc else None
     _ins_benefit_avail = ce.round2(ce.num(_ins_comp.get("schemeAvailable"))) if _ins_comp else 0.0
+    extra_from_cx = 0.0
+    if derived_pass and derived_pass.get("applied"):
+        extra_from_cx = ce.round2(ce.num(derived_pass.get("extraFromCustomer")))
     updates = {
         "grossVehicleCost": totals["grossVehicleCost"],
         "tcs": totals.get("tcs", 0),
@@ -985,6 +1013,7 @@ async def recompute_lead(lead_id):
         "oemExtraSupportReceived": oem_extra_recv,
         "oemExtraSupportPassed": oem_extra_pass,
         "oemExtraSupportRetained": oem_extra_retained,
+        "extraIncomeFromCustomer": extra_from_cx,
         "dealerMarginNetExGst": margin["marginNetExGst"],
         "dealerMarginGrossInclGst": margin["marginGrossInclGst"],
         "dealerMarginGst": margin["marginGst"],
@@ -1000,7 +1029,8 @@ async def recompute_lead(lead_id):
         # _oem_extra_earn. OEM claim receivables still never enter this total.
         "dealerTotalEarnings": ce.round2(
             margin["marginNetExGst"] + income["retainedIncomeTotal"] + _oem_extra_earn
-            + extra_income + _dealer_ins_income - _dealer_funded_benefit
+            + extra_income + _dealer_ins_income + extra_from_cx
+            - _dealer_funded_benefit
             - _wo["oemUnpayableScheme"]),
         # Engine summary lives here — NOT in schemeAllocation.
         # schemeAllocation is reserved for the flat {componentKey: amount} decision
@@ -1014,6 +1044,13 @@ async def recompute_lead(lead_id):
         "lastUpdated": now_iso(),
         "vehicleCount": oem_sync.vehicle_count(lead),
     }
+    if derived_pass and derived_pass.get("applied"):
+        updates["additionalDiscount"] = derived_pass["additionalDiscount"]
+        updates["oemExtraSupportPassed"] = derived_pass["oemExtraSupportPassed"]
+        updates["oemExtraSupportRetained"] = ce.round2(max(
+            0.0, oem_extra_recv - derived_pass["oemExtraSupportPassed"]))
+        if lead.get("units"):
+            updates["units"] = lead["units"]
     if oem_sync.is_same_order_pack(lead):
         updates["sameOrderMultiUnit"] = True
         pack_total, pack_units, pack_filled, pack_pending = _refresh_unit_payables(
@@ -2042,7 +2079,7 @@ OWNER_PNL_LEAD_KEYS = {
     "dsaRetained", "schemeRetainedBreakup",
     "documentationIncome", "warrantyIncome", "rsaIncome", "referralIncome",
     "otherIncome", "financeIncentive", "accessoriesMargin", "exchangeMargin",
-    "campaignIncentive",
+    "campaignIncentive", "extraIncomeFromCustomer",
 }
 
 OWNER_PNL_COMMERCIAL_KEYS = {

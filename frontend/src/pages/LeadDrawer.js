@@ -614,11 +614,15 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
       <Card className="p-4">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Commercial Breakup</h4>
         <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
+        <KV label="Cx Demand" value={inr(lead.cxDemand || lead.budget || 0)} />
         <KV label="TCS" value={inr(c.tcs)} />
         <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />
         <KV label="Passed to Customer" value={inr(c.totalPassedToCustomer)} />
         <OwnerKV label="Final Exchange Value" field="finalExchangeValue" value={lead.finalExchangeValue || 0}
           display={inr(lead.finalExchangeValue || 0)} numeric leadId={lid} onSaved={onSaved} />
+        {canSeeOwnerCommercials && Number(lead.extraIncomeFromCustomer) > 0 && (
+          <KV label="Extra income from customer" value={inr(lead.extraIncomeFromCustomer)} tone="text-emerald-600" />
+        )}
         <div className="mt-2 pt-2 border-t border-line flex items-center justify-between">
           <span className="text-sm font-semibold text-ink">Customer Payable</span>
           <span className="font-mono font-bold text-cobalt">{inr(lead.customerPayable ?? c.customerPayable)}</span>
@@ -1106,6 +1110,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
   // OEM Extra Support (NOT Additional Dealer): Received = full OEM claim;
   // Passed ≤ Received reduces payable; Retained = Received − Passed → earnings.
   const oemRecv = Math.max(0, +form.oemExtraSupportReceived || 0);
+  const dealLocked = Number(lead.cxDemand || lead.budget) > 0 && !!lead.useDealPrice;
   const oemPass = Math.max(0, Math.min(+form.oemExtraSupportPassed || 0, oemRecv));
   const oemRetained = Math.max(0, oemRecv - oemPass);
   const previewOemTotal = previewOem + oemRecv;
@@ -1140,10 +1145,11 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         </Field>
         <Field label="OEM Extra Support Passed">
           <Input data-testid="oem-extra-passed" type="number" value={form.oemExtraSupportPassed}
-            onChange={set("oemExtraSupportPassed")} disabled={locked} />
+            onChange={set("oemExtraSupportPassed")} disabled={locked || dealLocked} readOnly={dealLocked} />
         </Field>
         <Field label="Additional (Dealer)">
-          <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount} onChange={set("additionalDiscount")} disabled={locked} />
+          <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount}
+            onChange={set("additionalDiscount")} disabled={locked || dealLocked} readOnly={dealLocked} />
         </Field>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
@@ -1158,7 +1164,9 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           </div>
         )}
         <div className="text-[11px] text-ink-faint self-end">
-          Passed comes from Received only. Additional (Dealer) is a customer discount — separate.
+          {dealLocked
+            ? "Passed and Additional are set so payable matches Cx Demand. Scheme dealer share is unchanged. Extra Received is a claim only."
+            : "Passed comes from Received only. Additional (Dealer) is a customer discount — separate."}
         </div>
       </div>
       {hiddenFields.length > 0 && (
