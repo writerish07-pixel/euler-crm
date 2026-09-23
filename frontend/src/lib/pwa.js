@@ -1,6 +1,6 @@
 import { isFragileAndroid } from "./device";
 
-const FRAGILE_SW_CLEARED = "euler_cleared_sw_v9b";
+const FRAGILE_SW_CLEARED = "euler_cleared_sw_v9d";
 
 /**
  * Service-worker registration and the online/offline signal.

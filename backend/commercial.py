@@ -104,6 +104,73 @@ def default_rto_insurance_for_model(model, variant=""):
     return None
 
 
+def deal_price_total(s):
+    """Ex + RTO + dealer insurance — the create-lead 'my total' used vs Cx Demand."""
+    s = s or {}
+    rto = s.get("rto")
+    if rto is None:
+        rto = s.get("registrationRto")
+    ins = s.get("insurance")
+    if ins is None:
+        ins = s.get("insuranceAmount")
+    return round2(
+        num(s.get("exShowroom")) + num(rto)
+        + insurance_charge_for_payable({**s, "insurance": ins}))
+
+
+def scheme_customer_benefit_ex_additional(alloc):
+    """Scheme passed to customer, excluding Additional (Dealer) which is derived after."""
+    return round2(sum(
+        num(c.get("customerBenefit"))
+        for c in ((alloc or {}).get("components") or [])
+        if c.get("key") != "additionalDiscount"
+    ))
+
+
+def derive_deal_customer_pass(price_total, deal, scheme_passed, extra_received):
+    """Meet Cx Demand: scheme first (unchanged dealer-share), then Extra Passed, then Additional.
+
+    leftover = GVC (all charges) − deal − scheme customer benefit.
+    leftover > 0  → Extra Passed = min(Received, leftover), Additional = the rest.
+    leftover ≤ 0  → Extra Passed = 0, Additional = 0, extraFromCustomer = −leftover.
+    Extra Received is a claim only. Dealer-share scheme math is not rewritten here.
+    """
+    price_total = round2(max(0.0, num(price_total)))
+    deal = round2(max(0.0, num(deal)))
+    scheme_passed = round2(max(0.0, num(scheme_passed)))
+    extra_received = round2(max(0.0, num(extra_received)))
+    if deal <= 0:
+        return {
+            "applied": False,
+            "oemExtraSupportPassed": 0.0,
+            "additionalDiscount": 0.0,
+            "extraFromCustomer": 0.0,
+            "leftover": 0.0,
+            "schemePassed": scheme_passed,
+            "priceTotal": price_total,
+            "deal": deal,
+        }
+    leftover = round2(price_total - deal - scheme_passed)
+    if leftover > 0:
+        extra_passed = round2(min(extra_received, leftover))
+        additional = round2(leftover - extra_passed)
+        extra_from = 0.0
+    else:
+        extra_passed = 0.0
+        additional = 0.0
+        extra_from = round2(-leftover)
+    return {
+        "applied": True,
+        "oemExtraSupportPassed": extra_passed,
+        "additionalDiscount": additional,
+        "extraFromCustomer": extra_from,
+        "leftover": leftover,
+        "schemePassed": scheme_passed,
+        "priceTotal": price_total,
+        "deal": deal,
+    }
+
+
 def apply_deal_additional(deal, cx_demand=None, scheme_passed=None):
     """Additional (Dealer) = max(0, Ex+RTO+Insurance − Cx Demand − OEM scheme passed).
 
