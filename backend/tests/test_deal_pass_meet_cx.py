@@ -99,16 +99,19 @@ async def test_create_lead_meets_cx_demand_without_passing_extra(client):
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead.get("useDealPrice") is True
     assert ce.num(lead.get("cxDemand")) == 960000
-    assert ce.num(lead.get("customerPayable")) == 960000
+    assert ce.num(lead.get("grossVehicleCost")) == 989500
+    # 9,89,500 − 30,000 insurance passed. Extra is not given to the customer.
+    assert ce.num(lead.get("customerPayable")) == 959500
+    assert ce.num(lead.get("customerOutstanding")) == 959500
     assert ce.num(lead.get("oemExtraSupportReceived")) == 15000
     assert ce.num(lead.get("oemExtraSupportPassed")) == 0
     assert ce.num(lead.get("additionalDiscount")) == 0
     assert ce.num(lead.get("extraIncomeFromCustomer")) == 500
-    assert ce.num(lead.get("grossVehicleCost")) == 989500
     r360 = await client.get(f"/api/leads/{lid}/360")
     assert r360.status_code == 200, r360.text
     body = r360.json()
     assert ce.num(body["lead"]["cxDemand"]) == 960000
-    assert ce.num(body["lead"]["customerPayable"]) == 960000
+    assert ce.num(body["lead"]["customerPayable"]) == 959500
+    assert ce.num(body["lead"]["customerOutstanding"]) == 959500
     assert ce.num(body["lead"]["extraIncomeFromCustomer"]) == 500
     assert ce.num(body["commercials"]["grossVehicleCost"]) == 989500

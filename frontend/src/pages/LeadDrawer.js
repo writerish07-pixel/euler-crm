@@ -615,6 +615,9 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Commercial Breakup</h4>
         <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
         <KV label="Cx Demand" value={inr(lead.cxDemand || lead.budget || 0)} />
+        <p className="text-[11px] text-ink-faint -mt-1 mb-1">
+          Outstanding = GVC − scheme passed − OEM Extra Passed − Additional (+ TCS). Cx Demand is the quoted deal.
+        </p>
         <KV label="TCS" value={inr(c.tcs)} />
         <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />
         <KV label="Passed to Customer" value={inr(c.totalPassedToCustomer)} />

@@ -130,7 +130,7 @@ def scheme_customer_benefit_ex_additional(alloc):
 def derive_deal_customer_pass(price_total, deal, scheme_passed, extra_received):
     """Meet Cx Demand: scheme first (unchanged dealer-share), then Extra Passed, then Additional.
 
-    leftover = (Ex+RTO+Insurance) − deal − scheme customer benefit.
+    leftover = GVC (all charges) − deal − scheme customer benefit.
     leftover > 0  → Extra Passed = min(Received, leftover), Additional = the rest.
     leftover ≤ 0  → Extra Passed = 0, Additional = 0, extraFromCustomer = −leftover.
     Extra Received is a claim only. Dealer-share scheme math is not rewritten here.

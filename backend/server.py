@@ -889,7 +889,7 @@ async def recompute_lead(lead_id):
             and not oem_sync.is_same_order_pack(lead)):
         scheme_passed = ce.scheme_customer_benefit_ex_additional(alloc)
         derived_pass = ce.derive_deal_customer_pass(
-            ce.deal_price_total(snap), deal_cx, scheme_passed,
+            totals.get("grossVehicleCost"), deal_cx, scheme_passed,
             lead.get("oemExtraSupportReceived"))
         if derived_pass.get("applied"):
             lead["oemExtraSupportPassed"] = derived_pass["oemExtraSupportPassed"]
@@ -919,11 +919,16 @@ async def recompute_lead(lead_id):
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     refunded_amount = ce.round2(-refund_agg[0]["total"]) if refund_agg else 0.0
-    # Customer Payable comes solely from compute_commercial_totals(…, scheme_rows),
-    # which already reduces by Σ customerBenefit across offers + entitlements.
-    # Do NOT subtract entitlement benefits again — that double-counted after the
-    # allocation engines were merged onto one path.
-    customer_payable = _deal_price_payable(lead)
+    # Customer Payable / outstanding = GVC − scheme passed − Extra Passed −
+    # Additional + TCS. After a deal-priced leftover is derived, do not freeze
+    # those lines to Cx Demand — the quote stays on cxDemand.
+    if derived_pass and derived_pass.get("applied"):
+        customer_payable = ce.round2(ce.num(totals.get("customerPayable")))
+        extra_from_engine = ce.round2(max(0.0, deal_cx - customer_payable))
+        derived_pass["extraFromCustomer"] = extra_from_engine
+        lead["extraIncomeFromCustomer"] = extra_from_engine
+    else:
+        customer_payable = _deal_price_payable(lead)
     if customer_payable is None and oem_sync.is_same_order_pack(lead):
         customer_payable = _sum_unit_payables(lead, scheme_rows)
     if customer_payable is None:
