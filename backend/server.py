@@ -919,16 +919,9 @@ async def recompute_lead(lead_id):
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]).to_list(1)
     refunded_amount = ce.round2(-refund_agg[0]["total"]) if refund_agg else 0.0
-    # Customer Payable / outstanding = GVC − scheme passed − Extra Passed −
-    # Additional + TCS. After a deal-priced leftover is derived, do not freeze
-    # those lines to Cx Demand — the quote stays on cxDemand.
-    if derived_pass and derived_pass.get("applied"):
-        customer_payable = ce.round2(ce.num(totals.get("customerPayable")))
-        extra_from_engine = ce.round2(max(0.0, deal_cx - customer_payable))
-        derived_pass["extraFromCustomer"] = extra_from_engine
-        lead["extraIncomeFromCustomer"] = extra_from_engine
-    else:
-        customer_payable = _deal_price_payable(lead)
+    # TL collects Cx Demand. Scheme overshoot vs GVC is dealer margin
+    # (extraIncomeFromCustomer), not a cheaper customer price.
+    customer_payable = _deal_price_payable(lead)
     if customer_payable is None and oem_sync.is_same_order_pack(lead):
         customer_payable = _sum_unit_payables(lead, scheme_rows)
     if customer_payable is None:
@@ -1019,7 +1012,7 @@ async def recompute_lead(lead_id):
         "oemExtraSupportPassed": oem_extra_pass,
         "oemExtraSupportRetained": oem_extra_retained,
         "extraIncomeFromCustomer": extra_from_cx,
-        "dealerMarginNetExGst": margin["marginNetExGst"],
+        "dealerMarginNetExGst": ce.round2(margin["marginNetExGst"] + extra_from_cx),
         "dealerMarginGrossInclGst": margin["marginGrossInclGst"],
         "dealerMarginGst": margin["marginGst"],
         **_retained_component_fields(income.get("retainedByComponent") or {}),
