@@ -148,12 +148,11 @@ async def test_owner_create_sets_outstanding_to_cx_demand(client):
     lead = r.json()
     assert lead["useDealPrice"] is True
     assert ce.num(lead["cxDemand"]) == 1400000
+    assert ce.num(lead["customerPayable"]) == 1400000
+    assert ce.num(lead["customerOutstanding"]) == 1400000
+    assert lead["dealFormat"]["schemeIncluded"] is False
     assert ce.num(lead["grossVehicleCost"]) == 1460000
     assert ce.num(lead["additionalDiscount"]) == 60000
-    # GVC − Additional + TCS (14L after discount)
-    assert ce.num(lead["customerPayable"]) == 1414000
-    assert ce.num(lead["customerOutstanding"]) == 1414000
-    assert lead["dealFormat"]["schemeIncluded"] is False
 
 
 @pytest.mark.asyncio
@@ -183,8 +182,8 @@ async def test_approve_sets_outstanding_to_deal_price(client):
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     lead = await server.db.leads.find_one({"leadId": ap.json()["leadId"]})
-    assert ce.num(lead["customerOutstanding"]) == 1414000
-    assert ce.num(lead["customerPayable"]) == 1414000
+    assert ce.num(lead["customerOutstanding"]) == 1400000
+    assert ce.num(lead["customerPayable"]) == 1400000
     assert lead["useDealPrice"] is True
     assert ce.num(lead["additionalDiscount"]) == 60000
 
@@ -208,7 +207,7 @@ async def test_booking_stores_payment_reference(client):
     bk = await server.db.bookings.find_one({"leadId": lid})
     assert bk["paymentReference"] == "UTR123456789"
     lead = await server.db.leads.find_one({"leadId": lid})
-    assert ce.num(lead["customerOutstanding"]) == 1389000
+    assert ce.num(lead["customerOutstanding"]) == 1375000
 
 
 def test_oem_scheme_pass_on_cuts_additional_not_owner_approval():

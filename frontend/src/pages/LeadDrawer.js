@@ -616,7 +616,7 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
         <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
         <KV label="Cx Demand" value={inr(lead.cxDemand || lead.budget || 0)} />
         <p className="text-[11px] text-ink-faint -mt-1 mb-1">
-          Outstanding = GVC − scheme passed − OEM Extra Passed − Additional (+ TCS). Cx Demand is the quoted deal.
+          Payable and outstanding are the deal (Cx Demand). Extra vs GVC goes to dealer margin — not a cheaper customer price.
         </p>
         <KV label="TCS" value={inr(c.tcs)} />
         <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />
@@ -651,7 +651,11 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
             <KV label="OEM Extra Support Retained" value={inr(lead.oemExtraSupportRetained || c.oemExtraSupport?.oemExtraSupportRetained || 0)} tone="text-emerald-600" />
             <KV label="Dealer Scheme Retained" value={inr(c.dealerSchemeRetained ?? c.dealerRetained)} />
             <KV label="Dealer-Funded Benefit" value={inr(c.dealerFundedBenefit ?? lead.dealerFundedBenefit ?? 0)} tone="text-rose-600" />
-            <KV label="Dealer Margin (Net)" value={inr(c.margin?.marginNetExGst)} />
+            <KV label="Dealer Margin (Net)" value={inr(
+              lead.dealerMarginNetExGst != null
+                ? lead.dealerMarginNetExGst
+                : Number(c.margin?.marginNetExGst || 0) + Number(lead.extraIncomeFromCustomer || 0)
+            )} />
           </>
         )}
         <OwnerKV label="Lead Source" field="leadSource" value={lead.leadSource || ""}
