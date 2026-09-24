@@ -231,10 +231,9 @@ export default function OemBilling() {
       />
       {tab === "created_from_oem" && (repair.stubCount || 0) > 0 && (
         <p className="text-[12px] text-ink-faint mt-3" data-testid="oem-billing-repair-hint">
-          These IDs are empty copies. Payments and scheme stay on the original booked file.
-          {canEditCommercials && (repair.safeCount || 0) > 0
-            ? " Relink moves chassis/invoice onto that original and deletes the empty copy."
-            : " Name-only or second-vehicle rows need a manual check."}
+          These IDs are empty copies. Payments and scheme stay on the original file
+          (including Close Won). Relink moves chassis/invoice onto that original and
+          deletes the empty copy.
         </p>
       )}
       {drawer}
