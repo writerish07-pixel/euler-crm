@@ -1277,7 +1277,7 @@ def classify_oem_billing(sold_rows, leads):
     same mobile or the same usable name (Messenger SCS × 5) stay unmatched so
     sync can create the remaining units.
     """
-    live = [l for l in (leads or []) if live_occupies_vehicle_id(l)]
+    live = [l for l in (leads or []) if repair_original_lead(l) or is_oem_billing_stub(l)]
     occupied = occupied_chassis_numbers(leads)
     claimed = {}
     out = []
@@ -1418,7 +1418,48 @@ def is_oem_billing_stub(lead):
     if _lead_is_delivered(lead):
         return False
     status = str((lead or {}).get("currentStatus") or "New").strip().lower()
-    return status not in ("booked", "finance process", "financeprocess")
+    return status not in ("booked", "finance process", "financeprocess", "close won", "closewon")
+
+
+def repair_original_lead(lead):
+    """True for the real CRM file an OEM stub should join.
+
+    Close Won sets accountStatus=Closed. August deliveries are also excluded
+    from live_occupies_vehicle_id (yard rule from 1 Sep). Those files still
+    have the payments and scheme — pairing must see them.
+    """
+    if not lead:
+        return False
+    if is_oem_billing_stub(lead):
+        return False
+    if lead.get("dealCancelled"):
+        return False
+    acct = str(lead.get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return False
+    return True
+
+
+def _original_rank(lead):
+    """Prefer the finished deal when two files share a mobile."""
+    status = str((lead or {}).get("currentStatus") or "").strip().lower()
+    acct = str((lead or {}).get("accountStatus") or "").strip().lower()
+    money = 0.0
+    try:
+        money = float((lead or {}).get("totalReceived") or 0)
+    except (TypeError, ValueError):
+        money = 0.0
+    if acct == "closed" or "close" in status:
+        tier = 5
+    elif _lead_is_delivered(lead) or "deliver" in status:
+        tier = 4
+    elif status in ("booked", "finance process", "financeprocess") or "book" in status or "finance" in status:
+        tier = 3
+    elif money > 0:
+        tier = 2
+    else:
+        tier = 1
+    return (tier, money)
 
 
 def _pair_summary(lead):
@@ -1464,14 +1505,15 @@ def _originals_for_stub(stub, originals):
         return {"originals": list(uniq.values()), "match": "chassis", "conflict": True}
 
     if by_mobile:
-        free = [l for l in by_mobile if not _conflict(l)]
-        blocked = [l for l in by_mobile if _conflict(l)]
-        if len(free) == 1 and not blocked:
-            return {"originals": free, "match": "mobile", "conflict": False}
+        ranked = sorted(by_mobile, key=_original_rank, reverse=True)
+        best = _original_rank(ranked[0])
+        top = [l for l in ranked if _original_rank(l) == best]
+        if len(top) == 1:
+            return {"originals": top, "match": "mobile", "conflict": False}
         return {
             "originals": by_mobile,
             "match": "mobile",
-            "conflict": bool(blocked) or len(by_mobile) != 1,
+            "conflict": True,
         }
 
     if by_name:
@@ -1493,9 +1535,8 @@ def pair_oem_billing_stubs(leads):
     Safe = unique mobile (or already-same chassis) and the original does not
     already hold a different chassis. Name-only and second-vehicle stay review.
     """
-    live = [l for l in (leads or []) if live_occupies_vehicle_id(l)]
-    stubs = [l for l in live if is_oem_billing_stub(l)]
-    originals = [l for l in live if not is_oem_billing_stub(l)]
+    stubs = [l for l in (leads or []) if is_oem_billing_stub(l)]
+    originals = [l for l in (leads or []) if repair_original_lead(l)]
     claimed = {}
     rows = []
     for stub in stubs:
@@ -1538,7 +1579,7 @@ def pair_oem_billing_stubs(leads):
         if not cands:
             rows.append({
                 "action": "review",
-                "reason": "no booked lead on this mobile or name",
+                "reason": "no CRM lead on this mobile or name",
                 "match": match,
                 "stub": _pair_summary(stub),
                 "original": None,
@@ -1548,7 +1589,7 @@ def pair_oem_billing_stubs(leads):
         if match == "name" and len(cands) == 1 and not conflict:
             reason = "name-only match — confirm before relink"
         elif conflict and match == "mobile":
-            reason = "original already has a different chassis"
+            reason = "more than one original lead on this mobile"
         elif len(cands) > 1:
             reason = "more than one original lead matches"
         else:
@@ -1567,28 +1608,32 @@ def pair_oem_billing_stubs(leads):
 def merge_patch_for_stub(original, stub):
     """Chassis / invoice / plate to copy from the stub onto the original.
 
-    Never rewrites commercials. Refuses when the original already holds a
-    different chassis.
+    Never rewrites commercials. OEM billed ids win when the original is empty
+    or already holds this chassis. A different chassis on a same-order pack
+    is stamped onto the next empty unit; a single-unit file keeps its own
+    chassis and only fills blank invoice/plate.
     """
     chassis = _norm_chassis((stub or {}).get("chassisNumber"))
     invoice = str((stub or {}).get("invoiceNumber") or "").strip()
     plate = str((stub or {}).get("numberPlate") or "").strip()
     have = set(lead_chassis_list(original))
-    if have and chassis and chassis not in have:
-        return None
     patch = {}
-    if chassis and _norm_chassis((original or {}).get("chassisNumber")) != chassis:
-        if not is_same_order_pack(original) or not lead_chassis_list(original):
-            patch["chassisNumber"] = chassis
-    if invoice and _norm_invoice((original or {}).get("invoiceNumber")) != _norm_invoice(invoice):
-        if not is_same_order_pack(original) or not lead_invoice_list(original):
-            patch["invoiceNumber"] = invoice
-    if plate and _norm_invoice((original or {}).get("numberPlate")) != _norm_invoice(plate):
-        if not is_same_order_pack(original) or not str((original or {}).get("numberPlate") or "").strip():
-            patch["numberPlate"] = plate
-    stamped = stamp_unit_vehicle_ids(original, chassis, invoice, plate)
-    if stamped and stamped != list((original or {}).get("units") or []):
-        patch["units"] = stamped
+    same_or_empty = (not have) or (chassis and chassis in have)
+    if chassis and same_or_empty:
+        if _norm_chassis((original or {}).get("chassisNumber")) != chassis:
+            if not is_same_order_pack(original) or not lead_chassis_list(original):
+                patch["chassisNumber"] = chassis
+        if invoice and _norm_invoice((original or {}).get("invoiceNumber")) != _norm_invoice(invoice):
+            if not is_same_order_pack(original) or not lead_invoice_list(original):
+                patch["invoiceNumber"] = invoice
+        if plate and _norm_invoice((original or {}).get("numberPlate")) != _norm_invoice(plate):
+            if not is_same_order_pack(original) or not str((original or {}).get("numberPlate") or "").strip():
+                patch["numberPlate"] = plate
+        stamped = stamp_unit_vehicle_ids(original, chassis, invoice, plate)
+        if stamped and stamped != list((original or {}).get("units") or []):
+            patch["units"] = stamped
+    elif invoice and not _norm_invoice((original or {}).get("invoiceNumber")):
+        patch["invoiceNumber"] = invoice
     return patch
 
 
