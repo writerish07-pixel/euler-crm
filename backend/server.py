@@ -9160,9 +9160,9 @@ def _oem_repair_payload(pairs):
 
 
 async def _purge_oem_billing_stub(lead_id):
-    """Delete an empty Created-from-OEM file after its chassis is on the original."""
+    """Delete an empty duplicate after its chassis is on the original."""
     lead = await db.leads.find_one({"leadId": lead_id})
-    if not lead or not oem_sync.is_oem_billing_stub(lead):
+    if not lead or not oem_sync.is_empty_duplicate_lead(lead):
         return False
     if await _lead_has_money(lead_id):
         return False
@@ -9189,14 +9189,14 @@ async def _merge_oem_billing_stub(stub_id, original_id):
     original = await db.leads.find_one({"leadId": original_id})
     if not stub or not original:
         return {"ok": False, "reason": "lead not found"}
-    if not oem_sync.is_oem_billing_stub(stub):
-        return {"ok": False, "reason": "source is not an empty Created-from-OEM lead"}
-    if oem_sync.is_oem_billing_stub(original):
-        return {"ok": False, "reason": "original is also a Created-from-OEM stub"}
-    if not oem_sync.repair_original_lead(original):
-        return {"ok": False, "reason": "original lead is cancelled"}
+    if not oem_sync.is_empty_duplicate_lead(stub):
+        return {"ok": False, "reason": "source is not an empty duplicate lead"}
+    if oem_sync.is_empty_duplicate_lead(original):
+        return {"ok": False, "reason": "original is also an empty duplicate"}
+    if not oem_sync.is_commercial_original(original):
+        return {"ok": False, "reason": "original is not a booked / Close Won file"}
     if await _lead_has_money(stub_id):
-        return {"ok": False, "reason": "Created-from-OEM lead has payments — will not delete"}
+        return {"ok": False, "reason": "duplicate lead has payments — will not delete"}
     patch = oem_sync.merge_patch_for_stub(original, stub) or {}
     if patch:
         patch["oemSoldSyncedAt"] = now_iso()
@@ -9255,17 +9255,9 @@ async def merge_oem_billing_repair(body: OemBillingRepairIn, act=Depends(actor))
     skipped = []
     for stub_id, original_id in wanted:
         plan = allowed.get((stub_id, original_id))
-        if not plan:
+        if body.safeOnly and (not plan or plan.get("action") != "safe"):
             skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
-                            "reason": "pair is not on the current repair list"})
-            continue
-        if not body.safeOnly and body.pairs and plan.get("action") != "safe" and plan.get("match") != "name":
-            skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
-                            "reason": plan.get("reason") or "needs review"})
-            continue
-        if body.safeOnly and plan.get("action") != "safe":
-            skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
-                            "reason": plan.get("reason") or "needs review"})
+                            "reason": (plan or {}).get("reason") or "needs review"})
             continue
         result = await _merge_oem_billing_stub(stub_id, original_id)
         if result.get("ok"):

@@ -77,12 +77,34 @@ export default function OemBilling() {
       const n = r.mergedCount || 0;
       toast.success(
         n
-          ? `Relinked ${n} OEM stub${n === 1 ? "" : "s"} onto the original booked lead${n === 1 ? "" : "s"}`
+          ? `Connected ${n} original${n === 1 ? "" : "s"} and deleted the empty duplicate${n === 1 ? "" : "s"}`
           : "No safe matches to relink",
       );
       load();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not relink OEM stubs"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const connectPair = async (stubLeadId, originalLeadId) => {
+    if (!stubLeadId || !originalLeadId) return;
+    setBusy(true);
+    try {
+      const r = await post("/oem-billing/repair-merge", {
+        pairs: [{ stubLeadId, originalLeadId }],
+      });
+      const n = r.mergedCount || 0;
+      if (n) {
+        toast.success(`Connected ${originalLeadId} and deleted duplicate ${stubLeadId}`);
+      } else {
+        const why = (r.skipped && r.skipped[0] && r.skipped[0].reason) || "Could not connect";
+        toast.error(why);
+      }
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not connect leads"));
     } finally {
       setBusy(false);
     }
@@ -220,6 +242,39 @@ export default function OemBilling() {
                 >
                   {creating === r.chassis ? "Creating…" : "Create lead"}
                 </Button>
+              )}
+              {canEditCommercials && r.bucket === "needs_review" && (r.holderLeads || []).length > 1 && (
+                <div className="mt-2 space-y-1" data-testid={`oem-billing-holders-${r.chassis}`}>
+                  {(r.holderLeads || []).map((h) => (
+                    <div key={h.leadId} className="text-[11px] text-ink-soft">
+                      {h.leadId} · {h.currentStatus || "—"} · {h.executive || "no exec"}
+                    </div>
+                  ))}
+                  {(r.duplicateLeadIds || []).map((dupId) => (
+                    <Button
+                      key={dupId}
+                      variant="secondary"
+                      className="mt-1"
+                      data-testid={`oem-billing-connect-${r.chassis}-${dupId}`}
+                      disabled={busy || !r.keeperLeadId}
+                      onClick={() => connectPair(dupId, r.keeperLeadId)}
+                    >
+                      Keep {r.keeperLeadId}, delete {dupId}
+                    </Button>
+                  ))}
+                  {!r.keeperLeadId && (r.holderLeads || []).filter((h) => h.leadId && h.leadId !== r.leadId).map((h) => (
+                    <Button
+                      key={`alt-${h.leadId}`}
+                      variant="secondary"
+                      className="mt-1"
+                      data-testid={`oem-billing-connect-${r.chassis}-${h.leadId}`}
+                      disabled={busy}
+                      onClick={() => connectPair(h.leadId, r.leadId)}
+                    >
+                      Keep {r.leadId}, delete {h.leadId}
+                    </Button>
+                  ))}
+                </div>
               )}
             </div>
           ) },

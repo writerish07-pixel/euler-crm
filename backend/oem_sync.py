@@ -1225,8 +1225,10 @@ def _bucket_for_matched_lead(lead):
     return BUCKET_PENDING
 
 
-def _billing_row(sold, bucket, lead=None, review_reason=""):
+def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None):
     sold_date = str((sold or {}).get("soldDate") or "").strip()[:10]
+    holders = [_pair_summary(l) for l in (holder_leads or []) if l]
+    keeper = resolve_chassis_holders(holder_leads or [])
     return {
         "chassis": _norm_chassis((sold or {}).get("chassis")),
         "invoiceNumber": str((sold or {}).get("invoiceNumber") or "").strip(),
@@ -1242,6 +1244,12 @@ def _billing_row(sold, bucket, lead=None, review_reason=""):
         "crmExecutive": (lead or {}).get("executive") or "",
         "oemBillingCreated": bool((lead or {}).get("oemBillingCreated")),
         "reviewReason": review_reason,
+        "holderLeads": holders,
+        "keeperLeadId": (keeper or {}).get("leadId") or "",
+        "duplicateLeadIds": [
+            h["leadId"] for h in holders
+            if h.get("leadId") and h.get("leadId") != (keeper or {}).get("leadId")
+        ],
     }
 
 
@@ -1295,9 +1303,14 @@ def classify_oem_billing(sold_rows, leads):
             continue
         holders = [l for l in live if chassis in lead_chassis_list(l)]
         if len(holders) > 1:
+            keeper = resolve_chassis_holders(holders)
+            if keeper:
+                take(sold, keeper, _bucket_for_matched_lead(keeper))
+                continue
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, holders[0],
-                "several live leads hold this chassis"))
+                "several live leads hold this chassis — connect the original and delete the empty copy",
+                holder_leads=holders))
             continue
         if len(holders) == 1:
             take(sold, holders[0], _bucket_for_matched_lead(holders[0]))
@@ -1409,6 +1422,11 @@ async def list_oem_billing(db):
     return classify_oem_billing(sold, leads)
 
 
+_OPEN_DUP_STATUSES = {
+    "new", "contacted", "follow-up", "followup", "in progress", "inprogress",
+}
+
+
 def is_oem_billing_stub(lead):
     """New file minted by OEM sync — not a booked original."""
     if not (lead or {}).get("oemBillingCreated"):
@@ -1419,6 +1437,68 @@ def is_oem_billing_stub(lead):
         return False
     status = str((lead or {}).get("currentStatus") or "New").strip().lower()
     return status not in ("booked", "finance process", "financeprocess", "close won", "closewon")
+
+
+def is_commercial_original(lead):
+    """Booked / delivered / Close Won / paid file — keep this one."""
+    if not lead or lead.get("dealCancelled"):
+        return False
+    acct = str(lead.get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived"):
+        return False
+    if acct == "closed":
+        return True
+    status = str(lead.get("currentStatus") or "").strip().lower()
+    if "close" in status or "deliver" in status or "book" in status or "finance" in status:
+        return True
+    if _lead_is_delivered(lead):
+        return True
+    if lead.get("bookingDate") or lead.get("bookingId"):
+        return True
+    try:
+        if float(lead.get("totalReceived") or 0) > 0.01:
+            return True
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+def is_empty_duplicate_lead(lead):
+    """Open empty file that can be deleted after chassis moves to the original.
+
+    Includes Created-from-OEM stubs and a New enquiry on the same mobile
+    (Mohan Singh / Prerna vs Close Won / Devang). Executive is ignored.
+    """
+    if not lead or lead.get("dealCancelled"):
+        return False
+    if is_commercial_original(lead):
+        return False
+    acct = str(lead.get("accountStatus") or "Active").strip().lower()
+    if acct in ("cancelled", "inactive", "archived", "closed"):
+        return False
+    status = str(lead.get("currentStatus") or "new").strip().lower()
+    if status not in _OPEN_DUP_STATUSES:
+        return False
+    try:
+        if float(lead.get("totalReceived") or 0) > 0.01:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def resolve_chassis_holders(holders):
+    """One commercial file + empty copies → keep the commercial. Else None."""
+    rows = [l for l in (holders or []) if l]
+    if not rows:
+        return None
+    commercials = [l for l in rows if is_commercial_original(l)]
+    empties = [l for l in rows if is_empty_duplicate_lead(l)]
+    if len(commercials) == 1 and len(commercials) + len(empties) == len(rows):
+        return commercials[0]
+    if len(commercials) == 1 and len(empties) == len(rows) - 1:
+        return commercials[0]
+    return None
 
 
 def repair_original_lead(lead):
@@ -1472,6 +1552,7 @@ def _pair_summary(lead):
         "chassis": _norm_chassis(lead.get("chassisNumber")),
         "invoiceNumber": str(lead.get("invoiceNumber") or "").strip(),
         "model": lead.get("interestedModel") or lead.get("model") or "",
+        "executive": lead.get("executive") or "",
         "totalReceived": lead.get("totalReceived") or 0,
         "oemBillingCreated": bool(lead.get("oemBillingCreated")),
     }
@@ -1535,8 +1616,8 @@ def pair_oem_billing_stubs(leads):
     Safe = unique mobile (or already-same chassis) and the original does not
     already hold a different chassis. Name-only and second-vehicle stay review.
     """
-    stubs = [l for l in (leads or []) if is_oem_billing_stub(l)]
-    originals = [l for l in (leads or []) if repair_original_lead(l)]
+    stubs = [l for l in (leads or []) if is_empty_duplicate_lead(l)]
+    originals = [l for l in (leads or []) if is_commercial_original(l)]
     claimed = {}
     rows = []
     for stub in stubs:
