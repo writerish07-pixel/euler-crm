@@ -9018,7 +9018,13 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     return updated
 
 
-async def _create_leads_from_unmatched_oem_sold():
+async def _create_leads_from_unmatched_oem_sold(*, mint_new=False):
+    """Append leftover Sold chassis onto an existing pack. Do not mint New files.
+
+    Sync used to insert a stub lead for every unmatched Sold row. That orphaned
+    booked files when mobile/name did not line up. mint_new is only for the
+    explicit one-row Create action after the desk confirms the customer is new.
+    """
     sold = [r async for r in db.oem_sold.find({})]
     leads = [l async for l in db.leads.find({})]
     created = []
@@ -9047,6 +9053,8 @@ async def _create_leads_from_unmatched_oem_sold():
             leads = [live if (l or {}).get("leadId") == (target or {}).get("leadId") else l
                      for l in leads]
             continue
+        if not mint_new:
+            continue
         lead = await _insert_oem_billing_lead(row, sold)
         if lead:
             created.append(lead.get("leadId"))
@@ -9073,6 +9081,7 @@ def _oem_billing_payload(rows, period):
         "counts": counts,
         "rows": visible,
         "period": getattr(period, "label", "") or "All",
+        "repair": {"pairs": [], "safeCount": 0, "reviewCount": 0, "stubCount": 0},
     }
 
 
@@ -9084,13 +9093,20 @@ async def list_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     rows = await oem_sync.list_oem_billing(db)
     if bucket:
         rows = [r for r in rows if r.get("bucket") == bucket]
-    return _oem_billing_payload(rows, period)
+    payload = _oem_billing_payload(rows, period)
+    leads = [l async for l in db.leads.find({})]
+    payload["repair"] = _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
+    return payload
 
 
 @api.post("/oem-billing/sync", dependencies=[Depends(deal_desk_only)])
 async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = None,
                            act=Depends(actor)):
-    """Refresh Coulson Sold, stamp ids onto matching leads, create missing files."""
+    """Refresh Coulson Sold and stamp chassis/invoice onto matching CRM leads.
+
+    Does not mint New files. Unmatched Sold rows stay in Not in CRM / Needs
+    review so the desk can confirm before Create lead.
+    """
     try:
         await oem_sync.refresh_sold_inventory(db)
     except Exception:
@@ -9108,12 +9124,198 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     payload["createdLeadIds"] = created
     payload["created"] = len(created)
     payload["leadsVehicleIds"] = stamped
+    leads = [l async for l in db.leads.find({})]
+    payload["repair"] = _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
     await write_audit(act, "sync", "oem-billing", new={
         "soldCount": payload.get("soldCount"),
         "created": payload.get("created"),
         "leadsVehicleIds": stamped,
     })
     return payload
+
+
+class OemBillingCreateIn(BaseModel):
+    chassis: str = ""
+
+
+class OemBillingRepairPairIn(BaseModel):
+    stubLeadId: str = ""
+    originalLeadId: str = ""
+
+
+class OemBillingRepairIn(BaseModel):
+    pairs: List[OemBillingRepairPairIn] = []
+    safeOnly: bool = False
+
+
+def _oem_repair_payload(pairs):
+    safe = [p for p in pairs if (p or {}).get("action") == "safe"]
+    review = [p for p in pairs if (p or {}).get("action") != "safe"]
+    return {
+        "pairs": pairs,
+        "safeCount": len(safe),
+        "reviewCount": len(review),
+        "stubCount": len(pairs),
+    }
+
+
+async def _purge_oem_billing_stub(lead_id):
+    """Delete an empty Created-from-OEM file after its chassis is on the original."""
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead or not oem_sync.is_oem_billing_stub(lead):
+        return False
+    if await _lead_has_money(lead_id):
+        return False
+    try:
+        await gsheets.delete_lead_traces(lead_id)
+    except Exception:
+        logging.exception("OEM stub sheet cleanup failed for %s", lead_id)
+    for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
+                 "activities", "dealer_earnings", "incentive_register", "billing_summaries",
+                 "whatsapp_messages", "whatsapp_outbox"]:
+        await db[coll].delete_many({"leadId": lead_id})
+    await db[lead_docs.COLLECTION].delete_many({"leadId": lead_id})
+    await db.leads.delete_one({"leadId": lead_id})
+    return True
+
+
+async def _merge_oem_billing_stub(stub_id, original_id):
+    """Move OEM chassis onto the booked file and drop the empty stub."""
+    stub_id = str(stub_id or "").strip()
+    original_id = str(original_id or "").strip()
+    if not stub_id or not original_id or stub_id == original_id:
+        return {"ok": False, "reason": "stub and original lead ids are required"}
+    stub = await db.leads.find_one({"leadId": stub_id})
+    original = await db.leads.find_one({"leadId": original_id})
+    if not stub or not original:
+        return {"ok": False, "reason": "lead not found"}
+    if not oem_sync.is_oem_billing_stub(stub):
+        return {"ok": False, "reason": "source is not an empty Created-from-OEM lead"}
+    if oem_sync.is_oem_billing_stub(original):
+        return {"ok": False, "reason": "original is also a Created-from-OEM stub"}
+    if not oem_sync.live_occupies_vehicle_id(original):
+        return {"ok": False, "reason": "original lead is not live"}
+    if await _lead_has_money(stub_id):
+        return {"ok": False, "reason": "Created-from-OEM lead has payments — will not delete"}
+    patch = oem_sync.merge_patch_for_stub(original, stub)
+    if patch is None:
+        return {"ok": False, "reason": "original already has a different chassis"}
+    if patch:
+        patch["oemSoldSyncedAt"] = now_iso()
+        patch["oemBillingRelinkedFrom"] = stub_id
+        patch["lastUpdated"] = now_iso()
+        await db.leads.update_one({"leadId": original_id}, {"$set": patch})
+        delivery_ids = {
+            k: patch[k] for k in ("chassisNumber", "invoiceNumber", "numberPlate") if k in patch
+        }
+        if delivery_ids:
+            await db.deliveries.update_one({"leadId": original_id}, {"$set": delivery_ids})
+        if "invoiceNumber" in patch:
+            await db.billing_summaries.update_one(
+                {"leadId": original_id}, {"$set": {"invoiceNumber": patch["invoiceNumber"]}})
+        original.update(patch)
+    purged = await _purge_oem_billing_stub(stub_id)
+    if not purged:
+        return {"ok": False, "reason": "could not delete the empty Created-from-OEM lead"}
+    await sheet_sync("leads", clean(await db.leads.find_one({"leadId": original_id})))
+    return {
+        "ok": True,
+        "stubLeadId": stub_id,
+        "originalLeadId": original_id,
+        "chassis": oem_sync._norm_chassis(original.get("chassisNumber")),
+        "invoiceNumber": str(original.get("invoiceNumber") or "").strip(),
+    }
+
+
+@api.get("/oem-billing/repair-pairs", dependencies=[Depends(deal_desk_only)])
+async def list_oem_billing_repair_pairs():
+    """Created-from-OEM stubs paired with the booked lead they should join."""
+    leads = [l async for l in db.leads.find({})]
+    return _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
+
+
+@api.post("/oem-billing/repair-merge", dependencies=[Depends(deal_desk_only)])
+async def merge_oem_billing_repair(body: OemBillingRepairIn, act=Depends(actor)):
+    """Move chassis from empty OEM stubs onto the original booked files."""
+    leads = [l async for l in db.leads.find({})]
+    planned = oem_sync.pair_oem_billing_stubs(leads)
+    allowed = {}
+    for row in planned:
+        stub = (row.get("stub") or {}).get("leadId")
+        orig = (row.get("original") or {}).get("leadId")
+        if stub and orig:
+            allowed[(stub, orig)] = row
+    wanted = []
+    if body.safeOnly or not body.pairs:
+        wanted = [
+            ((row.get("stub") or {}).get("leadId"), (row.get("original") or {}).get("leadId"))
+            for row in planned if row.get("action") == "safe"
+        ]
+    else:
+        wanted = [(p.stubLeadId, p.originalLeadId) for p in body.pairs]
+    merged = []
+    skipped = []
+    for stub_id, original_id in wanted:
+        plan = allowed.get((stub_id, original_id))
+        if not plan:
+            skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
+                            "reason": "pair is not on the current repair list"})
+            continue
+        if not body.safeOnly and body.pairs and plan.get("action") != "safe" and plan.get("match") != "name":
+            skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
+                            "reason": plan.get("reason") or "needs review"})
+            continue
+        if body.safeOnly and plan.get("action") != "safe":
+            skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
+                            "reason": plan.get("reason") or "needs review"})
+            continue
+        result = await _merge_oem_billing_stub(stub_id, original_id)
+        if result.get("ok"):
+            merged.append(result)
+        else:
+            skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
+                            "reason": result.get("reason") or "merge failed"})
+    leads = [l async for l in db.leads.find({})]
+    payload = _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
+    payload["merged"] = merged
+    payload["skipped"] = skipped
+    payload["mergedCount"] = len(merged)
+    await write_audit(act, "repair", "oem-billing", new={
+        "mergedCount": len(merged),
+        "skippedCount": len(skipped),
+        "merged": merged,
+    })
+    return payload
+
+
+@api.post("/oem-billing/create", dependencies=[Depends(deal_desk_only)])
+async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
+    """Mint one New lead for a Sold chassis that is still Not in CRM."""
+    chassis = oem_sync._norm_chassis(body.chassis)
+    if not chassis:
+        raise HTTPException(400, "Chassis is required")
+    sold = [r async for r in db.oem_sold.find({})]
+    leads = [l async for l in db.leads.find({})]
+    classified = oem_sync.classify_oem_billing(sold, leads)
+    row = next((r for r in classified if oem_sync._norm_chassis(r.get("chassis")) == chassis), None)
+    if not row:
+        raise HTTPException(404, "That chassis is not on OEM Sold")
+    if row.get("bucket") != oem_sync.BUCKET_UNMATCHED:
+        raise HTTPException(409, "That chassis already matches a CRM lead")
+    target = _pack_target_for_sold(row, leads, sold)
+    if target is _PACK_DO_NOT_CREATE:
+        raise HTTPException(409, "This customer already has split files — do not mint another")
+    if target:
+        live = await _append_oem_unit(target, row)
+        await write_audit(act, "append", "oem-billing", leadId=(live or {}).get("leadId"),
+                          new={"chassis": chassis})
+        return {"ok": True, "appended": True, "leadId": (live or {}).get("leadId"),
+                "chassis": chassis}
+    lead = await _insert_oem_billing_lead(row, sold)
+    await write_audit(act, "create", "oem-billing", leadId=(lead or {}).get("leadId"),
+                      new={"chassis": chassis})
+    return {"ok": True, "created": True, "leadId": (lead or {}).get("leadId"),
+            "chassis": chassis}
 
 
 @api.put("/leads/{lead_id}/delivery")
