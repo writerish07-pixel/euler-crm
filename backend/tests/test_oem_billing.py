@@ -449,7 +449,30 @@ def test_pair_name_only_is_review():
     assert pairs[0]["original"]["leadId"] == "LD-ORIG-NAME"
 
 
-def test_pair_second_chassis_on_original_is_review():
+def test_pair_close_won_august_delivery_is_safe():
+    """Close Won + August delivery used to look like 'no booked lead'."""
+    pairs = oem_sync.pair_oem_billing_stubs([
+        {
+            "leadId": "LD26000033", "customerName": "Roshan Sharma",
+            "mobile": "9875180032", "accountStatus": "Closed",
+            "currentStatus": "Close Won", "deliveryStatus": "Delivered",
+            "deliveryDate": "2026-08-11", "totalReceived": 825000,
+        },
+        {
+            "leadId": "LD26000628", "customerName": "ROSHAN SHARMA",
+            "mobile": "9875180032", "accountStatus": "Active",
+            "currentStatus": "New", "oemBillingCreated": True,
+            "chassisNumber": "MD9EMVDL266277773", "invoiceNumber": "AF-122-126270118",
+        },
+    ])
+    assert len(pairs) == 1
+    assert pairs[0]["action"] == "safe"
+    assert pairs[0]["match"] == "mobile"
+    assert pairs[0]["original"]["leadId"] == "LD26000033"
+    assert pairs[0]["stub"]["leadId"] == "LD26000628"
+
+
+def test_pair_second_chassis_on_original_still_unique_mobile():
     pairs = oem_sync.pair_oem_billing_stubs([
         {
             "leadId": "LD-ORIG-FLEET", "customerName": "Fleet",
@@ -462,8 +485,8 @@ def test_pair_second_chassis_on_original_is_review():
             "oemBillingCreated": True, "chassisNumber": "MD9SECOND01",
         },
     ])
-    assert pairs[0]["action"] == "review"
-    assert "different chassis" in pairs[0]["reason"]
+    assert pairs[0]["action"] == "safe"
+    assert pairs[0]["original"]["leadId"] == "LD-ORIG-FLEET"
 
 
 @pytest.mark.asyncio
@@ -521,3 +544,58 @@ async def test_oem_billing_repair_merges_stub_onto_booked_original(client):
     hit = next(row for row in billed.json()["rows"] if row["chassis"] == chassis)
     assert hit["leadId"] == orig_id
     assert hit["bucket"] == "pending_delivery"
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_repair_merges_onto_august_close_won(client):
+    stub_id = "LD-OEM-STUB-ROSHAN"
+    orig_id = "LD-OEM-ORIG-ROSHAN"
+    chassis = "MD9ROSHAN0001"
+    mobile = "9875180032"
+    await server.db.leads.delete_many({"leadId": {"$in": [stub_id, orig_id]}})
+    await server.db.payments.delete_many({"leadId": {"$in": [stub_id, orig_id]}})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.insert_one({
+        "leadId": orig_id, "customerName": "Roshan Sharma", "mobile": mobile,
+        "accountStatus": "Closed", "currentStatus": "Close Won",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-08-11",
+        "totalReceived": 825000, "customerPayable": 825000,
+        "executive": "Amit",
+    })
+    await server.db.payments.insert_one({
+        "leadId": orig_id, "receiptNumber": "RC-ROSHAN-1", "amount": 825000,
+        "entryType": "Receipt",
+    })
+    await server.db.leads.insert_one({
+        "leadId": stub_id, "customerName": "ROSHAN SHARMA", "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "New",
+        "oemBillingCreated": True, "leadSource": "OEM Billing",
+        "chassisNumber": chassis, "invoiceNumber": "AF-122-126270118",
+        "totalReceived": 0, "customerPayable": 0,
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "AF-122-126270118",
+        "customerName": "ROSHAN SHARMA", "soldDate": "2026-08-11",
+        "coulsonStatus": "SOLD",
+    })
+    listed = await client.get("/api/oem-billing/repair-pairs")
+    assert listed.status_code == 200, listed.text
+    pair = next(p for p in listed.json()["pairs"] if (p.get("stub") or {}).get("leadId") == stub_id)
+    assert pair["action"] == "safe"
+    assert pair["original"]["leadId"] == orig_id
+    merged = await client.post("/api/oem-billing/repair-merge", json={
+        "pairs": [{"stubLeadId": stub_id, "originalLeadId": orig_id}],
+    })
+    assert merged.status_code == 200, merged.text
+    assert merged.json()["mergedCount"] == 1
+    original = await server.db.leads.find_one({"leadId": orig_id})
+    assert original["chassisNumber"] == chassis
+    assert original["invoiceNumber"] == "AF-122-126270118"
+    assert original["currentStatus"] == "Close Won"
+    assert original["totalReceived"] == 825000
+    assert original["executive"] == "Amit"
+    assert await server.db.leads.find_one({"leadId": stub_id}) is None
+    billed = await client.get("/api/oem-billing", params={"month": "2026-08"})
+    hit = next(row for row in billed.json()["rows"] if row["chassis"] == chassis)
+    assert hit["leadId"] == orig_id
+    assert hit["bucket"] == "matched_delivered"

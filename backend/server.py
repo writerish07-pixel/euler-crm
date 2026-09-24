@@ -9193,13 +9193,11 @@ async def _merge_oem_billing_stub(stub_id, original_id):
         return {"ok": False, "reason": "source is not an empty Created-from-OEM lead"}
     if oem_sync.is_oem_billing_stub(original):
         return {"ok": False, "reason": "original is also a Created-from-OEM stub"}
-    if not oem_sync.live_occupies_vehicle_id(original):
-        return {"ok": False, "reason": "original lead is not live"}
+    if not oem_sync.repair_original_lead(original):
+        return {"ok": False, "reason": "original lead is cancelled"}
     if await _lead_has_money(stub_id):
         return {"ok": False, "reason": "Created-from-OEM lead has payments — will not delete"}
-    patch = oem_sync.merge_patch_for_stub(original, stub)
-    if patch is None:
-        return {"ok": False, "reason": "original already has a different chassis"}
+    patch = oem_sync.merge_patch_for_stub(original, stub) or {}
     if patch:
         patch["oemSoldSyncedAt"] = now_iso()
         patch["oemBillingRelinkedFrom"] = stub_id
