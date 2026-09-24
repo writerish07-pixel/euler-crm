@@ -1409,6 +1409,189 @@ async def list_oem_billing(db):
     return classify_oem_billing(sold, leads)
 
 
+def is_oem_billing_stub(lead):
+    """New file minted by OEM sync — not a booked original."""
+    if not (lead or {}).get("oemBillingCreated"):
+        return False
+    if _lead_is_cancelled(lead):
+        return False
+    if _lead_is_delivered(lead):
+        return False
+    status = str((lead or {}).get("currentStatus") or "New").strip().lower()
+    return status not in ("booked", "finance process", "financeprocess")
+
+
+def _pair_summary(lead):
+    lead = lead or {}
+    return {
+        "leadId": lead.get("leadId") or "",
+        "customerName": lead.get("customerName") or "",
+        "mobile": _digits10(lead.get("mobile") or lead.get("altMobile")),
+        "currentStatus": _lead_crm_status(lead),
+        "chassis": _norm_chassis(lead.get("chassisNumber")),
+        "invoiceNumber": str(lead.get("invoiceNumber") or "").strip(),
+        "model": lead.get("interestedModel") or lead.get("model") or "",
+        "totalReceived": lead.get("totalReceived") or 0,
+        "oemBillingCreated": bool(lead.get("oemBillingCreated")),
+    }
+
+
+def _originals_for_stub(stub, originals):
+    """Prefer unique mobile, then unique usable name. Chassis conflict is review."""
+    chassis = _norm_chassis((stub or {}).get("chassisNumber"))
+    by_mobile = _live_same_mobile(originals, (stub or {}).get("mobile") or (stub or {}).get("altMobile"))
+    by_name = _live_same_name(originals, (stub or {}).get("customerName"))
+    same_chassis = [
+        l for l in originals
+        if chassis and chassis in set(lead_chassis_list(l))
+    ]
+
+    def _conflict(lead):
+        have = set(lead_chassis_list(lead))
+        if not have:
+            return False
+        return bool(chassis) and chassis not in have
+
+    if same_chassis:
+        uniq = {(l or {}).get("leadId"): l for l in same_chassis if (l or {}).get("leadId")}
+        if len(uniq) == 1:
+            lead = next(iter(uniq.values()))
+            return {
+                "originals": [lead],
+                "match": "chassis",
+                "conflict": False,
+            }
+        return {"originals": list(uniq.values()), "match": "chassis", "conflict": True}
+
+    if by_mobile:
+        free = [l for l in by_mobile if not _conflict(l)]
+        blocked = [l for l in by_mobile if _conflict(l)]
+        if len(free) == 1 and not blocked:
+            return {"originals": free, "match": "mobile", "conflict": False}
+        return {
+            "originals": by_mobile,
+            "match": "mobile",
+            "conflict": bool(blocked) or len(by_mobile) != 1,
+        }
+
+    if by_name:
+        free = [l for l in by_name if not _conflict(l)]
+        blocked = [l for l in by_name if _conflict(l)]
+        if len(free) == 1 and not blocked:
+            return {"originals": free, "match": "name", "conflict": False}
+        return {
+            "originals": by_name,
+            "match": "name",
+            "conflict": True,
+        }
+    return {"originals": [], "match": "", "conflict": False}
+
+
+def pair_oem_billing_stubs(leads):
+    """Join Created-from-OEM stubs to the booked file they should have matched.
+
+    Safe = unique mobile (or already-same chassis) and the original does not
+    already hold a different chassis. Name-only and second-vehicle stay review.
+    """
+    live = [l for l in (leads or []) if live_occupies_vehicle_id(l)]
+    stubs = [l for l in live if is_oem_billing_stub(l)]
+    originals = [l for l in live if not is_oem_billing_stub(l)]
+    claimed = {}
+    rows = []
+    for stub in stubs:
+        found = _originals_for_stub(stub, originals)
+        cands = found.get("originals") or []
+        match = found.get("match") or ""
+        conflict = bool(found.get("conflict"))
+        stub_id = (stub or {}).get("leadId") or ""
+        if len(cands) == 1 and not conflict and match in ("mobile", "chassis"):
+            orig = cands[0]
+            oid = (orig or {}).get("leadId") or ""
+            if oid and oid in claimed:
+                rows.append({
+                    "action": "review",
+                    "reason": "another Created-from-OEM stub already claims this original",
+                    "match": match,
+                    "stub": _pair_summary(stub),
+                    "original": _pair_summary(orig),
+                    "candidates": [_pair_summary(orig)],
+                })
+                continue
+            if oid:
+                claimed[oid] = stub_id
+            already = bool(
+                _norm_chassis(stub.get("chassisNumber"))
+                and _norm_chassis(stub.get("chassisNumber")) in set(lead_chassis_list(orig)))
+            rows.append({
+                "action": "safe",
+                "reason": (
+                    "same chassis already on original" if already
+                    else "unique mobile match" if match == "mobile"
+                    else "same chassis"
+                ),
+                "match": match,
+                "stub": _pair_summary(stub),
+                "original": _pair_summary(orig),
+                "candidates": [_pair_summary(orig)],
+            })
+            continue
+        if not cands:
+            rows.append({
+                "action": "review",
+                "reason": "no booked lead on this mobile or name",
+                "match": match,
+                "stub": _pair_summary(stub),
+                "original": None,
+                "candidates": [],
+            })
+            continue
+        if match == "name" and len(cands) == 1 and not conflict:
+            reason = "name-only match — confirm before relink"
+        elif conflict and match == "mobile":
+            reason = "original already has a different chassis"
+        elif len(cands) > 1:
+            reason = "more than one original lead matches"
+        else:
+            reason = "needs review"
+        rows.append({
+            "action": "review",
+            "reason": reason,
+            "match": match,
+            "stub": _pair_summary(stub),
+            "original": _pair_summary(cands[0]) if len(cands) == 1 else None,
+            "candidates": [_pair_summary(l) for l in cands],
+        })
+    return rows
+
+
+def merge_patch_for_stub(original, stub):
+    """Chassis / invoice / plate to copy from the stub onto the original.
+
+    Never rewrites commercials. Refuses when the original already holds a
+    different chassis.
+    """
+    chassis = _norm_chassis((stub or {}).get("chassisNumber"))
+    invoice = str((stub or {}).get("invoiceNumber") or "").strip()
+    plate = str((stub or {}).get("numberPlate") or "").strip()
+    have = set(lead_chassis_list(original))
+    if have and chassis and chassis not in have:
+        return None
+    patch = {}
+    if chassis and _norm_chassis((original or {}).get("chassisNumber")) != chassis:
+        if not is_same_order_pack(original) or not lead_chassis_list(original):
+            patch["chassisNumber"] = chassis
+    if invoice and _norm_invoice((original or {}).get("invoiceNumber")) != _norm_invoice(invoice):
+        if not is_same_order_pack(original) or not lead_invoice_list(original):
+            patch["invoiceNumber"] = invoice
+    if plate and _norm_invoice((original or {}).get("numberPlate")) != _norm_invoice(plate):
+        if not is_same_order_pack(original) or not str((original or {}).get("numberPlate") or "").strip():
+            patch["numberPlate"] = plate
+    stamped = stamp_unit_vehicle_ids(original, chassis, invoice, plate)
+    if stamped and stamped != list((original or {}).get("units") or []):
+        patch["units"] = stamped
+    return patch
+
+
 def sold_row_in_period(row, period):
     """Undated Sold rows stay visible in every month so they are not hidden."""
     if getattr(period, "is_all", True):

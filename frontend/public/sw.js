@@ -9,7 +9,7 @@
  * fall back to a cached shell so the app opens offline instead of showing the
  * browser's error page, and data always comes from the network.
  */
-const VERSION = "euler-v9-deal-pay";
+const VERSION = "euler-v9-oem-relink";
 const SHELL = `${VERSION}-shell`;
 const ASSETS = `${VERSION}-assets`;
 const OFFLINE_URL = "/index.html";

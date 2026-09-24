@@ -45,6 +45,18 @@ const mockBilling = {
         oemBillingCreated: true,
       },
     ],
+    repair: {
+      stubCount: 1,
+      safeCount: 1,
+      reviewCount: 0,
+      pairs: [{
+        action: "safe",
+        reason: "unique mobile match",
+        match: "mobile",
+        stub: { leadId: "LD-NEW-UI", currentStatus: "New" },
+        original: { leadId: "LD-ORIG-UI", currentStatus: "Booked" },
+      }],
+    },
   },
 };
 
@@ -79,6 +91,7 @@ test("OEM billing tab shows pending delivery without asking for chassis", async 
   expect(host.querySelector('[data-testid="oem-billing"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="oem-bill-card-pending"]').textContent).toMatch(/1/);
   expect(host.querySelector('[data-testid="oem-billing-sync"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="oem-billing-relink"]')).toBeTruthy();
   expect(host.textContent).toMatch(/Pending Person/);
   expect(host.textContent).not.toMatch(/Select chassis/i);
   await act(async () => { root.unmount(); });
