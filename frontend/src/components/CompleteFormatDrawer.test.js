@@ -26,7 +26,7 @@ jest.mock("./LeadDocuments", () => ({
   uploadKycFiles: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({
-  useAuth: () => ({ canSeeOwnerCommercials: false, isOwner: false }),
+  useAuth: () => ({ canSeeOwnerCommercials: false, isOwner: false, isExecutive: true }),
 }));
 
 import { put } from "../lib/api";
@@ -92,8 +92,8 @@ test("approval drawer prefills OEM extra support and saves it on the request", a
     variant: "Maxx (PV)",
     oemExtraSupportReceived: 7000,
     mobile: "9636959028",
-    schemePassOn: {},
   }));
+  expect(put.mock.calls[0][1].schemePassOn).toBeUndefined();
   await act(async () => { root.unmount(); });
   host.remove();
 });

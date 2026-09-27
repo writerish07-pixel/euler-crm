@@ -19,7 +19,13 @@ jest.mock("../lib/api", () => ({
       return Promise.resolve([{ priceId: "p1", variant: "Maxx (PV)", inYard: 1 }]);
     }
     if (path.indexOf("commercial/deal-preview") >= 0) {
-      return Promise.resolve({ netToCx: 185000 });
+      return Promise.resolve({
+        netToCx: 185000,
+        schemeMonth: "2026-09",
+        schemeOffers: [{ key: "loyaltyBonus", label: "Loyalty Bonus", schemeAvailable: 10000 }],
+        schemePassed: 0,
+        additionalDiscount: 5000,
+      });
     }
     if (path.indexOf("leads/mobile-matches") >= 0) {
       return Promise.resolve({
@@ -109,6 +115,10 @@ test("executive create form shows OEM extra support and another-vehicle checkbox
   expect(document.querySelector('[data-testid="another-vehicle-check"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="same-order-check"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="another-vehicle-block"]').textContent).toMatch(/another vehicle/i);
+  expect(document.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="deal-additional"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/OEM scheme/i);
+  expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/Scheme Master/i);
   await act(async () => { root.unmount(); });
 });
 
@@ -120,6 +130,7 @@ test("TL create form has the same extra-support and multi-unit controls", async 
   expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="another-vehicle-check"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="lead-executive"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="deal-additional"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
 });
 

@@ -40,6 +40,7 @@ KYC_INDIVIDUAL = ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan")
 # B2B is a firm: PAN + GST are required. Aadhaar is optional (may still be attached).
 KYC_B2B = ("kyc_pan", "kyc_gst")
 KYC_B2B_OPTIONAL = ("kyc_aadhaar_front", "kyc_aadhaar_back")
+EXTRA_SUPPORT_KIND = "oem_extra_support"
 
 ALLOWED_TYPES = {
     "image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif",
@@ -174,6 +175,53 @@ async def missing_kyc(db, *, request_id: str = "", lead_id: str = "",
     if normalize_customer_type(customer_type) == "B2B" and not str(gstin or "").strip():
         missing.append("gstin")
     return missing
+
+
+def extra_support_required(amount) -> bool:
+    try:
+        return float(amount or 0) > 0.01
+    except (TypeError, ValueError):
+        return False
+
+
+async def has_extra_support_proof(db, *, request_id: str = "", lead_id: str = "") -> bool:
+    clauses = []
+    if request_id:
+        clauses.append({"requestId": request_id, "kind": EXTRA_SUPPORT_KIND})
+    if lead_id:
+        clauses.append({"leadId": lead_id, "kind": EXTRA_SUPPORT_KIND})
+    if not clauses:
+        return False
+    q = {"$or": clauses} if len(clauses) > 1 else clauses[0]
+    return await db[COLLECTION].find_one(q, _META_PROJ) is not None
+
+
+async def missing_related_docs(db, *, lead=None, request_id: str = "",
+                               extra_received=None, require_kyc: bool = True) -> list:
+    """KYC (and extra-support proof when Received > 0) still outstanding."""
+    lead = lead or {}
+    lead_id = lead.get("leadId") or ""
+    missing = []
+    if require_kyc:
+        missing.extend(await missing_kyc(
+            db, request_id=request_id, lead_id=lead_id,
+            customer_type=lead.get("customerType") or "Individual",
+            gstin=lead.get("gstin") or ""))
+    extra = extra_received if extra_received is not None else lead.get("oemExtraSupportReceived")
+    if extra_support_required(extra):
+        if not await has_extra_support_proof(db, request_id=request_id, lead_id=lead_id):
+            missing.append(EXTRA_SUPPORT_KIND)
+    return missing
+
+
+def missing_doc_labels(kinds) -> str:
+    labels = []
+    for k in kinds or []:
+        if k == "gstin":
+            labels.append("GSTIN")
+        else:
+            labels.append((KINDS.get(k) or {}).get("label") or k)
+    return ", ".join(labels)
 
 
 async def has_oem_extra_proof(db, *, request_id: str = "", lead_id: str = "") -> bool:

@@ -171,7 +171,7 @@ function AppRoutes() {
       <Route path="/oem-extra-support" element={P(<OemExtraSupport />, { oemClaimDesk: true })} />
       <Route path="/dropped-extra-support" element={P(<DroppedExtraSupport />, { oemClaimDesk: true })} />
       <Route path="/claim-reconciliation" element={P(<ClaimReconciliation />, { ownerOnly: true })} />
-      <Route path="/scheme-master" element={P(<SchemeMaster />, { salesOnly: true })} />
+      <Route path="/scheme-master" element={P(<SchemeMaster />, { dealDesk: true })} />
       <Route path="/incentive-master" element={P(<IncentiveMaster />, { ownerOnly: true })} />
       <Route path="/executive-incentive" element={P(<ExecutiveIncentive />, { gmHome: true })} />
       <Route path="/dealer-earnings" element={P(<DealerEarnings />, { ownerOnly: true })} />

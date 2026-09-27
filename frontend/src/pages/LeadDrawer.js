@@ -8,7 +8,7 @@ import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
-import { LeadDocsStrip, RefundChequePick, kycKinds } from "../components/LeadDocuments";
+import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady } from "../components/LeadDocuments";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
@@ -214,6 +214,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       ? [
           { key: "overview", label: "Overview" },
           { key: "whatsapp", label: `WhatsApp${data.whatsapp?.count ? ` (${data.whatsapp.count})` : ""}` },
+          { key: "payments", label: `Payments (${(data.payments || []).length})` },
           { key: "activity", label: `Activity (${(data.activities || []).length})` },
         ]
       : [
@@ -267,7 +268,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             <Plus size={13} /> Add another vehicle
           </Button>
         )}
-        {!fieldView && !leadLocked && (isExecutive || isTl || isOwner || isSalesGm) && !actions.isDelivered && (
+        {!fieldView && !leadLocked && (isTl || isOwner || isSalesGm) && !actions.isDelivered && (
           <Button variant="secondary" data-testid="add-pack-unit-btn"
             onClick={() => setAddPackUnit(true)} className="!py-1 !px-2.5 text-xs">
             <Plus size={13} /> Add unit to this order
@@ -374,10 +375,10 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       )}
 
       {execHandover && !fieldView && !actions.isBooked && (
-        <StepLock text="You can convert this lead to a booking. After that, the Team Leader completes Price, Scheme, Payments and Delivery." />
+        <StepLock text="You can convert this lead to a booking. After that you post customer payments. Price, Scheme and Delivery stay with the Team Leader." />
       )}
       {execHandover && !fieldView && actions.isBooked && (
-        <StepLock text="Booked. Remaining steps are with the Team Leader — Price, Scheme, Payments and Delivery." />
+        <StepLock text="Booked. Post customer payments here. Price, Scheme and Delivery stay with the Team Leader." />
       )}
 
       {!fieldView && leadLocked && (
@@ -394,7 +395,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         />
       )}
 
-      <Tabs tabs={tabs} active={execHandover && !["overview", "whatsapp", "activity"].includes(tab) ? "overview" : tab} onChange={setTab} />
+      <Tabs tabs={tabs} active={execHandover && !["overview", "whatsapp", "activity", "payments"].includes(tab) ? "overview" : tab} onChange={setTab} />
 
       {tab === "units" && !fieldView && packUnits && (
         <UnitsTab
@@ -410,7 +411,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters}
             onOpenUnit={(sno, nextTab) => { setFocusUnit(sno); if (nextTab) setTab(nextTab); }} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("scheme")} />}
-      {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("payments")} onRefresh={refresh} />}
+      {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} documents={data.documents} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
       {tab === "delivery" && (
         fieldView
@@ -619,8 +620,8 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           Payable and outstanding are the deal (Cx Demand). Extra vs GVC goes to dealer margin — not a cheaper customer price.
         </p>
         <KV label="TCS" value={inr(c.tcs)} />
-        <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />
-        <KV label="Passed to Customer" value={inr(c.totalPassedToCustomer)} />
+        {!isExecutive && <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />}
+        {!isExecutive && <KV label="Passed to Customer" value={inr(c.totalPassedToCustomer)} />}
         <OwnerKV label="Final Exchange Value" field="finalExchangeValue" value={lead.finalExchangeValue || 0}
           display={inr(lead.finalExchangeValue || 0)} numeric leadId={lid} onSaved={onSaved} />
         {canSeeOwnerCommercials && Number(lead.extraIncomeFromCustomer) > 0 && (
@@ -642,10 +643,12 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           value={lead.oemExtraSupportReceived || 0}
           display={inr(lead.oemExtraSupportReceived || c.oemExtraSupport?.oemExtraSupportReceived || 0)}
           numeric leadId={lid} onSaved={onSaved} tone="text-amber-600" />
+        {!isExecutive && (
         <OwnerKV label="OEM Extra Support Passed" field="oemExtraSupportPassed"
           value={lead.oemExtraSupportPassed || 0}
           display={inr(lead.oemExtraSupportPassed || c.oemExtraSupport?.oemExtraSupportPassed || 0)}
           numeric leadId={lid} onSaved={onSaved} />
+        )}
         {canSeeOwnerCommercials && (
           <>
             <KV label="OEM Extra Support Retained" value={inr(lead.oemExtraSupportRetained || c.oemExtraSupport?.oemExtraSupportRetained || 0)} tone="text-emerald-600" />
@@ -702,9 +705,9 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
                         {u.model ? ` · ${u.model}` : ""}
                         {u.variant ? ` ${u.variant}` : ""}
                         {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
-                        {priced && schemed ? " · filled" : " · Price / Scheme open"}
+                        {priced && schemed ? " · filled" : (isExecutive ? "" : " · Price / Scheme open")}
                       </span>
-                      {onOpenUnit && (
+                      {onOpenUnit && !isExecutive && (
                         <span className="flex gap-1">
                           <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
                             data-testid={`overview-unit-price-${sno}`}
@@ -721,7 +724,7 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
               {Number(lead.customerPayable || lead.cxDemand) > 0 && (
                 <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
                   Pack payable {inr(lead.customerPayable || lead.cxDemand)}
-                  {Number(lead.packUnitsPending || 0) > 0 ? " · edit each unit’s Price and Scheme if the quote should change" : ""}
+                  {(!isExecutive && Number(lead.packUnitsPending || 0) > 0) ? " · edit each unit’s Price and Scheme if the quote should change" : ""}
                 </div>
               )}
             </div>
@@ -935,7 +938,7 @@ function Prev({ label, v, highlight }) {
 }
 
 /* -------------------------------------------------- Scheme */
-function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, onRefresh, unitSno: unitSnoProp, onUnitSno }) {
+function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, onRefresh, unitSno: unitSnoProp, onUnitSno, documents = [] }) {
   const units = packUnitList(lead);
   const [unitSnoLocal, setUnitSnoLocal] = useState(unitSnoProp || 1);
   const unitSno = unitSnoProp || unitSnoLocal;
@@ -1078,6 +1081,8 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       customerBenefitPassed: Object.values(clean).reduce((s, v) => s + (+v || 0), 0),
     };
     if (!schemeDate) return toast.error("Scheme date is required");
+    const extraErr = extraSupportReady(form.oemExtraSupportReceived, {}, documents);
+    if (extraErr) return toast.error(extraErr);
     try {
       // Only rewrite bookingDate after a real booking — never invent a booking via date alone.
       const alreadyBooked = Boolean(lead.bookingId || lead.bookingDate
@@ -1272,6 +1277,18 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           Summary follows Use Scheme = Yes only. Save to persist on the lead.
         </div>
       </Card>
+      {Number(form.oemExtraSupportReceived) > 0 && (
+        <div className="mt-4">
+          <LeadDocsStrip
+            leadId={lead.leadId}
+            kinds={["oem_extra_support"]}
+            canUploadKinds={["oem_extra_support"]}
+            title="OEM Extra Support proof"
+            documents={documents}
+            onChanged={onRefresh || onSaved}
+          />
+        </div>
+      )}
       {isOwner && unitIdx === 0 && <ExtraIncomeCard lead={lead} locked={locked} onSaved={onRefresh || onSaved} />}
       <div className="flex justify-end mt-4"><Button data-testid="save-scheme-btn" onClick={save} disabled={locked}>Update Scheme</Button></div>
     </div>
@@ -1329,10 +1346,12 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
 
 /* -------------------------------------------------- Payments */
 function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, onSaved }) {
+  const { isExecutive } = useAuth();
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
+  const paymentModes = (masters?.paymentModes || []).filter((m) => !(isExecutive && String(m).toLowerCase() === "finance"));
   const excess = +(lead.excessReceived || 0);
   const refunded = +(lead.refundedAmount || 0);
   const dealCancelled = !!lead.dealCancelled;
@@ -1377,7 +1396,15 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
   };
   return (
     <div>
-      {locked && <StepLock text={isFinance ? "This lead is archived — no receipts allowed." : "This lead is not Active — only Finance receipts are allowed."} />}
+      {locked && (
+        <StepLock text={
+          isFinance
+            ? "This lead is archived — no receipts allowed."
+            : isExecutive && !actions.isBooked
+              ? "Convert this lead to a booking before posting customer payments."
+              : "This lead is not Active — only Finance receipts are allowed."
+        } />
+      )}
       {(excess > 0 || refunded > 0) && (
         <Card className="p-4 mb-4 border-amber-200 bg-amber-50/60" data-testid="excess-panel">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1401,7 +1428,7 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 items-end">
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
           <Field label="Date"><Input data-testid="payment-date" type="date" value={form.date} onChange={set("date")} /></Field>
-          <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{(masters?.paymentModes || []).map((m) => <option key={m}>{m}</option>)}</Select></Field>
+          <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{paymentModes.map((m) => <option key={m}>{m}</option>)}</Select></Field>
           <Field label={paymentRefLabel(form.paymentMode)}>
             <Input data-testid="payment-ref" value={form.paymentReference} onChange={set("paymentReference")}
               placeholder={form.paymentMode === "Cheque" ? "Cheque number" : "UTR / transaction number"} />
