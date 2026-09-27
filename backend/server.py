@@ -8198,9 +8198,9 @@ async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = No
 
 
 @api.post("/leads/{lead_id}/payments")
-async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
+async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
-    role = ((act or {}).get("role") or "").strip().lower()
+    role = ((act or {}).get("role") or (user or {}).get("role") or "").strip().lower()
     if body.paymentMode == "Finance":
         if role not in authmod.MONEY_ROLES:
             raise HTTPException(
@@ -8209,6 +8209,11 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _sales=
             )
         _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)", act)
     else:
+        if role not in (*authmod.SALES_ROLES, *authmod.MONEY_ROLES):
+            raise HTTPException(
+                403,
+                "Only sales staff or the money desk can record a customer payment.",
+            )
         _require_action(lead, "canPayment", "customer payment (only Active leads)", act)
     await _require_related_docs(lead, act)
     rec = await _add_payment_internal(lead_id, body)
