@@ -1,7 +1,7 @@
 /**
  * @jest-environment jsdom
  */
-import { extraSupportReady, kycReady } from "./LeadDocuments";
+import { extraSupportReady, kycReady, dealSheetReady } from "./LeadDocuments";
 
 test("extra support proof is required only when amount is filled", () => {
   expect(extraSupportReady(0, {})).toBe("");
@@ -23,4 +23,11 @@ test("kycReady makes Aadhaar optional for B2B", () => {
   expect(kycReady("B2B", { kyc_pan: 1, kyc_gst: 1 }, "22AAAAA0000A1Z5")).toBe("");
   expect(kycReady("B2B", { kyc_pan: 1, kyc_gst: 1 }, "")).toMatch(/GSTIN/);
   expect(kycReady("B2B", { kyc_pan: 1 }, "22AAAAA0000A1Z5")).toMatch(/GST/);
+});
+
+test("dealSheetReady is required unless the file or an existing scan is present", () => {
+  expect(dealSheetReady({})).toMatch(/deal sheet/i);
+  expect(dealSheetReady({ deal_sheet: { name: "sheet.pdf" } })).toBe("");
+  expect(dealSheetReady({}, [{ kind: "deal_sheet" }])).toBe("");
+  expect(dealSheetReady({}, [{ kind: "kyc_pan" }])).toMatch(/deal sheet/i);
 });

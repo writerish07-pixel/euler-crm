@@ -83,7 +83,7 @@ async def gm_client(client):
 
 
 async def attach_kyc(http, request_id):
-    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
         r = await http.post(
             f"/api/lead-requests/{request_id}/documents",
             files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},

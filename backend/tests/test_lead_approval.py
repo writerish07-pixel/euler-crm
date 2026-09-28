@@ -101,7 +101,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"kyc-scan" * 8
 
 
 async def attach_kyc(client, request_id, extra=()):
-    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", *extra):
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet", *extra):
         r = await client.post(
             f"/api/lead-requests/{request_id}/documents",
             files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},
@@ -170,6 +170,28 @@ async def test_owner_approve_creates_the_live_lead(exec_client, client):
     assert again.json()["leadId"] == lid
     act = await server.db.activities.find_one({"leadId": lid})
     assert "approval" in (act.get("discussion") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_approve_without_deal_sheet_is_rejected(exec_client, client):
+    r = await exec_client.post("/api/leads", json=_enquiry("No Deal Sheet"))
+    rid = r.json()["requestId"]
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        up = await exec_client.post(
+            f"/api/lead-requests/{rid}/documents",
+            files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},
+            data={"kind": kind},
+        )
+        assert up.status_code == 200, up.text
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == rid)
+    assert row["dealSheetMissing"] is True
+    ap = await client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 422, ap.text
+    assert "deal sheet" in ap.json()["detail"].lower()
+    assert await server.db.leads.count_documents({"customerName": "No Deal Sheet"}) == 0
+    req = await server.db.lead_requests.find_one({"requestId": rid})
+    assert req["status"] == "pending"
 
 
 @pytest.mark.asyncio

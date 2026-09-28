@@ -59,6 +59,8 @@ jest.mock("../components/LeadDocuments", () => ({
     if (!(Number(amount) > 0)) return "";
     return "Attach the OEM Extra Support confirmation email from Siddharth Dubey (ASM) or Siddharth Sharma (RM)";
   }),
+  dealSheetReady: jest.fn(() => ""),
+  LocalDealSheetBlock: () => <div data-testid="deal-sheet-block" />,
   uploadKycFiles: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({
@@ -119,6 +121,7 @@ test("executive create form shows OEM extra support and another-vehicle checkbox
   expect(document.querySelector('[data-testid="deal-additional"]')).toBeFalsy();
   expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/OEM scheme/i);
   expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/Scheme Master/i);
+  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
 });
 
@@ -131,6 +134,7 @@ test("TL create form has the same extra-support and multi-unit controls", async 
   expect(document.querySelector('[data-testid="another-vehicle-check"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="lead-executive"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="deal-additional"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeFalsy();
   await act(async () => { root.unmount(); });
 });
 

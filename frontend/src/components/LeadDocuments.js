@@ -13,6 +13,7 @@ export const DOC_LABELS = {
   tally_invoice: "Tally GST invoice",
   refund_cheque: "Refund cheque",
   oem_extra_support: "OEM Extra Support email (ASM / RM)",
+  deal_sheet: "Deal sheet",
 };
 
 const ACCEPT = "image/*,application/pdf";
@@ -238,6 +239,35 @@ export function extraSupportReady(amount, files, existingDocs = [], { copyFromSi
   return "Attach the OEM Extra Support confirmation email from Siddharth Dubey (ASM) or Siddharth Sharma (RM)";
 }
 
+export function dealSheetReady(files, existingDocs = []) {
+  if (files && files.deal_sheet) return "";
+  if ((existingDocs || []).some((d) => d.kind === "deal_sheet")) return "";
+  return "Attach the deal sheet";
+}
+
+export function LocalDealSheetBlock({ files, setFiles, existingDocs = [] }) {
+  const have = (existingDocs || []).find((d) => d.kind === "deal_sheet");
+  return (
+    <div className="sm:col-span-2 space-y-2" data-testid="deal-sheet-block">
+      <div className="text-xs font-semibold text-ink">Deal sheet *</div>
+      <p className="text-[11px] text-ink-soft">
+        Photo or PDF of the deal sheet for this enquiry. Required before sending for approval.
+      </p>
+      {have && (
+        <p className="text-[11px] text-emerald-700" data-testid="deal-sheet-existing">
+          Already attached · {have.filename || "file"}
+        </p>
+      )}
+      <DocSlot
+        kind="deal_sheet"
+        localFile={files.deal_sheet}
+        onLocalFile={(f) => setFiles((prev) => ({ ...prev, deal_sheet: f }))}
+        canUpload
+      />
+    </div>
+  );
+}
+
 export function LocalOemExtraBlock({ files, setFiles, amount, existingDocs = [], copyFromSibling }) {
   if (!(Number(amount) > 0)) return null;
   const have = (existingDocs || []).find((d) => d.kind === "oem_extra_support");
@@ -292,6 +322,22 @@ export function RequestOemExtraPreview({ documents = [] }) {
           onClick={() => openDocumentFile(d.documentId, d.filename).catch(() => toast.error("Could not open"))}>
           <DocThumb doc={d} />
           <div className="text-[10px] text-ink-faint truncate w-16">ASM / RM email</div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function RequestDealSheetPreview({ documents = [] }) {
+  const rows = (documents || []).filter((d) => d.kind === "deal_sheet");
+  if (!rows.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5 mt-1" data-testid="deal-sheet-preview">
+      {rows.map((d) => (
+        <button key={d.documentId} type="button" className="text-left" title={d.filename}
+          onClick={() => openDocumentFile(d.documentId, d.filename).catch(() => toast.error("Could not open"))}>
+          <DocThumb doc={d} />
+          <div className="text-[10px] text-ink-faint truncate w-16">Deal sheet</div>
         </button>
       ))}
     </div>

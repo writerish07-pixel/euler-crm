@@ -34,6 +34,11 @@ KINDS = {
         "label": "OEM Extra Support email (ASM / RM)",
         "unique": True,
     },
+    "deal_sheet": {
+        "group": "deal",
+        "label": "Deal sheet",
+        "unique": True,
+    },
 }
 
 KYC_INDIVIDUAL = ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan")
@@ -41,6 +46,7 @@ KYC_INDIVIDUAL = ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan")
 KYC_B2B = ("kyc_pan", "kyc_gst")
 KYC_B2B_OPTIONAL = ("kyc_aadhaar_front", "kyc_aadhaar_back")
 EXTRA_SUPPORT_KIND = "oem_extra_support"
+DEAL_SHEET_KIND = "deal_sheet"
 
 ALLOWED_TYPES = {
     "image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif",
@@ -84,6 +90,10 @@ def can_read_kind(user, kind: str, *, own: bool = False) -> bool:
         if role in ("owner", "sales_gm", "tl", "accounts"):
             return True
         return role == "executive" and own
+    if group == "deal":
+        if role in ("owner", "sales_gm", "tl", "accounts"):
+            return True
+        return role == "executive" and own
     if group == "oem_extra":
         if role in ("owner", "sales_gm", "tl", "accounts"):
             return True
@@ -106,6 +116,10 @@ def can_upload_kind(user, kind: str, *, own: bool = False) -> bool:
         return False
     group = info["group"]
     if group == "kyc":
+        if role in ("owner", "sales_gm", "tl"):
+            return True
+        return role == "executive" and own
+    if group == "deal":
         if role in ("owner", "sales_gm", "tl"):
             return True
         return role == "executive" and own
@@ -214,6 +228,35 @@ async def missing_related_docs(db, *, lead=None, request_id: str = "",
     return missing
 
 
+async def has_deal_sheet(db, *, request_id: str = "", lead_id: str = "") -> bool:
+    have_req, have_lead = await deal_sheet_present(
+        db, request_ids=[request_id] if request_id else [],
+        lead_ids=[lead_id] if lead_id else [])
+    return bool((request_id and request_id in have_req) or (lead_id and lead_id in have_lead))
+
+
+async def deal_sheet_present(db, *, request_ids=(), lead_ids=()) -> tuple[set, set]:
+    """Return (requestIds, leadIds) that already have a deal sheet."""
+    have_req, have_lead = set(), set()
+    reqs = [str(x).strip() for x in (request_ids or []) if str(x or "").strip()]
+    lids = [str(x).strip() for x in (lead_ids or []) if str(x or "").strip()]
+    clauses = []
+    if reqs:
+        clauses.append({"requestId": {"$in": reqs}, "kind": DEAL_SHEET_KIND})
+    if lids:
+        clauses.append({"leadId": {"$in": lids}, "kind": DEAL_SHEET_KIND})
+    if not clauses:
+        return have_req, have_lead
+    q = {"$or": clauses} if len(clauses) > 1 else clauses[0]
+    for d in await db[COLLECTION].find(q, {"requestId": 1, "leadId": 1}).to_list(
+            max(len(reqs) + len(lids) + 20, 50)):
+        if d.get("requestId"):
+            have_req.add(d["requestId"])
+        if d.get("leadId"):
+            have_lead.add(d["leadId"])
+    return have_req, have_lead
+
+
 def missing_doc_labels(kinds) -> str:
     labels = []
     for k in kinds or []:
@@ -283,6 +326,7 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
     return public_row(doc)
 
 
+# Deal sheet is per-enquiry paper — never sibling-copied onto another unit.
 CREATE_DOC_KINDS = (
     *KYC_INDIVIDUAL, *KYC_B2B, *KYC_B2B_OPTIONAL, "oem_extra_support",
 )

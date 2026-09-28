@@ -7,7 +7,7 @@ import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui
 import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
-import { RequestKycPreview, RequestOemExtraPreview } from "../components/LeadDocuments";
+import { RequestKycPreview, RequestOemExtraPreview, RequestDealSheetPreview } from "../components/LeadDocuments";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import CallLink from "../components/CallLink";
 
@@ -74,7 +74,7 @@ export default function Approvals() {
       <PageHeader
         title={canApproveLeads ? "Lead approvals" : "Waiting for approval"}
         subtitle={canApproveLeads
-          ? "Approve or reject deal format and KYC"
+          ? "Approve or reject deal format, KYC and deal sheet"
           : "New enquiries waiting for approval"}
         actions={<ReportActions onRefresh={load} />}
       />
@@ -164,6 +164,16 @@ export default function Approvals() {
               {r.customerType === "B2B" && r.gstin ? <div className="text-[10px] text-ink-faint">{r.gstin}</div> : null}
             </div>
           ) },
+          { key: "dealSheet", label: "Deal sheet", render: (r) => (
+            <div>
+              <RequestDealSheetPreview documents={r.documents || []} />
+              {r.dealSheetMissing && (
+                <div className="text-[10px] text-rose-700 mt-1" data-testid={`deal-sheet-missing-${r.requestId}`}>
+                  Deal sheet required
+                </div>
+              )}
+            </div>
+          ) },
           { key: "createdAt", label: "Submitted", render: (r) => fmtDate(r.createdAt) },
           { key: "status", label: "Status", render: (r) => (
             <Badge>{r.status}{r.leadId ? ` · ${r.leadId}` : (r.existingLeadId ? ` · ${r.existingLeadId}` : "")}</Badge>
@@ -183,8 +193,8 @@ export default function Approvals() {
               return (
               <div className="flex gap-2 justify-end">
                 <Button data-testid={`approve-${r.requestId}`}
-                  disabled={!!busy || r.kycComplete === false || r.oemExtraProofMissing || gmBlocked}
-                  title={gmBlocked ? "Only the Owner can approve a deal that differs from Ex + RTO + Insurance" : (r.oemExtraProofMissing ? "Attach the ASM / RM extra-support email first" : undefined)}
+                  disabled={!!busy || r.kycComplete === false || r.oemExtraProofMissing || r.dealSheetMissing || gmBlocked}
+                  title={gmBlocked ? "Only the Owner can approve a deal that differs from Ex + RTO + Insurance" : (r.dealSheetMissing ? "Attach the deal sheet first" : (r.oemExtraProofMissing ? "Attach the ASM / RM extra-support email first" : undefined))}
                   onClick={() => act(r.requestId, "approve")}>
                   <Check size={14} /> Approve
                 </Button>

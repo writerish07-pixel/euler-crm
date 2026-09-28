@@ -33,6 +33,7 @@ import coulson as coulson_client
 import botspace as wa
 import web_push
 import lead_docs
+import tab_export
 import insurance_mis as ins_mis
 import sept_2026_schemes
 
@@ -4287,6 +4288,17 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
         if not has_proof and row.get("existingLeadId") in lead_proof:
             has_proof = True
         row["oemExtraProofMissing"] = extra > 0 and not has_proof
+    have_req_sheet, have_lead_sheet = await lead_docs.deal_sheet_present(
+        db,
+        request_ids=[r.get("requestId") for r in out],
+        lead_ids=[r.get("existingLeadId") for r in out],
+    )
+    for row in out:
+        rid = row.get("requestId") or ""
+        lid = row.get("existingLeadId") or ""
+        on_docs = any(d.get("kind") == "deal_sheet" for d in (row.get("documents") or []))
+        row["dealSheetMissing"] = not (
+            on_docs or rid in have_req_sheet or lid in have_lead_sheet)
     return out
 
 
@@ -4348,6 +4360,11 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         labels = [lead_docs.KINDS.get(k, {}).get("label") or k for k in missing]
         raise HTTPException(422, "KYC is incomplete — " + ", ".join(labels) + ".")
     existing_id = str(claimed.get("existingLeadId") or "").strip()
+    if not await lead_docs.has_deal_sheet(
+            db, request_id=request_id, lead_id=existing_id):
+        await db.lead_requests.update_one(
+            {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
+        raise HTTPException(422, "Attach the deal sheet before sending for approval.")
     live_for_extra = await db.leads.find_one({"leadId": existing_id}) if existing_id else None
     extra_needed = await _oem_extra_against_lead(live_for_extra, payload)
     if extra_needed > 0 and not await lead_docs.has_oem_extra_proof(
@@ -4677,6 +4694,8 @@ async def _request_public(req, user):
             has_proof = await lead_docs.has_oem_extra_proof(
                 db, request_id=rid or "", lead_id=existing_id)
     row["oemExtraProofMissing"] = extra > 0 and not has_proof
+    row["dealSheetMissing"] = not await lead_docs.has_deal_sheet(
+        db, request_id=rid or "", lead_id=str(row.get("existingLeadId") or ""))
     return row
 
 
@@ -11879,7 +11898,8 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/dealer-earnings"), ("GET", "/api/reports/owner-commercial"),
     ("GET", "/api/reports/oem-claim-dashboard"), ("GET", "/api/reports/claim-exceptions"),
     ("GET", "/api/reports/insurance-payout"), ("GET", "/api/reports/dealer-earnings"),
-    ("GET", "/api/integrations/gsheets"), ("GET", "/api/export"), ("GET", "/api/share/dashboard"),
+    ("GET", "/api/integrations/gsheets"), ("GET", "/api/export"), ("GET", "/api/export/catalog"),
+    ("GET", "/api/share/dashboard"),
     ("PUT", "/api/leads/{lead_id}/extra-income"), ("GET", "/api/audit-log"),
 ]
 OWNER_ONLY_ENDPOINTS = [
@@ -13703,10 +13723,24 @@ async def dealer_earnings_report(month: Optional[str] = None, year: Optional[str
 
 
 # ---------------------------------------------------------------- excel export
-@api.get("/export")
-async def export_xlsx(user=Depends(current_user)):
+@api.get("/export/catalog")
+async def export_catalog(user=Depends(current_user)):
     if (user or {}).get("role") not in EXPORT_ROLES:
         raise HTTPException(403, "Export is for the Owner, Sales GM and Team Leader.")
+    return tab_export.catalog()
+
+
+@api.get("/export")
+async def export_xlsx(tab: Optional[str] = None, columns: Optional[str] = None,
+                      month: Optional[str] = None, year: Optional[str] = None,
+                      status: Optional[str] = None, q: Optional[str] = None,
+                      user=Depends(current_user)):
+    if (user or {}).get("role") not in EXPORT_ROLES:
+        raise HTTPException(403, "Export is for the Owner, Sales GM and Team Leader.")
+    if tab:
+        return await tab_export.build_xlsx(
+            db, tab_key=tab, columns=columns or "", month=month or "",
+            year=year or "", status=status or "", q=q or "")
     import openpyxl
     wb = openpyxl.Workbook()
     wb.remove(wb.active)

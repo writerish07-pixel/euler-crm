@@ -4,7 +4,7 @@ import { get, post, apiErrorMessage, apiErrorDetail } from "../lib/api";
 import { todayISO, digitsLast10 } from "../lib/format";
 import { Button, Drawer, Field, Input, Select, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
-import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock } from "../components/LeadDocuments";
+import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock, dealSheetReady, LocalDealSheetBlock } from "../components/LeadDocuments";
 import DealFormatCard from "../components/DealFormatCard";
 
 function sameExecName(a, b) {
@@ -34,6 +34,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   });
   const [kyc, setKyc] = useState({});
   const [extraProof, setExtraProof] = useState({});
+  const [dealSheet, setDealSheet] = useState({});
   const [busy, setBusy] = useState(false);
   const [variants, setVariants] = useState([]);
   const [deal, setDeal] = useState(null);
@@ -186,9 +187,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       setClash(null);
       try {
         if (lead.pending && lead.requestId) {
-          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, { ...kyc, ...extraProof });
+          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, { ...kyc, ...extraProof, ...dealSheet });
         } else if (lead.leadId) {
-          await uploadKycFiles(`/leads/${lead.leadId}/documents`, { ...kyc, ...extraProof });
+          await uploadKycFiles(`/leads/${lead.leadId}/documents`, { ...kyc, ...extraProof, ...dealSheet });
         }
       } catch (ue) {
         toast.error(apiErrorMessage(ue, "Lead saved but a KYC file failed — attach it again."));
@@ -231,6 +232,10 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       form.oemExtraSupportReceived, extraProof, siblingDocs,
       { copyFromSibling: copyDocsFromSibling });
     if (extraErr) return toast.error(extraErr);
+    if (isExecutive) {
+      const sheetErr = dealSheetReady(dealSheet);
+      if (sheetErr) return toast.error(sheetErr);
+    }
     await saveLead({ anotherVehicle: anotherVehicle && !sameOrder, sameOrderMultiUnit: sameOrder });
   };
 
@@ -411,6 +416,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           existingDocs={siblingDocs}
           copyFromSibling={copyDocsFromSibling}
         />
+        {isExecutive && (
+          <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={[]} />
+        )}
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} copyFromSibling={copyDocsFromSibling} />
       </div>

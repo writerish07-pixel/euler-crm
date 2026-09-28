@@ -172,7 +172,7 @@ async def test_approve_sets_outstanding_to_deal_price(client):
         row = next(x for x in listed if x["requestId"] == rid)
         assert row["dealFormat"]["schemeIncluded"] is False
         assert row["dealFormat"]["supportRequired"] == 74600
-        for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
             up = await ex.post(
                 f"/api/lead-requests/{rid}/documents",
                 files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},

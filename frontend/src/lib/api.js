@@ -285,9 +285,9 @@ async function messageFromBlobError(err, fallback) {
   }
 }
 
-export async function downloadFile(url, filename) {
+export async function downloadFile(url, filename, params) {
   try {
-    const data = await withFallback(() => api.get(url, { responseType: "blob" }).then((r) => r.data));
+    const data = await withFallback(() => api.get(url, { responseType: "blob", params }).then((r) => r.data));
     const type = String(data?.type || "");
     if (type.includes("application/json") || type.includes("text/html")) {
       let text = "";
