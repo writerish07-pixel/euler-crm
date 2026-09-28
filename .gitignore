@@ -22,3 +22,12 @@ backend/gsheets_credentials.json
 !frontend/.env.production
 !frontend/.env.development
 frontend/build/
+
+# Capacitor native build outputs (the android/ and ios/ projects themselves are committed)
+frontend/android/app/build/
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/android/captures/
+frontend/ios/App/Pods/
+frontend/ios/App/build/
+frontend/ios/DerivedData/
