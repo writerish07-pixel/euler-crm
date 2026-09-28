@@ -88,7 +88,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       : undefined;
     get("/commercial/deal-preview", {
       model: form.interestedModel, variant: form.variant, cxDemand: Number(form.budget) || 0,
-      passOnKeys: passOnKeys || undefined,
+      passOnKeys: isExecutive ? undefined : (passOnKeys || undefined),
       units: units ? JSON.stringify(units) : undefined,
     }).then((d) => {
       if (!alive) return;
@@ -175,7 +175,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
         ...form,
         budget: Number(form.budget),
         oemExtraSupportReceived: Number(form.oemExtraSupportReceived) || 0,
-        schemePassOn: passOn,
+        ...(isExecutive ? {} : { schemePassOn: passOn }),
         anotherVehicle: !!(extra.anotherVehicle || anotherVehicle) && !sameOrder,
         sameOrderMultiUnit: !!(extra.sameOrderMultiUnit || sameOrder),
         units: (extra.sameOrderMultiUnit || sameOrder)
@@ -329,7 +329,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           {sameOrder && (
             <div className="space-y-2" data-testid="same-order-units">
               <p className="text-[11px] text-ink-soft">
-                Unit 1 is the model above. Add Unit 2, 3… Price and scheme for each extra SKU come from Price Master + Scheme Master. Payable is the sum.
+                {isExecutive
+                  ? "Unit 1 is the model above. Add Unit 2, 3… Payable is the sum of Cx Demand across units."
+                  : "Unit 1 is the model above. Add Unit 2, 3… Price and scheme for each extra SKU come from Price Master + Scheme Master. Payable is the sum."}
               </p>
               {extraUnits.map((u, i) => (
                 <div key={i} className="grid grid-cols-1 sm:grid-cols-2 gap-2" data-testid={`same-order-unit-${i + 2}`}>
@@ -393,8 +395,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             loading={dealLoading}
             missingPrice={!form.interestedModel || !form.variant}
             showOwnerPnl={!!canSeeOwnerCommercials}
-            passOn={passOn}
-            onPassOn={togglePassOn}
+            hideScheme={isExecutive}
+            passOn={isExecutive ? {} : passOn}
+            onPassOn={isExecutive ? undefined : togglePassOn}
           />
         </div>
         <Field label="OEM Extra Support">

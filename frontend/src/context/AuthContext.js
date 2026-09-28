@@ -137,7 +137,8 @@ export function AuthProvider({ children }) {
       isSalesStaff: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive",
       isMoneyDesk: role === "owner" || role === "tl" || role === "accounts",
       // Price, scheme, delivery, close and cancel — the steps an executive hands
-      // over. Mirrors DEAL_DESK_ROLES on the API.
+      // over. Customer payments after booking stay with the executive.
+      // Mirrors DEAL_DESK_ROLES on the API.
       canEditCommercials: role === "owner" || role === "sales_gm" || role === "tl",
       // ASM/RM / Sales GM may view Finance Register (disbursed vs remaining); writes stay money-desk.
       canViewFinance: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive"

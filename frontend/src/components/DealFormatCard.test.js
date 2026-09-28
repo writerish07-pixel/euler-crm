@@ -107,6 +107,37 @@ test("shows OEM scheme available with pass-on radios", async () => {
   host.remove();
 });
 
+test("hideScheme drops OEM scheme, additional and owner-only copy", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <DealFormatCard
+        hideScheme
+        snapshot={{
+          exShowroom: 785000, rto: 5500, insurance: 19000,
+          priceTotal: 809500, additionalDiscount: 19500,
+          needsOwnerApproval: true, netToCx: 809500, supportRequired: 19500,
+          schemeMonth: "2026-09",
+          schemeOffers: [{ key: "loyaltyBonus", label: "Loyalty Bonus", schemeAvailable: 10000 }],
+          schemePassed: 10000,
+        }}
+        cxDemand={790000}
+        passOn={{ loyaltyBonus: true }}
+      />,
+    );
+  });
+  expect(host.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="deal-additional"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="deal-owner-only"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="lead-budget"]')).toBeTruthy();
+  expect(host.textContent).toMatch(/Team Leader/i);
+  expect(host.textContent).not.toMatch(/OEM scheme/i);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("pack card lists each unit net", async () => {
   const host = document.createElement("div");
   document.body.appendChild(host);

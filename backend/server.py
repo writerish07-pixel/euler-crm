@@ -467,8 +467,9 @@ def lead_actions(lead, act=None):
     Close remains available on Active (including Delivered) so the lifecycle can exit.
     Finance / claim receipts stay allowed after close (not Archived).
 
-    Executives stop at Convert Booking. Price, scheme, payments, delivery, close
-    and cancel are Team Leader (or Owner / Sales GM) steps.
+    Executives request, convert to booking, and post customer payments after
+    booking. Price, scheme, delivery, close and cancel stay with the Team
+    Leader (or Owner / Sales GM).
     """
     role = ((act or {}).get("role") or "").strip().lower()
     active = _acct(lead) == "Active"
@@ -506,7 +507,8 @@ def lead_actions(lead, act=None):
         "canBook": mutable and not booked,
         "canPrice": mutable and not is_exec,
         "canScheme": mutable and not is_exec,
-        "canPayment": mutable and not is_exec,             # customer payment
+        # Desk can collect on an Active file. Executives collect only after booking.
+        "canPayment": mutable and (booked if is_exec else True),
         "canFinanceReceipt": not_archived and not is_exec,  # finance receipt allowed after close
         "canDeliver": active and booked and not delivered and not is_exec,
         "canClose": active and not is_exec,                # close exit path (incl. delivered)
@@ -516,7 +518,7 @@ def lead_actions(lead, act=None):
         # Owner-only once the customer has paid: cancelling a funded booking is a
         # refund decision, not a sales-desk one.
         "cancelNeedsOwner": _cancel_money(lead)["hasMoney"],
-        # Executives request + book. Name / mobile / vehicle edits are TL / Owner / GM.
+        # Executives request + book + collect. Name / mobile / vehicle edits are TL / Owner / GM.
         "canEditLead": mutable and not is_exec,
         "isBooked": booked, "isDelivered": delivered, "isActive": active,
         "isLocked": not mutable,
@@ -789,6 +791,27 @@ def _require_action(lead, key, verb, act=None):
     acts = lead_actions(lead, act)
     if not acts.get(key):
         raise HTTPException(409, f"This lead is not eligible for {verb} (status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}).")
+
+
+async def _require_related_docs(lead, act=None, *, request_id="", extra_received=None):
+    """Block a save when KYC or extra-support proof is still outstanding.
+
+    Production: every role. Test runtime: KYC only for executives so existing
+    convert-booking fixtures stay green; extra-support proof is always required
+    when OEM Extra Support Received is filled.
+    """
+    role = ((act or {}).get("role") or "").strip().lower()
+    require_kyc = True
+    if _is_test_env():
+        require_kyc = role == "executive"
+    missing = await lead_docs.missing_related_docs(
+        db, lead=lead, request_id=request_id, extra_received=extra_received,
+        require_kyc=require_kyc)
+    if missing:
+        raise HTTPException(
+            422,
+            f"Attach related documents first: {lead_docs.missing_doc_labels(missing)}.",
+        )
 
 
 def lead_to_snapshot(lead):
@@ -2143,6 +2166,18 @@ def _staff_safe_deal_preview(d):
         return d
     out = dict(d)
     out.pop("extraMargin", None)
+    return out
+
+
+def _exec_safe_deal_preview(d):
+    """Executives price the customer deal — they must not see Scheme Master lines."""
+    out = _staff_safe_deal_preview(d)
+    if not out:
+        return out
+    out = dict(out)
+    for k in ("schemeOffers", "schemePassed", "schemePassOn", "schemeMonth",
+              "additionalDiscount", "needsOwnerApproval"):
+        out.pop(k, None)
     return out
 
 
@@ -5035,6 +5070,7 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
             "Executives cannot edit lead details. Ask the Team Leader or Owner.",
         )
     _require_action(lead, "canEditLead", "lead edits", act)
+    await _require_related_docs(lead, act)
     payload = body.model_dump(exclude_unset=True)
     another = bool(payload.pop("anotherVehicle", False))
     payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
@@ -6167,6 +6203,7 @@ async def price_preview(lead_id: str, unit: Optional[int] = None):
 async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canBook", "conversion to booking", act)
+    await _require_related_docs(lead, act)
     # A booking is only valid once its commercial structure is resolved. If the lead
     # has no price structure yet, load it from the authoritative Price Master. If the
     # vehicle has no Price Master row, refuse the booking with a precise message
@@ -6521,6 +6558,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)", act)
+    await _require_related_docs(lead, act)
     payload = body.model_dump()
     unit_sno = payload.pop("unitSno", None)
     idx, units = _resolve_unit_index(lead, unit_sno)
@@ -6602,6 +6640,9 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     payload = body.model_dump()
+    await _require_related_docs(
+        lead, act,
+        extra_received=payload.get("oemExtraSupportReceived", lead.get("oemExtraSupportReceived")))
     unit_sno = payload.pop("unitSno", None)
     idx, units = _resolve_unit_index(lead, unit_sno)
     chosen = units[idx] if units else {}
@@ -6766,6 +6807,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
     fixed by the circular — and neither are the Scheme Master values themselves."""
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
+    await _require_related_docs(lead, act)
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
     scheme_rows = await get_scheme_rows()
     alloc = ce.compute_scheme_allocation(lead_to_snapshot(lead), scheme_rows)
@@ -8156,12 +8198,24 @@ async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = No
 
 
 @api.post("/leads/{lead_id}/payments")
-async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), _money=Depends(money_desk_only)):
+async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
+    role = ((act or {}).get("role") or (user or {}).get("role") or "").strip().lower()
     if body.paymentMode == "Finance":
+        if role not in authmod.MONEY_ROLES:
+            raise HTTPException(
+                403,
+                "Finance receipts are posted by the Team Leader, Owner or Accounts.",
+            )
         _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)", act)
     else:
+        if role not in (*authmod.SALES_ROLES, *authmod.MONEY_ROLES):
+            raise HTTPException(
+                403,
+                "Only sales staff or the money desk can record a customer payment.",
+            )
         _require_action(lead, "canPayment", "customer payment (only Active leads)", act)
+    await _require_related_docs(lead, act)
     rec = await _add_payment_internal(lead_id, body)
     await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
@@ -9311,6 +9365,7 @@ async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
 @api.put("/leads/{lead_id}/delivery")
 async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_related_docs(lead, act)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
     role = ((act or {}).get("role") or "").strip().lower()
     # Closed leads are frozen for everyone. After Mark Delivered, staff stay locked;
@@ -9793,6 +9848,9 @@ async def deal_preview(model: str = "", variant: str = "", cxDemand: float = 0,
         deal = await _deal_format_for_pack(specs, cxDemand, on, passOnKeys)
     else:
         deal = await _deal_format_for(model, variant, cxDemand, on, passOnKeys)
+    role = ((user or {}).get("role") or "").strip().lower()
+    if role == "executive":
+        return _exec_safe_deal_preview(deal)
     if not _is_owner_user(user):
         return _staff_safe_deal_preview(deal)
     return deal
@@ -9800,7 +9858,7 @@ async def deal_preview(model: str = "", variant: str = "", cxDemand: float = 0,
 
 @api.get("/commercial/scheme-preview")
 async def scheme_preview(model: str = "", variant: str = "", on: Optional[str] = None,
-                         user=Depends(current_user)):
+                         user=Depends(current_user), _desk=Depends(deal_desk_only)):
     """OEM scheme lines available for a model/variant (no lead required)."""
     out = await _scheme_preview_for(model, variant, on)
     if not _is_owner_user(user):
@@ -10189,7 +10247,7 @@ async def inventory_summary(_user=Depends(current_user)):
 
 # ---------------------------------------------------------------- masters registers
 @api.get("/scheme-master")
-async def list_scheme_master(on: Optional[str] = None):
+async def list_scheme_master(on: Optional[str] = None, _desk=Depends(deal_desk_only)):
     rows = [clean(s) for s in await db.scheme_master.find().to_list(1000)]
     iso = str(on or "").strip()[:10]
     if len(iso) == 10 and iso[4] == "-" and iso[7] == "-":

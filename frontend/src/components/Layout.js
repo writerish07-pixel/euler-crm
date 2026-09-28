@@ -54,7 +54,7 @@ const NAV = [
     { to: "/oem-claims/no-vehicle", label: "Missing chassis", icon: FileCheck, oemClaimDesk: true },
     { to: "/oem-extra-support", label: "OEM Extra Support", icon: Handshake, oemClaimDesk: true },
     { to: "/dropped-extra-support", label: "Dropped Extra Support", icon: Ban, oemClaimDesk: true },
-    { to: "/scheme-master", label: "Scheme Master", icon: Percent, salesOnly: true },
+    { to: "/scheme-master", label: "Scheme Master", icon: Percent, dealDesk: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },
     { to: "/executive-incentive", label: "Executive Incentive", icon: Trophy, gmHome: true },
     { to: "/dealer-earnings", label: "Dealer Earnings", icon: Coins, ownerOnly: true },

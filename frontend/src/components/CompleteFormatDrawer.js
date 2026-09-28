@@ -9,7 +9,7 @@ import CallLink from "./CallLink";
 import { useAuth } from "../context/AuthContext";
 
 export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
-  const { canSeeOwnerCommercials } = useAuth();
+  const { canSeeOwnerCommercials, isExecutive } = useAuth();
   const [budget, setBudget] = useState(Number(row.budget || row.dealAmount || 0) || "");
   const [model, setModel] = useState(row.interestedModel || "");
   const [variant, setVariant] = useState(row.variant || "");
@@ -50,7 +50,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     }
     let alive = true;
     setDealLoading(true);
-    const passOnKeys = Object.keys(passOn).filter((k) => passOn[k]).join(",");
+    const passOnKeys = isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(",");
     get("/commercial/deal-preview", {
       model, variant, cxDemand: Number(budget) || 0,
       passOnKeys: passOnKeys || undefined,
@@ -75,7 +75,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         budget: Number(budget), gstin, interestedModel: model, variant,
         oemExtraSupportReceived: Number(oemExtra) || 0,
         mobile: digitsLast10(mobile),
-        schemePassOn: passOn,
+        ...(isExecutive ? {} : { schemePassOn: passOn }),
       });
       await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, { ...kyc, ...extraProof });
       toast.success("Sent for approval");
@@ -141,8 +141,9 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           loading={dealLoading}
           missingPrice={!model || !variant}
           showOwnerPnl={!!canSeeOwnerCommercials}
-          passOn={passOn}
-          onPassOn={(key, yes, available) => {
+          hideScheme={isExecutive}
+          passOn={isExecutive ? {} : passOn}
+          onPassOn={isExecutive ? undefined : (key, yes, available) => {
             setPassOn((p) => ({ ...p, [key]: yes }));
             setBudget((cur) => {
               const n = Number(cur) || Number(deal?.netToCx) || 0;
@@ -155,7 +156,9 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           <Input data-testid="approval-oem-extra" type="number" min="0" step="1"
             value={oemExtra} onChange={(e) => setOemExtra(e.target.value)} />
           <p className="text-[11px] text-ink-faint mt-1">
-            Filled if extra support already exists against this lead. On Approve it becomes Scheme · OEM Extra Support Received.
+            {isExecutive
+              ? "Filled when extra OEM support is already confirmed. Attach the ASM / RM email below."
+              : "Filled if extra support already exists against this lead. On Approve it becomes Scheme · OEM Extra Support Received."}
           </p>
         </Field>
         <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={oemExtra} existingDocs={row.documents} />

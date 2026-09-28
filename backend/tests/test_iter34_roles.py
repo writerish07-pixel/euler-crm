@@ -9,11 +9,10 @@ The guard is therefore an ALLOWLIST enforced in current_user, which every /api
 route depends on. It fails closed: a route added tomorrow is denied to that role
 until someone deliberately opens it. These tests exist to keep it that way.
 
-Separately, executives feed the funnel only — leads, booking + booking amount,
-activities, quotations. The commercial half of the journey belongs to a TEAM
-LEADER: pricing, scheme, collection, delivery, close and cancel. The TL exists
-so that half never queues behind the owner, which is what happened when those
-steps were owner-only — a handover could not complete until the owner logged in.
+Separately, executives feed the funnel — leads, booking, customer payments
+after booking, activities, quotations. Price, scheme, delivery, close and
+cancel belong to a TEAM LEADER. The TL exists so those never queue behind the
+owner, which is what happened when those steps were owner-only.
 """
 import io
 import os
@@ -100,6 +99,16 @@ async def make_lead(c, name, executive="Amit"):
     assert r.status_code == 200, r.text
     assert r.json().get("leadId"), r.text
     return r.json()["leadId"]
+
+
+async def attach_kyc(c, lead_id):
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        up = await c.post(
+            f"/api/leads/{lead_id}/documents",
+            files={"file": ("scan.png", io.BytesIO(b"\x89PNG kyc"), "image/png")},
+            data={"kind": kind},
+        )
+        assert up.status_code == 200, up.text
 
 
 # ============================================== the outside role is fenced in
@@ -309,8 +318,10 @@ async def test_an_executive_still_feeds_leads_and_booking_amount(client, exec_cl
 async def test_the_booking_amount_still_posts_its_receipt(client, exec_client):
     """An executive taking a token must still be recorded as money received."""
     lid = await make_lead(client, "ITER34 Token", executive="Executive")
-    await exec_client.post(f"/api/leads/{lid}/convert-booking",
+    await attach_kyc(client, lid)
+    booked = await exec_client.post(f"/api/leads/{lid}/convert-booking",
                            json={"bookingAmount": 5000, "executive": "Executive"})
+    assert booked.status_code == 200, booked.text
     pays = await server.db.payments.find({"leadId": lid}).to_list(10)
     assert sum(server.ce.num(p.get("amount")) for p in pays) == 5000
 
@@ -339,10 +350,11 @@ async def test_an_executive_can_no_longer_deliver_close_or_cancel(client, exec_c
 
 
 @pytest.mark.asyncio
-async def test_an_executive_can_no_longer_move_money(client, exec_client):
+async def test_an_executive_cannot_refund_or_post_finance(client, exec_client):
+    """Customer cash after booking is allowed. Refunds and finance stay money desk."""
     lid = await make_lead(client, "ITER34 No money")
     assert (await exec_client.post(f"/api/leads/{lid}/payments",
-                                   json={"amount": 1000, "paymentMode": "Cash"})).status_code == 403
+                                   json={"amount": 1000, "paymentMode": "Cash"})).status_code == 409
     assert (await exec_client.post(f"/api/leads/{lid}/refund",
                                    json={"amount": 100})).status_code == 403
     assert (await exec_client.post("/api/insurance", json={"leadId": lid})).status_code == 403
@@ -405,12 +417,13 @@ async def tl(client):
 async def test_an_executive_hands_over_and_a_tl_completes_it(client, exec_client, tl):
     """The whole point of the role, walked end to end across two people.
 
-    The executive takes the enquiry and the booking; the TL prices it, collects
-    and hands the vehicle over. If any step regressed to owner-only, a delivery
-    would stall waiting for the owner to log in — which is exactly what the TL
-    exists to prevent, and what this test catches.
+    The executive takes the enquiry, the booking and customer payments; the TL
+    prices it and hands the vehicle over. If pricing or delivery regressed to
+    owner-only, a delivery would stall waiting for the owner to log in — which
+    is exactly what the TL exists to prevent, and what this test catches.
     """
     lid = await make_lead(client, "ITER34 Handover", executive="Executive")
+    await attach_kyc(client, lid)
     before = (await exec_client.get(f"/api/leads/{lid}/360")).json()["actions"]
     assert before["canBook"] is True
     assert before["canEditLead"] is False
@@ -425,23 +438,23 @@ async def test_an_executive_hands_over_and_a_tl_completes_it(client, exec_client
         "bookingDate": server.today(), "bookingAmount": 10000,
         "executive": "Executive"})).status_code == 200
 
-    # Executive stops here.
     after = (await exec_client.get(f"/api/leads/{lid}/360")).json()["actions"]
     assert after["canBook"] is False
     assert after["canEditLead"] is False
     assert after["isBooked"] is True
+    assert after["canPayment"] is True
     assert (await exec_client.put(f"/api/leads/{lid}",
                                   json={"remarks": "should be blocked"})).status_code == 403
     ps = (await tl.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
     assert (await exec_client.put(f"/api/leads/{lid}/price-structure",
                                   json=ps)).status_code == 403
 
-    # TL takes it the rest of the way.
+    # TL prices and schemes; the executive posts the remaining customer money.
     assert (await tl.put(f"/api/leads/{lid}/price-structure", json=ps)).status_code == 200
     assert (await tl.put(f"/api/leads/{lid}/scheme",
                          json={"benefitMode": "No Benefit"})).status_code == 200
     lead = await server.db.leads.find_one({"leadId": lid})
-    assert (await tl.post(f"/api/leads/{lid}/payments", json={
+    assert (await exec_client.post(f"/api/leads/{lid}/payments", json={
         "amount": lead["customerOutstanding"], "paymentMode": "Cash"})).status_code == 200
 
     agents = (await tl.get("/api/insurance-agents")).json()

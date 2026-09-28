@@ -21,6 +21,7 @@ export default function DealFormatCard({
   showOwnerPnl = true,
   passOn = {},
   onPassOn,
+  hideScheme = false,
 }) {
   const d = snapshot || {};
   const demand = cxDemand ?? d.cxDemand ?? 0;
@@ -29,8 +30,8 @@ export default function DealFormatCard({
   const priceTotal = Number(
     d.priceTotal ?? ((Number(d.exShowroom) || 0) + (Number(d.rto) || 0) + (Number(d.insurance) || 0)),
   );
-  const offers = Array.isArray(d.schemeOffers) ? d.schemeOffers : [];
-  const passed = Number(d.schemePassed || 0);
+  const offers = hideScheme ? [] : (Array.isArray(d.schemeOffers) ? d.schemeOffers : []);
+  const passed = hideScheme ? 0 : Number(d.schemePassed || 0);
   const additional = Number(
     d.additionalDiscount ?? Math.max(0, priceTotal - (Number(demand) || 0) - passed),
   );
@@ -127,6 +128,7 @@ export default function DealFormatCard({
           />
         </Field>
       )}
+      {!hideScheme && (
       <div className={`rounded-md px-2 py-1.5 ${additional > 0 ? "bg-amber-50" : "bg-paper"}`}>
         <Line
           k="Additional (Dealer)"
@@ -136,7 +138,8 @@ export default function DealFormatCard({
           tone={additional > 0 ? "text-amber-800" : ""}
         />
       </div>
-      {ownerOnly && Number(demand) > 0 && (
+      )}
+      {!hideScheme && ownerOnly && Number(demand) > 0 && (
         <p className="text-[11px] text-rose-700" data-testid="deal-owner-only">
           Deal differs from my total after OEM scheme — only Owner can approve.
         </p>
@@ -153,7 +156,9 @@ export default function DealFormatCard({
       </div>
       )}
       <p className="text-[11px] text-ink-faint">
-        {offers.length
+        {hideScheme
+          ? "Enter Cx Demand — the amount the customer will pay. Commercials are completed by the Team Leader."
+          : offers.length
           ? "Pass on Yes gives the full OEM amount to the customer and recuts Additional (Dealer)."
           : "No OEM scheme on this model this month. Additional (Dealer) is auto-filled from my total minus Cx Demand."}
       </p>
