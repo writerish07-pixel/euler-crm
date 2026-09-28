@@ -4,13 +4,15 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 
-const get = jest.fn();
-const downloadFile = jest.fn(() => Promise.resolve());
+global.IS_REACT_ACT_ENVIRONMENT = true;
+
+const mockGet = jest.fn();
+const mockDownloadFile = jest.fn(() => Promise.resolve());
 
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
 jest.mock("../lib/api", () => ({
-  get: (...args) => get(...args),
-  downloadFile: (...args) => downloadFile(...args),
+  get: (...args) => mockGet(...args),
+  downloadFile: (...args) => mockDownloadFile(...args),
   apiErrorMessage: (e, fallback) => fallback,
 }));
 
@@ -58,7 +60,7 @@ function setField(el, value) {
 }
 
 async function renderDialog(pathname = "/bookings") {
-  get.mockResolvedValue(CATALOG);
+  mockGet.mockResolvedValue(CATALOG);
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -71,8 +73,8 @@ async function renderDialog(pathname = "/bookings") {
 
 afterEach(() => {
   document.body.innerHTML = "";
-  get.mockReset();
-  downloadFile.mockReset();
+  mockGet.mockReset();
+  mockDownloadFile.mockReset();
 });
 
 test("export dialog opens on the current tab with that tab's default columns", async () => {
@@ -95,7 +97,7 @@ test("confirm downloads only the selected tab, columns and filters", async () =>
     document.querySelector('[data-testid="export-confirm"]').click();
   });
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-  expect(downloadFile).toHaveBeenCalledWith(
+  expect(mockDownloadFile).toHaveBeenCalledWith(
     "/export",
     expect.stringMatching(/^euler_leads_/),
     expect.objectContaining({
@@ -104,7 +106,7 @@ test("confirm downloads only the selected tab, columns and filters", async () =>
       q: "ramesh",
     }),
   );
-  const params = downloadFile.mock.calls[0][2];
+  const params = mockDownloadFile.mock.calls[0][2];
   expect(params.columns.split(",")).toEqual(expect.arrayContaining(["leadId", "customerName", "remarks"]));
   await act(async () => { root.unmount(); });
 });

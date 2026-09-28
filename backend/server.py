@@ -4956,8 +4956,8 @@ async def upload_request_document(request_id: str, kind: str = Form(...),
     if not own and not _can_approve_leads(user):
         raise HTTPException(403, "You can only attach KYC to your own request.")
     kind = lead_docs.require_kind(kind)
-    if lead_docs.KINDS[kind]["group"] not in ("kyc", "oem_extra"):
-        raise HTTPException(422, "Only KYC or OEM Extra Support files can be attached to a lead request.")
+    if lead_docs.KINDS[kind]["group"] not in ("kyc", "oem_extra", "deal"):
+        raise HTTPException(422, "Only KYC, deal sheet or OEM Extra Support files can be attached to a lead request.")
     if not lead_docs.can_upload_kind(user, kind, own=own or _can_approve_leads(user)):
         raise HTTPException(403, "You cannot upload this kind of document.")
     data, ctype, filename = await lead_docs.read_upload(file)
