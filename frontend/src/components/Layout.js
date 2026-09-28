@@ -8,12 +8,12 @@ import {
   MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse, Bell,
   FileCheck, Scale, CalendarDays,
 } from "lucide-react";
-import { toast } from "sonner";
 import { cx, Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
 import ConnectionBar from "./ConnectionBar";
-import { downloadFile, get } from "../lib/api";
+import { get } from "../lib/api";
 import LeadDrawer from "../pages/LeadDrawer";
+import ExportDialog from "./ExportDialog";
 import { fmtWhen } from "../lib/format";
 
 const NAV = [
@@ -296,15 +296,12 @@ const ROLE_LABEL = {
 
 function Topbar({ onMenuOpen }) {
   const { user, logout, canExport } = useAuth();
+  const location = useLocation();
   const [menu, setMenu] = useState(false);
-  const [dl, setDl] = useState(false);
-  const exportXlsx = async () => {
-    setDl(true);
-    try { await downloadFile("/export", `euler_crm_export_${new Date().toISOString().slice(0, 10)}.xlsx`); toast.success("Export downloaded"); }
-    catch { toast.error("Export failed"); } finally { setDl(false); }
-  };
+  const [exportOpen, setExportOpen] = useState(false);
   const initials = (user?.name || user?.email || "U").slice(0, 2).toUpperCase();
   return (
+    <>
     <header className="shrink-0 z-30 flex h-14 sm:h-16 items-center gap-2 sm:gap-4 border-b border-line bg-white/80 backdrop-blur px-3 sm:px-6">
       <button
         type="button"
@@ -321,12 +318,11 @@ function Topbar({ onMenuOpen }) {
           <Button
             variant="secondary"
             data-testid="export-btn"
-            onClick={exportXlsx}
-            disabled={dl}
+            onClick={() => setExportOpen(true)}
             className="!px-2.5 sm:!px-3.5"
           >
             <Download size={15} />
-            <span className="hidden sm:inline">{dl ? "Exporting…" : "Export"}</span>
+            <span className="hidden sm:inline">Export</span>
           </Button>
         )}
         <SyncBadge />
@@ -349,6 +345,14 @@ function Topbar({ onMenuOpen }) {
         </div>
       </div>
     </header>
+      {canExport && (
+        <ExportDialog
+          open={exportOpen}
+          onClose={() => setExportOpen(false)}
+          pathname={location.pathname}
+        />
+      )}
+    </>
   );
 }
 

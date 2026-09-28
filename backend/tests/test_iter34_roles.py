@@ -291,7 +291,7 @@ async def test_an_executive_still_feeds_leads_and_booking_amount(client, exec_cl
     names = {l["customerName"] for l in (await exec_client.get("/api/leads")).json()}
     assert "ITER34 Exec lead" not in names
     assert (await exec_client.post(f"/api/lead-requests/{rid}/approve")).status_code == 403
-    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
         up = await exec_client.post(
             f"/api/lead-requests/{rid}/documents",
             files={"file": ("scan.png", io.BytesIO(b"\x89PNG kyc"), "image/png")},

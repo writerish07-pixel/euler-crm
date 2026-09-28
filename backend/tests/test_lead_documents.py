@@ -114,7 +114,7 @@ async def upload(c, url, kind, name="scan.png"):
 
 
 async def attach_kyc(c, request_id):
-    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
         r = await upload(c, f"/api/lead-requests/{request_id}/documents", kind)
         assert r.status_code == 200, r.text
 
@@ -145,13 +145,14 @@ async def test_kyc_then_approve_copies_docs_onto_the_lead(exec_client, client):
     listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
     row = next(x for x in listed if x["requestId"] == rid)
     assert row["kycComplete"] is True
-    assert len(row["documents"]) == 3
+    assert len(row["documents"]) == 4
+    assert row["dealSheetMissing"] is False
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
     lid = ap.json()["leadId"]
     docs = (await client.get(f"/api/leads/{lid}/documents")).json()
     kinds = {d["kind"] for d in docs}
-    assert kinds == {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"}
+    assert kinds == {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"}
     file_id = docs[0]["documentId"]
     raw = await client.get(f"/api/documents/{file_id}/file")
     assert raw.status_code == 200
@@ -168,7 +169,8 @@ async def test_b2b_aadhaar_is_optional(exec_client, client):
     rid = r.json()["requestId"]
     pan = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "kyc_pan")
     gst = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "kyc_gst")
-    assert pan.status_code == 200 and gst.status_code == 200
+    sheet = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "deal_sheet")
+    assert pan.status_code == 200 and gst.status_code == 200 and sheet.status_code == 200
     listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
     row = next(x for x in listed if x["requestId"] == rid)
     assert row["kycComplete"] is True
@@ -331,6 +333,8 @@ async def test_another_vehicle_copies_create_docs_not_delivery(client):
         assert r.status_code == 200, r.text
     extra = await upload(client, f"/api/leads/{lid1}/documents", "oem_extra_support")
     assert extra.status_code == 200, extra.text
+    sheet = await upload(client, f"/api/leads/{lid1}/documents", "deal_sheet")
+    assert sheet.status_code == 200, sheet.text
     rto = await upload(client, f"/api/leads/{lid1}/documents", "delivery_rto")
     assert rto.status_code == 200, rto.text
     second = await client.post("/api/leads", json={
@@ -344,6 +348,7 @@ async def test_another_vehicle_copies_create_docs_not_delivery(client):
     kinds = {d["kind"] for d in docs2}
     assert {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "oem_extra_support"} <= kinds
     assert "delivery_rto" not in kinds
+    assert "deal_sheet" not in kinds
     assert all(d.get("copiedFromLeadId") == lid1 for d in docs2)
     assert all(d.get("documentId") for d in docs2)
     src_pan = next(d for d in (await client.get(f"/api/leads/{lid1}/documents")).json()
@@ -392,3 +397,6 @@ def test_tl_kyc_permissions_do_not_need_own_lead():
     assert server.lead_docs.can_upload_kind(exec_u, "oem_extra_support", own=True) is True
     assert server.lead_docs.can_upload_kind(exec_u, "oem_extra_support", own=False) is False
     assert server.lead_docs.can_read_kind(tl, "oem_extra_support", own=False) is True
+    assert server.lead_docs.can_upload_kind(exec_u, "deal_sheet", own=True) is True
+    assert server.lead_docs.can_upload_kind(exec_u, "deal_sheet", own=False) is False
+    assert server.lead_docs.can_read_kind(tl, "deal_sheet", own=False) is True

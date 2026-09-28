@@ -23,6 +23,8 @@ jest.mock("./LeadDocuments", () => ({
   LocalOemExtraBlock: () => <div data-testid="oem-extra-proof-block" />,
   kycReady: () => "",
   extraSupportReady: () => "",
+  dealSheetReady: () => "",
+  LocalDealSheetBlock: () => <div data-testid="deal-sheet-block" />,
   uploadKycFiles: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({
@@ -56,6 +58,7 @@ test("approval drawer has model and variant selects above Deal format", async ()
   expect(labels.some((t) => /Variant/.test(t))).toBe(true);
   expect(labels.some((t) => /OEM Extra Support/.test(t))).toBe(true);
   expect(drawer.querySelector('[data-testid="approval-oem-extra"]')).toBeTruthy();
+  expect(drawer.querySelector('[data-testid="deal-sheet-block"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
   host.remove();
 });

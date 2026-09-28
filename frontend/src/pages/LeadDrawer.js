@@ -754,6 +754,14 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
               onChanged={onSaved}
             />
           )}
+          <LeadDocsStrip
+            leadId={lead.leadId}
+            kinds={["deal_sheet"]}
+            canUploadKinds={canUploadKyc ? ["deal_sheet"] : []}
+            title="Deal sheet"
+            documents={documents}
+            onChanged={onSaved}
+          />
         </div>
       )}
       {booked && (

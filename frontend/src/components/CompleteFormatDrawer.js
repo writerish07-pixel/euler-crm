@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { get, put, apiErrorMessage } from "../lib/api";
 import { Drawer, Button, Field, Input, Select } from "./ui";
 import { digitsLast10 } from "../lib/format";
-import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock } from "./LeadDocuments";
+import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock, dealSheetReady, LocalDealSheetBlock } from "./LeadDocuments";
 import DealFormatCard from "./DealFormatCard";
 import CallLink from "./CallLink";
 import { useAuth } from "../context/AuthContext";
@@ -17,6 +17,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
   const [dealLoading, setDealLoading] = useState(false);
   const [kyc, setKyc] = useState({});
   const [extraProof, setExtraProof] = useState({});
+  const [dealSheet, setDealSheet] = useState({});
   const [gstin, setGstin] = useState(row.gstin || "");
   const [oemExtra, setOemExtra] = useState(
     Number(row.oemExtraSupportReceived) > 0 ? Number(row.oemExtraSupportReceived) : "");
@@ -69,6 +70,8 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     if (kycErr) return toast.error(kycErr);
     const extraErr = extraSupportReady(oemExtra, extraProof, row.documents);
     if (extraErr) return toast.error(extraErr);
+    const sheetErr = dealSheetReady(dealSheet, row.documents);
+    if (sheetErr) return toast.error(sheetErr);
     setBusy(true);
     try {
       await put(`/lead-requests/${row.requestId}`, {
@@ -77,7 +80,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         mobile: digitsLast10(mobile),
         ...(isExecutive ? {} : { schemePassOn: passOn }),
       });
-      await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, { ...kyc, ...extraProof });
+      await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, { ...kyc, ...extraProof, ...dealSheet });
       toast.success("Sent for approval");
       onSaved();
     } catch (e) {
@@ -105,7 +108,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     >
       <div className="space-y-4">
         <p className="text-sm text-ink-soft">
-          Select the vehicle, enter a 10-digit mobile and Cx Demand, attach KYC, then send for approval.
+          Select the vehicle, enter a 10-digit mobile and Cx Demand, attach KYC and the deal sheet, then send for approval.
         </p>
         <Field label="Mobile *">
           <Input data-testid="approval-mobile" value={mobile} inputMode="numeric"
@@ -162,6 +165,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           </p>
         </Field>
         <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={oemExtra} existingDocs={row.documents} />
+        <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={row.documents} />
         <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} />
       </div>
     </Drawer>
