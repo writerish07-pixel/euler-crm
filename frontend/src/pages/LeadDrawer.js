@@ -615,7 +615,8 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
       <Card className="p-4">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Commercial Breakup</h4>
         <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
-        <KV label="Cx Demand" value={inr(lead.cxDemand || lead.budget || 0)} />
+        <OwnerKV label="Cx Demand" field="cxDemand" value={lead.cxDemand || lead.budget || 0}
+          display={inr(lead.cxDemand || lead.budget || 0)} numeric leadId={lid} onSaved={onSaved} />
         <p className="text-[11px] text-ink-faint -mt-1 mb-1">
           Payable and outstanding are the deal (Cx Demand). Extra vs GVC goes to dealer margin — not a cheaper customer price.
         </p>
@@ -2193,7 +2194,7 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
     customerName: lead.customerName || "", mobile: lead.mobile || "", altMobile: lead.altMobile || "",
     village: lead.village || "", city: lead.city || "", leadSource: lead.leadSource || "Walk-in",
     interestedModel: lead.interestedModel || "", variant: lead.variant || "", executive: lead.executive || "",
-    currentStatus: lead.currentStatus || "New", priority: lead.priority || "Normal", budget: lead.budget || 0,
+    currentStatus: lead.currentStatus || "New", priority: lead.priority || "Normal", budget: lead.budget || lead.cxDemand || 0,
     remarks: lead.remarks || "", financeRequired: lead.financeRequired || "No",
     exchangeRequired: lead.exchangeRequired || "No", nextFollowupDate: lead.nextFollowupDate || "",
     bookingAmount: lead.bookingAmount ?? 0,
@@ -2252,7 +2253,7 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           <Field label="Model"><Select value={form.interestedModel} onChange={set("interestedModel")} disabled={vehicleLocked}><option value="">—</option>{(m.models || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Variant"><Select value={form.variant} onChange={set("variant")} disabled={vehicleLocked}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
           <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{(m.priorities || ["Low","Normal","High","Urgent"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
-          <Field label="Budget (₹)"><Input type="number" value={form.budget} onChange={set("budget")} /></Field>
+          <Field label="Cx Demand (₹)"><Input type="number" value={form.budget} onChange={set("budget")} data-testid="edit-cx-demand" /></Field>
           <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
           <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
           {isBookedLead && (
