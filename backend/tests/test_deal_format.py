@@ -272,3 +272,57 @@ async def test_owner_inline_field_edit(client):
     blocked = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "dealerMarginNetExGst", "value": 1})
     assert blocked.status_code == 422
 
+
+@pytest.mark.asyncio
+async def test_owner_cx_demand_edit_updates_customer_payable(client):
+    """Editing Cx Demand after create must move payable / outstanding with it.
+
+    Executives collect Cx Demand at create (copied onto budget + cxDemand).
+    Owner inline edit and the edit-lead modal historically wrote budget only,
+    so Details showed the new figure while Customer Payable stayed locked to
+    the stale create-time cxDemand.
+    """
+    r = await client.post("/api/leads", json={
+        "customerName": "Cx Edit Payable", "mobile": next_mobile(),
+        "interestedModel": "Storm", "variant": "Storm LR Deal Test",
+        "executive": "Amit", "budget": 1450000, "city": "Jaipur",
+    })
+    assert r.status_code == 200, r.text
+    lead = r.json()
+    lid = lead["leadId"]
+    assert lead["useDealPrice"] is True
+    assert ce.num(lead["cxDemand"]) == 1450000
+    assert ce.num(lead["customerPayable"]) == 1450000
+    assert ce.num(lead["customerOutstanding"]) == 1450000
+
+    inline = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "budget", "value": 1400000,
+    })
+    assert inline.status_code == 200, inline.text
+    body = inline.json()
+    assert ce.num(body["budget"]) == 1400000
+    assert ce.num(body["cxDemand"]) == 1400000
+    assert ce.num(body["customerPayable"]) == 1400000
+    assert ce.num(body["customerOutstanding"]) == 1400000
+
+    modal = await client.put(f"/api/leads/{lid}", json={"budget": 1395000, "city": "Udaipur"})
+    assert modal.status_code == 200, modal.text
+    again = modal.json()
+    assert again["city"] == "Udaipur"
+    assert ce.num(again["cxDemand"]) == 1395000
+    assert ce.num(again["customerPayable"]) == 1395000
+    assert ce.num(again["customerOutstanding"]) == 1395000
+
+    alias = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "cxDemand", "value": 1380000,
+    })
+    assert alias.status_code == 200, alias.text
+    locked = alias.json()
+    assert ce.num(locked["budget"]) == 1380000
+    assert ce.num(locked["cxDemand"]) == 1380000
+    assert ce.num(locked["customerPayable"]) == 1380000
+
+    untouched = await client.put(f"/api/leads/{lid}", json={"remarks": "city only"})
+    assert untouched.status_code == 200, untouched.text
+    assert ce.num(untouched.json()["customerPayable"]) == 1380000
+

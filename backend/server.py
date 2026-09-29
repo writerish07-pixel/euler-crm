@@ -5131,13 +5131,28 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
     if vehicle_changed and (_is_priced(lead) or _has_persisted_scheme(lead)):
         _require_owner_reedit(act, True, "Model / variant")
 
-    old = {k: lead.get(k) for k in payload.keys()}
     old_booking_amount = ce.num(lead.get("bookingAmount"))
     if "bookingAmount" in payload:
         try:
             payload["bookingAmount"] = max(0.0, float(payload["bookingAmount"] or 0))
         except (TypeError, ValueError):
             raise HTTPException(422, "bookingAmount must be a number ≥ 0")
+    if "budget" in payload:
+        try:
+            payload["budget"] = ce.round2(max(0.0, float(payload["budget"] or 0)))
+        except (TypeError, ValueError):
+            raise HTTPException(422, "budget must be a number ≥ 0")
+        # Create copies Cx Demand onto both budget and cxDemand, and payable
+        # follows cxDemand while useDealPrice is on. Inline / edit-modal saves
+        # used to write budget only, so Details showed the new figure while
+        # Customer Payable stayed on the stale create-time cxDemand.
+        if not oem_sync.is_same_order_pack(lead):
+            new_cx = payload["budget"]
+            live_cx = ce.round2(ce.num(lead.get("cxDemand")))
+            if new_cx != live_cx:
+                payload["cxDemand"] = new_cx
+                payload["useDealPrice"] = new_cx > 0
+    old = {k: lead.get(k) for k in payload.keys()}
     payload["lastUpdated"] = now_iso()
     # Lead Register "Last Updated By": the acting user was already resolved for the
     # audit log, but was never written onto the lead, so the column had no source.
