@@ -318,4 +318,5 @@ def test_quoted_deal_needs_approval_only_for_discount():
     assert server._quoted_deal_needs_approval(low, 790000) is True
     assert server._quoted_deal_needs_approval(high, 820000) is False
     assert server._quoted_deal_needs_approval(None, 0) is False
-    assert server._quoted_deal_needs_approval(None, 185000) is False
+    assert server._quoted_deal_needs_approval(None, 185000) is True
+    assert server._quoted_deal_needs_approval({"priceFound": False}, 185000) is True

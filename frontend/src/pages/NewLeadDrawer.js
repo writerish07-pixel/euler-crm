@@ -169,9 +169,10 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   // TL / owner / GM can add another unit when assigning to the same executive.
   const otherExecLock = isExecutive && otherExecHold;
   const quotedCx = Number(form.budget) || 0;
+  const priced = !!(deal && (deal.priceFound || Number(deal.exShowroom) > 0 || Number(deal.priceTotal) > 0));
   const needsApproval = (isExecutive || isTl)
     && quotedCx > 0
-    && (deal?.needsApproval === true || Number(deal?.additionalDiscount) >= 1);
+    && (deal?.needsApproval === true || Number(deal?.additionalDiscount) >= 1 || !priced);
   const saveLabel = needsApproval ? "Send for approval" : "Create Lead";
   const drawerTitle = needsApproval && isExecutive ? "Request a lead" : "New Lead";
   const drawerSubtitle = needsApproval

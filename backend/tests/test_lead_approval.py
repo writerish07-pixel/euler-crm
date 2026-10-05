@@ -130,8 +130,10 @@ async def test_executive_without_deal_amount_is_rejected(exec_client):
 
 @pytest.mark.asyncio
 async def test_executive_exact_deal_creates_live(exec_client):
-    budget = await matching_deal_budget()
-    r = await exec_client.post("/api/leads", json=_enquiry("Exact Live", budget=budget))
+    budget = await matching_deal_budget("Storm Exact Live", "No Disc LR")
+    r = await exec_client.post("/api/leads", json=_enquiry(
+        "Exact Live", budget=budget,
+        interestedModel="Storm Exact Live", variant="No Disc LR"))
     assert r.status_code == 200, r.text
     assert r.json().get("leadId")
     assert not r.json().get("pending")
@@ -208,9 +210,22 @@ async def test_approve_without_deal_sheet_is_rejected(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_sales_gm_can_approve(exec_client, gm_client, client):
-    budget = await matching_deal_budget()
-    r = await exec_client.post("/api/leads", json=_enquiry("GM Approves", budget=budget))
-    rid = r.json()["requestId"]
+    """Exact deals create live. GM can still approve a request already in queue."""
+    budget = await matching_deal_budget("Storm Gm Queue", "Exact LR")
+    rid = "LR26GMEXACT"
+    payload = _enquiry("GM Approves", budget=budget,
+                       interestedModel="Storm Gm Queue", variant="Exact LR")
+    await server.db.lead_requests.insert_one({
+        "requestId": rid,
+        "status": "pending",
+        "payload": payload,
+        "dealAmount": budget,
+        "dealFormat": await server._deal_format_for(
+            "Storm Gm Queue", "Exact LR", budget),
+        "createdAt": "2026-09-09T00:00:00+00:00",
+        "submittedBy": "executive@euler.com",
+        "submittedByName": "Executive",
+    })
     await attach_kyc(exec_client, rid)
     ap = await gm_client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
@@ -305,7 +320,8 @@ async def test_notify_never_breaks_submit(exec_client, monkeypatch):
 @pytest.mark.asyncio
 async def test_approval_oem_extra_support_lands_on_scheme(exec_client, client):
     r = await exec_client.post("/api/leads", json=_enquiry(
-        "Extra Cust", oemExtraSupportReceived=7000))
+        "Extra Cust", oemExtraSupportReceived=7000,
+        interestedModel="No Price Van", variant="X"))
     assert r.status_code == 200, r.text
     rid = r.json()["requestId"]
     waiting = (await exec_client.get("/api/lead-requests", params={"status": "pending"})).json()
@@ -313,7 +329,7 @@ async def test_approval_oem_extra_support_lands_on_scheme(exec_client, client):
     assert row["oemExtraSupportReceived"] == 7000
 
     upd = await exec_client.put(f"/api/lead-requests/{rid}", json={
-        "budget": 185000, "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "budget": 185000, "interestedModel": "No Price Van", "variant": "X",
         "oemExtraSupportReceived": 8500,
     })
     assert upd.status_code == 200, upd.text

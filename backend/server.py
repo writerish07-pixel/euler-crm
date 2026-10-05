@@ -3962,16 +3962,30 @@ def _can_approve_leads(user) -> bool:
     return str((user or {}).get("role") or "") in web_push.LEAD_APPROVER_ROLES
 
 
+def _deal_has_list_price(deal) -> bool:
+    if not deal:
+        return False
+    return bool(
+        deal.get("priceFound")
+        or ce.num(deal.get("exShowroom")) > 0
+        or ce.num(deal.get("priceTotal")) > 0
+    )
+
+
 def _quoted_deal_needs_approval(deal, cx_demand) -> bool:
     """GM / Owner queue only when the quoted deal gives a dealer discount.
 
-    Unpriced enquiries and exact / extra-margin deals create live immediately.
+    Budget 0 is an enquiry — create live. Exact list and extra-margin create
+    live. A Cx Demand with no Price Master row cannot be proven discount-free,
+    so it waits.
     """
     if ce.num(cx_demand) <= 0:
         return False
-    if deal and deal.get("needsApproval") is not None:
+    if not _deal_has_list_price(deal):
+        return True
+    if deal.get("needsApproval") is not None:
         return bool(deal.get("needsApproval"))
-    return ce.num((deal or {}).get("additionalDiscount")) >= ce.DEAL_AMOUNT_EQUAL_RUPEES
+    return ce.num(deal.get("additionalDiscount")) >= ce.DEAL_AMOUNT_EQUAL_RUPEES
 
 
 async def _create_pending_lead_request(body: LeadIn, user, *, deal_format, deal_amount,

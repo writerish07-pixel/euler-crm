@@ -109,7 +109,8 @@ async def test_second_lead_same_mobile_needs_confirm(client):
     mobile = next_mobile()
     first = await client.post("/api/leads", json=_enquiry("Ramesh", mobile=mobile))
     assert first.status_code == 200, first.text
-    second = await client.post("/api/leads", json=_enquiry("Ramesh", mobile=mobile))
+    second = await client.post("/api/leads", json=_enquiry(
+        "Ramesh", mobile=mobile, variant="City (PV)"))
     assert second.status_code == 409, second.text
     d = _detail(second)
     assert d["code"] == "mobile_active_deal"
@@ -140,7 +141,11 @@ async def test_closed_file_uses_new_purchase_code(client):
     first = await client.post("/api/leads", json=_enquiry("Old Deal", mobile=mobile))
     await server.db.leads.update_one(
         {"leadId": first.json()["leadId"]},
-        {"$set": {"currentStatus": "Close Won", "accountStatus": "Closed"}},
+        {"$set": {
+            "currentStatus": "Close Won",
+            "accountStatus": "Closed",
+            "lastUpdated": "2020-01-01T00:00:00+00:00",
+        }},
     )
     second = await client.post("/api/leads", json=_enquiry("Old Deal", mobile=mobile))
     assert second.status_code == 409
@@ -243,6 +248,10 @@ async def test_pending_same_mobile_blocked_without_flag(exec_client):
 async def test_tl_creates_second_unit_with_oem_extra(tl_client, client):
     """TL live-creates another vehicle on the same mobile, with extra support."""
     mobile = next_mobile()
+    await server.db.price_master.insert_one({
+        "priceId": "PM-TL-LIVE", "model": "Storm", "variant": "TL Live LR",
+        "exShowroom": 180000, "rto": 3000, "insurance": 2000, "status": "active",
+    })
     first = await client.post(
         "/api/leads", json=_enquiry("Ramesh", mobile=mobile, executive="Amit"))
     assert first.status_code == 200, first.text
@@ -251,6 +260,7 @@ async def test_tl_creates_second_unit_with_oem_extra(tl_client, client):
     assert blocked.status_code == 409
     ok = await tl_client.post("/api/leads", json=_enquiry(
         "Ramesh", mobile=mobile, executive="Amit",
+        interestedModel="Storm", variant="TL Live LR", budget=185000,
         anotherVehicle=True, oemExtraSupportReceived=7000))
     assert ok.status_code == 200, ok.text
     assert ok.json()["leadId"] != first.json()["leadId"]
