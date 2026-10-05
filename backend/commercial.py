@@ -174,9 +174,9 @@ def derive_deal_customer_pass(price_total, deal, scheme_passed, extra_received):
 def apply_deal_additional(deal, cx_demand=None, scheme_passed=None):
     """Additional (Dealer) = max(0, Ex+RTO+Insurance − Cx Demand − OEM scheme passed).
 
-    Owner approval is only required when the remaining gap is a dealer extra
-    (or the customer is asked to pay above list). Passing OEM scheme does not
-    by itself need Owner.
+    Owner-only (`needsOwnerApproval`) is any gap vs list. The GM/Owner queue
+    (`needsApproval`) is only the dealer extra — a discount. Passing OEM scheme
+    or collecting extra from the customer does not wait.
     """
     deal = dict(deal or {})
     cx = round2(max(0.0, num(cx_demand if cx_demand is not None else deal.get("cxDemand"))))
@@ -190,6 +190,9 @@ def apply_deal_additional(deal, cx_demand=None, scheme_passed=None):
     deal["additionalDiscount"] = round2(max(0.0, diff))
     deal["dealDifference"] = diff
     deal["needsOwnerApproval"] = abs(diff) >= DEAL_AMOUNT_EQUAL_RUPEES
+    # Queue for GM / Owner only when the dealer is giving extra (a discount).
+    # Exact list or extra income from the customer does not wait.
+    deal["needsApproval"] = deal["additionalDiscount"] >= DEAL_AMOUNT_EQUAL_RUPEES
     return deal
 
 
