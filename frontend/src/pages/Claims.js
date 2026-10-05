@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink, Link2 } from "lucide-react";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText, rowLeadIds, rowLineItems } from "../lib/claimMatch";
+import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText, rowLeadIds, rowLineItems, lineLeadIds } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
@@ -264,9 +264,8 @@ export default function Claims() {
             In Euler but not in this register — {oemOnly.count} line(s), {inr(oemOnly.total)}
           </div>
           <p className="text-xs text-ink-faint mb-3">
-            Claims Euler is working on that this register does not raise. A line with no
-            lead never matched a chassis; one with a lead is entitlement this app never
-            recorded.
+            Claims Euler is working on that still have no CRM lead. Matched debit
+            notes leave this list even when the scheme component was not used.
           </p>
           <Table
             rowKey="claimNumber"
@@ -490,17 +489,25 @@ function MatchOemModal({ claim, onClose, onDone }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    get("/oem-claims").then((rows) => setOemRows(Array.isArray(rows) ? rows : [])).catch(() => setOemRows([]));
+    get("/oem-claims", { unmatchedOnly: true })
+      .then((rows) => setOemRows(Array.isArray(rows) ? rows : []))
+      .catch(() => setOemRows([]));
   }, []);
 
   const needle = q.trim().toLowerCase();
   const shown = oemRows.filter((r) => {
+    const st = r.registerMatch?.state || "";
+    const alreadyPicked = r.claimNumber && r.claimNumber === claimNumber;
+    if (!alreadyPicked && st === "in_register") return false;
     if (!needle) return true;
     const blob = `${r.claimNumber || ""} ${rowLeadIds(r).join(" ")} ${rowLineItems(r).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""} ${li.description || ""} ${li.customerName || ""}`).join(" ")}`.toLowerCase();
     return blob.includes(needle);
   }).slice(0, 40);
   const picked = shown.find((r) => r.claimNumber === claimNumber) || oemRows.find((r) => r.claimNumber === claimNumber);
-  const lines = rowLineItems(picked);
+  const lines = rowLineItems(picked).filter((li) => {
+    if (lineId && (li.lineId || "") === lineId) return true;
+    return lineLeadIds(li).length === 0;
+  });
 
   const save = async () => {
     if (!claimNumber.trim()) return toast.error("Enter or pick an OEM claim number");

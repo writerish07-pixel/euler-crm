@@ -1475,11 +1475,11 @@ async def apply_oem_filing_to_register(db, index=None):
 
 
 async def oem_only_lines(db, register_pairs):
-    """Euler's side of the cross-check: claim lines the register has no row for.
+    """Euler's side of the cross-check: claim lines that still have no CRM match.
 
-    `register_pairs` is the set of (leadId, componentKey) the register actually renders.
-    A line whose lead is unknown, or whose component the register never raised, is money
-    Euler is processing that this app does not know it is owed.
+    A line already stamped with a lead — chassis, invoice, or Match — is done
+    work. Listing it again as "not in the register" kept matched Referral /
+    Extra Support notes in the unmatched queue.
     """
     out = []
     manual = await load_manual_oem_links(db)
@@ -1491,39 +1491,27 @@ async def oem_only_lines(db, register_pairs):
             continue
         for line in _line_item_list(row.get("lineItems")):
             leads = line_lead_ids(line)
-            names = line_lead_customers(line)
+            if leads:
+                continue
             key = map_claim_type_to_component(line.get("claimType"), line.get("description"))
-            if leads and key and all((lid, key) in register_pairs for lid in leads):
-                continue
-            if leads and not key and any(p[0] in leads for p in register_pairs):
-                # The lead is in the register; the phrase just did not map. That is the
-                # `unmapped` amber on the register side, not a missing row here.
-                continue
-            missing = [lid for lid in leads if not key or (lid, key) not in register_pairs]
-            show = missing or [""]
-            for i, lead_id in enumerate(show):
-                name = ""
-                if lead_id and lead_id in leads:
-                    name = names[leads.index(lead_id)] if leads.index(lead_id) < len(names) else ""
-                out.append({
-                    "claimNumber": row.get("claimNumber") or "",
-                    "oemStatus": row.get("status") or "",
-                    "stageLabel": row.get("stageLabel") or "",
-                    "stageDays": _as_int(row.get("stageDays")),
-                    "createdDate": row.get("createdDate") or "",
-                    "leadId": lead_id,
-                    "lineId": str(line.get("lineId") or ""),
-                    "customer": name or (line.get("leadCustomer") or ""),
-                    "chassis": line.get("chassis") or "",
-                    "sourceInvoiceNumber": line.get("sourceInvoiceNumber") or "",
-                    "description": line.get("description") or "",
-                    "claimType": line.get("claimType") or "",
-                    "mappedComponent": key,
-                    "amount": round2(line.get("totalAmount")),
-                    "hasVehicle": bool(line.get("chassis") or line.get("sourceInvoiceNumber")),
-                    "reason": "unknown_lead" if not lead_id else (
-                        "unmapped_component" if not key else "missing_register_row"),
-                })
+            out.append({
+                "claimNumber": row.get("claimNumber") or "",
+                "oemStatus": row.get("status") or "",
+                "stageLabel": row.get("stageLabel") or "",
+                "stageDays": _as_int(row.get("stageDays")),
+                "createdDate": row.get("createdDate") or "",
+                "leadId": "",
+                "lineId": str(line.get("lineId") or ""),
+                "customer": line.get("leadCustomer") or "",
+                "chassis": line.get("chassis") or "",
+                "sourceInvoiceNumber": line.get("sourceInvoiceNumber") or "",
+                "description": line.get("description") or "",
+                "claimType": line.get("claimType") or "",
+                "mappedComponent": key,
+                "amount": round2(line.get("totalAmount")),
+                "hasVehicle": bool(line.get("chassis") or line.get("sourceInvoiceNumber")),
+                "reason": "unknown_lead",
+            })
     out.sort(key=lambda r: -r["amount"])
     return out
 
@@ -1536,8 +1524,9 @@ async def register_pairs(db):
     lines in Coulson, so comparing them here would paint every Euler claim as a gap.
     """
     pairs = set()
-    async for c in db.claims.find({"manual": {"$ne": True}},
-                                  {"leadId": 1, "componentKey": 1, "_id": 0}):
+    async for c in db.claims.find(
+            {"manual": {"$ne": True}, "claimStatus": {"$ne": "Dropped"}},
+            {"leadId": 1, "componentKey": 1, "_id": 0}):
         lid, key = c.get("leadId") or "", c.get("componentKey") or ""
         if lid and key:
             pairs.add((lid, key))
@@ -1583,14 +1572,12 @@ def claim_register_match(row, pairs, manual_links=None):
             keys.append(key)
         if lid and lid in line_ids_linked:
             states.append("in_register")
-        elif not leads:
-            states.append("unknown_lead")
-        elif not key:
-            states.append("unmapped")
-        elif any((lead_id, key) in pairs for lead_id in leads):
+        elif leads:
+            # Chassis / invoice / Match already joined a CRM lead. That is
+            # matched work — not a "not in scheme register" chase item.
             states.append("in_register")
         else:
-            states.append("missing_register")
+            states.append("unknown_lead")
     if "in_register" in states and any(s != "in_register" for s in states):
         pick = "partial"
     else:
@@ -1600,7 +1587,7 @@ def claim_register_match(row, pairs, manual_links=None):
         "unknown_lead": "No chassis or invoice on this claim matched a lead.",
         "missing_register": "Euler filed this, but the Scheme Claim Register has no row.",
         "unmapped": "This lead is in the register, but the claim wording did not map to a component.",
-        "in_register": "Connected to the Scheme Claim Register by chassis / invoice.",
+        "in_register": "Matched to a lead or the Scheme Claim Register.",
         "partial": "Some items on this OEM claim are matched; others still need a lead.",
     }.get(pick, "")
     if row.get("status") == "Rejected" and row.get("needsResubmission"):
@@ -1668,9 +1655,16 @@ def _claim_matches_query(row, *, q="", chassis="", invoice=""):
     return True
 
 
+def oem_claim_is_unmatched(row):
+    """True while any line still needs a lead / register match."""
+    state = ((row or {}).get("registerMatch") or {}).get("state") or ""
+    return state != "in_register"
+
+
 async def list_claims(db, *, status="", lead_id="", unlinked=False,
                       q="", chassis="", invoice="", missing_doc=False,
-                      missing_vehicle=False, exclude_missing_vehicle=False):
+                      missing_vehicle=False, exclude_missing_vehicle=False,
+                      unmatched_only=False):
     filt = {}
     if status:
         filt["status"] = status
@@ -1693,6 +1687,8 @@ async def list_claims(db, *, status="", lead_id="", unlinked=False,
     for r in rows:
         r.pop("_id", None)
     await attach_register_match(db, rows)
+    if unmatched_only:
+        rows = [r for r in rows if oem_claim_is_unmatched(r)]
     return rows
 
 
@@ -1725,7 +1721,7 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
     register = []
     async for c in db.claims.find({"leadId": lead_id, "manual": {"$ne": True}}):
         key = c.get("componentKey") or ""
-        if not key:
+        if not key or str(c.get("claimStatus") or "") == "Dropped":
             continue
         register.append({
             "claimId": c.get("claimId") or f"CLM-{lead_id}-{key}",
@@ -1734,6 +1730,10 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
             "eligibleClaim": round2(c.get("eligibleClaim") if c.get("eligibleClaim") is not None
                                     else c.get("claimAmount")),
             "claimStatus": c.get("claimStatus") or "",
+            "receivedAmount": round2(c.get("receivedAmount")),
+            "submittedDate": c.get("submittedDate") or "",
+            "approvedDate": c.get("approvedDate") or "",
+            "claimReceivedDate": c.get("claimReceivedDate") or "",
             "oemMatch": match_state(
                 index, lead_id, key,
                 chassis=lead.get("chassisNumber") or "",

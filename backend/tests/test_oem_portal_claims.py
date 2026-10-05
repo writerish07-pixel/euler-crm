@@ -1234,7 +1234,7 @@ async def test_oem_claim_is_missing_from_register_when_no_row_exists(client, wir
     rows = (await client.get("/api/oem-claims")).json()
     hit = [r for r in rows if lead_id in (r.get("leadIds") or [])]
     assert hit, "the synced claim should be linked to the lead"
-    assert hit[0]["registerMatch"]["state"] == "missing_register"
+    assert hit[0]["registerMatch"]["state"] == "in_register"
 
 
 @pytest.mark.asyncio
@@ -2078,3 +2078,61 @@ async def test_sync_survives_dirty_existing_claim(client, wired):
     rows = (await client.get("/api/oem-claims")).json()
     assert rows
     assert all(isinstance(li, dict) for li in rows[0].get("lineItems") or [])
+
+
+def test_claim_register_match_lead_link_is_not_a_gap():
+    """Matching a debit note to a lead takes it off the unmatched work queue."""
+    row = {
+        "claimNumber": "AF-122-CLLEAD",
+        "lineItems": [{
+            "lineId": "l1", "leadId": "LD26005666",
+            "claimType": "Referral Commission",
+            "description": "Referral Commission for invoice AF-122-I26270073",
+        }],
+    }
+    got = oem_claims.claim_register_match(row, pairs=set())
+    assert got["state"] == "in_register"
+
+
+def test_claim_register_match_without_a_lead_stays_unmatched():
+    row = {
+        "claimNumber": "AF-122-CLNONE",
+        "lineItems": [{
+            "lineId": "l1", "leadId": "",
+            "claimType": "Referral Commission",
+            "description": "Referral Commission for invoice AF-122-I1",
+        }],
+    }
+    got = oem_claims.claim_register_match(row, pairs=set())
+    assert got["state"] == "unknown_lead"
+
+
+@pytest.mark.asyncio
+async def test_matched_oem_claim_leaves_unmatched_queues(client, wired):
+    lead_id = await _delivered_lead(client)
+    await client.post("/api/integrations/coulson/sync-claims")
+    only = (await client.get("/api/claims/oem-only")).json()
+    assert not [r for r in only["rows"] if r.get("leadId") == lead_id]
+    unmatched = (await client.get("/api/oem-claims", params={"unmatchedOnly": True})).json()
+    assert not [r for r in unmatched if lead_id in (r.get("leadIds") or [])]
+    all_rows = (await client.get("/api/oem-claims")).json()
+    hit = [r for r in all_rows if lead_id in (r.get("leadIds") or [])]
+    assert hit and hit[0]["registerMatch"]["state"] == "in_register"
+
+
+@pytest.mark.asyncio
+async def test_match_options_hide_dropped_and_already_matched(client):
+    lead_id = await _delivered_lead(client, chassis="MD9OPT26G900099",
+                                    invoice="AF-999-I26285099")
+    await _register_row(lead_id, "referralBonus", 5000.0)
+    await _register_row(lead_id, "loyaltyBonus", 10000.0)
+    await server.db.claims.update_one(
+        {"leadId": lead_id, "componentKey": "loyaltyBonus"},
+        {"$set": {"manualOemClaimNumber": "AF-122-CLUSED"}})
+    await server.db.claims.update_one(
+        {"leadId": lead_id, "componentKey": "referralBonus"},
+        {"$set": {"claimStatus": "Dropped"}})
+    rows = (await client.get("/api/claims/match-options")).json()
+    mine = [r for r in rows if r["leadId"] == lead_id]
+    assert not any(r["componentKey"] == "loyaltyBonus" for r in mine)
+    assert not any(r["componentKey"] == "referralBonus" for r in mine)

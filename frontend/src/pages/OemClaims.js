@@ -241,8 +241,8 @@ export default function OemClaims({ missingVehicleOnly = false }) {
         </div>
         {(matchCounts.missing_register || matchCounts.unknown_lead) ? (
           <p className="mt-3 text-sm text-violet-800">
-            Violet rows are filed in Euler but missing from the Scheme Claim Register.
-            Grey rows never matched a lead chassis or invoice.
+            Violet rows still need a lead. Grey rows never matched a chassis or invoice.
+            Once a claim is matched to a lead it leaves this unmatched list.
           </p>
         ) : null}
       </Card>
