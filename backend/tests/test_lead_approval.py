@@ -1,4 +1,4 @@
-"""Executive enquiries wait for GM / Owner Approve. No live lead until then."""
+"""Discounted exec/TL deals wait for GM / Owner. Exact / extra-margin create live."""
 import io
 import os
 import sys
@@ -126,6 +126,18 @@ async def test_executive_without_deal_amount_is_rejected(exec_client):
     assert r.status_code == 422, r.text
     assert await server.db.leads.count_documents({}) == 0
     assert await server.db.lead_requests.count_documents({}) == 0
+
+
+@pytest.mark.asyncio
+async def test_executive_exact_deal_creates_live(exec_client):
+    budget = await matching_deal_budget()
+    r = await exec_client.post("/api/leads", json=_enquiry("Exact Live", budget=budget))
+    assert r.status_code == 200, r.text
+    assert r.json().get("leadId")
+    assert not r.json().get("pending")
+    assert await server.db.leads.count_documents({"customerName": "Exact Live"}) == 1
+    assert await server.db.lead_requests.count_documents(
+        {"payload.customerName": "Exact Live"}) == 0
 
 
 @pytest.mark.asyncio

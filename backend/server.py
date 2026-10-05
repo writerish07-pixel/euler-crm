@@ -2174,7 +2174,11 @@ def _staff_safe_deal_preview(d):
 
 
 def _exec_safe_deal_preview(d):
-    """Executives price the customer deal — they must not see Scheme Master lines."""
+    """Executives price the customer deal — they must not see Scheme Master lines.
+
+    `needsApproval` stays so the create-lead button can switch to Send for
+    approval when there is a dealer discount.
+    """
     out = _staff_safe_deal_preview(d)
     if not out:
         return out
@@ -3958,74 +3962,106 @@ def _can_approve_leads(user) -> bool:
     return str((user or {}).get("role") or "") in web_push.LEAD_APPROVER_ROLES
 
 
+def _quoted_deal_needs_approval(deal, cx_demand) -> bool:
+    """GM / Owner queue only when the quoted deal gives a dealer discount.
+
+    Unpriced enquiries and exact / extra-margin deals create live immediately.
+    """
+    if ce.num(cx_demand) <= 0:
+        return False
+    if deal and deal.get("needsApproval") is not None:
+        return bool(deal.get("needsApproval"))
+    return ce.num((deal or {}).get("additionalDiscount")) >= ce.DEAL_AMOUNT_EQUAL_RUPEES
+
+
+async def _create_pending_lead_request(body: LeadIn, user, *, deal_format, deal_amount,
+                                       scheme_pass_on, payload, another):
+    request_id = await next_id("lead_request", "LR26")
+    req = {
+        "requestId": request_id,
+        "status": "pending",
+        "payload": payload,
+        "submittedBy": user.get("email") or "",
+        "submittedByName": user.get("name") or "",
+        "submittedByUserId": user.get("userId") or user.get("email") or "",
+        "createdAt": now_iso(),
+        "dealAmount": deal_amount,
+        "dealFormat": deal_format,
+        "cxDemand": deal_amount,
+        "schemePassOn": scheme_pass_on,
+    }
+    await db.lead_requests.insert_one(req)
+    if another:
+        await _copy_create_docs_from_sibling(
+            "", mobile=body.mobile, name=body.customerName, viewer=user,
+            request_id=request_id)
+    name = (body.customerName or "Customer").strip()
+    model = " ".join(x for x in (body.interestedModel, body.variant) if x).strip() or "vehicle"
+    amt = f"₹{ce.num(body.budget):,.0f}"
+    try:
+        await web_push.notify_lead_approvers(
+            db,
+            title="Lead waiting for approval",
+            body=f"{name} · {model} · {amt}. Open Approvals in Euler CRM.",
+            url="/approvals",
+        )
+    except Exception:
+        logger.exception("lead-request push notify failed")
+    return {
+        "pending": True,
+        "requestId": request_id,
+        "status": "pending",
+        "dealAmount": req["dealAmount"],
+        "message": "Sent for approval. The lead is created after it is approved.",
+    }
+
+
 @api.post("/leads")
 async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
-    """Owner / GM / TL create a live lead. An executive submits a request until
-    GM or Owner taps Approve — nothing is written to the Lead Register until then."""
+    """Owner / GM create a live lead. Executive / TL create live when there is
+    no dealer discount; a discounted deal waits for GM or Owner Approve."""
     role = str(user.get("role") or "")
     if role == "tl" and not str(body.executive or "").strip():
         raise HTTPException(422, "Pick the executive this lead belongs to.")
-    if role == "executive":
-        mobile_digits = re.sub(r"\D", "", str(body.mobile or ""))
-        if len(mobile_digits) < 10:
-            raise HTTPException(422, "A 10-digit mobile is required before sending for approval.")
-        if ce.num(body.budget) <= 0:
-            raise HTTPException(422, "Enter the deal amount before sending for GM / Owner approval.")
+    if role in ("executive", "tl"):
         payload = body.model_dump()
         another = bool(payload.pop("anotherVehicle", False))
         scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
-        await _raise_if_mobile_taken(
-            body.mobile, incoming_name=body.customerName,
-            incoming_executive=user.get("name") or payload.get("executive") or "",
-            allow=another, check_pending=True)
-        payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
-        payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
-        if payload["customerType"] != "B2B":
-            payload["gstin"] = ""
-        if not str(payload.get("executive") or "").strip():
-            payload["executive"] = user.get("name") or ""
-        request_id = await next_id("lead_request", "LR26")
         deal_amount = ce.round2(ce.num(body.budget))
-        deal_format = await _deal_format_for(
-            payload.get("interestedModel"), payload.get("variant"), deal_amount,
-            payload.get("createdDate"), scheme_pass_on)
-        req = {
-            "requestId": request_id,
-            "status": "pending",
-            "payload": payload,
-            "submittedBy": user.get("email") or "",
-            "submittedByName": user.get("name") or "",
-            "submittedByUserId": user.get("userId") or user.get("email") or "",
-            "createdAt": now_iso(),
-            "dealAmount": deal_amount,
-            "dealFormat": deal_format,
-            "cxDemand": deal_amount,
-            "schemePassOn": scheme_pass_on,
-        }
-        await db.lead_requests.insert_one(req)
-        if another:
-            await _copy_create_docs_from_sibling(
-                "", mobile=body.mobile, name=body.customerName, viewer=user,
-                request_id=request_id)
-        name = (body.customerName or "Customer").strip()
-        model = " ".join(x for x in (body.interestedModel, body.variant) if x).strip() or "vehicle"
-        amt = f"₹{ce.num(body.budget):,.0f}"
-        try:
-            await web_push.notify_lead_approvers(
-                db,
-                title="Lead waiting for approval",
-                body=f"{name} · {model} · {amt}. Open Approvals in Euler CRM.",
-                url="/approvals",
-            )
-        except Exception:
-            logger.exception("lead-request push notify failed")
-        return {
-            "pending": True,
-            "requestId": request_id,
-            "status": "pending",
-            "dealAmount": req["dealAmount"],
-            "message": "Sent for approval. The lead is created after it is approved.",
-        }
+        same_order = bool(payload.get("sameOrderMultiUnit"))
+        specs = _unit_specs_from(
+            payload.get("interestedModel"), payload.get("variant"), payload.get("units"))
+        if same_order and len(specs) > 1:
+            deal_format = await _deal_format_for_pack(
+                specs, deal_amount, payload.get("createdDate"), scheme_pass_on)
+        else:
+            deal_format = await _deal_format_for(
+                payload.get("interestedModel"), payload.get("variant"), deal_amount,
+                payload.get("createdDate"), scheme_pass_on)
+        needs_approval = _quoted_deal_needs_approval(deal_format, deal_amount)
+        mobile_digits = re.sub(r"\D", "", str(body.mobile or ""))
+        if role == "executive":
+            if len(mobile_digits) < 10:
+                raise HTTPException(422, "A 10-digit mobile is required.")
+            if deal_amount <= 0:
+                raise HTTPException(422, "Enter Cx Demand.")
+        if needs_approval:
+            if len(mobile_digits) < 10:
+                raise HTTPException(
+                    422, "A 10-digit mobile is required before sending for approval.")
+            await _raise_if_mobile_taken(
+                body.mobile, incoming_name=body.customerName,
+                incoming_executive=user.get("name") or payload.get("executive") or "",
+                allow=another, check_pending=True)
+            payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+            payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
+            if payload["customerType"] != "B2B":
+                payload["gstin"] = ""
+            if not str(payload.get("executive") or "").strip():
+                payload["executive"] = user.get("name") or ""
+            return await _create_pending_lead_request(
+                body, user, deal_format=deal_format, deal_amount=deal_amount,
+                scheme_pass_on=scheme_pass_on, payload=payload, another=another)
     return await _insert_live_lead(body, viewer=user)
 
 
@@ -4139,11 +4175,13 @@ def _request_out(doc):
         row["priceTotal"] = df.get("priceTotal") or 0
         row["additionalDiscount"] = df.get("additionalDiscount") or 0
         row["needsOwnerApproval"] = bool(df.get("needsOwnerApproval"))
+        row["needsApproval"] = bool(df.get("needsApproval"))
         row["schemePassed"] = df.get("schemePassed") or 0
     else:
         row["priceTotal"] = 0
         row["additionalDiscount"] = 0
         row["needsOwnerApproval"] = False
+        row["needsApproval"] = False
         row["schemePassed"] = 0
     return row
 

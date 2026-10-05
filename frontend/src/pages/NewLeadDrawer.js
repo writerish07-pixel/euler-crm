@@ -11,7 +11,7 @@ function sameExecName(a, b) {
   return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
 }
 
-/** Create / request a lead. Executives send for approval; TL / owner / GM create live. */
+/** Create a lead. Exec / TL send for GM/Owner only when the deal has a discount. */
 export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {} }) {
   const { isExecutive, isTl, user, canSeeOwnerCommercials } = useAuth();
   const [form, setForm] = useState({
@@ -168,6 +168,17 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   // Executives cannot open a second file on another executive's mobile.
   // TL / owner / GM can add another unit when assigning to the same executive.
   const otherExecLock = isExecutive && otherExecHold;
+  const quotedCx = Number(form.budget) || 0;
+  const needsApproval = (isExecutive || isTl)
+    && quotedCx > 0
+    && (deal?.needsApproval === true || Number(deal?.additionalDiscount) >= 1);
+  const saveLabel = needsApproval ? "Send for approval" : "Create Lead";
+  const drawerTitle = needsApproval && isExecutive ? "Request a lead" : "New Lead";
+  const drawerSubtitle = needsApproval
+    ? "Discounted deal — waits for GM or Owner"
+    : isExecutive || isTl
+      ? "Creates live when there is no extra discount"
+      : "Capture a fresh enquiry";
 
   const saveLead = async (extra = {}) => {
     setBusy(true);
@@ -215,8 +226,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
     if (isTl && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
-    if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
+    if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required");
     if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
+    if (needsApproval && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
     if (anotherVehicle && !digitsLast10(form.mobile)) {
       return toast.error("Enter the 10-digit mobile this extra unit belongs to");
     }
@@ -232,7 +244,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       form.oemExtraSupportReceived, extraProof, siblingDocs,
       { copyFromSibling: copyDocsFromSibling });
     if (extraErr) return toast.error(extraErr);
-    if (isExecutive) {
+    if (needsApproval) {
       const sheetErr = dealSheetReady(dealSheet);
       if (sheetErr) return toast.error(sheetErr);
     }
@@ -247,9 +259,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const priorities = masters.priorities || ["Low", "Normal", "High", "Urgent"];
   return (
     <>
-    <Drawer open onClose={onClose} width="max-w-2xl" title={isExecutive ? "Request a lead" : "New Lead"}
-      subtitle={isExecutive ? "Sent for owner or GM approval" : isTl ? "Live lead assigned to any executive" : "Capture a fresh enquiry"}
-      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : (isExecutive ? "Send for approval" : "Create Lead")}</Button></div>}>
+    <Drawer open onClose={onClose} width="max-w-2xl" title={drawerTitle}
+      subtitle={drawerSubtitle}
+      footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : saveLabel}</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
         <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
@@ -416,7 +428,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           existingDocs={siblingDocs}
           copyFromSibling={copyDocsFromSibling}
         />
-        {isExecutive && (
+        {needsApproval && (
           <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={[]} />
         )}
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>

@@ -108,6 +108,7 @@ def test_exact_deal_has_no_additional_and_gm_ok():
     assert deal["priceTotal"] == MY_TOTAL
     assert deal["additionalDiscount"] == 0
     assert deal["needsOwnerApproval"] is False
+    assert deal["needsApproval"] is False
 
 
 def test_lower_deal_fills_additional_and_owner_only():
@@ -116,6 +117,7 @@ def test_lower_deal_fills_additional_and_owner_only():
     assert deal["priceTotal"] == MY_TOTAL
     assert deal["additionalDiscount"] == 19500
     assert deal["needsOwnerApproval"] is True
+    assert deal["needsApproval"] is True
 
 
 def test_higher_deal_no_additional_still_owner_only():
@@ -123,6 +125,7 @@ def test_higher_deal_no_additional_still_owner_only():
         {"exShowroom": EX, "rto": RTO, "insurance": INS}, 820000)
     assert deal["additionalDiscount"] == 0
     assert deal["needsOwnerApproval"] is True
+    assert deal["needsApproval"] is False
 
 
 @pytest.mark.asyncio
@@ -165,6 +168,29 @@ async def test_deal_preview_auto_additional(client):
     })
     assert exact.json()["additionalDiscount"] == 0
     assert exact.json()["needsOwnerApproval"] is False
+    assert exact.json()["needsApproval"] is False
+    high = await client.get("/api/commercial/deal-preview", params={
+        "model": "Storm", "variant": "Deal Gate LR", "cxDemand": 820000,
+    })
+    assert high.json()["additionalDiscount"] == 0
+    assert high.json()["needsApproval"] is False
+    assert high.json()["needsOwnerApproval"] is True
+
+
+@pytest.mark.asyncio
+async def test_exec_deal_preview_keeps_needs_approval(exec_client):
+    await server._apply_rto_insurance_defaults()
+    low = await exec_client.get("/api/commercial/deal-preview", params={
+        "model": "Storm", "variant": "Deal Gate LR", "cxDemand": 790000,
+    })
+    assert low.status_code == 200, low.text
+    body = low.json()
+    assert "additionalDiscount" not in body
+    assert body["needsApproval"] is True
+    exact = await exec_client.get("/api/commercial/deal-preview", params={
+        "model": "Storm", "variant": "Deal Gate LR", "cxDemand": MY_TOTAL,
+    })
+    assert exact.json()["needsApproval"] is False
 
 
 @pytest.mark.asyncio
@@ -181,6 +207,7 @@ async def test_exec_submit_stores_additional(exec_client, client):
     row = next(x for x in listed if x["requestId"] == rid)
     assert row["additionalDiscount"] == 19500
     assert row["needsOwnerApproval"] is True
+    assert row["needsApproval"] is True
     assert row["dealFormat"]["priceTotal"] == MY_TOTAL
 
 
@@ -207,17 +234,88 @@ async def test_gm_forbidden_when_deal_differs(exec_client, gm_client, client):
 
 
 @pytest.mark.asyncio
-async def test_gm_can_approve_exact_deal(exec_client, gm_client):
+async def test_exec_exact_deal_creates_live_without_approval(exec_client):
     await server._apply_rto_insurance_defaults()
     r = await exec_client.post("/api/leads", json={
-        "customerName": "GM Exact", "mobile": next_mobile(),
+        "customerName": "No Discount Exec", "mobile": next_mobile(),
         "interestedModel": "Storm", "variant": "Deal Gate LR",
         "executive": "Executive", "budget": MY_TOTAL,
     })
-    rid = r.json()["requestId"]
-    await attach_kyc(exec_client, rid)
-    ap = await gm_client.post(f"/api/lead-requests/{rid}/approve")
-    assert ap.status_code == 200, ap.text
-    lead = await server.db.leads.find_one({"leadId": ap.json()["leadId"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not body.get("pending")
+    assert body.get("leadId")
+    lead = await server.db.leads.find_one({"leadId": body["leadId"]})
     assert ce.num(lead["additionalDiscount"]) == 0
     assert ce.num(lead["customerPayable"]) == MY_TOTAL
+    assert await server.db.lead_requests.count_documents(
+        {"payload.customerName": "No Discount Exec"}) == 0
+
+
+@pytest.mark.asyncio
+async def test_tl_discount_waits_for_owner_gm(client):
+    await server._apply_rto_insurance_defaults()
+    await client.post("/api/auth/users", json={
+        "email": "deal.tl@euler.com", "password": PW, "name": "Deal TL", "role": "tl"})
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as tl:
+        login = await tl.post("/api/auth/login",
+                              json={"email": "deal.tl@euler.com", "password": PW})
+        tl.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+        r = await tl.post("/api/leads", json={
+            "customerName": "TL Discount", "mobile": next_mobile(),
+            "interestedModel": "Storm", "variant": "Deal Gate LR",
+            "executive": "Amit", "budget": 790000,
+        })
+        assert r.status_code == 200, r.text
+        assert r.json().get("pending") is True
+        assert await server.db.leads.count_documents({"customerName": "TL Discount"}) == 0
+        exact = await tl.post("/api/leads", json={
+            "customerName": "TL Exact", "mobile": next_mobile(),
+            "interestedModel": "Storm", "variant": "Deal Gate LR",
+            "executive": "Amit", "budget": MY_TOTAL,
+        })
+        assert exact.status_code == 200, exact.text
+        assert exact.json().get("leadId")
+        assert not exact.json().get("pending")
+        extra = await tl.post("/api/leads", json={
+            "customerName": "TL Extra Margin", "mobile": next_mobile(),
+            "interestedModel": "Storm", "variant": "Deal Gate LR",
+            "executive": "Amit", "budget": 820000,
+        })
+        assert extra.status_code == 200, extra.text
+        assert extra.json().get("leadId")
+        assert not extra.json().get("pending")
+
+
+@pytest.mark.asyncio
+async def test_exec_extra_margin_creates_live_without_approval(exec_client):
+    await server._apply_rto_insurance_defaults()
+    r = await exec_client.post("/api/leads", json={
+        "customerName": "Exec Extra Margin", "mobile": next_mobile(),
+        "interestedModel": "Storm", "variant": "Deal Gate LR",
+        "executive": "Executive", "budget": 820000,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not body.get("pending")
+    assert body.get("leadId")
+    lead = await server.db.leads.find_one({"leadId": body["leadId"]})
+    assert ce.num(lead["additionalDiscount"]) == 0
+    assert ce.num(lead["customerPayable"]) == 820000
+    assert await server.db.lead_requests.count_documents(
+        {"payload.customerName": "Exec Extra Margin"}) == 0
+
+
+def test_quoted_deal_needs_approval_only_for_discount():
+    exact = ce.compute_deal_format(
+        {"exShowroom": EX, "rto": RTO, "insurance": INS}, MY_TOTAL)
+    low = ce.compute_deal_format(
+        {"exShowroom": EX, "rto": RTO, "insurance": INS}, 790000)
+    high = ce.compute_deal_format(
+        {"exShowroom": EX, "rto": RTO, "insurance": INS}, 820000)
+    assert server._quoted_deal_needs_approval(exact, MY_TOTAL) is False
+    assert server._quoted_deal_needs_approval(low, 790000) is True
+    assert server._quoted_deal_needs_approval(high, 820000) is False
+    assert server._quoted_deal_needs_approval(None, 0) is False
+    assert server._quoted_deal_needs_approval(None, 185000) is False
