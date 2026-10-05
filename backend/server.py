@@ -3963,13 +3963,16 @@ def _can_approve_leads(user) -> bool:
 
 
 def _deal_has_list_price(deal) -> bool:
+    """True only when every quoted SKU has a Price Master row.
+
+    Packs set `priceFound` when all units are priced. A partial pack still has
+    a positive ex-showroom from the known unit — that is not a full list.
+    """
     if not deal:
         return False
-    return bool(
-        deal.get("priceFound")
-        or ce.num(deal.get("exShowroom")) > 0
-        or ce.num(deal.get("priceTotal")) > 0
-    )
+    if "priceFound" in deal:
+        return bool(deal.get("priceFound"))
+    return ce.num(deal.get("exShowroom")) > 0 or ce.num(deal.get("priceTotal")) > 0
 
 
 def _quoted_deal_needs_approval(deal, cx_demand) -> bool:
@@ -4059,14 +4062,17 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
                 raise HTTPException(422, "A 10-digit mobile is required.")
             if deal_amount <= 0:
                 raise HTTPException(422, "Enter Cx Demand.")
+        incoming_exec = str(payload.get("executive") or user.get("name") or "")
+        if role == "executive":
+            incoming_exec = str(user.get("name") or payload.get("executive") or "")
+        await _raise_if_mobile_taken(
+            body.mobile, incoming_name=body.customerName,
+            incoming_executive=incoming_exec,
+            allow=another, check_pending=True)
         if needs_approval:
             if len(mobile_digits) < 10:
                 raise HTTPException(
                     422, "A 10-digit mobile is required before sending for approval.")
-            await _raise_if_mobile_taken(
-                body.mobile, incoming_name=body.customerName,
-                incoming_executive=user.get("name") or payload.get("executive") or "",
-                allow=another, check_pending=True)
             payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
             payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
             if payload["customerType"] != "B2B":

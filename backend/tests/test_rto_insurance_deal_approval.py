@@ -307,6 +307,49 @@ async def test_exec_extra_margin_creates_live_without_approval(exec_client):
         {"payload.customerName": "Exec Extra Margin"}) == 0
 
 
+@pytest.mark.asyncio
+async def test_exec_exact_blocked_when_pending_same_mobile(exec_client):
+    await server._apply_rto_insurance_defaults()
+    mobile = next_mobile()
+    first = await exec_client.post("/api/leads", json={
+        "customerName": "Pending Disc", "mobile": mobile,
+        "interestedModel": "Storm", "variant": "Deal Gate LR",
+        "executive": "Executive", "budget": 790000,
+    })
+    assert first.status_code == 200, first.text
+    assert first.json().get("pending") is True
+    blocked = await exec_client.post("/api/leads", json={
+        "customerName": "Pending Disc", "mobile": mobile,
+        "interestedModel": "Storm", "variant": "Deal Gate LR",
+        "executive": "Executive", "budget": MY_TOTAL,
+    })
+    assert blocked.status_code == 409, blocked.text
+    assert (blocked.json().get("detail") or {}).get("code") == "mobile_active_deal"
+    ok = await exec_client.post("/api/leads", json={
+        "customerName": "Pending Disc", "mobile": mobile,
+        "interestedModel": "Storm", "variant": "Deal Gate LR",
+        "executive": "Executive", "budget": MY_TOTAL, "anotherVehicle": True,
+    })
+    assert ok.status_code == 200, ok.text
+    assert ok.json().get("leadId")
+    assert not ok.json().get("pending")
+
+
+@pytest.mark.asyncio
+async def test_exec_partial_pack_waits_for_approval(exec_client):
+    await server._apply_rto_insurance_defaults()
+    r = await exec_client.post("/api/leads", json={
+        "customerName": "Partial Pack", "mobile": next_mobile(),
+        "interestedModel": "Storm", "variant": "Deal Gate LR",
+        "executive": "Executive", "budget": MY_TOTAL,
+        "sameOrderMultiUnit": True,
+        "units": [{"model": "No Price Van", "variant": "X"}],
+    })
+    assert r.status_code == 200, r.text
+    assert r.json().get("pending") is True
+    assert await server.db.leads.count_documents({"customerName": "Partial Pack"}) == 0
+
+
 def test_quoted_deal_needs_approval_only_for_discount():
     exact = ce.compute_deal_format(
         {"exShowroom": EX, "rto": RTO, "insurance": INS}, MY_TOTAL)
@@ -320,3 +363,6 @@ def test_quoted_deal_needs_approval_only_for_discount():
     assert server._quoted_deal_needs_approval(None, 0) is False
     assert server._quoted_deal_needs_approval(None, 185000) is True
     assert server._quoted_deal_needs_approval({"priceFound": False}, 185000) is True
+    assert server._quoted_deal_needs_approval(
+        {"priceFound": False, "exShowroom": EX, "priceTotal": MY_TOTAL, "pack": True},
+        MY_TOTAL) is True
