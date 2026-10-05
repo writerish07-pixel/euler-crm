@@ -121,11 +121,10 @@ async def test_drop_extra_support_recasts_earnings(client):
     await client.put(f"/api/leads/{lid}/price-structure", json=ps)
     await client.post(f"/api/leads/{lid}/convert-booking",
                       json={"bookingDate": "2026-08-09", "bookingAmount": 0})
-    await client.put(f"/api/leads/{lid}/scheme", json={
-        "oemExtraSupportReceived": 7000, "oemExtraSupportPassed": 0,
-        "additionalDiscount": 0, "loyaltyBonus": 0, "consumerDiscount": 0,
-        "exchangeBonus": 0, "referralBonus": 0, "dsaDiscount": 0,
+    extra_set = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "oemExtraSupportReceived", "value": 7000,
     })
+    assert extra_set.status_code == 200, extra_set.text
     before = await server.db.leads.find_one({"leadId": lid})
     assert before["oemExtraSupportRetained"] == 7000
     claims = (await client.get("/api/claims")).json()
@@ -143,6 +142,9 @@ async def test_drop_extra_support_recasts_earnings(client):
     assert listed[0]["droppedAmount"] == 7000
     claim = await server.db.claims.find_one({"claimId": extra["claimId"]})
     assert claim["claimStatus"] == "Dropped"
+    after_claims = (await client.get("/api/claims")).json()
+    assert not [c for c in after_claims
+                if c.get("leadId") == lid and c.get("componentKey") == "oemExtraSupport"]
 
 
 @pytest.mark.asyncio
@@ -173,3 +175,36 @@ async def test_rejected_unrefileable_deducts_scheme_claim(client):
     de = (await client.get("/api/dealer-earnings")).json()
     row = next(x for x in de["rows"] if x["leadId"] == lid)
     assert row["oemUnpayableWriteOff"] == 10000
+
+
+@pytest.mark.asyncio
+async def test_unused_loyalty_is_not_listed_as_unclaimed(client):
+    """Use this scheme = No must not keep a 'Not claimed' register / drawer row."""
+    r = await client.post("/api/leads", json={
+        "customerName": "No Loyalty", "mobile": "9000010005",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    lid = r.json()["leadId"]
+    ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    await client.put(f"/api/leads/{lid}/price-structure", json=ps)
+    await client.post(f"/api/leads/{lid}/convert-booking",
+                      json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+    await server.db.claims.insert_one({
+        "claimId": f"CLM-{lid}-loyaltyBonus",
+        "leadId": lid, "componentKey": "loyaltyBonus",
+        "component": "Loyalty Bonus",
+        "eligibleClaim": 10000, "claimAmount": 10000,
+        "receivedAmount": 0, "claimStatus": "Pending", "manual": False,
+    })
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "schemeComponentsUsed": '{"loyaltyBonus": false}',
+        "loyaltyBonus": 0,
+    }})
+    await server.recompute_lead(lid)
+    rows = (await client.get("/api/claims")).json()
+    assert not [c for c in rows if c.get("leadId") == lid and c.get("componentKey") == "loyaltyBonus"]
+    drawer = (await client.get(f"/api/leads/{lid}/oem-claims")).json()
+    assert not [c for c in drawer.get("schemeRegister") or []
+                if c.get("componentKey") == "loyaltyBonus"]
+    stored = await server.db.claims.find_one(
+        {"leadId": lid, "componentKey": "loyaltyBonus", "manual": {"$ne": True}})
+    assert stored is None

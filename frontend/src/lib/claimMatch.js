@@ -16,7 +16,7 @@ export const OEM_MATCH = {
 };
 
 export const REGISTER_MATCH = {
-  in_register:      { label: "In scheme register",      tone: "bg-emerald-50 text-emerald-700 ring-emerald-600/20", row: "" },
+  in_register:      { label: "Matched",                 tone: "bg-emerald-50 text-emerald-700 ring-emerald-600/20", row: "" },
   partial:          { label: "Part matched",            tone: "bg-amber-50 text-amber-800 ring-amber-600/20",      row: "bg-amber-50/40" },
   missing_register: { label: "Not in scheme register",  tone: "bg-violet-50 text-violet-800 ring-violet-600/20",   row: "bg-violet-50/50" },
   unmapped:         { label: "Check match",             tone: "bg-amber-50 text-amber-800 ring-amber-600/20",      row: "bg-amber-50/40" },

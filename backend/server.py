@@ -1270,6 +1270,9 @@ async def recompute_lead(lead_id):
             else:
                 await db.claims.insert_one(dict(_claim_row))
             await sheet_sync("claims", _claim_row)
+        await _prune_inactive_scheme_claims(
+            lead_id,
+            {k for k, amt in shares["displayByComponent"].items() if ce.num(amt) > 0})
         # OEM Extra Support Register — Received is the claim; Passed/Retained track usage.
         if oem_extra_recv > 0:
             _bk = await _live_booking(lead_id) or {}
@@ -10162,11 +10165,13 @@ async def coulson_sync_claims(act=Depends(actor)):
 async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: bool = False,
                                  q: str = "", chassis: str = "", invoice: str = "",
                                  missingDoc: bool = False, missingVehicle: bool = False,
-                                 excludeMissingVehicle: bool = False):
+                                 excludeMissingVehicle: bool = False,
+                                 unmatchedOnly: bool = False):
     return await oem_claims.list_claims(
         db, status=status, lead_id=leadId, unlinked=unlinked,
         q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc,
-        missing_vehicle=missingVehicle, exclude_missing_vehicle=excludeMissingVehicle)
+        missing_vehicle=missingVehicle, exclude_missing_vehicle=excludeMissingVehicle,
+        unmatched_only=unmatchedOnly)
 
 
 @api.get("/oem-claims/summary", dependencies=[Depends(oem_claim_desk_only)])
@@ -10180,7 +10185,16 @@ async def lead_oem_portal_claims(lead_id: str, user=Depends(current_user)):
     they should line up with. Scoped like any other lead read."""
     lead = await get_lead_or_404(lead_id)
     _require_own_lead(lead, user)
-    return await oem_claims.lead_claim_crosscheck(db, lead_id, lead)
+    pack = await oem_claims.lead_claim_crosscheck(db, lead_id, lead)
+    scheme_rows = await get_scheme_rows()
+    shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
+    live = {k for k, amt in (shares.get("displayByComponent") or {}).items() if ce.num(amt) > 0}
+    pack["schemeRegister"] = [
+        r for r in (pack.get("schemeRegister") or [])
+        if not _scheme_claim_is_dropped(r)
+        and ((r.get("componentKey") or "") in live or _scheme_claim_has_money_lifecycle(r))
+    ]
+    return pack
 
 
 @api.get("/reports/claim-reconciliation", dependencies=[Depends(owner_only)])
@@ -12288,6 +12302,39 @@ def _claim_ageing_days(submitted_date, claim_status, end_date=""):
         return 0
 
 
+_CLAIM_MONEY_STATUSES = (
+    "Received", "Partial", "Submitted", "Approved", "Rejected", "Cancelled",
+)
+
+
+def _scheme_claim_is_dropped(claim) -> bool:
+    return str((claim or {}).get("claimStatus") or "").strip() == "Dropped"
+
+
+def _scheme_claim_has_money_lifecycle(claim) -> bool:
+    """True when the row is real register history, not a stale unused-scheme shell."""
+    claim = claim or {}
+    if ce.num(claim.get("receivedAmount")) > 0:
+        return True
+    status = str(claim.get("claimStatus") or "").strip()
+    if status in _CLAIM_MONEY_STATUSES:
+        return True
+    return bool(claim.get("submittedDate") or claim.get("approvedDate")
+                or claim.get("claimReceivedDate"))
+
+
+async def _prune_inactive_scheme_claims(lead_id, live_keys):
+    """Remove unused / Use=No Pending shells. Dropped and paid rows stay."""
+    live_keys = set(live_keys or [])
+    async for c in db.claims.find({"leadId": lead_id, "manual": {"$ne": True}}):
+        key = c.get("componentKey") or ""
+        if key in live_keys:
+            continue
+        if _scheme_claim_is_dropped(c) or _scheme_claim_has_money_lifecycle(c):
+            continue
+        await db.claims.delete_one({"_id": c["_id"]})
+
+
 @api.get("/claims")
 async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads.
@@ -12322,15 +12369,19 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     scheme_rows = await get_scheme_rows()
     result = []
     seen_ids = set()
+    live_by_lead = {}
     for l in leads:
         snap = lead_to_snapshot(l)
         shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
         display = shares["displayByComponent"]
         eligible = shares["eligibleByComponent"]
+        live_by_lead[l["leadId"]] = {k for k, amt in display.items() if ce.num(amt) > 0}
         for key, company_share in display.items():
             if company_share <= 0:
                 continue
             existing = await db.claims.find_one({"leadId": l["leadId"], "componentKey": key})
+            if existing and _scheme_claim_is_dropped(existing):
+                continue
             elig = ce.round2(eligible.get(key, 0))
             submitted = (existing or {}).get("submittedDate", "")
             approved = (existing or {}).get("approvedDate", "")
@@ -12381,18 +12432,24 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
             "totalDiscount": ce.round2(ce.num(m.get("totalDiscount") if m.get("totalDiscount") is not None else elig)),
             "oemDiscount": ce.round2(ce.num(m.get("oemDiscount") if m.get("oemDiscount") is not None else elig)),
         })
-    # Persisted scheme claims that would otherwise drop out (Use=No / lead status change /
-    # share recomputed to 0) — Received or Partial money still belongs in the eternal register.
+    # Persisted scheme claims that would otherwise drop out (lead status change /
+    # share recomputed to 0) — Received / filed money still belongs in the register.
+    # Dropped Extra Support lives only on Dropped Extra Support. Unused / Use=No
+    # Pending shells are not "not claimed" work.
     for c in await db.claims.find({"manual": {"$ne": True}}).to_list(5000):
         claim_id = c.get("claimId") or f"CLM-{c.get('leadId')}-{c.get('componentKey')}"
         if claim_id in seen_ids:
             continue
+        if _scheme_claim_is_dropped(c):
+            continue
         received = ce.round2(ce.num(c.get("receivedAmount")))
         status = (c.get("claimStatus") or "").strip()
-        if received <= 0 and status not in (
-            "Received", "Partial", "Submitted", "Approved", "Rejected", "Cancelled",
-            "Pending", "Dropped"):
-            # Skip pure empty shells with no lifecycle — only keep real register history.
+        lid = c.get("leadId") or ""
+        key = c.get("componentKey") or ""
+        live_keys = live_by_lead.get(lid)
+        if live_keys is not None and key not in live_keys and not _scheme_claim_has_money_lifecycle(c):
+            continue
+        if received <= 0 and status not in _CLAIM_MONEY_STATUSES:
             if not (c.get("submittedDate") or c.get("approvedDate") or c.get("claimReceivedDate")
                     or ce.num(c.get("claimAmount")) > 0 or ce.num(c.get("eligibleClaim")) > 0):
                 continue
@@ -12458,6 +12515,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
         row["ageingDays"] = _claim_ageing_days(
             row.get("submittedDate", ""), row.get("claimStatus", ""), row.get("approvedDate", ""))
         result[i] = row
+    result = [r for r in result if not _scheme_claim_is_dropped(r)]
     return _rows_in_period(result, _parse_period(month, year), lambda r: r.get("bookingDate"))
 
 
@@ -12505,10 +12563,14 @@ async def claim_match_options():
     async for c in db.claims.find(
             {"manual": {"$ne": True}},
             {"leadId": 1, "customer": 1, "componentKey": 1, "component": 1,
-             "claimStatus": 1, "_id": 0}):
+             "claimStatus": 1, "manualOemClaimNumber": 1, "_id": 0}):
         lid = str(c.get("leadId") or "").strip()
         key = str(c.get("componentKey") or "").strip()
         if not lid or not key:
+            continue
+        if _scheme_claim_is_dropped(c) or str(c.get("claimStatus") or "") == "Cancelled":
+            continue
+        if str(c.get("manualOemClaimNumber") or "").strip():
             continue
         lead_ids.add(lid)
         rows.append({
