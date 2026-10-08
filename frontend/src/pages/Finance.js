@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Landmark } from "lucide-react";
 import { get, post, apiErrorMessage } from "../lib/api";
@@ -32,10 +33,18 @@ function financerRollup(rows) {
   return [...map.values()].sort((a, b) => b.fileOutstanding - a.fileOutstanding || a.financer.localeCompare(b.financer));
 }
 
+function isPendingFile(r) {
+  return (Number(r.fileOutstanding) || 0) > 0 && r.status !== "Received";
+}
+
 export default function Finance() {
   const { isMoneyDesk, isField, isExecutive } = useAuth();
+  const [searchParams] = useSearchParams();
   const [rows, setRows] = useState([]);
-  const [view, setView] = useState("all");
+  const [view, setView] = useState(() => {
+    const q = (searchParams.get("view") || "").toLowerCase();
+    return ["pending", "overdue", "all"].includes(q) ? q : "all";
+  });
   const [receipt, setReceipt] = useState(false);
   const period = usePeriodState();
   const load = useCallback(() => get("/finance", { view, ...period.params }).then(setRows), [view, period.params]);
@@ -43,6 +52,7 @@ export default function Finance() {
   const views = [["all", "All Files"], ["pending", "Pending"], ["overdue", "Overdue"]];
   const [allFiles, setAllFiles] = useState([]);
   const [financerFilter, setFinancerFilter] = useState("");
+  const [pendingOnly, setPendingOnly] = useState(() => searchParams.get("pending") === "1");
   useEffect(() => {
     if (!isMoneyDesk) return undefined;
     get("/finance", { view: "pending" }).then(setAllFiles);
@@ -52,13 +62,22 @@ export default function Finance() {
   const { openLead, drawer } = useLeadDrawer(load);
   const byFinancer = useMemo(() => financerRollup(rows), [rows]);
   const visible = useMemo(() => {
-    if (!financerFilter) return rows;
-    const key = financerFilter.toLowerCase();
-    return rows.filter((r) => (r.financer || "").trim().toLowerCase() === key);
-  }, [rows, financerFilter]);
-  const pickFinancer = (name) => {
+    let out = rows;
+    if (financerFilter) {
+      const key = financerFilter.toLowerCase();
+      out = out.filter((r) => (r.financer || "").trim().toLowerCase() === key);
+    }
+    if (pendingOnly) out = out.filter(isPendingFile);
+    return out;
+  }, [rows, financerFilter, pendingOnly]);
+  const pickFinancer = (name, { pending = false } = {}) => {
     const next = (name || "").trim();
-    setFinancerFilter((cur) => (cur === next ? "" : next));
+    setFinancerFilter((cur) => {
+      const same = cur === next;
+      if (same && pendingOnly === pending) return "";
+      return next;
+    });
+    setPendingOnly(!!pending && !!next);
   };
 
   return (
@@ -93,17 +112,31 @@ export default function Finance() {
         <Card className="p-5 mb-6" data-testid="finance-by-financer">
           <h3 className="font-heading font-bold text-ink mb-1">By financer</h3>
           <p className="text-xs text-ink-soft mb-3">
-            Click remaining (or the row) to list that financer’s files and leads below
+            Click pending or remaining to list only open files. Click the financer name for every file.
           </p>
           <Table
             rowKey="financer"
-            onRowClick={(r) => pickFinancer(r.financer)}
+            onRowClick={(r) => pickFinancer(r.financer, { pending: true })}
             rowClassName={(r) => (financerFilter === r.financer ? "bg-cobalt-tint" : undefined)}
             columns={[
-              { key: "financer", label: "Financer", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge> },
-              { key: "files", label: "Files", align: "right" },
+              { key: "financer", label: "Financer", render: (r) => (
+                <button type="button" className="text-left" onClick={(e) => { e.stopPropagation(); pickFinancer(r.financer); }}>
+                  <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge>
+                </button>
+              ) },
+              { key: "files", label: "Files", align: "right", render: (r) => (
+                <button type="button" className="hover:underline" onClick={(e) => { e.stopPropagation(); pickFinancer(r.financer); }}>
+                  {r.files}
+                </button>
+              ) },
               { key: "pendingFiles", label: "Pending", align: "right", render: (r) => (
-                r.pendingFiles ? <span className="text-amber-700 font-semibold">{r.pendingFiles}</span> : "—"
+                r.pendingFiles ? (
+                  <button type="button" data-testid={`finance-pending-${r.financer}`}
+                    className="text-amber-700 font-semibold hover:underline"
+                    onClick={(e) => { e.stopPropagation(); pickFinancer(r.financer, { pending: true }); }}>
+                    {r.pendingFiles}
+                  </button>
+                ) : "—"
               ) },
               { key: "sanctionedAmount", label: "Committed", align: "right", mono: true, render: (r) => inr(r.sanctionedAmount) },
               { key: "receivedAgainstFile", label: "Received", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedAgainstFile)}</span> },
@@ -111,9 +144,9 @@ export default function Finance() {
                 <button
                   type="button"
                   data-testid={`finance-remaining-${r.financer}`}
-                  onClick={(e) => { e.stopPropagation(); pickFinancer(r.financer); }}
+                  onClick={(e) => { e.stopPropagation(); pickFinancer(r.financer, { pending: true }); }}
                   className={`hover:underline ${r.fileOutstanding > 0 ? "text-red-600 font-semibold" : "text-ink"}`}
-                  title={`Show ${r.financer} files`}
+                  title={`Show ${r.financer} pending files`}
                 >
                   {inr(r.fileOutstanding)}
                 </button>
@@ -127,12 +160,14 @@ export default function Finance() {
       <div className="flex flex-wrap items-center justify-between gap-2 mb-3" data-testid="finance-file-heading">
         <div>
           <h3 className="font-heading font-bold text-ink">
-            {financerFilter ? `${financerFilter} files` : "Files"}
+            {financerFilter
+              ? `${financerFilter} ${pendingOnly ? "pending files" : "files"}`
+              : (pendingOnly ? "Pending files" : "Files")}
           </h3>
           <p className="text-xs text-ink-soft">
             {financerFilter
               ? `${visible.length} file${visible.length === 1 ? "" : "s"} for this financer — click a lead to open it`
-              : `${rows.length} files · click a financer remaining total above to split the list`}
+              : `${visible.length} files · click pending or remaining above to split the list`}
           </p>
         </div>
         {financerFilter && (
@@ -148,9 +183,12 @@ export default function Finance() {
           { key: "fileNumber", label: "File #", mono: true, render: (r) => <span className="font-semibold text-cobalt">{r.fileNumber}</span> },
           { key: "leadId", label: "Lead", render: (r) => <LeadLink leadId={r.leadId} onOpen={openLead} /> },
           { key: "customerName", label: "Customer", render: (r) => (
-            r.leadId
-              ? <button type="button" className="font-semibold text-left hover:underline" onClick={() => openLead(r.leadId)}>{r.customerName}</button>
-              : r.customerName
+            <div>
+              {r.leadId
+                ? <button type="button" className="font-semibold text-left hover:underline" onClick={() => openLead(r.leadId)}>{r.customerName}</button>
+                : <span className="font-semibold">{r.customerName}</span>}
+              {r.executive ? <div className="text-[11px] text-ink-faint">{r.executive}</div> : null}
+            </div>
           ) },
           { key: "financer", label: "Financer", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge> },
           { key: "sanctionedAmount", label: "Committed", align: "right", mono: true, render: (r) => inr(r.sanctionedAmount) },

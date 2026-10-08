@@ -328,6 +328,30 @@ export function RequestOemExtraPreview({ documents = [] }) {
   );
 }
 
+export function RequestMissingUploads({ requestId, kinds = [], onUploaded }) {
+  const missing = (kinds || []).filter((kind) => DOC_LABELS[kind]);
+  if (!requestId || !missing.length) return null;
+  const save = async (kind, file) => {
+    try {
+      await uploadFile(`/lead-requests/${requestId}/documents`, file, { kind });
+      toast.success(`${DOC_LABELS[kind] || kind} attached`);
+      if (onUploaded) onUploaded();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Upload failed"));
+    }
+  };
+  return (
+    <div className="space-y-1.5 mt-1" data-testid={`missing-uploads-${requestId}`}>
+      {missing.map((kind) => (
+        <div key={kind}>
+          <div className="text-[10px] text-rose-700">{DOC_LABELS[kind] || kind} missing</div>
+          <CameraFilePick onFile={(f) => save(kind, f)} testId={`upload-${requestId}-${kind}`} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function RequestDealSheetPreview({ documents = [] }) {
   const rows = (documents || []).filter((d) => d.kind === "deal_sheet");
   if (!rows.length) return null;

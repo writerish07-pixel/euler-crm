@@ -1000,10 +1000,15 @@ def _lead_is_cancelled(lead):
     return acct in ("cancelled", "inactive", "archived")
 
 
+def _lead_is_close_won(lead):
+    return "close won" in str((lead or {}).get("currentStatus") or "").strip().lower()
+
+
 def _lead_is_delivered(lead):
+    """Retail complete: Mark Delivered or Close Won — same thing on OEM Billing."""
     ds = str((lead or {}).get("deliveryStatus") or "").lower()
     cs = str((lead or {}).get("currentStatus") or "").lower()
-    return ds == "delivered" or cs == "delivered"
+    return ds == "delivered" or cs == "delivered" or _lead_is_close_won(lead)
 
 
 def _sold_apply_rank(lead, chassis):
@@ -1218,10 +1223,13 @@ def _lead_crm_status(lead):
 
 
 def _bucket_for_matched_lead(lead):
+    """Once a Sold row is on a CRM lead, status follows that file.
+
+    Created-from-OEM is not shown: Delivered/Close Won → Delivered, else
+    Pending delivery.
+    """
     if _lead_is_delivered(lead):
         return BUCKET_DELIVERED
-    if (lead or {}).get("oemBillingCreated"):
-        return BUCKET_CREATED
     return BUCKET_PENDING
 
 
@@ -1616,16 +1624,17 @@ def pair_oem_billing_stubs(leads):
     Safe = unique mobile (or already-same chassis) and the original does not
     already hold a different chassis. Name-only and second-vehicle stay review.
     """
-    stubs = [l for l in (leads or []) if is_empty_duplicate_lead(l)]
+    stubs = [l for l in (leads or []) if is_empty_duplicate_lead(l) or is_oem_billing_stub(l)]
     originals = [l for l in (leads or []) if is_commercial_original(l)]
     claimed = {}
     rows = []
     for stub in stubs:
-        found = _originals_for_stub(stub, originals)
+        stub_id = (stub or {}).get("leadId") or ""
+        others = [l for l in originals if (l or {}).get("leadId") != stub_id]
+        found = _originals_for_stub(stub, others)
         cands = found.get("originals") or []
         match = found.get("match") or ""
         conflict = bool(found.get("conflict"))
-        stub_id = (stub or {}).get("leadId") or ""
         if len(cands) == 1 and not conflict and match in ("mobile", "chassis"):
             orig = cands[0]
             oid = (orig or {}).get("leadId") or ""
