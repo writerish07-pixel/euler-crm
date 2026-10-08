@@ -15,7 +15,7 @@ export default function Bookings() {
   useEffect(() => { load(); }, [load]);
   return (
     <div>
-      <PageHeader title="Booking Register" subtitle={`${rows.length} bookings${isField ? " · field view" : ""}`}
+      <PageHeader title="Booking Register" subtitle={`${rows.length} open bookings${isField ? " · field view" : ""}`}
         actions={<ReportActions onRefresh={load} />} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
@@ -23,7 +23,12 @@ export default function Bookings() {
         columns={[
           { key: "bookingId", label: "Booking ID", mono: true, render: (r) => <span className="font-semibold text-cobalt">{r.bookingId}</span> },
           { key: "leadId", label: "Lead", mono: true },
-          { key: "customerName", label: "Customer", render: (r) => <span className="font-semibold">{r.customerName}</span> },
+          { key: "customerName", label: "Customer", render: (r) => (
+            <div>
+              <span className="font-semibold">{r.customerName}</span>
+              {r.executive ? <div className="text-xs text-ink-faint">{r.executive}</div> : null}
+            </div>
+          ) },
           { key: "model", label: "Vehicle", render: (r) => <div className="text-sm">{r.model}<div className="text-xs text-ink-faint">{r.variant}</div></div> },
           { key: "bookingDate", label: "Date", render: (r) => fmtDate(r.bookingDate) },
           ...(!isField ? [

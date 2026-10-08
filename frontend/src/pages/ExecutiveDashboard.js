@@ -87,7 +87,10 @@ export default function ExecutiveDashboard({ teamView = false }) {
                     : "bg-sky-50 text-sky-700 ring-sky-600/20"}>{r.kind}</Badge>
               ) },
               { key: "customerName", label: "Customer", render: (r) => (
-                <Link to="/leads" className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                <div>
+                  <Link to="/leads" className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                  {r.executive ? <div className="text-[11px] text-ink-faint">{r.executive}</div> : null}
+                </div>
               ) },
               { key: "model", label: "Model" },
               { key: "status", label: "Status" },

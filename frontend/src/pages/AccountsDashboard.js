@@ -73,8 +73,10 @@ export default function AccountsDashboard() {
         <StatCard label="Collected (MTD)" value={compactInr(k.collectedMtd)} sub={ytdMoney(k.collectedYtd)} icon={Wallet} tone="text-cobalt" />
         <StatCard label="Deliveries (MTD)" value={num(k.deliveriesMtd)} sub={ytdCount(k.deliveriesYtd)} icon={Truck} tone="text-teal-600" />
         <StatCard label="Customer outstanding" value={compactInr(k.customerOutstanding)} sub="live · not period-cut" icon={IndianRupee} tone="text-red-600" />
-        <StatCard label="Finance pending" value={compactInr(k.financeOutstanding)}
-          sub={`${k.financePendingFiles || 0} open files`} icon={Landmark} tone="text-violet-600" />
+        <Link to="/finance?view=pending" className="block" data-testid="acct-finance-pending">
+          <StatCard label="Finance pending" value={compactInr(k.financeOutstanding)}
+            sub={`${k.financePendingFiles || 0} open files`} icon={Landmark} tone="text-violet-600" />
+        </Link>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
@@ -107,7 +109,12 @@ export default function AccountsDashboard() {
             empty="No delivered leads yet"
             columns={[
               { key: "invoiceNumber", label: "Invoice", mono: true, render: (r) => r.invoiceNumber || "—" },
-              { key: "customerName", label: "Customer", render: (r) => <span className="font-semibold">{r.customerName}</span> },
+              { key: "customerName", label: "Customer", render: (r) => (
+                <div>
+                  <span className="font-semibold">{r.customerName}</span>
+                  {r.executive ? <div className="text-[11px] text-ink-faint">{r.executive}</div> : null}
+                </div>
+              ) },
               { key: "deliveryDate", label: "Delivered", render: (r) => fmtDate(r.deliveryDate) || "—" },
               { key: "customerPayable", label: "Payable", align: "right", mono: true, render: (r) => inr(r.customerPayable) },
               { key: "totalReceived", label: "Received", align: "right", mono: true, render: (r) => inr(r.totalReceived) },
@@ -161,7 +168,12 @@ export default function AccountsDashboard() {
           rowKey="leadId"
           empty="No cancelled deals holding money"
           columns={[
-            { key: "customerName", label: "Customer", render: (r) => <span className="font-semibold">{r.customerName}</span> },
+            { key: "customerName", label: "Customer", render: (r) => (
+              <div>
+                <span className="font-semibold">{r.customerName}</span>
+                {r.executive ? <div className="text-[11px] text-ink-faint">{r.executive}</div> : null}
+              </div>
+            ) },
             { key: "cancelDate", label: "Cancelled", render: (r) => fmtDate(r.cancelDate) || "—" },
             { key: "cancelReason", label: "Reason" },
             { key: "excessReceived", label: "Held", align: "right", mono: true, render: (r) => <span className="text-amber-700 font-semibold">{inr(r.excessReceived)}</span> },

@@ -20,14 +20,19 @@ export default function Deliveries() {
   const isOk = (v) => ["done", "yes", "true", "completed"].includes(String(v || "").toLowerCase());
   return (
     <div>
-      <PageHeader title="Delivery Tracker" subtitle={`${rows.length} bookings in fulfilment`}
+      <PageHeader title="Delivery Tracker" subtitle={`${rows.length} open bookings and completed retails`}
         actions={<ReportActions onRefresh={load} />} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
         rowKey="leadId"
         columns={[
           { key: "leadId", label: "Lead", mono: true },
-          { key: "customerName", label: "Customer", render: (r) => <span className="font-semibold">{r.customerName}</span> },
+          { key: "customerName", label: "Customer", render: (r) => (
+            <div>
+              <span className="font-semibold">{r.customerName}</span>
+              {r.executive ? <div className="text-xs text-ink-faint">{r.executive}</div> : null}
+            </div>
+          ) },
           { key: "model", label: "Vehicle", render: (r) => <div className="text-sm">{r.model}<div className="text-xs text-ink-faint">{r.variant}</div></div> },
           { key: "checklist", label: "Checklist", render: (r) => (
             <div className="flex flex-wrap">

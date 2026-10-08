@@ -97,7 +97,9 @@ export default function Dashboard() {
             <div className="space-y-3">
               <Row label="Customer Outstanding" value={os.customer} tone="text-red-600" />
               <Row label="Company Outstanding (OEM)" value={os.company} tone="text-amber-600" />
-              <Row label="Finance Outstanding" value={k.financeOutstanding || 0} tone="text-violet-600" />
+              <Link to="/finance?view=pending" className="block hover:bg-zinc-50 rounded-md -mx-1 px-1" data-testid="dash-finance-pending">
+                <Row label="Finance Outstanding" value={k.financeOutstanding || 0} tone="text-violet-600" />
+              </Link>
               {k.financeOverdueCount > 0 && (
                 <Row label={`Finance Overdue (>2d, ${k.financeOverdueCount} files)`} value={k.financeOverdueAmount || 0} tone="text-red-600" />
               )}

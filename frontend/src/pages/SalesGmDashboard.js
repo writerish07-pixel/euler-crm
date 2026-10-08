@@ -49,8 +49,10 @@ export default function SalesGmDashboard() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
         <StatCard label="Follow-ups overdue" value={num(k.followupOverdue)} sub={`${k.followupDue || 0} due today`} icon={AlertCircle} tone="text-red-600" />
-        <StatCard label="Finance overdue" value={num(k.financeOverdueCount)}
-          sub={compactInr(k.financeOverdueAmount)} icon={Landmark} tone="text-violet-600" />
+        <Link to="/finance?view=overdue" className="block" data-testid="gm-finance-overdue">
+          <StatCard label="Finance overdue" value={num(k.financeOverdueCount)}
+            sub={compactInr(k.financeOverdueAmount)} icon={Landmark} tone="text-violet-600" />
+        </Link>
         <StatCard label="Cancellations (MTD)" value={num(k.cancellationsMtd)} sub={`${ytdCount(k.cancellationsYtd)} · ${k.lostCount || 0} lost`} icon={Ban} tone="text-amber-700" />
         <StatCard label="Customer OS" value={compactInr(k.customerOutstanding)}
           sub={`Scheme use ${k.schemeUseRate || 0}%`} icon={IndianRupee} tone="text-red-600" />

@@ -694,3 +694,117 @@ async def test_oem_billing_merges_empty_new_different_executive(client):
     hit = next(row for row in billed.json()["rows"] if row["chassis"] == chassis)
     assert hit["leadId"] == orig_id
     assert hit["bucket"] != "needs_review"
+
+
+def test_classify_oem_created_lead_is_pending_delivery():
+    sold = [{
+        "chassis": "MD9OEMNEW01", "mobile": "9811199001", "invoiceNumber": "INV-N",
+        "customerName": "Kapoor", "soldDate": "2026-09-03",
+    }]
+    leads = [{
+        "leadId": "LD-OEM-NEW", "customerName": "Kapoor", "mobile": "9811199001",
+        "accountStatus": "Active", "currentStatus": "New",
+        "oemBillingCreated": True, "chassisNumber": "MD9OEMNEW01",
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["bucket"] == oem_sync.BUCKET_PENDING
+    assert rows[0]["leadId"] == "LD-OEM-NEW"
+
+
+def test_classify_close_won_is_delivered():
+    sold = [{
+        "chassis": "MD9CLOSE01", "mobile": "9811199002", "invoiceNumber": "INV-C",
+        "customerName": "Hrithik", "soldDate": "2026-09-03",
+    }]
+    leads = [{
+        "leadId": "LD-CLOSE", "customerName": "Hrithik", "mobile": "9811199002",
+        "accountStatus": "Closed", "currentStatus": "Close Won",
+        "deliveryStatus": "Delivered", "chassisNumber": "MD9CLOSE01",
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["bucket"] == oem_sync.BUCKET_DELIVERED
+
+
+@pytest.mark.asyncio
+async def test_oem_create_connects_existing_open_lead(client):
+    chassis = "MD9CONNECT01"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.delete_many({"mobile": "9812299001"})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "9812299001", "invoiceNumber": "CINV-CONN",
+        "customerName": "Open File", "model": "Turbo Max", "variant": "Maxx (PV)",
+        "soldDate": "2026-09-05", "coulsonStatus": "SOLD",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-OPEN-CONN", "customerName": "Open File", "mobile": "9812299001",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-09-01",
+        "executive": "Payal",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-09")
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 0
+    live = await server.db.leads.find_one({"leadId": "LD-OPEN-CONN"})
+    assert live["chassisNumber"] == chassis
+    assert live.get("oemBillingCreated") is not True
+    minted = await server.db.leads.count_documents({"mobile": "9812299001"})
+    assert minted == 1
+    hit = next(x for x in r.json()["rows"] if x["chassis"] == chassis)
+    assert hit["leadId"] == "LD-OPEN-CONN"
+    assert hit["bucket"] == oem_sync.BUCKET_PENDING
+
+
+@pytest.mark.asyncio
+async def test_oem_create_reuses_delivered_file_instead_of_minting(client):
+    chassis = "MD9CONNECT02"
+    await server.db.oem_sold.delete_many({"chassis": {"$in": [chassis, "MD9CONNECT01B"]}})
+    await server.db.leads.delete_many({"mobile": "9812299008"})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "9812299008", "invoiceNumber": "CINV-CONN2",
+        "customerName": "Repeat Buyer", "model": "Turbo Max", "variant": "Maxx (PV)",
+        "soldDate": "2026-09-08", "coulsonStatus": "SOLD",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-DEL-CONN", "customerName": "Repeat Buyer", "mobile": "9812299008",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-01",
+        "chassisNumber": "MD9CONNECT01B", "invoiceNumber": "CINV-OLD",
+        "executive": "Payal",
+    })
+    r = await client.post("/api/oem-billing/create", json={"chassis": chassis})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["leadId"] == "LD-DEL-CONN"
+    assert await server.db.leads.count_documents({"mobile": "9812299008"}) == 1
+    live = await server.db.leads.find_one({"leadId": "LD-DEL-CONN"})
+    assert chassis in set(oem_sync.lead_chassis_list(live))
+    assert live.get("oemBillingCreated") is not True
+
+
+@pytest.mark.asyncio
+async def test_oem_sync_relinks_safe_stub(client):
+    chassis = "MD9RELINK01"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-ORIG-RL", "LD-STUB-RL"]}})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "9812299002", "invoiceNumber": "CINV-RL",
+        "customerName": "Hrithik Chopra", "soldDate": "2026-09-05", "coulsonStatus": "SOLD",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-ORIG-RL", "customerName": "Hrithik Chopra", "mobile": "9812299002",
+        "accountStatus": "Closed", "currentStatus": "Close Won",
+        "deliveryStatus": "Delivered", "totalReceived": 80000, "bookingDate": "2026-09-01",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-STUB-RL", "customerName": "Hrithik Chopra", "mobile": "9812299002",
+        "accountStatus": "Active", "currentStatus": "New", "oemBillingCreated": True,
+        "chassisNumber": chassis, "invoiceNumber": "CINV-RL", "leadSource": "OEM Billing",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-09")
+    assert r.status_code == 200, r.text
+    assert r.json().get("relinkedCount", 0) >= 1
+    assert await server.db.leads.find_one({"leadId": "LD-STUB-RL"}) is None
+    orig = await server.db.leads.find_one({"leadId": "LD-ORIG-RL"})
+    assert orig["chassisNumber"] == chassis
+    hit = next(x for x in r.json()["rows"] if x["chassis"] == chassis)
+    assert hit["leadId"] == "LD-ORIG-RL"
+    assert hit["bucket"] == oem_sync.BUCKET_DELIVERED

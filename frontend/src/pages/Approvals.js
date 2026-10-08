@@ -7,7 +7,7 @@ import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui
 import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
-import { RequestKycPreview, RequestOemExtraPreview, RequestDealSheetPreview } from "../components/LeadDocuments";
+import { RequestKycPreview, RequestOemExtraPreview, RequestDealSheetPreview, RequestMissingUploads } from "../components/LeadDocuments";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import CallLink from "../components/CallLink";
 
@@ -148,18 +148,24 @@ export default function Approvals() {
                 {Number(r.oemExtraSupportReceived) > 0 ? inr(r.oemExtraSupportReceived) : "—"}
               </span>
               <RequestOemExtraPreview documents={r.documents || []} />
-              {r.oemExtraProofMissing && (
-                <div className="text-[10px] text-rose-700 mt-1" data-testid={`oem-extra-proof-missing-${r.requestId}`}>
-                  Missing ASM / RM email
-                </div>
+              {status === "pending" && r.oemExtraProofMissing && (
+                <RequestMissingUploads
+                  requestId={r.requestId}
+                  kinds={["oem_extra_support"]}
+                  onUploaded={load}
+                />
               )}
             </div>
           ) },
           { key: "kyc", label: "KYC", render: (r) => (
             <div>
               <RequestKycPreview documents={r.documents || []} />
-              {r.kycComplete === false && (
-                <div className="text-[10px] text-rose-700 mt-1">Missing {(r.kycMissing || []).join(", ")}</div>
+              {status === "pending" && r.kycComplete === false && (
+                <RequestMissingUploads
+                  requestId={r.requestId}
+                  kinds={r.kycMissing || []}
+                  onUploaded={load}
+                />
               )}
               {r.customerType === "B2B" && r.gstin ? <div className="text-[10px] text-ink-faint">{r.gstin}</div> : null}
             </div>
@@ -167,10 +173,12 @@ export default function Approvals() {
           { key: "dealSheet", label: "Deal sheet", render: (r) => (
             <div>
               <RequestDealSheetPreview documents={r.documents || []} />
-              {r.dealSheetMissing && (
-                <div className="text-[10px] text-rose-700 mt-1" data-testid={`deal-sheet-missing-${r.requestId}`}>
-                  Deal sheet required
-                </div>
+              {status === "pending" && r.dealSheetMissing && (
+                <RequestMissingUploads
+                  requestId={r.requestId}
+                  kinds={["deal_sheet"]}
+                  onUploaded={load}
+                />
               )}
             </div>
           ) },

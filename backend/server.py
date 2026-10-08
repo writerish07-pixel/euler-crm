@@ -1793,6 +1793,23 @@ def _is_booked_lead(lead) -> bool:
     return False
 
 
+def _is_open_booking_lead(lead) -> bool:
+    """Booked / finance file that is not yet Delivered or Close Won."""
+    if not lead or lead.get("dealCancelled"):
+        return False
+    acct = str(lead.get("accountStatus") or "Active").strip()
+    if acct not in ("Active", ""):
+        return False
+    if _is_delivered_lead(lead):
+        return False
+    st = (lead.get("currentStatus") or "").lower()
+    if "book" in st or "finance" in st:
+        return True
+    if lead.get("bookingDate") or lead.get("bookingId"):
+        return True
+    return False
+
+
 def _norm_name(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
@@ -2411,11 +2428,7 @@ async def accounts_dashboard():
     insurance_due = ce.round2(insurance_due)
 
     # Delivered leads for Tally — prefer stored billing summaries, else live build.
-    delivered = [
-        l for l in leads
-        if (l.get("deliveryStatus") or "").lower() == "delivered"
-        or (l.get("currentStatus") or "").lower() == "delivered"
-    ]
+    delivered = [l for l in leads if _is_delivered_lead(l)]
     delivered.sort(key=lambda l: str(l.get("deliveryDate") or ""), reverse=True)
     tally_rows = []
     do_not_post_total_retained = 0.0
@@ -2431,6 +2444,7 @@ async def accounts_dashboard():
         tally_rows.append({
             "leadId": l["leadId"],
             "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
             "model": l.get("interestedModel") or "",
             "variant": l.get("variant") or "",
             "invoiceNumber": summary.get("invoiceNumber") or l.get("invoiceNumber") or "",
@@ -2451,6 +2465,7 @@ async def accounts_dashboard():
         cancelled_due.append({
             "leadId": l["leadId"],
             "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
             "model": l.get("interestedModel") or "",
             "variant": l.get("variant") or "",
             "cancelDate": l.get("lastCancelDate") or l.get("cancelDate") or "",
@@ -2570,18 +2585,21 @@ async def executive_dashboard(user=Depends(current_user)):
     for l in followup_overdue[:15]:
         worklist.append({
             "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
             "kind": "Follow-up overdue", "date": followup_date(l),
             "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
         })
     for l in followup_due[:10]:
         worklist.append({
             "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
             "kind": "Follow-up today", "date": followup_date(l),
             "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
         })
     for l in active_booked[:10]:
         worklist.append({
             "leadId": l["leadId"], "customerName": l.get("customerName") or "",
+            "executive": l.get("executive") or "",
             "kind": "Pending delivery", "date": str(l.get("bookingDate") or "")[:10],
             "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
         })
@@ -8693,6 +8711,13 @@ async def list_finance(view: str = "all", month: Optional[str] = None, year: Opt
             return str(lead.get("deliveryDate") or lead.get("closedDate") or "")[:10]
 
         files = _rows_in_period(files, period, _fdate)
+    lead_ids = [f.get("leadId") for f in files if f.get("leadId")]
+    exec_by = {}
+    if lead_ids:
+        async for l in db.leads.find({"leadId": {"$in": lead_ids}}, {"leadId": 1, "executive": 1}):
+            exec_by[l["leadId"]] = l.get("executive") or ""
+    for f in files:
+        f["executive"] = exec_by.get(f.get("leadId") or "") or f.get("executive") or ""
     pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
     if view == "pending":
         return pending
@@ -8825,21 +8850,25 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
 @api.get("/deliveries")
 async def list_deliveries(month: Optional[str] = None, year: Optional[str] = None,
                           user=Depends(current_user)):
-    # active-booked leads that are not delivered = pending deliveries; plus delivered ones
-    leads = await db.leads.find({"currentStatus": {"$in": ["Booked", "Finance Process", "Delivered"]}}).to_list(2000)
+    # Open bookings still in fulfilment, plus Delivered / Close Won retails.
+    leads = await db.leads.find().to_list(5000)
+    leads = [l for l in leads if _is_open_booking_lead(l) or _is_delivered_lead(l)]
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
     result = []
     for l in leads:
         d = await db.deliveries.find_one({"leadId": l["leadId"]}) or {}
+        done = _is_delivered_lead(l)
         result.append({
             "leadId": l["leadId"], "customerName": l.get("customerName"), "mobile": l.get("mobile"),
+            "executive": l.get("executive") or "",
             "model": l.get("interestedModel"), "variant": l.get("variant"),
             "insurance": d.get("insurance", ""), "registration": d.get("registration", ""),
             "invoice": d.get("invoice", ""), "rc": d.get("rc", ""), "pdi": d.get("pdi", ""),
-            "delivered": d.get("delivered", "") or ("Yes" if (l.get("deliveryStatus") or "").lower() == "delivered" else ""),
-            "deliveryDate": d.get("deliveryDate") or l.get("deliveryDate"),
-            "chassisNumber": d.get("chassisNumber", ""), "numberPlate": d.get("numberPlate", ""),
+            "delivered": d.get("delivered", "") or ("Yes" if done else ""),
+            "deliveryDate": d.get("deliveryDate") or l.get("deliveryDate") or l.get("closedDate"),
+            "chassisNumber": d.get("chassisNumber") or l.get("chassisNumber") or "",
+            "numberPlate": d.get("numberPlate") or l.get("numberPlate") or "",
         })
     period = _parse_period(month, year)
     if period.is_all:
@@ -9000,14 +9029,16 @@ def _same_sold_person(a, b):
 _PACK_DO_NOT_CREATE = object()
 
 
-def _pack_target_for_sold(row, leads, sold_rows):
+def _pack_target_for_sold(row, leads, sold_rows, *, allow_delivered=False):
     """Existing same-name/mobile file this leftover Sold should join, or None.
 
-    Pack or one open CRM file → append. Delivered single-unit leftover stays a
-    new id (repeat buyer / #169). Already-split siblings skip create so a sync
-    cannot keep adding New files for the same person.
+    Pack or one open CRM file → append. A delivered single-unit leftover stays
+    unmatched on sync (repeat buyer). Explicit Create may reuse that file
+    (allow_delivered) so a second leadId is never minted for the same mobile.
+    Already-split siblings skip create so a sync cannot keep adding New files.
     """
-    live = [l for l in (leads or []) if oem_sync.live_occupies_vehicle_id(l)]
+    live = [l for l in (leads or [])
+            if oem_sync.live_occupies_vehicle_id(l) or oem_sync.repair_original_lead(l)]
     same = oem_sync._live_same_mobile(live, (row or {}).get("mobile"))
     if not same:
         same = oem_sync._live_same_name(live, (row or {}).get("customerName"))
@@ -9015,6 +9046,10 @@ def _pack_target_for_sold(row, leads, sold_rows):
     same = [l for l in same if chassis not in set(oem_sync.lead_chassis_list(l))]
     if not same:
         return None
+    keepers = [l for l in same if oem_sync.repair_original_lead(l)
+               and not oem_sync.is_oem_billing_stub(l)]
+    if keepers:
+        same = keepers
     packs = [l for l in same if oem_sync.is_same_order_pack(l)]
     if packs:
         return packs[0]
@@ -9022,7 +9057,8 @@ def _pack_target_for_sold(row, leads, sold_rows):
         return _PACK_DO_NOT_CREATE
     lead = same[0]
     if oem_sync._lead_is_delivered(lead) and oem_sync.vehicle_count(lead) <= 1:
-        return None
+        if not allow_delivered:
+            return None
     return lead
 
 
@@ -9038,6 +9074,43 @@ def _family_sold_for_pack(row, sold_rows, leads, target):
             seen.add(ch)
             out.append(s)
     return out
+
+
+async def _connect_oem_sold(lead, row):
+    """Put this Sold chassis on the live CRM file. Never mint a second id.
+
+    Empty chassis → stamp. Same-order pack or a file that already holds a
+    different chassis → append a unit. Do not overwrite a billed chassis.
+    """
+    chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
+    if not chassis or not lead:
+        return lead
+    if chassis in set(oem_sync.lead_chassis_list(lead)):
+        return lead
+    have = set(oem_sync.lead_chassis_list(lead))
+    if have or oem_sync.is_same_order_pack(lead):
+        return await _append_oem_unit(lead, row)
+    invoice = str((row or {}).get("invoiceNumber") or "").strip()
+    plate = str((row or {}).get("numberPlate") or "").strip()
+    patch = {
+        "chassisNumber": chassis,
+        "oemSoldSyncedAt": now_iso(),
+        "lastUpdated": now_iso(),
+    }
+    if invoice:
+        patch["invoiceNumber"] = invoice
+    if plate:
+        patch["numberPlate"] = plate
+    stamped = oem_sync.stamp_unit_vehicle_ids(lead, chassis, invoice, plate)
+    if stamped and stamped != list((lead or {}).get("units") or []):
+        patch["units"] = stamped
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    delivery_ids = {k: patch[k] for k in ("chassisNumber", "invoiceNumber", "numberPlate") if k in patch}
+    if delivery_ids:
+        await db.deliveries.update_one({"leadId": lead["leadId"]}, {"$set": delivery_ids})
+    updated = await db.leads.find_one({"leadId": lead["leadId"]})
+    await sheet_sync("leads", clean(updated))
+    return updated
 
 
 async def _append_oem_unit(lead, row):
@@ -9190,15 +9263,19 @@ async def _create_leads_from_unmatched_oem_sold(*, mint_new=False):
         if target:
             family = _family_sold_for_pack(row, sold, leads, target)
             live = target
-            for sold_row in family:
-                ch = oem_sync._norm_chassis((sold_row or {}).get("chassis"))
-                if not ch or ch in consumed:
-                    continue
-                if ch in set(oem_sync.lead_chassis_list(live)):
+            if oem_sync.is_same_order_pack(target) or len(family) > 1:
+                for sold_row in family:
+                    ch = oem_sync._norm_chassis((sold_row or {}).get("chassis"))
+                    if not ch or ch in consumed:
+                        continue
+                    if ch in set(oem_sync.lead_chassis_list(live)):
+                        consumed.add(ch)
+                        continue
+                    live = await _append_oem_unit(live, sold_row) or live
                     consumed.add(ch)
-                    continue
-                live = await _append_oem_unit(live, sold_row) or live
-                consumed.add(ch)
+            else:
+                live = await _connect_oem_sold(target, row) or live
+                consumed.add(chassis)
             leads = [live if (l or {}).get("leadId") == (target or {}).get("leadId") else l
                      for l in leads]
             continue
@@ -9267,11 +9344,23 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
         logging.exception("OEM billing could not backfill chassis/invoice")
         stamped = {}
     created = await _create_leads_from_unmatched_oem_sold()
+    leads = [l async for l in db.leads.find({})]
+    relinked = []
+    for pair in oem_sync.pair_oem_billing_stubs(leads):
+        if (pair or {}).get("action") != "safe":
+            continue
+        stub_id = ((pair.get("stub") or {}).get("leadId") or "")
+        orig_id = ((pair.get("original") or {}).get("leadId") or "")
+        result = await _merge_oem_billing_stub(stub_id, orig_id)
+        if result.get("ok"):
+            relinked.append(result)
     period = _parse_period(month, year)
     rows = await oem_sync.list_oem_billing(db)
     payload = _oem_billing_payload(rows, period)
     payload["createdLeadIds"] = created
     payload["created"] = len(created)
+    payload["relinked"] = relinked
+    payload["relinkedCount"] = len(relinked)
     payload["leadsVehicleIds"] = stamped
     leads = [l async for l in db.leads.find({})]
     payload["repair"] = _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
@@ -9338,9 +9427,9 @@ async def _merge_oem_billing_stub(stub_id, original_id):
     original = await db.leads.find_one({"leadId": original_id})
     if not stub or not original:
         return {"ok": False, "reason": "lead not found"}
-    if not oem_sync.is_empty_duplicate_lead(stub):
+    if not (oem_sync.is_empty_duplicate_lead(stub) or oem_sync.is_oem_billing_stub(stub)):
         return {"ok": False, "reason": "source is not an empty duplicate lead"}
-    if oem_sync.is_empty_duplicate_lead(original):
+    if oem_sync.is_oem_billing_stub(original) or oem_sync.is_empty_duplicate_lead(original):
         return {"ok": False, "reason": "original is also an empty duplicate"}
     if not oem_sync.is_commercial_original(original):
         return {"ok": False, "reason": "original is not a booked / Close Won file"}
@@ -9429,7 +9518,10 @@ async def merge_oem_billing_repair(body: OemBillingRepairIn, act=Depends(actor))
 
 @api.post("/oem-billing/create", dependencies=[Depends(deal_desk_only)])
 async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
-    """Mint one New lead for a Sold chassis that is still Not in CRM."""
+    """Connect this Sold chassis to the live CRM file on the same mobile.
+
+    Mints a New lead only when no live register file exists for that person.
+    """
     chassis = oem_sync._norm_chassis(body.chassis)
     if not chassis:
         raise HTTPException(400, "Chassis is required")
@@ -9441,15 +9533,15 @@ async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
         raise HTTPException(404, "That chassis is not on OEM Sold")
     if row.get("bucket") != oem_sync.BUCKET_UNMATCHED:
         raise HTTPException(409, "That chassis already matches a CRM lead")
-    target = _pack_target_for_sold(row, leads, sold)
+    target = _pack_target_for_sold(row, leads, sold, allow_delivered=True)
     if target is _PACK_DO_NOT_CREATE:
         raise HTTPException(409, "This customer already has split files — do not mint another")
     if target:
-        live = await _append_oem_unit(target, row)
+        live = await _connect_oem_sold(target, row)
         await write_audit(act, "append", "oem-billing", leadId=(live or {}).get("leadId"),
                           new={"chassis": chassis})
-        return {"ok": True, "appended": True, "leadId": (live or {}).get("leadId"),
-                "chassis": chassis}
+        return {"ok": True, "appended": True, "connected": True,
+                "leadId": (live or {}).get("leadId"), "chassis": chassis}
     lead = await _insert_oem_billing_lead(row, sold)
     await write_audit(act, "create", "oem-billing", leadId=(lead or {}).get("leadId"),
                       new={"chassis": chassis})
@@ -10558,10 +10650,23 @@ async def exec_incentive_board():
 async def list_bookings(month: Optional[str] = None, year: Optional[str] = None,
                         user=Depends(current_user)):
     rows = [clean(b) for b in await db.bookings.find().sort("bookingId", -1).to_list(1000)]
+    rows = [b for b in rows if str(b.get("bookingStatus") or "").lower() != "cancelled"]
     if user.get("role") == "executive":
         mine = await _own_lead_ids(user)
         rows = [b for b in rows if b.get("leadId") in mine]
-    rows = _rows_in_period(rows, _parse_period(month, year), lambda b: b.get("bookingDate"))
+    lead_ids = [b.get("leadId") for b in rows if b.get("leadId")]
+    leads = {}
+    if lead_ids:
+        async for l in db.leads.find({"leadId": {"$in": lead_ids}}):
+            leads[l["leadId"]] = l
+    open_rows = []
+    for b in rows:
+        lead = leads.get(b.get("leadId")) or {}
+        if not _is_open_booking_lead(lead):
+            continue
+        b["executive"] = lead.get("executive") or b.get("executive") or ""
+        open_rows.append(b)
+    rows = _rows_in_period(open_rows, _parse_period(month, year), lambda b: b.get("bookingDate"))
     if user.get("role") in authmod.FIELD_ROLES:
         safe = []
         for b in rows:
@@ -14256,9 +14361,9 @@ async def share_dashboard():
     leads = await db.leads.find().to_list(5000)
     ym = this_month()
     td = today()
-    booked = [l for l in leads if "book" in (l.get("currentStatus") or "").lower()]
-    active_booked = [l for l in booked if (l.get("deliveryStatus") or "").lower() != "delivered"]
-    delivered = [l for l in leads if (l.get("deliveryStatus") or "").lower() == "delivered"]
+    booked = [l for l in leads if _is_booked_lead(l)]
+    active_booked = [l for l in booked if _is_open_booking_lead(l)]
+    delivered = [l for l in leads if _is_delivered_lead(l)]
     new_this_month = [l for l in booked if str(l.get("bookingDate") or "").startswith(ym)]
     retail_this_month = [l for l in delivered if str(l.get("deliveryDate") or "").startswith(ym)]
     today_bookings = [l for l in booked if str(l.get("bookingDate") or "") == td]
