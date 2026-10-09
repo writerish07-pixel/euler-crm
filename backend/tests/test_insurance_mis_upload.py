@@ -522,3 +522,143 @@ async def test_dealer_earnings_uses_live_expected_until_mis(client):
     row2 = next(x for x in de2["rows"] if x["leadId"] == lid)
     assert row2["dealerInsuranceIncome"] == short
     assert row2["totalDealerEarnings"] == ce.round2(original_total - expected + short)
+
+
+def test_month_label_parses_agent_spellings():
+    assert ins_mis._ym_from_month_label("Aug'26") == "2026-08"
+    assert ins_mis._ym_from_month_label("August 2026") == "2026-08"
+    assert ins_mis._ym_from_month_label("Sep-26") == "2026-09"
+    assert ins_mis._ym_from_month_label("2026-09") == "2026-09"
+    assert ins_mis._ym_from_month_label("09/2026") == "2026-09"
+
+
+def test_parse_rows_keeps_month_column():
+    headers = ["Month", "Chassis", "Distribut Fee"]
+    raw = [headers, ["Aug'26", "MD9X", "100"]]
+    mp = ins_mis.suggest_mapping(headers)
+    _, rows = ins_mis.parse_rows(raw, mp)
+    assert rows[0]["month"] == "Aug'26"
+    months, src = ins_mis.infer_period_months(rows)
+    assert months == ["2026-08"]
+    assert src == "month"
+
+
+def test_unmatched_entries_only_cover_mis_month():
+    entries = [
+        {"entryId": "AUG", "customerName": "Aug", "policyDate": "2026-08-10",
+         "expectedPayout": 100, "receivedPayout": 0, "status": "Pending"},
+        {"entryId": "SEP", "customerName": "Sep", "policyDate": "2026-09-10",
+         "expectedPayout": 100, "receivedPayout": 0, "status": "Pending"},
+        {"entryId": "DEL", "customerName": "Deliv", "deliveryDate": "2026-08-20",
+         "expectedPayout": 100, "receivedPayout": 0, "status": "Pending"},
+        {"entryId": "PAID", "customerName": "Paid", "policyDate": "2026-08-05",
+         "expectedPayout": 100, "receivedPayout": 100, "status": "Received"},
+        {"entryId": "JAN", "customerName": "Jan", "policyDate": "2026-01-15",
+         "expectedPayout": 100, "receivedPayout": 0, "status": "Pending"},
+    ]
+    rows = [{
+        "_row": 2, "chassisNumber": "MD9AUGONLY", "misAmount": 90,
+        "policyDate": "2026-08-01",
+    }]
+    out = ins_mis.match_file(rows, entries)
+    assert out["period"]["months"] == ["2026-08"]
+    assert out["period"]["label"] == "Aug 2026"
+    assert out["period"]["source"] == "policyDate"
+    ids = {e["entryId"] for e in out["unmatchedEntries"]}
+    assert ids == {"AUG", "DEL"}
+
+
+def test_month_column_scopes_when_policy_date_missing():
+    entries = [
+        {"entryId": "AUG", "policyDate": "2026-08-10", "status": "Pending",
+         "expectedPayout": 50, "receivedPayout": 0, "customerName": "A"},
+        {"entryId": "SEP", "policyDate": "2026-09-10", "status": "Pending",
+         "expectedPayout": 50, "receivedPayout": 0, "customerName": "S"},
+    ]
+    out = ins_mis.match_file(
+        [{"_row": 2, "misAmount": 40, "month": "Aug'26", "policyNumber": "NONE"}],
+        entries)
+    assert out["period"]["source"] == "month"
+    assert {e["entryId"] for e in out["unmatchedEntries"]} == {"AUG"}
+
+
+def test_no_dates_keeps_all_time_unmatched():
+    entries = [
+        {"entryId": "A", "status": "Pending", "expectedPayout": 50, "receivedPayout": 0},
+        {"entryId": "B", "policyDate": "2026-01-01", "status": "Pending",
+         "expectedPayout": 50, "receivedPayout": 0},
+    ]
+    out = ins_mis.match_file(
+        [{"_row": 2, "misAmount": 40, "policyNumber": "NONE"}], entries)
+    assert out["period"]["source"] == "all"
+    assert {e["entryId"] for e in out["unmatchedEntries"]} == {"A", "B"}
+
+
+def test_explicit_months_override_file_dates():
+    entries = [
+        {"entryId": "AUG", "policyDate": "2026-08-10", "status": "Pending",
+         "expectedPayout": 50, "receivedPayout": 0},
+        {"entryId": "SEP", "policyDate": "2026-09-10", "status": "Pending",
+         "expectedPayout": 50, "receivedPayout": 0},
+    ]
+    rows = [{"_row": 2, "misAmount": 40, "policyDate": "2026-08-01", "policyNumber": "NONE"}]
+    out = ins_mis.match_file(rows, entries, months=["2026-09"])
+    assert out["period"]["source"] == "explicit"
+    assert out["period"]["months"] == ["2026-09"]
+    assert {e["entryId"] for e in out["unmatchedEntries"]} == {"SEP"}
+
+
+def test_chassis_match_stays_inside_file_month():
+    entries = [
+        {"entryId": "AUG", "chassisNumber": "MD9SAMEVIN00000001",
+         "policyDate": "2026-08-10", "expectedPayout": 100, "status": "Pending",
+         "customerName": "Aug"},
+        {"entryId": "SEP", "chassisNumber": "MD9SAMEVIN00000001",
+         "policyDate": "2026-09-10", "expectedPayout": 100, "status": "Pending",
+         "customerName": "Sep"},
+    ]
+    out = ins_mis.match_file([{
+        "_row": 2, "chassisNumber": "MD9SAMEVIN00000001", "misAmount": 90,
+        "policyDate": "2026-08-03",
+    }], entries)
+    assert out["totals"]["matched"] == 1
+    assert out["matched"][0]["entryId"] == "AUG"
+    assert {e["entryId"] for e in out["unmatchedEntries"]} == set()
+
+
+@pytest.mark.asyncio
+async def test_preview_unmatched_is_file_month_only(client):
+    aug = await _entry(client, policyNumber="POL-AUG-M", customerName="Aug Month")
+    sep = await _entry(client, policyNumber="POL-SEP-M", customerName="Sep Month")
+    await server.db.insurance.update_one(
+        {"entryId": sep["entryId"]}, {"$set": {"policyDate": "2026-09-12"}})
+    csv = (
+        _AGENT_MIS_HEADERS + "\n"
+        "Aug'26,United India Ins. Co,NEW,Someone,EULER MOTORS,TURBO EV 1000,2026,"
+        "847637,MD9NOTINREGISTER0001,MC3012532020603250091,POL-MISSING,"
+        "01-Aug-26,31-Jul-27,4448,13742,18190,1501,19691,5275\n"
+    )
+    r = await client.post("/api/insurance/mis/preview", files=_csv(csv))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["period"]["months"] == ["2026-08"]
+    assert body["period"]["label"] == "Aug 2026"
+    ids = {e["entryId"] for e in body["unmatchedEntries"]}
+    assert aug["entryId"] in ids
+    assert sep["entryId"] not in ids
+
+
+@pytest.mark.asyncio
+async def test_preview_explicit_month_overrides_file(client):
+    sep = await _entry(client, policyNumber="POL-SEP-OVR", customerName="Sep Override")
+    await server.db.insurance.update_one(
+        {"entryId": sep["entryId"]}, {"$set": {"policyDate": "2026-09-12"}})
+    csv = "Policy Number,Payout Amount,Policy Date\nNONE,90,2026-08-01\n"
+    r = await client.post("/api/insurance/mis/preview", files=_csv(csv),
+                          data={"month": "2026-09"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["period"]["source"] == "explicit"
+    assert body["period"]["months"] == ["2026-09"]
+    ids = {e["entryId"] for e in body["unmatchedEntries"]}
+    assert sep["entryId"] in ids

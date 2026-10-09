@@ -111,12 +111,22 @@ def suggest_mapping(headers):
     return mapping
 
 
+_MONTH_HEADERS = ("month", "mis month", "period", "for month")
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
 def parse_rows(raw_rows, mapping):
     """Turn spreadsheet rows into dicts keyed by MIS field. First row is headers."""
     if not raw_rows:
         return [], []
     headers = [str(h).strip() if h is not None else "" for h in raw_rows[0]]
     idx = {h: i for i, h in enumerate(headers) if h}
+    month_idx = None
+    for h, i in idx.items():
+        if h.strip().lower() in _MONTH_HEADERS:
+            month_idx = i
+            break
     out = []
     for n, row in enumerate(raw_rows[1:], start=2):
         rec = {"_row": n}
@@ -139,6 +149,11 @@ def parse_rows(raw_rows, mapping):
                 rec[field] = _norm_chassis(cell)
             else:
                 rec[field] = str(cell).strip() if cell not in (None, "None") else ""
+        if month_idx is not None and month_idx < len(row):
+            cell = row[month_idx]
+            rec["month"] = str(cell).strip() if cell not in (None, "", "None") else ""
+            if rec["month"]:
+                empty = False
         if not empty:
             out.append(rec)
     return headers, out
@@ -324,9 +339,101 @@ def match_row(row, indexes):
     return None, "unmatched"
 
 
-def match_file(mis_rows, entries):
+def entry_period_date(entry):
+    """Register month key: policy date, else delivery date (same as Insurance Register)."""
+    return str((entry or {}).get("policyDate") or (entry or {}).get("deliveryDate") or "").strip()[:10]
+
+
+def _ym(raw):
+    s = str(raw or "").strip()
+    if len(s) >= 7 and s[4] == "-" and s[0:4].isdigit() and s[5:7].isdigit():
+        mo = int(s[5:7])
+        if 1 <= mo <= 12:
+            return s[:7]
+    return ""
+
+
+def _ym_from_month_label(raw):
+    """Parse agent Month cells such as Aug'26, Aug-2026, August 2026, 2026-08."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    ym = _ym(s)
+    if ym:
+        return ym
+    m = re.match(r"^(\d{1,2})[-/](\d{4})$", s)
+    if m:
+        mo, y = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12:
+            return f"{y:04d}-{mo:02d}"
+    m = re.match(r"^([A-Za-z]{3,9})['.\s\-/]*(\d{2,4})$", s)
+    if m:
+        mon, yi = m.group(1), int(m.group(2))
+        if yi < 100:
+            yi += 2000
+        months = ("jan", "feb", "mar", "apr", "may", "jun",
+                  "jul", "aug", "sep", "oct", "nov", "dec")
+        try:
+            mo = months.index(mon[:3].lower()) + 1
+        except ValueError:
+            return ""
+        return f"{yi:04d}-{mo:02d}"
+    return ""
+
+
+def infer_period_months(mis_rows):
+    """YYYY-MM values this MIS covers. Policy date wins; Month column is the fallback."""
+    from_date, from_label = set(), set()
+    for row in mis_rows or []:
+        ym = _ym(row.get("policyDate"))
+        if ym:
+            from_date.add(ym)
+        ym2 = _ym_from_month_label(row.get("month"))
+        if ym2:
+            from_label.add(ym2)
+    if from_date:
+        return sorted(from_date), "policyDate"
+    if from_label:
+        return sorted(from_label), "month"
+    return [], "all"
+
+
+def filter_entries_for_months(entries, months):
+    if not months:
+        return list(entries or [])
+    want = set(months)
+    return [e for e in (entries or []) if _ym(entry_period_date(e)) in want]
+
+
+def period_label(months):
+    if not months:
+        return "All"
+    parts = []
+    for ym in months:
+        try:
+            y, m = ym.split("-")
+            parts.append(f"{_MONTH_ABBR[int(m) - 1]} {y}")
+        except (ValueError, IndexError):
+            parts.append(ym)
+    return ", ".join(parts)
+
+
+def match_file(mis_rows, entries, months=None):
+    """Match MIS rows to Insurance Payout entries for the file's month(s).
+
+    Register period is policyDate else deliveryDate — the same basis as the
+    Insurance Register. When the file has dates (or `months` is passed),
+    unmatchedEntries are unpaid payouts in that month that are missing from
+    the file, not every unpaid row all-time.
+    """
+    if months is None:
+        months, source = infer_period_months(mis_rows)
+    else:
+        months = [m for m in (months or []) if _ym(m)]
+        source = "explicit" if months else "all"
+    scoped = filter_entries_for_months(entries, months)
     rows, chassis_dupes = unique_by_chassis(mis_rows)
-    indexes = _entry_indexes(entries)
+    indexes = _entry_indexes(scoped)
     used = set()
     matched, unmatched_mis = [], []
     unmatched_mis.extend(chassis_dupes)
@@ -364,7 +471,7 @@ def match_file(mis_rows, entries):
             "status": entry.get("status") or "",
         })
     unmatched_entries = []
-    for e in entries:
+    for e in scoped:
         if str(e.get("status") or "").startswith("N/A"):
             continue
         if e.get("entryId") in used:
@@ -384,11 +491,17 @@ def match_file(mis_rows, entries):
             "receivedPayout": ce.round2(ce.num(e.get("receivedPayout"))),
             "status": e.get("status") or "",
             "misApproved": bool(e.get("misApproved")),
+            "periodDate": entry_period_date(e),
         })
     return {
         "matched": matched,
         "unmatchedMis": unmatched_mis,
         "unmatchedEntries": unmatched_entries,
+        "period": {
+            "months": months,
+            "source": source if months else "all",
+            "label": period_label(months),
+        },
         "totals": {
             "misRows": len(mis_rows),
             "matched": len(matched),
