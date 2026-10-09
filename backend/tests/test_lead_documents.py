@@ -187,13 +187,42 @@ async def test_b2b_aadhaar_is_optional(exec_client, client):
     assert ap.status_code == 422
     gst = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "kyc_gst")
     assert gst.status_code == 200, gst.text
-    # still missing gstin
-    ap = await client.post(f"/api/lead-requests/{rid}/approve")
-    assert ap.status_code == 422
-    await server.db.lead_requests.update_one(
-        {"requestId": rid}, {"$set": {"payload.gstin": "22AAAAA0000A1Z5", "payload.customerType": "B2B"}})
+    # GST certificate is the GSTIN proof — the 15-digit number is optional.
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
+
+
+@pytest.mark.asyncio
+async def test_b2b_gst_certificate_books_without_gstin_number(exec_client, client):
+    r = await client.post("/api/leads", json={
+        "customerName": "Kapoor Freight Carriers", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Executive", "customerType": "B2B", "budget": 200000})
+    lid = r.json()["leadId"]
+    blocked = await exec_client.post(f"/api/leads/{lid}/convert-booking", json={
+        "bookingDate": "2026-10-09", "bookingAmount": 0, "executive": "Executive"})
+    assert blocked.status_code == 422, blocked.text
+    assert "gstin" in blocked.text.lower() or "gst" in blocked.text.lower()
+    pan = await upload(client, f"/api/leads/{lid}/documents", "kyc_pan")
+    gst = await upload(client, f"/api/leads/{lid}/documents", "kyc_gst")
+    assert pan.status_code == 200 and gst.status_code == 200
+    ok = await exec_client.post(f"/api/leads/{lid}/convert-booking", json={
+        "bookingDate": "2026-10-09", "bookingAmount": 0, "executive": "Executive"})
+    assert ok.status_code == 200, ok.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert (lead.get("currentStatus") or "").lower() == "booked"
+
+
+@pytest.mark.asyncio
+async def test_staff_can_save_gstin_on_a_b2b_lead(exec_client, client):
+    r = await client.post("/api/leads", json={
+        "customerName": "GSTIN Save Co", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Executive", "customerType": "B2B"})
+    lid = r.json()["leadId"]
+    saved = await exec_client.put(f"/api/leads/{lid}/gstin", json={"gstin": "08abcde1234f1z5"})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["gstin"] == "08ABCDE1234F1Z5"
 
 
 @pytest.mark.asyncio

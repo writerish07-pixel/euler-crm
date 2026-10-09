@@ -187,7 +187,11 @@ async def missing_kyc(db, *, request_id: str = "", lead_id: str = "",
     have = {r.get("kind") for r in rows}
     missing = [k for k in required_kyc_kinds(customer_type) if k not in have]
     if normalize_customer_type(customer_type) == "B2B" and not str(gstin or "").strip():
-        missing.append("gstin")
+        # GST certificate on file is the GSTIN proof. The 15-digit number is
+        # optional once kyc_gst is attached (OEM-created B2B files never had a
+        # GSTIN capture step).
+        if "kyc_gst" not in have:
+            missing.append("gstin")
     return missing
 
 

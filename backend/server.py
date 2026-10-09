@@ -1395,6 +1395,7 @@ class BookingIn(BaseModel):
     exchangeRequired: str = "No"
     # UTR / cheque / transaction number for the booking advance.
     paymentReference: str = ""
+    gstin: str = ""
 
 
 class PriceStructureIn(BaseModel):
@@ -6312,10 +6313,34 @@ async def price_preview(lead_id: str, unit: Optional[int] = None):
             "priceStructure": _price_structure_from_master(row, as_of)}
 
 
+class GstinIn(BaseModel):
+    gstin: str = ""
+
+
+@api.put("/leads/{lead_id}/gstin")
+async def set_lead_gstin(lead_id: str, body: GstinIn, act=Depends(actor),
+                         user=Depends(current_user),
+                         _sales=Depends(sales_staff_only)):
+    """Staff KYC: save the B2B GSTIN number next to the GST certificate."""
+    lead = await get_lead_or_404(lead_id)
+    _require_own_lead(lead, user)
+    value = str(body.gstin or "").strip().upper()
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {"gstin": value, "lastUpdated": now_iso()}})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    await write_audit(act, "update", "gstin", leadId=lead_id,
+                      old={"gstin": lead.get("gstin") or ""}, new={"gstin": value})
+    return clean(updated)
+
+
 @api.post("/leads/{lead_id}/convert-booking")
 async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canBook", "conversion to booking", act)
+    gstin = str(body.gstin or "").strip().upper()
+    if gstin and gstin != str(lead.get("gstin") or "").strip().upper():
+        await db.leads.update_one({"leadId": lead_id}, {"$set": {"gstin": gstin, "lastUpdated": now_iso()}})
+        lead = await db.leads.find_one({"leadId": lead_id})
     await _require_related_docs(lead, act)
     # A booking is only valid once its commercial structure is resolved. If the lead
     # has no price structure yet, load it from the authoritative Price Master. If the

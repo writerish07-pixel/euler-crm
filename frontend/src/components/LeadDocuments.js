@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Camera, FileUp, Download, Trash2, FileText, Image as ImageIcon } from "lucide-react";
 import { toast } from "sonner";
-import { api, del, get, uploadFile, apiErrorMessage } from "../lib/api";
+import { api, del, get, put, uploadFile, apiErrorMessage } from "../lib/api";
 
 export const DOC_LABELS = {
   kyc_aadhaar_front: "Aadhaar front",
@@ -227,8 +227,46 @@ export function kycReady(customerType, files, gstin) {
       ? "Attach PAN and GST certificate"
       : "Attach Aadhaar front, Aadhaar back and PAN";
   }
-  if (customerType === "B2B" && !String(gstin || "").trim()) return "Enter the GSTIN";
+  if (customerType === "B2B" && !String(gstin || "").trim() && !files.kyc_gst) {
+    return "Enter the GSTIN or attach the GST certificate";
+  }
   return "";
+}
+
+export function B2bGstinField({ leadId, gstin, canEdit, onSaved }) {
+  const [value, setValue] = useState(gstin || "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setValue(gstin || ""); }, [gstin]);
+  const save = async () => {
+    if (!leadId || !canEdit) return;
+    setBusy(true);
+    try {
+      await put(`/leads/${leadId}/gstin`, { gstin: value });
+      toast.success("GSTIN saved");
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not save GSTIN"));
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="rounded-lg border border-line bg-white p-2.5" data-testid="b2b-gstin-field">
+      <div className="text-xs font-semibold text-ink mb-1">GSTIN</div>
+      <p className="text-[11px] text-ink-faint mb-1.5">Optional once the GST certificate is attached.</p>
+      {canEdit ? (
+        <div className="flex gap-2">
+          <input data-testid="lead-gstin-live" value={value} onChange={(e) => setValue(e.target.value)}
+            className="block w-full rounded-lg border-0 py-2 px-3 text-sm ring-1 ring-inset ring-line focus:ring-2 focus:ring-cobalt font-mono"
+            placeholder="22AAAAA0000A1Z5" />
+          <button type="button" className="text-xs font-medium text-cobalt shrink-0" disabled={busy}
+            data-testid="save-lead-gstin" onClick={save}>
+            {busy ? "Saving…" : "Save"}
+          </button>
+        </div>
+      ) : (
+        <div className="font-mono text-sm">{gstin || "—"}</div>
+      )}
+    </div>
+  );
 }
 
 export function extraSupportReady(amount, files, existingDocs = [], { copyFromSibling } = {}) {
