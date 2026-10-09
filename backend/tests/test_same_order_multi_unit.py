@@ -1188,3 +1188,81 @@ async def test_append_oem_unit_keeps_own_billed_date(client):
     assert len(units) == 2
     assert units[0].get("soldDate") == "2026-09-30"
     assert units[1].get("soldDate") == "2026-10-09"
+
+
+@pytest.mark.asyncio
+async def test_add_unit_keeps_own_billed_date(client):
+    mobile = "9813301888"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-BD-A", "PM-BD-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-BD-A", "model": "Turbo Max", "variant": "Bd A",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-BD-B", "model": "Storm", "variant": "Bd B",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    first = await client.post("/api/leads", json={
+        "customerName": "Billed Dates",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Bd A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert first.status_code == 200, first.text
+    lid = first.json()["leadId"]
+    u1 = await client.put(f"/api/leads/{lid}/units/1/billed-date", json={"soldDate": "2026-09-30"})
+    assert u1.status_code == 200, u1.text
+    add = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Storm", "variant": "Bd B", "soldDate": "2026-10-09",
+    })
+    assert add.status_code == 200, add.text
+    units = add.json().get("units") or []
+    assert units[0].get("soldDate") == "2026-09-30"
+    assert units[1].get("soldDate") == "2026-10-09"
+    assert units[1].get("schemeAsOf") == "2026-10-09"
+    sept = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 1})
+    octb = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 2})
+    assert sept.status_code == 200, sept.text
+    assert octb.status_code == 200, octb.text
+    assert sept.json().get("asOf")[:7] == "2026-09"
+    assert octb.json().get("asOf")[:7] == "2026-10"
+
+
+@pytest.mark.asyncio
+async def test_billed_date_switches_scheme_month(client):
+    lid = "LD-BILL-SWITCH"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-SW-A"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-SW-A", "model": "Turbo Max", "variant": "Sw A",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Switch Month", "mobile": "9813301999",
+        "interestedModel": "Turbo Max", "variant": "Sw A",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-10-03",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Sw A",
+             "soldDate": "2026-10-03", "schemeAsOf": "2026-10-03"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Sw A",
+             "soldDate": "2026-10-03", "schemeAsOf": "2026-10-03"},
+        ],
+    })
+    r = await client.put(f"/api/leads/{lid}/units/2/billed-date", json={"soldDate": "2026-09-15"})
+    assert r.status_code == 200, r.text
+    units = r.json().get("units") or []
+    assert units[0].get("soldDate") == "2026-10-03"
+    assert units[1].get("soldDate") == "2026-09-15"
+    assert units[1].get("schemeAsOf") == "2026-09-15"
+    rules = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 2})
+    assert rules.json().get("asOf") == "2026-09-15"
+    u1 = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 1})
+    assert u1.json().get("asOf") == "2026-10-03"

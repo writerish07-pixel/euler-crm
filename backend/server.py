@@ -1359,6 +1359,12 @@ class AddLeadUnitIn(BaseModel):
     """Add one SKU onto an existing same-order file."""
     model: str
     variant: str = ""
+    soldDate: Optional[str] = None
+
+
+class UnitBilledDateIn(BaseModel):
+    """OEM / Tally billed date for one pack unit. Drives that unit's scheme month."""
+    soldDate: str
 
 
 class LeadUpdateIn(BaseModel):
@@ -4163,9 +4169,10 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
     if _is_delivered_lead(lead) or lead.get("dealCancelled"):
         raise HTTPException(422, "Cannot add a unit on a delivered or cancelled file.")
     units = _ensure_lead_units(lead)
-    as_of = today()
+    billed = _parse_iso_date(body.soldDate, field="Billed date") if str(body.soldDate or "").strip() else ""
+    as_of = billed or today()
     rec = await _price_unit_from_master(body.model, body.variant, as_of)
-    units.append({
+    extra = {
         "sno": len(units) + 1,
         "model": str(body.model or "").strip(),
         "variant": str(body.variant or "").strip(),
@@ -4173,7 +4180,11 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
         "invoiceNumber": "",
         "numberPlate": "",
         **rec,
-    })
+    }
+    if billed:
+        extra["soldDate"] = billed
+        extra["schemeAsOf"] = billed
+    units.append(extra)
     lead["units"] = units
     lead["sameOrderMultiUnit"] = True
     cx = ce.round2(ce.num(lead.get("cxDemand") or lead.get("budget")))
@@ -4188,6 +4199,37 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
         "cxDemand": updated.get("cxDemand"),
     })
     return _lead_for_viewer(updated, user)
+
+
+@api.put("/leads/{lead_id}/units/{unit_sno}/billed-date")
+async def set_unit_billed_date(lead_id: str, unit_sno: int, body: UnitBilledDateIn,
+                               act=Depends(actor), _desk=Depends(deal_desk_only)):
+    """Save this unit's billed date. Scheme Master month follows that date."""
+    lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canScheme", "billed date (only Active leads)", act)
+    billed = _parse_iso_date(body.soldDate, field="Billed date")
+    idx, units = _resolve_unit_index(lead, unit_sno)
+    units = _ensure_lead_units(lead)
+    if idx >= len(units):
+        raise HTTPException(422, "That unit is not on this order.")
+    rec = dict(units[idx])
+    old = rec.get("soldDate") or rec.get("schemeAsOf") or ""
+    rec["soldDate"] = billed
+    rec["schemeAsOf"] = billed
+    rec["sno"] = idx + 1
+    units[idx] = rec
+    patch = {"units": units, "lastUpdated": now_iso(),
+             "vehicleCount": max(len(units), 1)}
+    if len(units) > 1:
+        patch["sameOrderMultiUnit"] = True
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    await recompute_lead(lead_id)
+    await write_audit(act, "update", "unit-billed-date", leadId=lead_id,
+                      old={"unitSno": idx + 1, "soldDate": old},
+                      new={"unitSno": idx + 1, "soldDate": billed})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    return _lead_for_viewer(clean(updated), act)
 
 
 def _request_out(doc):
@@ -5462,10 +5504,31 @@ def _is_turbo_vehicle(model, variant=""):
     return ce.normalize_scheme_model_key(model, variant) == "turbo"
 
 
-def _lead_price_as_of(lead=None, on=None):
-    """Booking date locks the list price; unbooked quotes use today."""
+def _unit_billed_date(unit=None):
+    d = str((unit or {}).get("soldDate") or (unit or {}).get("schemeAsOf") or "")[:10]
+    if len(d) == 10 and d[4] == "-" and d[7] == "-":
+        return d
+    return ""
+
+
+def _parse_iso_date(raw, *, field="Date"):
+    d = str(raw or "").strip()[:10]
+    if len(d) == 10 and d[4] == "-" and d[7] == "-":
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+            return d
+        except ValueError:
+            pass
+    raise HTTPException(422, f"{field} must be YYYY-MM-DD.")
+
+
+def _lead_price_as_of(lead=None, on=None, unit=None):
+    """Unit billed date, else booking date, else today."""
     if on:
         return str(on)[:10]
+    billed = _unit_billed_date(unit)
+    if billed:
+        return billed
     if lead:
         booked = str(lead.get("bookingDate") or "")[:10]
         if booked:
@@ -6380,7 +6443,7 @@ async def price_preview(lead_id: str, unit: Optional[int] = None):
         return {"found": False, "model": model, "variant": variant,
                 "message": f"Price Master entry not found for: Model = {model or '(none)'}, "
                            f"Variant = {variant or '(none)'}"}
-    as_of = _lead_price_as_of(lead)
+    as_of = _lead_price_as_of(lead, unit=chosen)
     return {"found": True, "model": model, "variant": variant,
             "priceId": row.get("priceId"), "asOf": as_of,
             "priceStructure": _price_structure_from_master(row, as_of)}
@@ -6784,7 +6847,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     variant = chosen.get("variant") or lead.get("variant")
     row = await _price_master_row(model, variant)
     if row:
-        master_ex = ce.num(_price_structure_from_master(row, _lead_price_as_of(lead)).get("exShowroom"))
+        master_ex = ce.num(_price_structure_from_master(row, _lead_price_as_of(lead, unit=chosen)).get("exShowroom"))
         if master_ex <= 0:
             raise HTTPException(422,
                 f"Price Master row for {model}/{variant} "

@@ -132,7 +132,7 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
   );
 }
 
-function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme }) {
+function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved, canEditBilledDate }) {
   return (
     <div className="space-y-3" data-testid="pack-units-tab">
       <p className="text-sm text-ink-soft">
@@ -151,7 +151,15 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme }) {
                 <div className="font-mono font-bold text-cobalt mt-1" data-testid={`units-tab-payable-${sno}`}>
                   {inr(u.customerPayable)}
                 </div>
-                {u.soldDate ? <div className="text-xs text-ink-soft mt-1" data-testid={`units-tab-billed-${sno}`}>Billed {fmtDate(u.soldDate)}</div> : null}
+                <div className="mt-1">
+                  <UnitBilledDateField
+                    leadId={lead.leadId}
+                    sno={sno}
+                    value={u.soldDate || ""}
+                    canEdit={!!canEditBilledDate}
+                    onSaved={onSaved}
+                  />
+                </div>
                 {u.chassisNumber ? <div className="text-xs text-ink-soft mt-1">Chassis {u.chassisNumber}</div> : null}
                 {u.numberPlate ? <div className="text-xs text-ink-soft">Plate {u.numberPlate}</div> : null}
               </div>
@@ -420,12 +428,19 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           activeUnit={activeUnit}
           onOpenPrice={(sno) => { setFocusUnit(sno); setTab("price"); }}
           onOpenScheme={(sno) => { setFocusUnit(sno); setTab("scheme"); }}
+          onSaved={refresh}
+          canEditBilledDate={!leadLocked && (isTl || isOwner || isSalesGm)}
         />
       )}
       {tab === "overview" && (fieldView
         ? <FieldOverview lead={lead} booking={data.booking} delivery={data.delivery} />
         : <Overview lead={lead} c={c} actions={actions} onSaved={refresh} documents={data.documents} masters={masters}
-            onOpenUnit={(sno, nextTab) => { setFocusUnit(sno); if (nextTab) setTab(nextTab); }} />)}
+            onOpenUnit={(sno, nextTab) => { setFocusUnit(sno); if (nextTab) setTab(nextTab); }}
+            onAddPackUnit={() => setAddPackUnit(true)}
+            onAddAnotherVehicle={() => setAddUnit(true)}
+            canAddPackUnit={!leadLocked && (isTl || isOwner || isSalesGm) && !actions.isDelivered}
+            canAddAnotherVehicle={isExecutive || isTl || isOwner || isSalesGm}
+            canEditBilledDate={!leadLocked && (isTl || isOwner || isSalesGm)} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} documents={data.documents} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
@@ -563,8 +578,8 @@ function companyKeptRetained(oemShare, customerBenefit) {
 function KV({ label, value, tone }) {
   return (
     <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 last:border-0 min-w-0">
-      <span className="text-sm text-ink-soft min-w-0 break-words">{label}</span>
-      <span className={`font-mono tabular text-sm font-medium shrink-0 text-right ${tone || "text-ink"}`}>{value}</span>
+      <span className="text-sm text-ink-soft shrink-0 pr-3">{label}</span>
+      <span className={`font-mono tabular text-sm font-medium min-w-0 text-right ${tone || "text-ink"}`}>{value}</span>
     </div>
   );
 }
@@ -592,7 +607,7 @@ function OwnerKV({ label, field, value, display, type = "text", options, leadId,
   };
   return (
     <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 last:border-0 min-w-0" data-testid={`owner-field-${field}`}>
-      <span className="text-sm text-ink-soft min-w-0 break-words">{label}</span>
+      <span className="text-sm text-ink-soft shrink-0 pr-3">{label}</span>
       {editing ? (
         <div className="flex items-center gap-1 min-w-0">
           {options ? (
@@ -619,7 +634,135 @@ function OwnerKV({ label, field, value, display, type = "text", options, leadId,
   );
 }
 
-function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit }) {
+function UnitBilledDateField({ leadId, sno, value, canEdit, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setDraft(value || ""); }, [value]);
+  const save = async () => {
+    if (!draft) return toast.error("Pick a billed date");
+    setBusy(true);
+    try {
+      await put(`/leads/${leadId}/units/${sno}/billed-date`, { soldDate: draft });
+      toast.success(`Unit ${sno} billed date saved — Scheme Master uses that month`);
+      setEditing(false);
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not save billed date"));
+    } finally { setBusy(false); }
+  };
+  if (!canEdit) {
+    return (
+      <span className="text-xs text-ink-soft" data-testid={`unit-billed-${sno}`}>
+        {value ? `Billed ${fmtDate(value)}` : "No billed date"}
+      </span>
+    );
+  }
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1" data-testid={`unit-billed-edit-${sno}`}>
+        <input className="rounded-md ring-1 ring-inset ring-line text-xs py-0.5 px-1.5 font-mono"
+          type="date" value={draft} onChange={(e) => setDraft(e.target.value)}
+          data-testid={`unit-billed-input-${sno}`} />
+        <Button className="!py-0.5 !px-1.5 text-[11px]" onClick={save} disabled={busy}
+          data-testid={`unit-billed-save-${sno}`}>Save</Button>
+        <Button variant="ghost" className="!py-0.5 !px-1.5 text-[11px]"
+          onClick={() => { setDraft(value || ""); setEditing(false); }}>Cancel</Button>
+      </span>
+    );
+  }
+  return (
+    <button type="button" className="inline-flex items-center gap-1 text-xs text-cobalt"
+      data-testid={`unit-billed-btn-${sno}`} onClick={() => setEditing(true)}>
+      <span>{value ? `Billed ${fmtDate(value)}` : "Set billed date"}</span>
+      <Pencil size={11} className="text-ink-faint" />
+    </button>
+  );
+}
+
+export function OverviewUnits({
+  lead, onOpenUnit, onSaved, onAddPackUnit, onAddAnotherVehicle,
+  canAddPackUnit, canAddAnotherVehicle, canEditBilledDate, hideExecScheme,
+}) {
+  const units = (lead.units || []).length
+    ? lead.units
+    : [{
+      sno: 1,
+      model: lead.interestedModel,
+      variant: lead.variant,
+      customerPayable: lead.customerPayable,
+      soldDate: lead.schemeAsOf || "",
+    }];
+  return (
+    <div className="sm:col-span-2 lg:col-span-3 mt-2" data-testid="overview-units">
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <div className="text-[10px] uppercase tracking-wide text-ink-faint">
+          Units ({lead.vehicleCount || units.length})
+        </div>
+        {canAddPackUnit && onAddPackUnit && (
+          <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
+            data-testid="overview-add-pack-unit-btn" onClick={onAddPackUnit}>
+            <Plus size={11} /> Add unit to this order
+          </Button>
+        )}
+        {canAddAnotherVehicle && onAddAnotherVehicle && (
+          <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
+            data-testid="overview-add-another-vehicle-btn" onClick={onAddAnotherVehicle}>
+            <Plus size={11} /> Add another vehicle
+          </Button>
+        )}
+      </div>
+      <p className="text-[11px] text-ink-faint mb-2">
+        Each unit has its own billed date. That date loads that month’s scheme (Sept vs Oct can differ).
+      </p>
+      <ul className="space-y-2">
+        {units.map((u, i) => {
+          const sno = u.sno || i + 1;
+          const priced = !!(u.priceStructureSaved || (i === 0 && lead.priceStructureSaved));
+          const schemed = !!(u.schemeAllocationExplicit || (u.benefitPassedBreakup && String(u.benefitPassedBreakup) !== "{}")
+            || (i === 0 && (lead.schemeAllocationExplicit || lead.benefitPassedBreakup)));
+          return (
+            <li key={sno} className="flex flex-wrap items-center gap-2 text-xs text-ink" data-testid={`overview-unit-${sno}`}>
+              <span className="min-w-0">
+                Unit {sno}
+                {u.model ? ` · ${u.model}` : ""}
+                {u.variant ? ` ${u.variant}` : ""}
+                {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
+                {priced && schemed ? " · filled" : (hideExecScheme ? "" : " · Price / Scheme open")}
+              </span>
+              <UnitBilledDateField
+                leadId={lead.leadId}
+                sno={sno}
+                value={u.soldDate || ""}
+                canEdit={!!canEditBilledDate}
+                onSaved={onSaved}
+              />
+              {onOpenUnit && !hideExecScheme && (
+                <span className="flex gap-1">
+                  <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
+                    data-testid={`overview-unit-price-${sno}`}
+                    onClick={() => onOpenUnit(sno, "price")}>Price</Button>
+                  <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
+                    data-testid={`overview-unit-scheme-${sno}`}
+                    onClick={() => onOpenUnit(sno, "scheme")}>Scheme</Button>
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {Number(lead.customerPayable || lead.cxDemand) > 0 && (
+        <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
+          Pack payable {inr(lead.customerPayable || lead.cxDemand)}
+          {(!hideExecScheme && Number(lead.packUnitsPending || 0) > 0) ? " · edit each unit’s Price and Scheme if the quote should change" : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
+  onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate }) {
   const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, canSeeOwnerCommercials } = useAuth();
   const booked = !!actions.isBooked;
   const kycDocKinds = kycKinds(lead.customerType);
@@ -715,49 +858,17 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           <OwnerKV label="Model" field="interestedModel" value={lead.interestedModel || ""}
             options={["", ...(masters.models || [])]} leadId={lid} onSaved={onSaved} />
           <OwnerKV label="Variant" field="variant" value={lead.variant || ""} leadId={lid} onSaved={onSaved} />
-          {(lead.sameOrderMultiUnit || (lead.units || []).length > 1) && (
-            <div className="sm:col-span-2 lg:col-span-3 mt-2" data-testid="overview-units">
-              <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">
-                Same-order units ({lead.vehicleCount || (lead.units || []).length})
-              </div>
-              <ul className="space-y-2">
-                {(lead.units || []).map((u, i) => {
-                  const sno = u.sno || i + 1;
-                  const priced = !!(u.priceStructureSaved || (i === 0 && lead.priceStructureSaved));
-                  const schemed = !!(u.schemeAllocationExplicit || (u.benefitPassedBreakup && String(u.benefitPassedBreakup) !== "{}")
-                    || (i === 0 && (lead.schemeAllocationExplicit || lead.benefitPassedBreakup)));
-                  return (
-                    <li key={sno} className="flex flex-wrap items-center gap-2 text-xs text-ink" data-testid={`overview-unit-${sno}`}>
-                      <span className="min-w-0">
-                        Unit {sno}
-                        {u.model ? ` · ${u.model}` : ""}
-                        {u.variant ? ` ${u.variant}` : ""}
-                        {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
-                        {u.soldDate ? ` · billed ${fmtDate(u.soldDate)}` : ""}
-                        {priced && schemed ? " · filled" : (isExecutive ? "" : " · Price / Scheme open")}
-                      </span>
-                      {onOpenUnit && !isExecutive && (
-                        <span className="flex gap-1">
-                          <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
-                            data-testid={`overview-unit-price-${sno}`}
-                            onClick={() => onOpenUnit(sno, "price")}>Price</Button>
-                          <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
-                            data-testid={`overview-unit-scheme-${sno}`}
-                            onClick={() => onOpenUnit(sno, "scheme")}>Scheme</Button>
-                        </span>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-              {Number(lead.customerPayable || lead.cxDemand) > 0 && (
-                <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
-                  Pack payable {inr(lead.customerPayable || lead.cxDemand)}
-                  {(!isExecutive && Number(lead.packUnitsPending || 0) > 0) ? " · edit each unit’s Price and Scheme if the quote should change" : ""}
-                </div>
-              )}
-            </div>
-          )}
+          <OverviewUnits
+            lead={lead}
+            onOpenUnit={onOpenUnit}
+            onSaved={onSaved}
+            onAddPackUnit={onAddPackUnit}
+            onAddAnotherVehicle={onAddAnotherVehicle}
+            canAddPackUnit={canAddPackUnit}
+            canAddAnotherVehicle={canAddAnotherVehicle}
+            canEditBilledDate={canEditBilledDate}
+            hideExecScheme={isExecutive}
+          />
           <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
             display={inr(lead.budget || lead.cxDemand || 0)} numeric leadId={lid} onSaved={onSaved} />
           <OwnerKV label="Remarks" field="remarks" value={lead.remarks || ""} leadId={lid} onSaved={onSaved} />
@@ -1194,6 +1305,9 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-2">
         <Field label="Scheme Date">
           <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
+          <p className="text-[11px] text-ink-faint mt-1">
+            Defaults to this unit’s billed date so Sept and Oct units load different Scheme Master months.
+          </p>
         </Field>
         <Field label="OEM Extra Support Received">
           <Input data-testid="oem-extra-received" type="number" value={form.oemExtraSupportReceived}
@@ -2737,6 +2851,7 @@ function CancelModal({ lead, actions, amend = false, onClose, onDone }) {
 function AddPackUnitModal({ lead, masters, onClose, onSaved }) {
   const [model, setModel] = useState("");
   const [variant, setVariant] = useState("");
+  const [soldDate, setSoldDate] = useState(todayISO());
   const [variants, setVariants] = useState([]);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -2748,8 +2863,8 @@ function AddPackUnitModal({ lead, masters, onClose, onSaved }) {
     if (!model) return toast.error("Pick a model for the extra unit");
     setBusy(true);
     try {
-      const saved = await post(`/leads/${lead.leadId}/units`, { model, variant });
-      toast.success(`Unit ${saved.vehicleCount || ""} added. Fill its Price Structure and Scheme.`);
+      const saved = await post(`/leads/${lead.leadId}/units`, { model, variant, soldDate });
+      toast.success(`Unit ${saved.vehicleCount || ""} added. Fill its Price Structure and Scheme for the billed month.`);
       onSaved(saved);
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not add unit"));
@@ -2760,9 +2875,13 @@ function AddPackUnitModal({ lead, masters, onClose, onSaved }) {
     <MiniModal title="Add unit to this order" onClose={onClose} onSubmit={save}
       submitLabel={busy ? "Saving…" : "Add unit"} testid="save-pack-unit-btn" submitDisabled={busy}>
       <p className="text-sm text-ink-soft mb-3">
-        Adds another vehicle on this file. Each unit has its own Price Structure and Scheme. Final outstanding is calculated after every unit is filled. Unit 1 prices stay as they are.
+        Adds another vehicle on this file. Each unit has its own billed date, Price Structure and Scheme. That billed date picks the Scheme Master month. Final outstanding is calculated after every unit is filled. Unit 1 prices stay as they are.
       </p>
       <div className="grid grid-cols-1 gap-3 pb-2">
+        <Field label="Billed date">
+          <Input data-testid="pack-unit-billed-date" type="date" value={soldDate}
+            onChange={(e) => setSoldDate(e.target.value)} />
+        </Field>
         <Field label="Model">
           <Select data-testid="pack-unit-model" value={model} onChange={(e) => { setModel(e.target.value); setVariant(""); }}>
             <option value="">—</option>
