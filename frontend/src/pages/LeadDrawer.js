@@ -8,7 +8,7 @@ import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
-import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady } from "../components/LeadDocuments";
+import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady, B2bGstinField } from "../components/LeadDocuments";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
@@ -745,6 +745,11 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
             documents={documents}
             onChanged={onSaved}
           />
+          {(lead.customerType || "Individual") === "B2B" && (
+            <div className="mt-2">
+              <B2bGstinField leadId={lead.leadId} gstin={lead.gstin || ""} canEdit={canUploadKyc} onSaved={onSaved} />
+            </div>
+          )}
           {Number(lead.oemExtraSupportReceived) > 0 && (
             <LeadDocsStrip
               leadId={lead.leadId}
@@ -2419,7 +2424,7 @@ function paymentRefRequired(mode, amount) {
 }
 
 function BookingModal({ lead, onClose, onDone }) {
-  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", paymentReference: "", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO() });
+  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", paymentReference: "", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO(), gstin: lead.gstin || "" });
   // Commercial gate: a booking may only be confirmed once the backend has resolved
   // the vehicle against Price Master. All figures below come from the API — nothing
   // is calculated or defaulted in React, so there is no path to a silent zero.
@@ -2460,6 +2465,7 @@ function BookingModal({ lead, onClose, onDone }) {
         bookingAmount: +form.bookingAmount, paymentMode: form.paymentMode, executive: lead.executive,
         financeRequired: form.financeRequired, exchangeRequired: form.exchangeRequired,
         bookingDate: form.bookingDate, paymentReference: String(form.paymentReference || "").trim(),
+        gstin: String(form.gstin || "").trim(),
       });
       // Report the ACTUAL backend sync state, never an assumption from a 200.
       let sync = "Pending";
@@ -2540,6 +2546,14 @@ function BookingModal({ lead, onClose, onDone }) {
           <Input data-testid="booking-payment-ref" value={form.paymentReference} onChange={set("paymentReference")}
             placeholder={form.paymentMode === "Cheque" ? "Cheque number" : "UTR / transaction number"} />
         </Field>
+        {(lead.customerType || "Individual") === "B2B" && (
+          <div className="sm:col-span-2">
+            <Field label="GSTIN">
+              <Input data-testid="booking-gstin" value={form.gstin} onChange={set("gstin")}
+                placeholder="Optional if GST certificate is attached" />
+            </Field>
+          </div>
+        )}
         <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
         <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
       </div>
