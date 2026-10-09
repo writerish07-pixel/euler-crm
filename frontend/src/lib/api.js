@@ -285,26 +285,49 @@ async function messageFromBlobError(err, fallback) {
   }
 }
 
+function saveBlob(data, filename) {
+  const type = String(data?.type || "");
+  if (type.includes("application/json") || type.includes("text/html")) {
+    return null;
+  }
+  const blob = data instanceof Blob ? data : new Blob([data]);
+  const link = document.createElement("a");
+  link.href = window.URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  window.URL.revokeObjectURL(link.href);
+  return blob;
+}
+
+async function rejectIfJsonBlob(data, fallback) {
+  const type = String(data?.type || "");
+  if (!(type.includes("application/json") || type.includes("text/html"))) return;
+  let text = "";
+  try { text = await data.text(); } catch { /* empty */ }
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { /* not json */ }
+  const msg = parsed
+    ? apiErrorMessage({ response: { data: parsed } }, fallback)
+    : fallback;
+  throw Object.assign(new Error(msg), { response: { data: parsed || { detail: msg } } });
+}
+
 export async function downloadFile(url, filename, params) {
   try {
     const data = await withFallback(() => api.get(url, { responseType: "blob", params }).then((r) => r.data));
-    const type = String(data?.type || "");
-    if (type.includes("application/json") || type.includes("text/html")) {
-      let text = "";
-      try { text = await data.text(); } catch { /* empty */ }
-      let parsed = null;
-      try { parsed = JSON.parse(text); } catch { /* not json */ }
-      const msg = parsed
-        ? apiErrorMessage({ response: { data: parsed } }, "Download failed")
-        : "Could not download file";
-      throw Object.assign(new Error(msg), { response: { data: parsed || { detail: msg } } });
-    }
-    const blob = data instanceof Blob ? data : new Blob([data]);
-    const link = document.createElement("a");
-    link.href = window.URL.createObjectURL(blob);
-    link.download = filename;
-    link.click();
-    window.URL.revokeObjectURL(link.href);
+    await rejectIfJsonBlob(data, "Could not download file");
+    saveBlob(data, filename);
+  } catch (err) {
+    const msg = await messageFromBlobError(err, "Could not download file");
+    throw Object.assign(new Error(msg), { response: { data: { detail: msg } }, cause: err });
+  }
+}
+
+export async function downloadPost(url, filename, body) {
+  try {
+    const data = await withFallback(() => api.post(url, body, { responseType: "blob" }).then((r) => r.data));
+    await rejectIfJsonBlob(data, "Could not download file");
+    saveBlob(data, filename);
   } catch (err) {
     const msg = await messageFromBlobError(err, "Could not download file");
     throw Object.assign(new Error(msg), { response: { data: { detail: msg } }, cause: err });

@@ -16,6 +16,7 @@ jest.mock("../lib/api", () => ({
     return Promise.resolve({});
   },
   put: jest.fn(() => Promise.resolve({})),
+  downloadPost: jest.fn(() => Promise.resolve()),
   apiErrorMessage: (e, fallback) => fallback,
 }));
 jest.mock("./LeadDocuments", () => ({
@@ -25,6 +26,7 @@ jest.mock("./LeadDocuments", () => ({
   extraSupportReady: () => "",
   dealSheetReady: () => "",
   LocalDealSheetBlock: () => <div data-testid="deal-sheet-block" />,
+  PrintDealSheetButton: () => <button type="button" data-testid="print-deal-sheet-btn">Print</button>,
   uploadKycFiles: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({

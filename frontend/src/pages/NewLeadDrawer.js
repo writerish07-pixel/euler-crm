@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { get, post, apiErrorMessage, apiErrorDetail } from "../lib/api";
+import { get, post, apiErrorMessage, apiErrorDetail, downloadPost } from "../lib/api";
 import { todayISO, digitsLast10 } from "../lib/format";
 import { Button, Drawer, Field, Input, Select, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -254,6 +254,32 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     await saveLead({ anotherVehicle: anotherVehicle && !sameOrder, sameOrderMultiUnit: sameOrder });
   };
 
+  const printDealSheet = async () => {
+    if (!form.customerName) return toast.error("Enter the customer name");
+    if (!form.interestedModel || !form.variant) return toast.error("Select a vehicle");
+    if (!(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
+    setBusy(true);
+    try {
+      const extras = extraUnits.filter((u) => u.model || u.variant);
+      await downloadPost("/commercial/deal-sheet.pdf", `deal-sheet-${form.customerName}.pdf`, {
+        customerName: form.customerName,
+        mobile: form.mobile,
+        city: form.city,
+        customerType: form.customerType,
+        gstin: form.gstin,
+        interestedModel: form.interestedModel,
+        variant: form.variant,
+        budget: Number(form.budget),
+        executive: form.executive,
+        createdDate: form.createdDate,
+        passOnKeys: isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(","),
+        units: sameOrder && extras.length ? extras : undefined,
+      });
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
+    } finally { setBusy(false); }
+  };
+
   if (!masters) return null;
   const execOptions = [...(masters.executives || [])];
   if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
@@ -418,6 +444,8 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             hideScheme={isExecutive}
             passOn={isExecutive ? {} : passOn}
             onPassOn={isExecutive ? undefined : togglePassOn}
+            onPrint={printDealSheet}
+            printBusy={busy}
           />
         </div>
         <Field label="OEM Extra Support">
@@ -432,7 +460,8 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           copyFromSibling={copyDocsFromSibling}
         />
         {needsApproval && (
-          <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={[]} />
+          <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={[]}
+            onPrint={printDealSheet} printBusy={busy} />
         )}
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} copyFromSibling={copyDocsFromSibling} />

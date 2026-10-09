@@ -1,6 +1,7 @@
 import React from "react";
 import { inr } from "../lib/format";
 import { Field, Input } from "./ui";
+import { PrintDealSheetButton } from "./LeadDocuments";
 
 function Line({ k, v, strong, testid, tone }) {
   return (
@@ -22,6 +23,8 @@ export default function DealFormatCard({
   passOn = {},
   onPassOn,
   hideScheme = false,
+  onPrint,
+  printBusy = false,
 }) {
   const d = snapshot || {};
   const demand = cxDemand ?? d.cxDemand ?? 0;
@@ -40,8 +43,11 @@ export default function DealFormatCard({
     : !!d.needsOwnerApproval;
   return (
     <div className="rounded-lg border border-line bg-paper px-3 py-3 space-y-1.5" data-testid="deal-format-card">
-      <div className="text-xs font-semibold uppercase tracking-wide text-ink-soft mb-1">
-        Deal format{d.pack && d.unitCount > 1 ? ` · ${d.unitCount} units` : ""}
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <div className="text-xs font-semibold uppercase tracking-wide text-ink-soft">
+          Deal format{d.pack && d.unitCount > 1 ? ` · ${d.unitCount} units` : ""}
+        </div>
+        <PrintDealSheetButton onPrint={onPrint} disabled={printBusy} />
       </div>
       {loading && <p className="text-xs text-ink-faint">Loading Price Master…</p>}
       {missingPrice && (

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { get, put, apiErrorMessage } from "../lib/api";
+import { get, put, apiErrorMessage, downloadPost } from "../lib/api";
 import { Drawer, Button, Field, Input, Select } from "./ui";
 import { digitsLast10 } from "../lib/format";
 import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock, dealSheetReady, LocalDealSheetBlock } from "./LeadDocuments";
@@ -88,6 +88,30 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     } finally { setBusy(false); }
   };
 
+  const printDealSheet = async () => {
+    if (!row.customerName) return toast.error("Customer name is missing");
+    if (!model || !variant) return toast.error("Select a vehicle");
+    if (!(Number(budget) > 0)) return toast.error("Enter Cx Demand");
+    setBusy(true);
+    try {
+      await downloadPost("/commercial/deal-sheet.pdf", `deal-sheet-${row.customerName}.pdf`, {
+        customerName: row.customerName,
+        mobile,
+        city: row.city || "",
+        customerType,
+        gstin,
+        interestedModel: model,
+        variant,
+        budget: Number(budget),
+        executive: row.executive || row.submittedByName || "",
+        createdDate: String(row.createdAt || "").slice(0, 10),
+        passOnKeys: isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(","),
+      });
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
+    } finally { setBusy(false); }
+  };
+
   const models = masters?.models || [];
 
   return (
@@ -146,6 +170,8 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           showOwnerPnl={!!canSeeOwnerCommercials}
           hideScheme={isExecutive}
           passOn={isExecutive ? {} : passOn}
+          onPrint={printDealSheet}
+          printBusy={busy}
           onPassOn={isExecutive ? undefined : (key, yes, available) => {
             setPassOn((p) => ({ ...p, [key]: yes }));
             setBudget((cur) => {
@@ -165,7 +191,8 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           </p>
         </Field>
         <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={oemExtra} existingDocs={row.documents} />
-        <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={row.documents} />
+        <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={row.documents}
+          onPrint={printDealSheet} printBusy={busy} />
         <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} />
       </div>
     </Drawer>

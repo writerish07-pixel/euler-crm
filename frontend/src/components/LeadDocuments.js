@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Camera, FileUp, Download, Trash2, FileText, Image as ImageIcon } from "lucide-react";
+import { Camera, FileUp, Download, Trash2, FileText, Image as ImageIcon, Printer } from "lucide-react";
 import { toast } from "sonner";
 import { api, del, get, put, uploadFile, apiErrorMessage } from "../lib/api";
 
@@ -283,13 +283,31 @@ export function dealSheetReady(files, existingDocs = []) {
   return "Attach the deal sheet";
 }
 
-export function LocalDealSheetBlock({ files, setFiles, existingDocs = [] }) {
+export function PrintDealSheetButton({ onPrint, disabled, label = "Print deal sheet" }) {
+  if (!onPrint) return null;
+  return (
+    <button
+      type="button"
+      data-testid="print-deal-sheet-btn"
+      disabled={disabled}
+      onClick={onPrint}
+      className="inline-flex items-center gap-1.5 text-xs font-medium text-cobalt disabled:text-ink-faint"
+    >
+      <Printer size={14} /> {label}
+    </button>
+  );
+}
+
+export function LocalDealSheetBlock({ files, setFiles, existingDocs = [], onPrint, printBusy }) {
   const have = (existingDocs || []).find((d) => d.kind === "deal_sheet");
   return (
     <div className="sm:col-span-2 space-y-2" data-testid="deal-sheet-block">
-      <div className="text-xs font-semibold text-ink">Deal sheet *</div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-semibold text-ink">Deal sheet *</div>
+        <PrintDealSheetButton onPrint={onPrint} disabled={printBusy} />
+      </div>
       <p className="text-[11px] text-ink-soft">
-        Photo or PDF of the deal sheet for this enquiry. Required before sending for approval.
+        Print the deal sheet, get the customer to sign it, then upload the photo or PDF. Required before sending for approval.
       </p>
       {have && (
         <p className="text-[11px] text-emerald-700" data-testid="deal-sheet-existing">

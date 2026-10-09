@@ -15,6 +15,7 @@ jest.mock("../lib/api", () => ({
   del: jest.fn(() => Promise.resolve({})),
   apiErrorMessage: (e, fallback) => fallback,
   apiErrorDetail: () => ({}),
+  downloadFile: jest.fn(() => Promise.resolve()),
 }));
 jest.mock("../context/AuthContext", () => ({
   useAuth: () => ({ isOwner: true, isTl: true, isSalesGm: false, isExecutive: false, isAccounts: false, canSeeOwnerCommercials: true }),
@@ -27,6 +28,7 @@ jest.mock("../components/LeadDocuments", () => ({
   extraSupportReady: () => "",
   B2bGstinField: () => null,
   RefundChequePick: () => null,
+  PrintDealSheetButton: () => null,
 }));
 jest.mock("../components/CallLink", () => () => null);
 jest.mock("../components/CompleteFormatDrawer", () => () => null);

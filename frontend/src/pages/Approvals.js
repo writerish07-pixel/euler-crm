@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, apiErrorMessage } from "../lib/api";
+import { get, post, apiErrorMessage, downloadFile } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
-import { RequestKycPreview, RequestOemExtraPreview, RequestDealSheetPreview, RequestMissingUploads } from "../components/LeadDocuments";
+import { RequestKycPreview, RequestOemExtraPreview, RequestDealSheetPreview, RequestMissingUploads, PrintDealSheetButton } from "../components/LeadDocuments";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import CallLink from "../components/CallLink";
 
@@ -173,6 +173,18 @@ export default function Approvals() {
           { key: "dealSheet", label: "Deal sheet", render: (r) => (
             <div>
               <RequestDealSheetPreview documents={r.documents || []} />
+              <PrintDealSheetButton
+                onPrint={async () => {
+                  try {
+                    await downloadFile(
+                      `/lead-requests/${r.requestId}/deal-sheet.pdf`,
+                      `deal-sheet-${r.requestId}.pdf`,
+                    );
+                  } catch (e) {
+                    toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
+                  }
+                }}
+              />
               {status === "pending" && r.dealSheetMissing && (
                 <RequestMissingUploads
                   requestId={r.requestId}
