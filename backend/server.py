@@ -36,6 +36,8 @@ import lead_docs
 import tab_export
 import insurance_mis as ins_mis
 import sept_2026_schemes
+import oct_2026_schemes
+import scheme_circulars
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -6904,6 +6906,7 @@ async def scheme_rules(lead_id: str, on: Optional[str] = None, unit: Optional[in
     snap = {**lead_to_snapshot(_lead_overlay_unit(lead, chosen, idx)), "schemeAsOf": as_of}
     out["allocation"] = ce.compute_scheme_allocation(snap, scheme_rows)
     out["asOf"] = as_of
+    out["circular"] = scheme_circulars.for_date(as_of)
     if not _is_owner_user(user):
         out = _staff_safe_scheme_rules(out)
     return out
@@ -10615,6 +10618,16 @@ async def list_scheme_master(on: Optional[str] = None, _desk=Depends(deal_desk_o
     if len(iso) == 10 and iso[4] == "-" and iso[7] == "-":
         rows = [r for r in rows if _scheme_row_matches_as_of(r, iso)]
     return rows
+
+
+@api.get("/scheme-circulars")
+async def list_scheme_circulars(month: Optional[str] = None, on: Optional[str] = None,
+                               _user=Depends(current_user)):
+    """OEM circular picture for a billed / scheme month. Empty when that month has no file."""
+    if month or on:
+        hit = scheme_circulars.for_date(month or on)
+        return hit or {}
+    return scheme_circulars.all_circulars()
 
 
 @api.get("/incentive-master")
@@ -15050,6 +15063,10 @@ async def _run_boot_maintenance():
             await sept_2026_schemes.ensure_sept_2026_schemes(db)
         except Exception:
             logging.exception("SEPT_2026_SCHEME_BOOT_ERROR")
+        try:
+            await oct_2026_schemes.ensure_oct_2026_schemes(db)
+        except Exception:
+            logging.exception("OCT_2026_SCHEME_BOOT_ERROR")
         _boot_state["maintenance"] = "done"
         logging.info("BOOT_MAINTENANCE: finished")
     except Exception:

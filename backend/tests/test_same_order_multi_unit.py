@@ -1231,6 +1231,8 @@ async def test_add_unit_keeps_own_billed_date(client):
     assert octb.status_code == 200, octb.text
     assert sept.json().get("asOf")[:7] == "2026-09"
     assert octb.json().get("asOf")[:7] == "2026-10"
+    assert not sept.json().get("circular")
+    assert (octb.json().get("circular") or {}).get("imageUrl") == "/scheme-circulars/2026-10.png"
 
 
 @pytest.mark.asyncio

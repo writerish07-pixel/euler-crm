@@ -454,6 +454,11 @@ async def run_seed(db, force=False):
         result["sept_2026_schemes"] = await ensure_sept_2026_schemes(db)
     except Exception as exc:
         result["sept_2026_schemes"] = f"error ({type(exc).__name__})"
+    try:
+        from oct_2026_schemes import ensure_oct_2026_schemes
+        result["oct_2026_schemes"] = await ensure_oct_2026_schemes(db)
+    except Exception as exc:
+        result["oct_2026_schemes"] = f"error ({type(exc).__name__})"
     return {"seeded": True, "result": result}
 
 
