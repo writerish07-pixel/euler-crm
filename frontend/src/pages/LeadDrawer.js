@@ -34,6 +34,19 @@ function packUnitList(lead) {
   return null;
 }
 
+function unitBilledDate(u, lead) {
+  const d = String((u && (u.soldDate || u.schemeAsOf)) || (lead && lead.bookingDate) || "").slice(0, 10);
+  return d.length === 10 ? d : "";
+}
+
+function earliestPackBilledDate(lead) {
+  const dates = (lead?.units || [])
+    .map((u) => String(u?.soldDate || "").slice(0, 10))
+    .filter((d) => d.length === 10)
+    .sort();
+  return dates[0] || lead?.bookingDate || "";
+}
+
 function unitSource(lead, unit, index) {
   const u = unit || {};
   if (!index) {
@@ -59,7 +72,8 @@ function unitSource(lead, unit, index) {
     oemExtraSupportPassed: u.oemExtraSupportPassed || 0,
     benefitPassedBreakup: u.benefitPassedBreakup,
     schemeComponentsUsed: u.schemeComponentsUsed,
-    schemeAsOf: u.schemeAsOf || lead.schemeAsOf,
+    schemeAsOf: u.schemeAsOf || u.soldDate || lead.schemeAsOf,
+    soldDate: u.soldDate || "",
     tcsApplicable: u.tcsApplicable || "No",
     finalExchangeValue: u.finalExchangeValue || 0,
     insuranceArrangedBy: u.insuranceArrangedBy === "self" ? "self" : "dealer",
@@ -95,6 +109,7 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
             >
               Unit {sno}{u.model ? ` · ${u.model}` : ""}{u.variant ? ` ${u.variant}` : ""}
               {u.customerPayable ? ` · ${inr(u.customerPayable)}` : ""}
+              {u.soldDate ? ` · billed ${fmtDate(u.soldDate)}` : ""}
               {priced && schemed ? " ✓" : ""}
             </button>
           );
@@ -136,6 +151,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme }) {
                 <div className="font-mono font-bold text-cobalt mt-1" data-testid={`units-tab-payable-${sno}`}>
                   {inr(u.customerPayable)}
                 </div>
+                {u.soldDate ? <div className="text-xs text-ink-soft mt-1" data-testid={`units-tab-billed-${sno}`}>Billed {fmtDate(u.soldDate)}</div> : null}
                 {u.chassisNumber ? <div className="text-xs text-ink-soft mt-1">Chassis {u.chassisNumber}</div> : null}
                 {u.numberPlate ? <div className="text-xs text-ink-soft">Plate {u.numberPlate}</div> : null}
               </div>
@@ -632,9 +648,18 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           <span className="text-sm font-semibold text-ink">Customer Payable</span>
           <span className="font-mono font-bold text-cobalt">{inr(lead.customerPayable ?? c.customerPayable)}</span>
         </div>
+        {(booked || Number(lead.bookingAmount) > 0) && (
+          <div className="flex items-center justify-between mt-1" data-testid="overview-booking-amount">
+            <span className="text-sm text-ink-soft">Booking amount</span>
+            <span className="font-mono font-semibold text-ink">{inr(lead.bookingAmount || 0)}</span>
+          </div>
+        )}
       </Card>
       <Card className="p-4">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Collections & Claims</h4>
+        {(booked || Number(lead.bookingAmount) > 0) && (
+          <KV label="Booking advance" value={inr(lead.bookingAmount || 0)} />
+        )}
         <KV label="Total Received" value={inr(lead.totalReceived)} tone="text-emerald-600" />
         <KV label="Customer Outstanding" value={inr(lead.customerOutstanding)} tone={lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"} />
         {canSeeOwnerCommercials && (
@@ -677,6 +702,8 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           <KV label="Created" value={fmtDate(lead.createdDate)} />
           <OwnerKV label="Booking Date" field="bookingDate" value={lead.bookingDate || ""} type="date"
             display={fmtDate(lead.bookingDate)} leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="Booking amount" field="bookingAmount" value={lead.bookingAmount || 0}
+            display={inr(lead.bookingAmount || 0)} numeric leadId={lid} onSaved={onSaved} />
           <OwnerKV label="Finance" field="financeRequired" value={lead.financeRequired || "No"}
             options={["No", "Yes"]} leadId={lid} onSaved={onSaved} />
           <OwnerKV label="Exchange" field="exchangeRequired" value={lead.exchangeRequired || "No"}
@@ -706,6 +733,7 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
                         {u.model ? ` · ${u.model}` : ""}
                         {u.variant ? ` ${u.variant}` : ""}
                         {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
+                        {u.soldDate ? ` · billed ${fmtDate(u.soldDate)}` : ""}
                         {priced && schemed ? " · filled" : (isExecutive ? "" : " · Price / Scheme open")}
                       </span>
                       {onOpenUnit && !isExecutive && (
@@ -791,7 +819,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
   const inactive = !actions.canPrice;
   const staffLocked = !isOwner && unitPriced;
   const locked = inactive || staffLocked;
-  const [priceDate, setPriceDate] = useState(lead.bookingDate || lead.createdDate || todayISO());
+  const [priceDate, setPriceDate] = useState(unitBilledDate(src, lead) || lead.createdDate || todayISO());
   const [masterMsg, setMasterMsg] = useState("");
   const [form, setForm] = useState(() => {
     const f = {
@@ -814,6 +842,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
     };
     CHARGE_FIELDS.forEach(([k]) => (f[k] = next[k] || 0));
     setForm(f);
+    setPriceDate(unitBilledDate(next, lead) || lead.createdDate || todayISO());
   }, [lead.leadId, unitSno]); // form reset is keyed only to the selected pack unit
 
   // Ex-Showroom is locked to Price Master for this unit's model/variant.
@@ -966,7 +995,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
   const staffLocked = !isOwner && unitSchemed;
   const locked = inactive || staffLocked;
   const [rules, setRules] = useState(null);
-  const [schemeDate, setSchemeDate] = useState(src.schemeAsOf || lead.bookingDate || todayISO());
+  const [schemeDate, setSchemeDate] = useState(unitBilledDate(src, lead) || todayISO());
   const [form, setForm] = useState(() => ({
     oemExtraSupportReceived: src.oemExtraSupportReceived || 0,
     oemExtraSupportPassed: src.oemExtraSupportPassed || 0,
@@ -993,7 +1022,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
 
   useEffect(() => {
     const next = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
-    setSchemeDate(next.schemeAsOf || lead.bookingDate || todayISO());
+    setSchemeDate(unitBilledDate(next, lead) || todayISO());
     setForm({
       oemExtraSupportReceived: next.oemExtraSupportReceived || 0,
       oemExtraSupportPassed: next.oemExtraSupportPassed || 0,
@@ -1099,9 +1128,10 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     if (extraErr) return toast.error(extraErr);
     try {
       // Only rewrite bookingDate after a real booking — never invent a booking via date alone.
+      // Pack units keep their own billed / scheme date; do not collapse the order onto one date.
       const alreadyBooked = Boolean(lead.bookingId || lead.bookingDate
         || ["booked", "finance process", "delivered"].includes(String(lead.currentStatus || "").toLowerCase()));
-      if (alreadyBooked && schemeDate !== (lead.bookingDate || "")) {
+      if (!units && alreadyBooked && schemeDate !== (lead.bookingDate || "")) {
         await put(`/leads/${lead.leadId}`, { bookingDate: schemeDate });
       }
       await put(`/leads/${lead.leadId}/scheme`, units ? { ...payload, unitSno } : payload);
@@ -1366,6 +1396,9 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
   const paymentModes = (masters?.paymentModes || []).filter((m) => !(isExecutive && String(m).toLowerCase() === "finance"));
+  const packPayable = +(lead.customerPayable || 0);
+  const packReceived = +(lead.totalReceived || 0);
+  const packRoom = Math.max(0, packPayable - packReceived);
   const excess = +(lead.excessReceived || 0);
   const refunded = +(lead.refundedAmount || 0);
   const dealCancelled = !!lead.dealCancelled;
@@ -1439,6 +1472,15 @@ function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, o
         </Card>
       )}
       <Card className="p-4 mb-4">
+        {packPayable > 0 && (
+          <p className="text-xs text-ink-soft mb-3" data-testid="payments-pack-room">
+            {packUnitList(lead)
+              ? `Pack payable ${inr(packPayable)}`
+              : `Customer payable ${inr(packPayable)}`}
+            {` · received ${inr(packReceived)} · still collect ${inr(packRoom)}`}
+            {Number(lead.bookingAmount) > 0 ? ` · booking amount ${inr(lead.bookingAmount)}` : ""}
+          </p>
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 items-end">
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
           <Field label="Date"><Input data-testid="payment-date" type="date" value={form.date} onChange={set("date")} /></Field>
@@ -2424,7 +2466,7 @@ function paymentRefRequired(mode, amount) {
 }
 
 function BookingModal({ lead, onClose, onDone }) {
-  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", paymentReference: "", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || todayISO(), gstin: lead.gstin || "" });
+  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", paymentReference: "", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || earliestPackBilledDate(lead) || todayISO(), gstin: lead.gstin || "" });
   // Commercial gate: a booking may only be confirmed once the backend has resolved
   // the vehicle against Price Master. All figures below come from the API — nothing
   // is calculated or defaulted in React, so there is no path to a silent zero.
