@@ -777,6 +777,9 @@ async def test_pack_units_own_oem_extra_scheme(client):
     base2 = ce.num(base_units[1].get("customerPayable"))
     assert base1 > 0 and base2 > 0
 
+    await server.db.lead_documents.insert_one({
+        "leadId": lid, "kind": "oem_extra_support", "filename": "asm-mail.pdf",
+    })
     s1 = await client.put(f"/api/leads/{lid}/scheme", json={
         "benefitMode": "Partial Benefit",
         "additionalDiscount": 0,
@@ -971,3 +974,295 @@ def test_pack_billing_summary_uses_per_unit_48000_and_11500():
         assert ce.num(row["additionalDiscount"]) == 11500
     assert ce.num(s["totals"]["oemExtraSupportPassed"]) == 240000
     assert ce.num(s["totals"]["additionalDiscount"]) == 57500
+
+
+def test_stamp_unit_keeps_distinct_sold_dates():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "A"},
+            {"sno": 2, "model": "Turbo Max", "variant": "A"},
+        ],
+    }
+    first = oem_sync.stamp_unit_vehicle_ids(lead, "MD9DATE01", "INV-1", "", "2026-09-30")
+    lead = {**lead, "units": first}
+    second = oem_sync.stamp_unit_vehicle_ids(lead, "MD9DATE02", "INV-2", "", "2026-10-09")
+    assert second[0]["soldDate"] == "2026-09-30"
+    assert second[0]["chassisNumber"] == "MD9DATE01"
+    assert second[1]["soldDate"] == "2026-10-09"
+    assert second[1]["chassisNumber"] == "MD9DATE02"
+
+
+def test_receipt_payable_sums_pack_not_unit1():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "priceStructureSaved": True,
+        "useDealPrice": True,
+        "cxDemand": 1580000,
+        "customerPayable": 1580000,
+        "exShowroom": 790000,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "A", "exShowroom": 790000,
+             "priceStructureSaved": True, "customerPayable": 786000},
+            {"sno": 2, "model": "Turbo Max", "variant": "A", "exShowroom": 790000,
+             "priceStructureSaved": True, "customerPayable": 794000},
+        ],
+    }
+    assert server._deal_price_payable(lead) is None
+    unit1 = ce.compute_commercial_totals(server.lead_to_snapshot(lead))["customerPayable"]
+    assert unit1 < 1580000
+    pay = server._receipt_payable(lead)
+    assert pay >= 1500000
+    assert pay > unit1
+
+
+@pytest.mark.asyncio
+async def test_pack_booking_advance_posts_against_pack_payable(client):
+    """₹8,00,000 convert-booking on a two-unit file must land as a receipt."""
+    mobile = "9813301555"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-PAY-A", "PM-PAY-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-PAY-A", "model": "Turbo Max", "variant": "Pay A",
+        "exShowroom": 790000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-PAY-B", "model": "Turbo Max", "variant": "Pay B",
+        "exShowroom": 790000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    created = await client.post("/api/leads", json={
+        "customerName": "Kapoor Freight",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Pay A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    added = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Turbo Max", "variant": "Pay B",
+    })
+    assert added.status_code == 200, added.text
+    p1 = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 790000, "unitSno": 1,
+    })
+    assert p1.status_code == 200, p1.text
+    s1 = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 4000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 1,
+    })
+    assert s1.status_code == 200, s1.text
+    p2 = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 790000, "unitSno": 2,
+    })
+    assert p2.status_code == 200, p2.text
+    s2 = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 4000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 2,
+    })
+    assert s2.status_code == 200, s2.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    pack_pay = ce.num(lead.get("customerPayable"))
+    unit1_pay = ce.num((lead.get("units") or [{}])[0].get("customerPayable"))
+    assert pack_pay > unit1_pay > 0
+    # Amount that used to 422 against unit 1 (~₹7,86,000) but is valid on the pack.
+    advance = ce.round2(max(800000.0, unit1_pay + 14000))
+    assert advance < pack_pay
+    booked = await client.post(f"/api/leads/{lid}/convert-booking", json={
+        "bookingDate": "2026-09-30", "bookingAmount": advance,
+        "paymentMode": "UPI", "paymentReference": "7878",
+        "financeRequired": "No", "exchangeRequired": "No",
+    })
+    assert booked.status_code == 200, booked.text
+    pays = await server.db.payments.find({"leadId": lid}).to_list(20)
+    assert len(pays) == 1
+    assert ce.num(pays[0].get("amount")) == advance
+    fresh = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(fresh.get("bookingAmount")) == advance
+    assert ce.num(fresh.get("totalReceived")) == advance
+    assert ce.num(fresh.get("customerOutstanding")) == ce.round2(pack_pay - advance)
+    rest = ce.round2(min(800000.0, ce.num(fresh.get("customerOutstanding"))))
+    extra = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": rest, "paymentMode": "Cash", "date": "2026-09-30",
+        "paymentReference": "5287134685",
+    })
+    assert extra.status_code == 200, extra.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(after.get("totalReceived")) == ce.round2(advance + rest)
+
+
+@pytest.mark.asyncio
+async def test_360_heals_missing_booking_advance(client):
+    """Booked + bookingAmount with Payments(0) gets the convert receipt on open."""
+    lid = "LD-HEAL-ADV"
+    mobile = "9813301666"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.payments.delete_many({"leadId": lid})
+    await server.db.bookings.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-HEAL-A", "PM-HEAL-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-HEAL-A", "model": "Turbo Max", "variant": "Heal A",
+        "exShowroom": 790000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-HEAL-B", "model": "Turbo Max", "variant": "Heal B",
+        "exShowroom": 790000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Kapoor Heal", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Heal A",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-30", "bookingAmount": 800000,
+        "lastPaymentMode": "UPI",
+        "sameOrderMultiUnit": True, "priceStructureSaved": True,
+        "exShowroom": 790000, "customerPayable": 1572000,
+        "cxDemand": 1572000, "useDealPrice": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Heal A",
+             "exShowroom": 790000, "priceStructureSaved": True,
+             "soldDate": "2026-09-30", "customerPayable": 786000},
+            {"sno": 2, "model": "Turbo Max", "variant": "Heal B",
+             "exShowroom": 790000, "priceStructureSaved": True,
+             "soldDate": "2026-10-09", "customerPayable": 786000},
+        ],
+    })
+    await server.db.bookings.insert_one({
+        "bookingId": "BK-HEAL-1", "leadId": lid, "bookingDate": "2026-09-30",
+        "bookingAmount": 800000, "amountReceived": 800000,
+        "paymentMode": "UPI", "paymentReference": "7878",
+        "bookingStatus": "Booked",
+    })
+    r = await client.get(f"/api/leads/{lid}/360")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    pays = body.get("payments") or []
+    assert len(pays) == 1
+    assert ce.num(pays[0].get("amount")) == 800000
+    lead = body.get("lead") or {}
+    assert ce.num(lead.get("bookingAmount")) == 800000
+    assert ce.num(lead.get("totalReceived")) == 800000
+    units = lead.get("units") or []
+    assert units[0].get("soldDate") == "2026-09-30"
+    assert units[1].get("soldDate") == "2026-10-09"
+
+
+@pytest.mark.asyncio
+async def test_append_oem_unit_keeps_own_billed_date(client):
+    lid = "LD-BILL-DATES"
+    mobile = "9813301777"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-BILL-DATE"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-BILL-DATE", "model": "Turbo Max", "variant": "Date A",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Date Pack", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Date A",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-01",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Date A",
+             "chassisNumber": "MD9DATEA01", "soldDate": "2026-09-30"},
+        ],
+    })
+    updated = await server._append_oem_unit(
+        await server.db.leads.find_one({"leadId": lid}),
+        {"chassis": "MD9DATEA02", "invoiceNumber": "INV-D2",
+         "model": "Turbo Max", "variant": "Date A", "soldDate": "2026-10-09"},
+    )
+    units = (updated or {}).get("units") or []
+    assert len(units) == 2
+    assert units[0].get("soldDate") == "2026-09-30"
+    assert units[1].get("soldDate") == "2026-10-09"
+
+
+@pytest.mark.asyncio
+async def test_add_unit_keeps_own_billed_date(client):
+    mobile = "9813301888"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-BD-A", "PM-BD-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-BD-A", "model": "Turbo Max", "variant": "Bd A",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-BD-B", "model": "Storm", "variant": "Bd B",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    first = await client.post("/api/leads", json={
+        "customerName": "Billed Dates",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Bd A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert first.status_code == 200, first.text
+    lid = first.json()["leadId"]
+    u1 = await client.put(f"/api/leads/{lid}/units/1/billed-date", json={"soldDate": "2026-09-30"})
+    assert u1.status_code == 200, u1.text
+    add = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Storm", "variant": "Bd B", "soldDate": "2026-10-09",
+    })
+    assert add.status_code == 200, add.text
+    units = add.json().get("units") or []
+    assert units[0].get("soldDate") == "2026-09-30"
+    assert units[1].get("soldDate") == "2026-10-09"
+    assert units[1].get("schemeAsOf") == "2026-10-09"
+    sept = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 1})
+    octb = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 2})
+    assert sept.status_code == 200, sept.text
+    assert octb.status_code == 200, octb.text
+    assert sept.json().get("asOf")[:7] == "2026-09"
+    assert octb.json().get("asOf")[:7] == "2026-10"
+
+
+@pytest.mark.asyncio
+async def test_billed_date_switches_scheme_month(client):
+    lid = "LD-BILL-SWITCH"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-SW-A"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-SW-A", "model": "Turbo Max", "variant": "Sw A",
+        "exShowroom": 500000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Switch Month", "mobile": "9813301999",
+        "interestedModel": "Turbo Max", "variant": "Sw A",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-10-03",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Sw A",
+             "soldDate": "2026-10-03", "schemeAsOf": "2026-10-03"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Sw A",
+             "soldDate": "2026-10-03", "schemeAsOf": "2026-10-03"},
+        ],
+    })
+    r = await client.put(f"/api/leads/{lid}/units/2/billed-date", json={"soldDate": "2026-09-15"})
+    assert r.status_code == 200, r.text
+    units = r.json().get("units") or []
+    assert units[0].get("soldDate") == "2026-10-03"
+    assert units[1].get("soldDate") == "2026-09-15"
+    assert units[1].get("schemeAsOf") == "2026-09-15"
+    rules = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 2})
+    assert rules.json().get("asOf") == "2026-09-15"
+    u1 = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 1})
+    assert u1.json().get("asOf") == "2026-10-03"

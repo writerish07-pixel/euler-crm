@@ -236,13 +236,21 @@ def _rows_in_period(rows, period, getter):
     return [r for r in rows if periodmod.in_period(getter(r), period)]
 
 
-def _scheme_as_of(lead=None, on=None):
-    """Date used to pick Scheme Master month for a lead.
+def _scheme_as_of(lead=None, on=None, unit=None):
+    """Date used to pick Scheme Master month for a lead or pack unit.
 
-    Order: explicit `on` / schemeDate > lead.schemeAsOf > bookingDate > today.
-    Changing Scheme Date on an unbooked lead must not invent a bookingDate.
+    Order: explicit `on` / schemeDate > unit.schemeAsOf > unit billed/sold date >
+    lead.schemeAsOf > bookingDate > today. Two units billed on different OEM
+    dates keep their own month. Changing Scheme Date on an unbooked lead must
+    not invent a bookingDate.
     """
-    for raw in (on, (lead or {}).get("schemeAsOf"), (lead or {}).get("bookingDate")):
+    for raw in (
+        on,
+        (unit or {}).get("schemeAsOf"),
+        (unit or {}).get("soldDate"),
+        (lead or {}).get("schemeAsOf"),
+        (lead or {}).get("bookingDate"),
+    ):
         d = str(raw or "").strip()[:10]
         if len(d) == 10 and d[4] == "-" and d[7] == "-":
             return d
@@ -1351,6 +1359,12 @@ class AddLeadUnitIn(BaseModel):
     """Add one SKU onto an existing same-order file."""
     model: str
     variant: str = ""
+    soldDate: Optional[str] = None
+
+
+class UnitBilledDateIn(BaseModel):
+    """OEM / Tally billed date for one pack unit. Drives that unit's scheme month."""
+    soldDate: str
 
 
 class LeadUpdateIn(BaseModel):
@@ -4155,9 +4169,10 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
     if _is_delivered_lead(lead) or lead.get("dealCancelled"):
         raise HTTPException(422, "Cannot add a unit on a delivered or cancelled file.")
     units = _ensure_lead_units(lead)
-    as_of = today()
+    billed = _parse_iso_date(body.soldDate, field="Billed date") if str(body.soldDate or "").strip() else ""
+    as_of = billed or today()
     rec = await _price_unit_from_master(body.model, body.variant, as_of)
-    units.append({
+    extra = {
         "sno": len(units) + 1,
         "model": str(body.model or "").strip(),
         "variant": str(body.variant or "").strip(),
@@ -4165,7 +4180,11 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
         "invoiceNumber": "",
         "numberPlate": "",
         **rec,
-    })
+    }
+    if billed:
+        extra["soldDate"] = billed
+        extra["schemeAsOf"] = billed
+    units.append(extra)
     lead["units"] = units
     lead["sameOrderMultiUnit"] = True
     cx = ce.round2(ce.num(lead.get("cxDemand") or lead.get("budget")))
@@ -4180,6 +4199,37 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
         "cxDemand": updated.get("cxDemand"),
     })
     return _lead_for_viewer(updated, user)
+
+
+@api.put("/leads/{lead_id}/units/{unit_sno}/billed-date")
+async def set_unit_billed_date(lead_id: str, unit_sno: int, body: UnitBilledDateIn,
+                               act=Depends(actor), _desk=Depends(deal_desk_only)):
+    """Save this unit's billed date. Scheme Master month follows that date."""
+    lead = await get_lead_or_404(lead_id)
+    _require_action(lead, "canScheme", "billed date (only Active leads)", act)
+    billed = _parse_iso_date(body.soldDate, field="Billed date")
+    idx, units = _resolve_unit_index(lead, unit_sno)
+    units = _ensure_lead_units(lead)
+    if idx >= len(units):
+        raise HTTPException(422, "That unit is not on this order.")
+    rec = dict(units[idx])
+    old = rec.get("soldDate") or rec.get("schemeAsOf") or ""
+    rec["soldDate"] = billed
+    rec["schemeAsOf"] = billed
+    rec["sno"] = idx + 1
+    units[idx] = rec
+    patch = {"units": units, "lastUpdated": now_iso(),
+             "vehicleCount": max(len(units), 1)}
+    if len(units) > 1:
+        patch["sameOrderMultiUnit"] = True
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    await recompute_lead(lead_id)
+    await write_audit(act, "update", "unit-billed-date", leadId=lead_id,
+                      old={"unitSno": idx + 1, "soldDate": old},
+                      new={"unitSno": idx + 1, "soldDate": billed})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    return _lead_for_viewer(clean(updated), act)
 
 
 def _request_out(doc):
@@ -4865,6 +4915,7 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
 async def get_lead(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     _require_own_lead(lead, user)
+    lead = clean(await _ensure_booking_advance_receipt(lead) or lead)
     lead = (await _attach_approval_request_ids([clean(lead)]))[0]
     return _lead_for_viewer(lead, user)
 
@@ -4943,6 +4994,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         await _hydrate_pack_unit_prices(lead)
         await recompute_lead(lead_id)
         lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
+    lead = clean(await _ensure_booking_advance_receipt(lead) or lead)
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
     commercials = ce.compute_full_commercials(snap, scheme_rows)
@@ -5381,6 +5433,40 @@ async def _sync_booking_amount_edit(lead_id, lead, old_amount, new_amount, act=N
         ))
 
 
+async def _ensure_booking_advance_receipt(lead):
+    """Post the convert-booking advance if status saved but the receipt 422'd.
+
+    Convert used to mark Booked, then `_add_payment_internal` refused the
+    advance against unit-1 payable. The drawer then showed Payments (0) and
+    full outstanding while `bookingAmount` sat on the lead.
+    """
+    if not lead or lead.get("dealCancelled"):
+        return lead
+    lid = lead.get("leadId")
+    requested = ce.round2(max(0.0, ce.num(lead.get("bookingAmount"))))
+    if not lid or requested <= 0.01 or not _is_booked(lead):
+        return lead
+    if await db.payments.count_documents({"leadId": lid}) > 0:
+        return lead
+    booking = await _live_booking(lid)
+    mode = str((booking or {}).get("paymentMode") or lead.get("lastPaymentMode") or "Cash")
+    pay_ref = str((booking or {}).get("paymentReference") or "").strip()
+    if _payment_ref_required(mode, requested) and not pay_ref:
+        mode = "Cash"
+    bdate = str((booking or {}).get("bookingDate") or lead.get("bookingDate") or today())[:10]
+    note = "Booking advance"
+    if pay_ref:
+        note = f"Booking advance · {pay_ref}"
+    try:
+        await _add_payment_internal(lid, PaymentIn(
+            amount=requested, paymentMode=mode, date=bdate,
+            narration=note, paymentReference=pay_ref))
+    except HTTPException:
+        return lead
+    await recompute_lead(lid)
+    return await db.leads.find_one({"leadId": lid}) or lead
+
+
 async def _price_master_row(model, variant):
     """Authoritative Price Master lookup, keyed on model + variant exactly as the
     Price Master defines them (case/whitespace-insensitive, active rows only).
@@ -5418,10 +5504,31 @@ def _is_turbo_vehicle(model, variant=""):
     return ce.normalize_scheme_model_key(model, variant) == "turbo"
 
 
-def _lead_price_as_of(lead=None, on=None):
-    """Booking date locks the list price; unbooked quotes use today."""
+def _unit_billed_date(unit=None):
+    d = str((unit or {}).get("soldDate") or (unit or {}).get("schemeAsOf") or "")[:10]
+    if len(d) == 10 and d[4] == "-" and d[7] == "-":
+        return d
+    return ""
+
+
+def _parse_iso_date(raw, *, field="Date"):
+    d = str(raw or "").strip()[:10]
+    if len(d) == 10 and d[4] == "-" and d[7] == "-":
+        try:
+            datetime.strptime(d, "%Y-%m-%d")
+            return d
+        except ValueError:
+            pass
+    raise HTTPException(422, f"{field} must be YYYY-MM-DD.")
+
+
+def _lead_price_as_of(lead=None, on=None, unit=None):
+    """Unit billed date, else booking date, else today."""
     if on:
         return str(on)[:10]
+    billed = _unit_billed_date(unit)
+    if billed:
+        return billed
     if lead:
         booked = str(lead.get("bookingDate") or "")[:10]
         if booked:
@@ -5604,6 +5711,9 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
             "invoiceNumber": str(u.get("invoiceNumber") or "").strip(),
             "numberPlate": str(u.get("numberPlate") or "").strip(),
         }
+        sold = str(u.get("soldDate") or "").strip()[:10]
+        if sold:
+            rec["soldDate"] = sold
         _copy_unit_commercials(u, rec)
         if rec["model"] or rec["variant"] or rec["chassisNumber"]:
             units.append(rec)
@@ -5915,6 +6025,9 @@ def _lead_overlay_unit(lead, unit, index=0):
     for k in UNIT_COMMERCIAL_KEYS:
         if k in u:
             out[k] = u[k]
+    as_of = _scheme_as_of(lead, unit=u)
+    if as_of:
+        out["schemeAsOf"] = as_of
     return out
 
 
@@ -5964,15 +6077,38 @@ def _sum_unit_payables(lead, scheme_rows=None):
     return total
 
 
+def _receipt_payable(lead, scheme_rows=None):
+    """Payable used to accept receipts — pack sum, not unit 1.
+
+    `_deal_price_payable` returns None once a pack has saved Price / Scheme so
+    callers will sum units. Payment posting used to fall through to
+    `compute_commercial_totals` on the lead snapshot (unit 1), so ₹8,00,000
+    on a two-unit ₹15,80,000 file 422'd against ~₹7,86,000 and the booking
+    advance never landed.
+    """
+    if not lead or lead.get("dealCancelled"):
+        return 0.0
+    payable = _deal_price_payable(lead)
+    if payable is None and oem_sync.is_same_order_pack(lead):
+        payable = _sum_unit_payables(lead, scheme_rows)
+    if payable is None or ce.num(payable) <= 0:
+        stored = ce.round2(ce.num(lead.get("customerPayable")))
+        if stored > 0:
+            payable = stored
+        else:
+            payable = ce.compute_commercial_totals(lead_to_snapshot(lead)).get("customerPayable")
+    return ce.round2(ce.num(payable))
+
+
 async def _hydrate_pack_unit_prices(lead):
     """Write Price Master charges onto pack units that still have ₹0."""
     if not oem_sync.is_same_order_pack(lead or {}):
         return lead, False
     units = _ensure_lead_units(lead)
-    as_of = str((lead or {}).get("bookingDate") or (lead or {}).get("createdDate") or today())[:10]
     changed = False
     for i, raw in enumerate(units):
         u = dict(raw or {})
+        as_of = _scheme_as_of(lead, unit=u)
         if ce.num(u.get("exShowroom")) > 0:
             units[i] = u
             continue
@@ -6307,7 +6443,7 @@ async def price_preview(lead_id: str, unit: Optional[int] = None):
         return {"found": False, "model": model, "variant": variant,
                 "message": f"Price Master entry not found for: Model = {model or '(none)'}, "
                            f"Variant = {variant or '(none)'}"}
-    as_of = _lead_price_as_of(lead)
+    as_of = _lead_price_as_of(lead, unit=chosen)
     return {"found": True, "model": model, "variant": variant,
             "priceId": row.get("priceId"), "asOf": as_of,
             "priceStructure": _price_structure_from_master(row, as_of)}
@@ -6711,7 +6847,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     variant = chosen.get("variant") or lead.get("variant")
     row = await _price_master_row(model, variant)
     if row:
-        master_ex = ce.num(_price_structure_from_master(row, _lead_price_as_of(lead)).get("exShowroom"))
+        master_ex = ce.num(_price_structure_from_master(row, _lead_price_as_of(lead, unit=chosen)).get("exShowroom"))
         if master_ex <= 0:
             raise HTTPException(422,
                 f"Price Master row for {model}/{variant} "
@@ -6762,7 +6898,7 @@ async def scheme_rules(lead_id: str, on: Optional[str] = None, unit: Optional[in
     chosen = units[idx] if units else {}
     model = chosen.get("model") or lead.get("interestedModel") or ""
     variant = chosen.get("variant") or lead.get("variant") or ""
-    as_of = _scheme_as_of(lead, on or chosen.get("schemeAsOf"))
+    as_of = _scheme_as_of(lead, on, unit=chosen)
     out = ce.get_scheme_offer_rules_for_vehicle(model, variant, as_of, scheme_rows)
     # Preview allocation for the same as-of date the rules were resolved against.
     snap = {**lead_to_snapshot(_lead_overlay_unit(lead, chosen, idx)), "schemeAsOf": as_of}
@@ -6786,7 +6922,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     chosen = units[idx] if units else {}
     _require_owner_reedit(act, _unit_has_scheme(lead, chosen, idx), "Scheme")
     scheme_date = payload.pop("schemeDate", None)
-    as_of = _scheme_as_of(lead, scheme_date or chosen.get("schemeAsOf"))
+    as_of = _scheme_as_of(lead, scheme_date, unit=chosen)
     payload["schemeAsOf"] = as_of
     scheme_model = chosen.get("model") or lead.get("interestedModel") or ""
     scheme_variant = chosen.get("variant") or lead.get("variant") or ""
@@ -8278,10 +8414,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         {"$match": {"leadId": lead_id}}, {"$group": {"_id": None, "t": {"$sum": "$amount"}}}
     ]).to_list(1)
     running = ce.round2((prior[0]["t"] if prior else 0) + body.amount)
-    snap = lead_to_snapshot(lead) if lead else {}
-    payable = _deal_price_payable(lead) if lead else None
-    if payable is None:
-        payable = ce.compute_commercial_totals(snap)["customerPayable"] if lead else 0
+    payable = _receipt_payable(lead) if lead else 0
     # Over-payment guard (port of BusinessRulesService.validatePaymentAmount_): a receipt may
     # never push total received above Customer Payable *by accident*. Provisional allowed only
     # when payable is still ₹0 (slim booking, price deferred to Price Structure). Staff can
@@ -9126,7 +9259,8 @@ async def _connect_oem_sold(lead, row):
         patch["invoiceNumber"] = invoice
     if plate:
         patch["numberPlate"] = plate
-    stamped = oem_sync.stamp_unit_vehicle_ids(lead, chassis, invoice, plate)
+    sold_date = str((row or {}).get("soldDate") or "")[:10]
+    stamped = oem_sync.stamp_unit_vehicle_ids(lead, chassis, invoice, plate, sold_date)
     if stamped and stamped != list((lead or {}).get("units") or []):
         patch["units"] = stamped
     await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
@@ -9155,12 +9289,14 @@ async def _append_oem_unit(lead, row):
         units[0]["chassisNumber"] = chassis
         units[0]["invoiceNumber"] = invoice or units[0].get("invoiceNumber") or ""
         units[0]["numberPlate"] = plate or units[0].get("numberPlate") or ""
+        if sold_date:
+            units[0]["soldDate"] = sold_date
         if not units[0].get("model"):
             units[0]["model"] = model
             units[0]["variant"] = variant
     else:
         priced = await _price_unit_from_master(model, variant, sold_date)
-        units.append({
+        rec = {
             "sno": len(units) + 1,
             "model": model,
             "variant": variant,
@@ -9168,7 +9304,10 @@ async def _append_oem_unit(lead, row):
             "invoiceNumber": invoice,
             "numberPlate": plate,
             **priced,
-        })
+        }
+        if sold_date:
+            rec["soldDate"] = sold_date
+        units.append(rec)
     for i, u in enumerate(units):
         u["sno"] = i + 1
     patch = {

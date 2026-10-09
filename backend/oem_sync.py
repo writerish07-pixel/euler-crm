@@ -773,26 +773,31 @@ def lead_invoice_list(lead):
     return out
 
 
-def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate=""):
-    """Write chassis / invoice / plate onto the matching or next empty unit line."""
+def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date=""):
+    """Write chassis / invoice / plate / billed date onto the matching or next empty unit line."""
     units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
     ch = _norm_chassis(chassis)
     if not ch:
         return units
+    date = str(sold_date or "").strip()[:10]
+
+    def _apply(u):
+        if invoice:
+            u["invoiceNumber"] = invoice
+        if plate:
+            u["numberPlate"] = plate
+        if date:
+            u["soldDate"] = date
+        return u
+
     for u in units:
         if _norm_chassis(u.get("chassisNumber")) == ch:
-            if invoice:
-                u["invoiceNumber"] = invoice
-            if plate:
-                u["numberPlate"] = plate
+            _apply(u)
             return units
     for u in units:
         if not _norm_chassis(u.get("chassisNumber")):
             u["chassisNumber"] = chassis
-            if invoice:
-                u["invoiceNumber"] = invoice
-            if plate:
-                u["numberPlate"] = plate
+            _apply(u)
             return units
     return units
 
@@ -1139,7 +1144,8 @@ async def apply_sold_vehicle_ids_to_leads(db):
         if plate and _norm_invoice(lead.get("numberPlate")) != _norm_invoice(plate):
             if not is_same_order_pack(lead) or not str(lead.get("numberPlate") or "").strip():
                 patch["numberPlate"] = plate
-        stamped_units = stamp_unit_vehicle_ids(lead, chassis, invoice, plate)
+        sold_date = str(row.get("soldDate") or "").strip()[:10]
+        stamped_units = stamp_unit_vehicle_ids(lead, chassis, invoice, plate, sold_date)
         if stamped_units and stamped_units != list((lead or {}).get("units") or []):
             patch["units"] = stamped_units
         if oem_mobile and len(oem_mobile) == 10 and oem_mobile != lead_mobile:
@@ -1719,7 +1725,8 @@ def merge_patch_for_stub(original, stub):
         if plate and _norm_invoice((original or {}).get("numberPlate")) != _norm_invoice(plate):
             if not is_same_order_pack(original) or not str((original or {}).get("numberPlate") or "").strip():
                 patch["numberPlate"] = plate
-        stamped = stamp_unit_vehicle_ids(original, chassis, invoice, plate)
+        sold_date = str((stub or {}).get("soldDate") or "").strip()[:10]
+        stamped = stamp_unit_vehicle_ids(original, chassis, invoice, plate, sold_date)
         if stamped and stamped != list((original or {}).get("units") or []):
             patch["units"] = stamped
     elif invoice and not _norm_invoice((original or {}).get("invoiceNumber")):
