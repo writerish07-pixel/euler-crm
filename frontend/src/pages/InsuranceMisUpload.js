@@ -112,7 +112,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
 
   return (
     <Drawer open onClose={onClose} width="max-w-5xl" title="Upload agent MIS"
-      subtitle="Match the file to payouts already in this app. Mapped means the row is on the MIS — not that money arrived."
+      subtitle="Match this month's file to payouts already in this app. Mapped means the row is on the MIS — not that money arrived."
       footer={<div className="flex justify-between items-center gap-2">
         <Button variant="ghost" data-testid="mis-template-btn" onClick={downloadTemplate}>
           <Download size={15} /> Download template
@@ -142,6 +142,11 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
 
       {step === "review" && data && (
         <div className="space-y-4" data-testid="mis-review">
+          {data.period?.label && data.period.label !== "All" && (
+            <div className="text-xs text-ink-soft" data-testid="mis-period">
+              Matching {data.period.label} — register month is policy date, or delivery date if policy date is blank
+            </div>
+          )}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <Stat k="Matched" v={data.totals?.matched} />
             <Stat k="Not in this MIS" v={data.totals?.unmatchedEntries} tone="text-rose-700" />
@@ -227,7 +232,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
             <Card className="p-3 bg-rose-50 border-rose-200" data-testid="mis-unmatched-register">
               <div className="flex gap-2 text-sm text-rose-900 mb-2">
                 <AlertTriangle size={16} className="shrink-0 mt-0.5" />
-                {data.unmatchedEntries.length} register payout{data.unmatchedEntries.length === 1 ? "" : "s"} not on this MIS — send to the agent
+                {data.unmatchedEntries.length}{data.period?.label && data.period.label !== "All" ? ` ${data.period.label}` : ""} register payout{data.unmatchedEntries.length === 1 ? "" : "s"} not on this MIS — send to the agent
               </div>
               <ul className="text-xs text-rose-900 space-y-1">
                 {data.unmatchedEntries.slice(0, 20).map((r) => (

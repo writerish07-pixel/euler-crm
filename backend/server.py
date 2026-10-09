@@ -11628,10 +11628,27 @@ async def insurance_mis_template(_money=Depends(money_desk_only)):
     )
 
 
+def _mis_explicit_months(month=None, year=None):
+    """Optional owner override. Empty → let the file's dates pick the month."""
+    if not (month or year):
+        return None
+    period = _parse_period(month, year)
+    if period.kind == "month":
+        return [period.month]
+    if period.kind == "year":
+        return periodmod.year_months(period.year)
+    return None
+
+
 @api.post("/insurance/mis/preview")
 async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
+                                month: Optional[str] = Form(None), year: Optional[str] = Form(None),
                                 act=Depends(actor), _money=Depends(money_desk_only)):
-    """Parse the agent's MIS and match rows to Insurance Payout entries. No writes."""
+    """Parse the agent's MIS and match rows to Insurance Payout entries. No writes.
+
+    Unmatched register rows are scoped to the file's month (policyDate, else
+    deliveryDate). Pass month=YYYY-MM to override.
+    """
     content = await file.read()
     try:
         raw = _read_rows(file.filename, content)
@@ -11649,7 +11666,7 @@ async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[
             {"leadId": 1, "chassisNumber": 1, "customerName": 1, "mobile": 1, "_id": 0},
         ).to_list(8000)
     entries = ins_mis.enrich_entries_with_chassis(entries, leads)
-    matched = ins_mis.match_file(rows, entries)
+    matched = ins_mis.match_file(rows, entries, months=_mis_explicit_months(month, year))
     need_ch = [r.get("chassisNumber") for r in matched["unmatchedMis"] if r.get("chassisNumber")]
     if need_ch:
         extra = await db.leads.find(
