@@ -12,6 +12,7 @@ import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady, B2bGstinF
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
+import SchemeCircularPic from "../components/SchemeCircularPic";
 
 const CHARGE_FIELDS = [
   ["exShowroom", "Ex-Showroom"], ["rto", "RTO"], ["insuranceAmount", "Insurance"],
@@ -1301,6 +1302,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           {components.length === 0 && <span className="text-amber-700"> — no scheme components for this model/variant this month</span>}
         </div>
       )}
+      <SchemeCircularPic circular={rules?.circular} />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-2">
         <Field label="Scheme Date">

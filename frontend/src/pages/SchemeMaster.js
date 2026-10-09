@@ -5,6 +5,7 @@ import { get, post, put, del } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
+import SchemeCircularPic from "../components/SchemeCircularPic";
 
 const COMPONENTS = [
   ["Consumer Discount", "consumerDiscount"], ["Exchange Bonus", "exchangeBonus"],
@@ -41,8 +42,12 @@ export default function SchemeMaster() {
   const [models, setModels] = useState([]);
   const [asOf, setAsOf] = useState(todayISO());
   const [showAll, setShowAll] = useState(false);
+  const [circular, setCircular] = useState(null);
   const load = useCallback(() => get("/scheme-master").then(setRows), []);
   useEffect(() => { load(); get("/masters").then((m) => setModels(m.models)); }, [load]);
+  useEffect(() => {
+    get("/scheme-circulars", { on: asOf }).then((r) => setCircular(r && r.imageUrl ? r : null)).catch(() => setCircular(null));
+  }, [asOf]);
   const remove = async (r) => { if (!window.confirm("Delete scheme row?")) return; await del(`/scheme-master/${r.schemeId}`); toast.success("Deleted"); load(); };
 
   const visible = useMemo(
@@ -66,6 +71,7 @@ export default function SchemeMaster() {
           {showAll ? "Filter by date" : "Show all months"}
         </Button>
       </div>
+      {!showAll && <SchemeCircularPic circular={circular} />}
       <Table
         rowKey="schemeId"
         columns={[
