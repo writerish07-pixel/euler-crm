@@ -177,7 +177,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
 }
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isSalesGm } = useAuth();
+  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isTeamLead, isSalesGm } = useAuth();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
@@ -287,13 +287,13 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
         {!fieldView && !leadLocked && actions.canEditLead && (
           <Button variant="secondary" data-testid="edit-lead-btn" onClick={() => setEditing(true)} className="!py-1 !px-2.5 text-xs"><Pencil size={13} /> Edit</Button>
         )}
-        {!fieldView && (isExecutive || isTl || isOwner || isSalesGm) && (
+        {!fieldView && (isExecutive || isTl || isTeamLead || isOwner || isSalesGm) && (
           <Button variant="secondary" data-testid="add-another-vehicle-btn"
             onClick={() => setAddUnit(true)} className="!py-1 !px-2.5 text-xs">
             <Plus size={13} /> Add another vehicle
           </Button>
         )}
-        {!fieldView && !leadLocked && (isTl || isOwner || isSalesGm) && !actions.isDelivered && (
+        {!fieldView && !leadLocked && canEditCommercials && !actions.isDelivered && (
           <Button variant="secondary" data-testid="add-pack-unit-btn"
             onClick={() => setAddPackUnit(true)} className="!py-1 !px-2.5 text-xs">
             <Plus size={13} /> Add unit to this order
@@ -430,7 +430,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           onOpenPrice={(sno) => { setFocusUnit(sno); setTab("price"); }}
           onOpenScheme={(sno) => { setFocusUnit(sno); setTab("scheme"); }}
           onSaved={refresh}
-          canEditBilledDate={!leadLocked && (isTl || isOwner || isSalesGm)}
+          canEditBilledDate={!leadLocked && canEditCommercials}
         />
       )}
       {tab === "overview" && (fieldView
@@ -439,9 +439,9 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             onOpenUnit={(sno, nextTab) => { setFocusUnit(sno); if (nextTab) setTab(nextTab); }}
             onAddPackUnit={() => setAddPackUnit(true)}
             onAddAnotherVehicle={() => setAddUnit(true)}
-            canAddPackUnit={!leadLocked && (isTl || isOwner || isSalesGm) && !actions.isDelivered}
-            canAddAnotherVehicle={isExecutive || isTl || isOwner || isSalesGm}
-            canEditBilledDate={!leadLocked && (isTl || isOwner || isSalesGm)} />)}
+            canAddPackUnit={!leadLocked && canEditCommercials && !actions.isDelivered}
+            canAddAnotherVehicle={isExecutive || isTl || isTeamLead || isOwner || isSalesGm}
+            canEditBilledDate={!leadLocked && canEditCommercials} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} documents={data.documents} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
@@ -764,10 +764,10 @@ export function OverviewUnits({
 
 function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
   onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate }) {
-  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, canSeeOwnerCommercials } = useAuth();
+  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, canSeeOwnerCommercials } = useAuth();
   const booked = !!actions.isBooked;
   const kycDocKinds = kycKinds(lead.customerType);
-  const canUploadKyc = isOwner || isSalesGm || isTl || isExecutive;
+  const canUploadKyc = isOwner || isSalesGm || isTl || isTeamLead || isExecutive;
   const canSeeKyc = canUploadKyc || isAccounts;
   const lid = lead.leadId;
   return (
@@ -1520,13 +1520,21 @@ function ExtraIncomeCard({ lead, locked, onSaved }) {
 }
 
 /* -------------------------------------------------- Payments */
-function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, onSaved }) {
+export function receiptPaymentModes(masters) {
+  const raw = Array.isArray(masters?.paymentModes) && masters.paymentModes.length
+    ? masters.paymentModes
+    : ["Cash", "UPI", "Cheque", "NEFT", "Finance"];
+  if (raw.some((m) => String(m).toLowerCase() === "finance")) return raw;
+  return [...raw, "Finance"];
+}
+
+export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, onSaved }) {
   const { isExecutive } = useAuth();
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
-  const paymentModes = (masters?.paymentModes || []).filter((m) => !(isExecutive && String(m).toLowerCase() === "finance"));
+  const paymentModes = receiptPaymentModes(masters);
   const packPayable = +(lead.customerPayable || 0);
   const packReceived = +(lead.totalReceived || 0);
   const packRoom = Math.max(0, packPayable - packReceived);

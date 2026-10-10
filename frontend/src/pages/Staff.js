@@ -6,7 +6,8 @@ import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
 
 const ROLES = [
-  ["executive", "Executive"], ["TL", "Team Leader"], ["GM", "Sales GM"], ["ASM", "ASM"], ["RM", "RM"],
+  ["executive", "Executive"], ["team_lead", "Team Leader"], ["TL", "Showroom Admin"],
+  ["GM", "Sales GM"], ["ASM", "ASM"], ["RM", "RM"],
   ["owner", "Owner"], ["accounts", "Accounts"],
 ];
 
@@ -20,6 +21,7 @@ const REPORTS = [
 const DEFAULTS = {
   executive: ["exec_morning", "exec_eod"],
   TL: ["manager_eod"],
+  team_lead: ["exec_morning", "exec_eod", "manager_eod"],
   GM: ["manager_eod"],
   ASM: ["manager_eod"], RM: ["manager_eod"],
   owner: ["owner_eod"], accounts: [],
@@ -86,6 +88,7 @@ export default function Staff() {
         columns={[
           { key: "name", label: "Name", render: (r) => <span className="font-semibold">{r.name}</span> },
           { key: "role", label: "Role", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{roleLabel(r.role)}</Badge> },
+          { key: "reportsTo", label: "Reports to", render: (r) => r.reportsTo || "—" },
           { key: "mobile", label: "WhatsApp", mono: true, render: (r) => (
             r.mobile ? r.mobile : <span className="text-amber-700">not set</span>
           ) },
@@ -121,16 +124,16 @@ export default function Staff() {
         has leads is blocked — set them Inactive and add the new name instead.
       </p>
 
-      {edit && <StaffDrawer row={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
+      {edit && <StaffDrawer row={edit} people={rows} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
     </div>
   );
 }
 
-function StaffDrawer({ row, onClose, onSaved }) {
+function StaffDrawer({ row, people = [], onClose, onSaved }) {
   const isNew = !row.staffId;
   const [form, setForm] = useState({
     name: row.name || "", mobile: row.mobile || "", email: row.email || "",
-    role: row.role || "executive", monthlyTarget: row.monthlyTarget || 0,
+    role: row.role || "executive", reportsTo: row.reportsTo || "", monthlyTarget: row.monthlyTarget || 0,
     reports: row.reports || DEFAULTS[row.role || "executive"],
     whatsappOptIn: row.whatsappOptIn !== false,
     status: row.status || "Active", remarks: row.remarks || "",
@@ -173,6 +176,16 @@ function StaffDrawer({ row, onClose, onSaved }) {
             {ROLES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
           </Select>
         </Field>
+        {(form.role === "executive" || form.role === "team_lead") && (
+          <Field label="Reports to (Team Leader)">
+            <Select data-testid="staff-reports-to" value={form.reportsTo} onChange={set("reportsTo")}>
+              <option value="">—</option>
+              {people.filter((p) => p.role === "team_lead").map((p) => (
+                <option key={p.staffId} value={p.name}>{p.name}</option>
+              ))}
+            </Select>
+          </Field>
+        )}
         <Field label="WhatsApp number"><Input data-testid="staff-mobile" value={form.mobile} onChange={set("mobile")} placeholder="10-digit mobile" /></Field>
         <Field label="Email"><Input value={form.email} onChange={set("email")} /></Field>
         {form.role === "executive" && (

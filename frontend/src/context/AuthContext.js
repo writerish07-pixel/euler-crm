@@ -134,18 +134,22 @@ export function AuthProvider({ children }) {
       // nothing else; the API denies every other route to this role.
       isOemFinance: role === "oem_finance",
       isTl: role === "tl",
-      isSalesStaff: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive",
-      isMoneyDesk: role === "owner" || role === "tl" || role === "accounts",
+      isShowroomAdmin: role === "tl",
+      isTeamLead: role === "team_lead",
+      isSalesStaff: role === "owner" || role === "sales_gm" || role === "tl" || role === "team_lead" || role === "executive",
+      isMoneyDesk: role === "owner" || role === "tl" || role === "team_lead" || role === "accounts",
       // Price, scheme, delivery, close and cancel — the steps an executive hands
       // over. Customer payments after booking stay with the executive.
       // Mirrors DEAL_DESK_ROLES on the API.
-      canEditCommercials: role === "owner" || role === "sales_gm" || role === "tl",
+      canEditCommercials: role === "owner" || role === "sales_gm" || role === "tl" || role === "team_lead",
+      canManageShowroom: role === "owner" || role === "sales_gm" || role === "tl",
+      canManageStaff: role === "owner" || role === "sales_gm" || role === "tl",
       // ASM/RM / Sales GM may view Finance Register (disbursed vs remaining); writes stay money-desk.
-      canViewFinance: role === "owner" || role === "sales_gm" || role === "tl" || role === "executive"
+      canViewFinance: role === "owner" || role === "sales_gm" || role === "tl" || role === "team_lead" || role === "executive"
         || role === "accounts" || role === "asm" || role === "rm",
       canApproveLeads: role === "owner" || role === "sales_gm",
       canEditLeadSplit: role === "owner" || role === "sales_gm",
-      canViewMonthly: role === "owner" || role === "sales_gm" || role === "tl" || role === "accounts"
+      canViewMonthly: role === "owner" || role === "sales_gm" || role === "tl" || role === "team_lead" || role === "accounts"
         || role === "executive" || role === "asm" || role === "rm",
       canExport: role === "owner" || role === "sales_gm" || role === "tl",
       // Match OEM debit notes to the scheme register. Not payments.

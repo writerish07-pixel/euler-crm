@@ -14,22 +14,36 @@ const TABS = [
 ];
 
 export default function Inventory() {
-  const { isOwner } = useAuth();
+  const { isOwner, isShowroomAdmin } = useAuth();
   const [tab, setTab] = useState("yard");
   const [rows, setRows] = useState([]);
   const [transit, setTransit] = useState([]);
   const [need, setNeed] = useState([]);
   const [summary, setSummary] = useState(null);
   const [status, setStatus] = useState(null);
+  const [check, setCheck] = useState(null);
+  const [ticks, setTicks] = useState({});
   const [model, setModel] = useState("");
   const [busy, setBusy] = useState(false);
+  const canConfirm = isOwner || isShowroomAdmin;
 
   const load = useCallback(() => {
     const q = model ? { model } : undefined;
-    get("/inventory", q).then(setRows).catch(() => setRows([]));
+    get("/inventory", q).then((list) => {
+      const next = Array.isArray(list) ? list : [];
+      setRows(next);
+      setTicks((cur) => {
+        const out = { ...cur };
+        next.forEach((r) => {
+          if (r.chassis && r.physicalStatus && !out[r.chassis]) out[r.chassis] = r.physicalStatus;
+        });
+        return out;
+      });
+    }).catch(() => setRows([]));
     get("/inventory/transit", q).then(setTransit).catch(() => setTransit([]));
     get("/inventory/need-to-order").then(setNeed).catch(() => setNeed([]));
     get("/inventory/summary").then(setSummary).catch(() => {});
+    get("/inventory/check").then(setCheck).catch(() => {});
     get("/integrations/coulson").then(setStatus).catch(() => {});
   }, [model]);
   useEffect(() => { load(); }, [load]);
@@ -61,7 +75,7 @@ export default function Inventory() {
     <div data-testid="yard-inventory">
       <PageHeader
         title="Yard Inventory"
-        subtitle="Live stock from the Euler OEM portal. Ex-showroom is OEM; RTO and insurance stay on Price Master."
+        subtitle="OEM stock plus Showroom Admin's daily physical tick. Missing / damaged drop out of In yard for quoting."
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
           {isOwner && (
@@ -102,6 +116,12 @@ export default function Inventory() {
         <Card className="p-3 mb-4 bg-red-50 border-red-200 text-sm text-red-800">{status.lastError}</Card>
       )}
 
+      <Card className="p-3 mb-4" data-testid="inventory-check-banner">
+        {check?.confirmed && check.date === (check.today || "")
+          ? <p className="text-sm text-emerald-800">Yard confirmed today by {check.submittedBy || "Showroom Admin"} · {check.presentCount || 0} present · {check.missingCount || 0} missing · {check.damagedCount || 0} damaged.</p>
+          : <p className="text-sm text-amber-800">Yard not confirmed today{check?.lastConfirmedDate ? ` — last check: ${fmtDate(check.lastConfirmedDate)}` : ""}.</p>}
+      </Card>
+
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="flex gap-1 bg-white rounded-lg p-1 border border-line shadow-card">
           {TABS.map(([k, l]) => (
@@ -131,9 +151,45 @@ export default function Inventory() {
             { key: "inventoryAgeing", label: "Age (days)", align: "right", mono: true },
             { key: "pdiDone", label: "PDI", render: (r) => <Badge tone={r.pdiDone ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-zinc-100 text-zinc-500 ring-zinc-400/20"}>{r.pdiDone ? "Done" : "Pending"}</Badge> },
             { key: "readyForAllocation", label: "Ready", render: (r) => r.readyForAllocation ? "Yes" : "No" },
+            { key: "physicalStatus", label: "Physical", render: (r) => (
+              canConfirm ? (
+                <Select
+                  data-testid={`inv-tick-${r.chassis}`}
+                  value={ticks[r.chassis] || r.physicalStatus || ""}
+                  onChange={(e) => setTicks((cur) => ({ ...cur, [r.chassis]: e.target.value }))}
+                  className="w-32"
+                >
+                  <option value="">—</option>
+                  <option value="present">Present</option>
+                  <option value="missing">Missing</option>
+                  <option value="damaged">Damaged</option>
+                </Select>
+              ) : <Badge>{r.physicalStatus || "—"}</Badge>
+            ) },
           ]}
           rows={yardRows}
         />
+      )}
+      {tab === "yard" && canConfirm && (
+        <div className="mt-3">
+          <Button data-testid="submit-inventory-check" disabled={busy} onClick={async () => {
+            const items = yardRows.map((r) => ({
+              chassis: r.chassis, model: r.model, variant: r.variant,
+              status: ticks[r.chassis] || r.physicalStatus || "",
+            }));
+            if (items.some((i) => !i.status)) return toast.error("Tick every vehicle Present, Missing or Damaged.");
+            setBusy(true);
+            try {
+              await post("/inventory/check", { items });
+              toast.success("Yard confirmed");
+              load();
+            } catch (e) {
+              toast.error(apiErrorMessage(e, "Could not save the yard check"));
+            } finally { setBusy(false); }
+          }}>
+            Confirm today's yard
+          </Button>
+        </div>
       )}
 
       {tab === "transit" && (

@@ -32,7 +32,7 @@ const NAV = [
     { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
     { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle, salesOnly: true },
     { to: "/cancellations", label: "Cancellations", icon: Ban },
-    { to: "/allocation", label: "Lead Allocation", icon: UserCheck, dealDesk: true },
+    { to: "/allocation", label: "Lead Allocation", icon: UserCheck, showroomDesk: true },
   ]},
   { section: "Money", items: [
     { to: "/payments", label: "Payment Ledger", icon: Wallet, moneyDesk: true },
@@ -54,7 +54,7 @@ const NAV = [
     { to: "/oem-claims/no-vehicle", label: "Missing chassis", icon: FileCheck, oemClaimDesk: true },
     { to: "/oem-extra-support", label: "OEM Extra Support", icon: Handshake, oemClaimDesk: true },
     { to: "/dropped-extra-support", label: "Dropped Extra Support", icon: Ban, oemClaimDesk: true },
-    { to: "/scheme-master", label: "Scheme Master", icon: Percent, dealDesk: true },
+    { to: "/scheme-master", label: "Scheme Master", icon: Percent, showroomDesk: true },
     { to: "/incentive-master", label: "Incentive Master", icon: Trophy, ownerOnly: true },
     { to: "/executive-incentive", label: "Executive Incentive", icon: Trophy, gmHome: true },
     { to: "/dealer-earnings", label: "Dealer Earnings", icon: Coins, ownerOnly: true },
@@ -72,7 +72,7 @@ const NAV = [
     { to: "/price-list", label: "Price List", icon: Tag, salesOnly: true },
     { to: "/inventory", label: "Yard Inventory", icon: Warehouse },
     { to: "/price-master", label: "Price Master", icon: SlidersHorizontal, ownerOnly: true },
-    { to: "/staff", label: "Staff & Reports", icon: UserCog, ownerOnly: true },
+    { to: "/staff", label: "Staff & Reports", icon: UserCog, staffDesk: true },
     { to: "/settings", label: "Settings", icon: SettingsIcon },
   ]},
 ];
@@ -87,9 +87,10 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, isTl, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
-    : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk" : isTl ? "Team Leader desk" : "EV Dealership";
+    : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk"
+      : isTl ? "Showroom Admin desk" : isTeamLead ? "Team Leader desk" : "EV Dealership";
   const nav = isOemFinance ? OEM_NAV : NAV;
   return (
     <aside
@@ -127,11 +128,13 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             if (i.oemClaimDesk && !canMatchOemClaims) return false;
             if (i.financeView && !canViewFinance) return false;
             if (i.dealDesk && !canEditCommercials) return false;
+            if (i.showroomDesk && !canManageShowroom) return false;
+            if (i.staffDesk && !canManageStaff) return false;
             if (i.accountsHome && !isAccounts && !isOwner) return false;
             if (i.fieldHome && !isField && !isOwner) return false;
             if (i.gmHome && !isSalesGm && !isOwner) return false;
             if (i.monthly && !canViewMonthly) return false;
-            if (i.approvals && !canApproveLeads && !isExecutive) return false;
+            if (i.approvals && !canApproveLeads && !isExecutive && !isTeamLead) return false;
             return true;
           });
           if (!items.length) return null;
@@ -286,7 +289,8 @@ function GlobalLeadSearch() {
 const ROLE_LABEL = {
   owner: "Owner",
   sales_gm: "Sales GM",
-  tl: "Team Leader",
+  tl: "Showroom Admin",
+  team_lead: "Team Leader",
   executive: "Executive",
   accounts: "Accounts",
   asm: "ASM",
@@ -357,13 +361,13 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canApproveLeads, isExecutive, isTl, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const location = useLocation();
 
   useEffect(() => {
-    if (!canApproveLeads && !isExecutive) return undefined;
+    if (!canApproveLeads && !isExecutive && !isTeamLead) return undefined;
     let live = true;
     const load = () => get("/lead-requests/summary").then((d) => {
       if (live) setPendingApprovals(Number(d?.pending || 0));
@@ -371,7 +375,7 @@ export default function Layout({ children }) {
     load();
     const t = setInterval(load, 30000);
     return () => { live = false; clearInterval(t); };
-  }, [canApproveLeads, isExecutive, location.pathname]);
+  }, [canApproveLeads, isExecutive, isTeamLead, location.pathname]);
 
   // Close mobile drawer on route change
   useEffect(() => { setNavOpen(false); }, [location.pathname]);
@@ -406,10 +410,13 @@ export default function Layout({ children }) {
         canViewFinance={canViewFinance}
         isOemFinance={isOemFinance}
         canEditCommercials={canEditCommercials}
+        canManageShowroom={canManageShowroom}
+        canManageStaff={canManageStaff}
         isSalesGm={isSalesGm}
         canApproveLeads={canApproveLeads}
         isExecutive={isExecutive}
         isTl={isTl}
+        isTeamLead={isTeamLead}
         canViewMonthly={canViewMonthly}
         canMatchOemClaims={canMatchOemClaims}
         pendingApprovals={pendingApprovals}

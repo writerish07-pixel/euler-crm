@@ -13,7 +13,7 @@ function sameExecName(a, b) {
 
 /** Create a lead. Exec / TL send for GM/Owner only when the deal has a discount. */
 export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {} }) {
-  const { isExecutive, isTl, user, canSeeOwnerCommercials } = useAuth();
+  const { isExecutive, isTl, isTeamLead, user, canSeeOwnerCommercials } = useAuth();
   const [form, setForm] = useState({
     customerName: initial.customerName || "",
     mobile: initial.mobile || "",
@@ -172,14 +172,14 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const priced = deal?.priceFound === true
     || (deal != null && deal.priceFound == null
       && (Number(deal.exShowroom) > 0 || Number(deal.priceTotal) > 0));
-  const needsApproval = (isExecutive || isTl)
+  const needsApproval = (isExecutive || isTl || isTeamLead)
     && quotedCx > 0
     && (deal?.needsApproval === true || Number(deal?.additionalDiscount) >= 1 || !priced);
   const saveLabel = needsApproval ? "Send for approval" : "Create Lead";
   const drawerTitle = needsApproval && isExecutive ? "Request a lead" : "New Lead";
   const drawerSubtitle = needsApproval
     ? "Discounted deal — waits for GM or Owner"
-    : isExecutive || isTl
+    : isExecutive || isTl || isTeamLead
       ? "Creates live when there is no extra discount"
       : "Capture a fresh enquiry";
 
@@ -228,7 +228,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const submit = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
-    if (isTl && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
+    if ((isTl || isTeamLead) && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
     if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required");
     if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
     if (needsApproval && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
@@ -304,7 +304,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           </Select>
         </Field>
         <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{sources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label={isTl ? "Executive *" : "Executive"}>
+        <Field label={isTl || isTeamLead ? "Executive *" : "Executive"}>
           <Select data-testid="lead-executive" value={form.executive} onChange={set("executive")}>
             <option value="">—</option>
             {execOptions.map((s) => <option key={s}>{s}</option>)}
