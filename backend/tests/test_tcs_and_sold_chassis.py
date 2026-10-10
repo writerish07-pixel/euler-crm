@@ -634,3 +634,107 @@ async def test_mark_delivered_fills_from_unique_mobile_even_if_model_differs(cli
     assert server._is_delivered(lead) is True
     assert lead["chassisNumber"] == chassis
     assert lead["invoiceNumber"] == "CINV-UNIQ"
+    assert lead["interestedModel"] == "Turbo Max"
+    assert lead["variant"] == "Maxx (PV)"
+
+
+def test_sold_body_fields_maps_catalog_sku():
+    row = {"model": "Turbo Max", "variant": "Maxx (DV220)", "oemSkuKey": "turbo.maxx.dv220"}
+    fields = oem_sync.sold_body_fields(row)
+    assert fields["variant"] == "Maxx (DV220)"
+    assert fields["bodyType"] == "DV220"
+    assert oem_sync.can_adopt_sold_body(
+        {"interestedModel": "Turbo Max", "variant": "Maxx (FB)", "accountStatus": "Active"},
+        row,
+    )
+    assert not oem_sync.can_adopt_sold_body(
+        {"interestedModel": "Turbo Max", "variant": "Maxx (FB)", "accountStatus": "Active"},
+        {"model": "Hi-Load", "variant": "XR"},
+    )
+    assert not oem_sync.lead_allows_body_adopt({
+        "accountStatus": "Active", "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+    })
+
+
+@pytest.mark.asyncio
+async def test_sold_sync_adopts_fb_to_dv_on_active_file(client):
+    mobile = "9811100221"
+    chassis = "MD9BODYADOPT0001"
+    await server.db.leads.delete_many({"leadId": "LD-BODY-ADOPT"})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.insert_one({
+        "leadId": "LD-BODY-ADOPT", "customerName": "Body Convert", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-10-10",
+        "customerPayable": 760000, "exShowroom": 760000,
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-DV-1",
+        "model": "Turbo Max", "variant": "Maxx (DV220)", "bodyType": "DV220",
+        "oemSkuKey": "turbo.maxx.dv220", "coulsonStatus": "SOLD",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["bodyAdopted"] == 1
+    lead = await server.db.leads.find_one({"leadId": "LD-BODY-ADOPT"})
+    assert lead["chassisNumber"] == chassis
+    assert lead["variant"] == "Maxx (DV220)"
+    assert lead["originalVariant"] == "Maxx (FB)"
+    assert lead["oemBilledVariant"] == "Maxx (DV220)"
+    assert lead.get("oemBodyMismatch") is False
+
+
+@pytest.mark.asyncio
+async def test_sold_sync_mismatch_only_after_delivered(client):
+    mobile = "9811100222"
+    chassis = "MD9BODYMISMATCH01"
+    await server.db.leads.delete_many({"leadId": "LD-BODY-MISMATCH"})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.insert_one({
+        "leadId": "LD-BODY-MISMATCH", "customerName": "Already Out", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-09",
+        "chassisNumber": chassis,
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-DV-2",
+        "model": "Turbo Max", "variant": "Maxx (DV220)", "bodyType": "DV220",
+        "oemSkuKey": "turbo.maxx.dv220", "coulsonStatus": "SOLD",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["bodyMismatch"] == 1
+    lead = await server.db.leads.find_one({"leadId": "LD-BODY-MISMATCH"})
+    assert lead["variant"] == "Maxx (FB)"
+    assert lead["oemBodyMismatch"] is True
+    assert lead["oemBilledVariant"] == "Maxx (DV220)"
+    accept = await client.post("/api/leads/LD-BODY-MISMATCH/adopt-oem-body")
+    assert accept.status_code == 200, accept.text
+    lead = await server.db.leads.find_one({"leadId": "LD-BODY-MISMATCH"})
+    assert lead["variant"] == "Maxx (DV220)"
+    assert lead.get("oemBodyMismatch") is False
+
+
+@pytest.mark.asyncio
+async def test_delivery_adopts_billed_dv_body(client):
+    mobile = "9811100223"
+    chassis = "MD9BODYDELIV0001"
+    await _booked_cleared_lead("LD-BODY-DELIV", mobile, "Deliver DV")
+    await server.db.leads.update_one({"leadId": "LD-BODY-DELIV"}, {"$set": {
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)", "exShowroom": 760000,
+    }})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "CINV-DV-3",
+        "model": "Turbo Max", "variant": "Maxx (DV220)", "bodyType": "DV220",
+        "oemSkuKey": "turbo.maxx.dv220", "coulsonStatus": "SOLD",
+    })
+    preview = (await client.get("/api/leads/LD-BODY-DELIV/oem-sold")).json()
+    assert preview["bodyDiffers"] is True
+    assert preview["willAdoptBody"] is True
+    r = await client.put("/api/leads/LD-BODY-DELIV/delivery", json=_delivery_yes())
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": "LD-BODY-DELIV"})
+    assert server._is_delivered(lead) is True
+    assert lead["chassisNumber"] == chassis
+    assert lead["variant"] == "Maxx (DV220)"
+    assert lead["originalVariant"] == "Maxx (FB)"

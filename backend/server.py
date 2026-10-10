@@ -623,6 +623,47 @@ async def _refresh_sold_then_fill_delivery(lead, body):
     return await _fill_delivery_from_sold(lead, body)
 
 
+async def _reprice_after_sold_body(lead_id):
+    """Price Master + scheme follow the billed variant after an OEM body change."""
+    try:
+        await _cascade_vehicle_or_price_change(lead_id)
+    except Exception:
+        logging.exception("Sold body reprice failed for %s", lead_id)
+
+
+async def _apply_sold_vehicle_ids():
+    return await oem_sync.apply_sold_vehicle_ids_to_leads(
+        db, on_body_adopted=_reprice_after_sold_body)
+
+
+def _sold_body_row_from_match(match):
+    if not match:
+        return None
+    return {
+        "chassis": match.get("chassis"),
+        "model": match.get("model"),
+        "variant": match.get("variant"),
+        "bodyType": match.get("bodyType"),
+        "oemSkuKey": match.get("oemSkuKey"),
+    }
+
+
+async def _sold_body_updates_for_lead(lead):
+    """Adopt billed body on an Active file; record mismatch after delivery/close."""
+    match = await oem_sync.match_sold_family_for_lead(db, lead)
+    row = _sold_body_row_from_match(match)
+    if not row or not oem_sync.can_adopt_sold_body(lead, row):
+        return {}, False
+    adopt = oem_sync.lead_allows_body_adopt(lead)
+    patch = oem_sync.sold_body_adopt_patch(lead, row, adopt=adopt)
+    fields = oem_sync.sold_body_fields(row)
+    units = oem_sync.apply_sold_body_to_units(
+        list((lead or {}).get("units") or []), row, fields, adopt=adopt)
+    if units and units != list((lead or {}).get("units") or []):
+        patch["units"] = units
+    return patch, adopt
+
+
 def _merge_delivery_units(existing, sold_units, lead=None):
     """Fill empty chassis/invoice on pack lines from OEM Sold family rows."""
     base = _normalize_lead_units(
@@ -9126,7 +9167,39 @@ async def lead_oem_sold(lead_id: str, refresh: bool = False, user=Depends(curren
         }
     match["outstandingCleared"] = outstanding <= 0.01
     match["customerOutstanding"] = outstanding
+    row = _sold_body_row_from_match(match)
+    match["currentModel"] = lead.get("interestedModel") or ""
+    match["currentVariant"] = lead.get("variant") or ""
+    match["bodyDiffers"] = bool(row and oem_sync.can_adopt_sold_body(lead, row))
+    match["willAdoptBody"] = bool(match["bodyDiffers"] and oem_sync.lead_allows_body_adopt(lead))
     return match
+
+
+@api.post("/leads/{lead_id}/adopt-oem-body")
+async def adopt_oem_body(lead_id: str, act=Depends(actor), user=Depends(owner_only)):
+    """Owner accepts the Coulson billed body on a delivered / closed file."""
+    lead = await get_lead_or_404(lead_id)
+    match = await oem_sync.match_sold_family_for_lead(db, lead)
+    row = _sold_body_row_from_match(match)
+    if not row or not oem_sync.sold_body_fields(row):
+        raise HTTPException(409, "No billed body on OEM Sold for this file.")
+    if not oem_sync.same_sold_family(lead, oem_sync.sold_body_fields(row)):
+        raise HTTPException(409, "OEM Sold is a different model family — do not adopt.")
+    if not oem_sync.lead_body_differs(lead, oem_sync.sold_body_fields(row)):
+        return {"ok": True, "unchanged": True, "variant": lead.get("variant")}
+    patch = oem_sync.sold_body_adopt_patch(lead, row, adopt=True)
+    fields = oem_sync.sold_body_fields(row)
+    units = oem_sync.apply_sold_body_to_units(
+        list((lead or {}).get("units") or []), row, fields, adopt=True)
+    if units:
+        patch["units"] = units
+    patch["lastUpdated"] = now_iso()
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    await _reprice_after_sold_body(lead_id)
+    await write_audit(act, "adopt", "oem-body", leadId=lead_id,
+                      old={"variant": lead.get("variant"), "model": lead.get("interestedModel")},
+                      new={"variant": patch.get("variant"), "model": patch.get("interestedModel")})
+    return {"ok": True, "variant": patch.get("variant"), "model": patch.get("interestedModel")}
 
 
 async def _sibling_lead_for_docs(mobile="", name="", exclude_id=""):
@@ -9574,7 +9647,7 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
         logging.exception("Coulson sold refresh failed for OEM billing")
     stamped = {}
     try:
-        stamped = await oem_sync.apply_sold_vehicle_ids_to_leads(db)
+        stamped = await _apply_sold_vehicle_ids()
     except Exception:
         logging.exception("OEM billing could not backfill chassis/invoice")
         stamped = {}
@@ -9816,6 +9889,9 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
     else:
         await _refresh_sold_then_fill_delivery(lead, body)
+    sold_body_patch, sold_body_adopted = await _sold_body_updates_for_lead(lead)
+    if sold_body_patch:
+        lead.update(sold_body_patch)
     unit_docs = _normalize_lead_units(
         getattr(body, "units", None) or (lead or {}).get("units") or [],
         model=(lead or {}).get("interestedModel") or "",
@@ -9859,10 +9935,14 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             raise HTTPException(422, "Selected insurance agent not found")
         lead_updates["insuranceAgentId"] = _agent["agentId"]
         lead_updates["insuranceAgentName"] = _agent.get("agentName", "")
+    if sold_body_patch:
+        lead_updates.update(sold_body_patch)
     if delivered:
         lead_updates.update({"deliveryStatus": "Delivered", "currentStatus": "Delivered",
                              "deliveryDate": body.deliveryDate or today()})
     await db.leads.update_one({"leadId": lead_id}, {"$set": lead_updates})
+    if sold_body_adopted:
+        await _reprice_after_sold_body(lead_id)
     if delivered:
         await sheet_sync("deliveries", {
             "leadId": lead_id, "customerName": lead.get("customerName"),
@@ -9888,7 +9968,7 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             except Exception:
                 logging.exception("Could not drop delivered chassis from yard inventory")
             try:
-                await oem_sync.apply_sold_vehicle_ids_to_leads(db)
+                await _apply_sold_vehicle_ids()
             except Exception:
                 logging.exception("Could not backfill chassis/invoice from OEM Sold")
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
@@ -10590,7 +10670,7 @@ async def coulson_diagnose(body: CoulsonCredIn, act=Depends(actor)):
 async def coulson_sync(act=Depends(actor)):
     """Pull live OEM prices + yard stock. RTO/insurance stay as manual Price Master fields."""
     try:
-        result = await oem_sync.sync_from_coulson(db)
+        result = await oem_sync.sync_from_coulson(db, on_body_adopted=_reprice_after_sold_body)
     except coulson_client.CoulsonError as e:
         await oem_sync._record_sync(db, False, str(e))
         await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
@@ -15172,7 +15252,7 @@ async def _coulson_sync_loop():
     """Periodic Coulson pull. Never raises into the event loop."""
     while True:
         try:
-            result = await oem_sync.sync_from_coulson(db)
+            result = await oem_sync.sync_from_coulson(db, on_body_adopted=_reprice_after_sold_body)
             if result.get("ok"):
                 try:
                     await _reprice_after_oem(result.get("changedPriceIds"))
@@ -15294,7 +15374,7 @@ async def _run_boot_maintenance():
         except Exception:
             logging.exception("OEM_CATALOG_BOOT_ERROR")
         try:
-            sold_stats = await oem_sync.apply_sold_vehicle_ids_to_leads(db)
+            sold_stats = await _apply_sold_vehicle_ids()
             missing = await oem_sync.delivered_missing_vehicle_ids(db)
             logging.info(
                 "OEM_SOLD_LEAD_IDS: updated=%s remainingDeliveredMissing=%s",

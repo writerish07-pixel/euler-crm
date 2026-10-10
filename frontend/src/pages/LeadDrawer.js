@@ -834,6 +834,39 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
         <OwnerKV label="Lead Source" field="leadSource" value={lead.leadSource || ""}
           options={(masters.leadSources || []).map((s) => s)} leadId={lid} onSaved={onSaved} />
       </Card>
+      {(lead.oemBodyMismatch || (lead.originalVariant && lead.originalVariant !== lead.variant)) && (
+        <Card className="p-3 sm:col-span-2 border-amber-200 bg-amber-50/70" data-testid="oem-body-banner">
+          {lead.oemBodyMismatch
+            ? (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm text-amber-900">
+                  Coulson billed this chassis as {lead.oemBilledModel || lead.interestedModel} {lead.oemBilledVariant}
+                  {lead.variant ? ` — this file is still ${lead.interestedModel || ""} ${lead.variant}` : ""}.
+                  Price was not changed after close.
+                </p>
+                {isOwner && (
+                  <Button variant="secondary" data-testid="adopt-oem-body-btn" className="!py-1 !px-2.5 text-xs"
+                    onClick={async () => {
+                      try {
+                        await post(`/leads/${lid}/adopt-oem-body`, {});
+                        onSaved();
+                      } catch (e) {
+                        toast.error(apiErrorMessage(e, "Could not adopt the billed body"));
+                      }
+                    }}>
+                    Use billed body + price
+                  </Button>
+                )}
+              </div>
+            )
+            : (
+              <p className="text-sm text-amber-900">
+                Coulson billed this chassis as {lead.interestedModel} {lead.variant}
+                {lead.originalVariant ? ` (was ${lead.originalModel || ""} ${lead.originalVariant})` : ""}. Price follows the billed body.
+              </p>
+            )}
+        </Card>
+      )}
       <Card className="p-4 sm:col-span-2">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6">
@@ -2060,6 +2093,9 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           {outstandingCleared
             ? " Filled automatically — no need to type them."
             : " Clear outstanding, then these ids fill automatically."}
+          {sold.bodyDiffers && sold.variant
+            ? ` Coulson billed body ${sold.model || ""} ${sold.variant}${sold.willAdoptBody ? " — this file will switch to that body and price." : "."}`
+            : ""}
         </p>
       )}
       {!soldChassis && !alreadyDelivered && (
