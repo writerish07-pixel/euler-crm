@@ -45,6 +45,7 @@ jest.mock("../lib/api", () => ({
     return Promise.resolve({});
   },
   post: jest.fn(() => Promise.resolve({ leadId: "LD26000002" })),
+  downloadPost: jest.fn(() => Promise.resolve()),
   apiErrorMessage: (e, fallback) => fallback,
   apiErrorDetail: (e) => e?.response?.data?.detail || {},
 }));
@@ -61,6 +62,9 @@ jest.mock("../components/LeadDocuments", () => ({
   }),
   dealSheetReady: jest.fn(() => ""),
   LocalDealSheetBlock: () => <div data-testid="deal-sheet-block" />,
+  PrintDealSheetButton: ({ onPrint }) => (
+    <button type="button" data-testid="print-deal-sheet-btn" onClick={onPrint}>Print deal sheet</button>
+  ),
   uploadKycFiles: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({
@@ -121,7 +125,8 @@ test("executive create form shows OEM extra support and another-vehicle checkbox
   expect(document.querySelector('[data-testid="deal-additional"]')).toBeFalsy();
   expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/OEM scheme/i);
   expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/Scheme Master/i);
-  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="print-deal-sheet-btn"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeFalsy();
   await act(async () => { root.unmount(); });
 });
 

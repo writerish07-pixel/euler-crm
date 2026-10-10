@@ -30,6 +30,7 @@ jest.mock("../lib/api", () => ({
   },
   post: jest.fn(),
   uploadFile: jest.fn(() => Promise.resolve({ documentId: "D1" })),
+  downloadFile: jest.fn(() => Promise.resolve()),
   apiErrorMessage: (e, fallback) => fallback,
 }));
 jest.mock("../context/AuthContext", () => ({

@@ -38,6 +38,7 @@ import insurance_mis as ins_mis
 import sept_2026_schemes
 import oct_2026_schemes
 import scheme_circulars
+import deal_sheet_pdf
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -10208,6 +10209,120 @@ async def deal_preview(model: str = "", variant: str = "", cxDemand: float = 0,
     if not _is_owner_user(user):
         return _staff_safe_deal_preview(deal)
     return deal
+
+
+class DealSheetPreviewIn(BaseModel):
+    customerName: str = ""
+    mobile: str = ""
+    city: str = ""
+    customerType: str = "Individual"
+    gstin: str = ""
+    interestedModel: str = ""
+    variant: str = ""
+    budget: float = 0
+    executive: str = ""
+    createdDate: Optional[str] = None
+    passOnKeys: str = ""
+    units: Optional[List[dict]] = None
+
+
+def _deal_sheet_file(payload, pdf):
+    name = deal_sheet_pdf.filename_for(payload)
+    return StreamingResponse(
+        io.BytesIO(pdf),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+def _require_printable_deal(customer, deal):
+    if not str((customer or {}).get("customerName") or "").strip():
+        raise HTTPException(422, "Enter the customer name before printing the deal sheet.")
+    if not str((deal or {}).get("model") or (customer or {}).get("interestedModel") or "").strip():
+        raise HTTPException(422, "Select a vehicle before printing the deal sheet.")
+    if ce.num((deal or {}).get("cxDemand") or (customer or {}).get("budget")) <= 0:
+        raise HTTPException(422, "Enter Cx Demand before printing the deal sheet.")
+
+
+async def _deal_from_quote(model, variant, cx, on, pass_on, units=None):
+    specs = _unit_specs_from(model, variant, units)
+    if len(specs) > 1:
+        return await _deal_format_for_pack(specs, cx, on, pass_on)
+    return await _deal_format_for(model, variant, cx, on, pass_on)
+
+
+@api.post("/commercial/deal-sheet.pdf")
+async def deal_sheet_preview_pdf(body: DealSheetPreviewIn, _sales=Depends(sales_staff_only)):
+    """Printable customer deal sheet from the live quote (before the lead exists)."""
+    customer = body.model_dump()
+    deal = await _deal_from_quote(
+        body.interestedModel, body.variant, body.budget, body.createdDate,
+        body.passOnKeys, body.units)
+    deal["model"] = deal.get("model") or body.interestedModel
+    deal["variant"] = deal.get("variant") or body.variant
+    _require_printable_deal(customer, deal)
+    payload, pdf = deal_sheet_pdf.assemble_deal_sheet(
+        customer=customer, deal=deal, executive=body.executive, date=body.createdDate)
+    return _deal_sheet_file(payload, pdf)
+
+
+@api.get("/leads/{lead_id}/deal-sheet.pdf")
+async def lead_deal_sheet_pdf(lead_id: str, _sales=Depends(sales_staff_only)):
+    lead = await get_lead_or_404(lead_id)
+    cx = ce.num(lead.get("cxDemand") or lead.get("budget"))
+    deal = lead.get("dealFormat") or {}
+    if not deal or ce.num(deal.get("exShowroom")) <= 0:
+        deal = await _deal_from_quote(
+            lead.get("interestedModel"), lead.get("variant"), cx,
+            lead.get("schemeAsOf") or lead.get("bookingDate") or lead.get("createdDate"),
+            lead.get("schemePassOn"),
+            lead.get("units"))
+    deal = {**deal, "cxDemand": cx or deal.get("cxDemand"),
+            "model": deal.get("model") or lead.get("interestedModel"),
+            "variant": deal.get("variant") or lead.get("variant")}
+    _require_printable_deal(lead, deal)
+    payload, pdf = deal_sheet_pdf.assemble_deal_sheet(
+        customer=lead, deal=deal, ref=lead.get("leadId") or "",
+        date=lead.get("createdDate") or lead.get("bookingDate"),
+        executive=lead.get("executive") or "")
+    return _deal_sheet_file(payload, pdf)
+
+
+@api.get("/lead-requests/{request_id}/deal-sheet.pdf")
+async def request_deal_sheet_pdf(request_id: str, user=Depends(current_user)):
+    req = await db.lead_requests.find_one({"requestId": request_id})
+    if not req:
+        raise HTTPException(404, "Lead request not found")
+    role = str(user.get("role") or "")
+    if role == "executive":
+        if not await _exec_may_open_request(req, user):
+            raise HTTPException(403, "You can only print your own deal sheet.")
+    elif not _can_approve_leads(user) and role not in ("tl", "team lead"):
+        raise HTTPException(403, "Not allowed to print this deal sheet.")
+    payload_in = req.get("payload") or {}
+    customer = {**payload_in, **{k: req.get(k) for k in (
+        "customerName", "mobile", "city", "customerType", "gstin", "executive",
+        "interestedModel", "variant", "budget") if req.get(k)}}
+    if not customer.get("customerName"):
+        customer["customerName"] = payload_in.get("customerName") or ""
+    deal = req.get("dealFormat") or {}
+    cx = ce.num(req.get("cxDemand") or req.get("dealAmount") or payload_in.get("budget"))
+    if not deal or ce.num(deal.get("exShowroom")) <= 0:
+        deal = await _deal_from_quote(
+            customer.get("interestedModel") or payload_in.get("interestedModel"),
+            customer.get("variant") or payload_in.get("variant"), cx,
+            payload_in.get("createdDate"), req.get("schemePassOn"),
+            payload_in.get("units"))
+    deal = {**deal, "cxDemand": cx or deal.get("cxDemand"),
+            "model": deal.get("model") or customer.get("interestedModel") or payload_in.get("interestedModel"),
+            "variant": deal.get("variant") or customer.get("variant") or payload_in.get("variant")}
+    _require_printable_deal({**payload_in, **customer}, deal)
+    payload, pdf = deal_sheet_pdf.assemble_deal_sheet(
+        customer={**payload_in, **customer}, deal=deal,
+        ref=req.get("requestId") or "",
+        date=payload_in.get("createdDate") or str(req.get("createdAt") or "")[:10],
+        executive=customer.get("executive") or req.get("submittedByName") or "")
+    return _deal_sheet_file(payload, pdf)
 
 
 @api.get("/commercial/scheme-preview")

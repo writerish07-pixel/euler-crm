@@ -2,13 +2,13 @@ import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
-import { get, post, put, del, apiErrorMessage, apiErrorDetail } from "../lib/api";
+import { get, post, put, del, apiErrorMessage, apiErrorDetail, downloadFile } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
-import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady, B2bGstinField } from "../components/LeadDocuments";
+import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady, B2bGstinField, PrintDealSheetButton } from "../components/LeadDocuments";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
@@ -900,11 +900,26 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
               onChanged={onSaved}
             />
           )}
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+            <h4 className="font-heading font-bold text-ink text-sm">Deal sheet</h4>
+            <PrintDealSheetButton
+              onPrint={async () => {
+                try {
+                  await downloadFile(
+                    `/leads/${lead.leadId}/deal-sheet.pdf`,
+                    `deal-sheet-${lead.leadId}.pdf`,
+                  );
+                } catch (e) {
+                  toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
+                }
+              }}
+            />
+          </div>
+          <p className="text-[11px] text-ink-faint mt-1">Print, get the customer to sign, then upload the signed sheet.</p>
           <LeadDocsStrip
             leadId={lead.leadId}
             kinds={["deal_sheet"]}
             canUploadKinds={canUploadKyc ? ["deal_sheet"] : []}
-            title="Deal sheet"
             documents={documents}
             onChanged={onSaved}
           />
