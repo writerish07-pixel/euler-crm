@@ -124,7 +124,8 @@ async def test_executive_pays_only_after_booking(exec_client, client):
     assert after.status_code == 200, after.text
     finance = await exec_client.post(f"/api/leads/{lid}/payments", json={
         "amount": 1000, "paymentMode": "Finance", "financerName": "HDFC"})
-    assert finance.status_code == 403, finance.text
+    assert finance.status_code == 200, finance.text
+    assert finance.json()["paymentMode"] == "Finance"
 
 
 @pytest.mark.asyncio

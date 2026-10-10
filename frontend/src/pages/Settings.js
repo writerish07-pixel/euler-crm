@@ -163,7 +163,7 @@ export default function Settings() {
   };
 
   const STAFF_ROLE_TO_LOGIN = {
-    executive: "executive", TL: "tl", GM: "sales_gm", ASM: "asm", RM: "rm", owner: "owner", accounts: "accounts",
+    executive: "executive", TL: "tl", team_lead: "team_lead", GM: "sales_gm", ASM: "asm", RM: "rm", owner: "owner", accounts: "accounts",
   };
   const pickStaff = (staffId) => {
     const row = staff.find((s) => s.staffId === staffId);
@@ -362,7 +362,8 @@ export default function Settings() {
               setForm((f) => ({ ...f, role, ...(role === "oem_finance" ? { staffId: "" } : {}) }));
             }}>
               <option value="executive">Executive</option>
-              <option value="tl">Team Leader (completes the deal)</option>
+              <option value="team_lead">Team Leader (own team + deal desk)</option>
+              <option value="tl">Showroom Admin (full desk)</option>
               <option value="sales_gm">Sales GM (showroom sales, no money desk)</option>
               <option value="accounts">Accounts</option>
               <option value="asm">ASM</option>

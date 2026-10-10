@@ -7,6 +7,7 @@ import { createRoot } from "react-dom/client";
 const mockAuth = {
   isExecutive: true,
   isTl: false,
+  isTeamLead: false,
   user: { name: "Executive" },
   canSeeOwnerCommercials: false,
 };
@@ -110,6 +111,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   mockAuth.isExecutive = true;
   mockAuth.isTl = false;
+  mockAuth.isTeamLead = false;
   mockAuth.user = { name: "Executive" };
   post.mockClear();
 });

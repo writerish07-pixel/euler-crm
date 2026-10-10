@@ -1823,8 +1823,17 @@ async def take_chassis_from_inventory(db, chassis):
 
 
 async def inventory_counts(db):
+    present = None
+    try:
+        import inventory_check
+        present = await inventory_check.present_chassis(db)
+    except Exception:
+        present = None
     counts = {}
     async for v in db.oem_inventory.find({}):
+        chassis = str(v.get("chassis") or "").strip()
+        if present is not None and chassis not in present:
+            continue
         key = (v.get("model") or "", v.get("variant") or "")
         counts[key] = counts.get(key, 0) + 1
     return counts

@@ -58,9 +58,9 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, gmHome, monthlyOk, oemClaimDesk }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, showroomDesk, staffDesk, gmHome, monthlyOk, oemClaimDesk }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, isSalesGm, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = auth;
   const loc = useLocation();
   if (user === undefined) {
     return (
@@ -81,6 +81,8 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   if (isOemFinance && !oemOk) return <Navigate to="/oem-finance" replace />;
   if (ownerOnly && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (dealDesk && !canEditCommercials) return <Navigate to={homePath(auth)} replace />;
+  if (showroomDesk && !canManageShowroom) return <Navigate to={homePath(auth)} replace />;
+  if (staffDesk && !canManageStaff) return <Navigate to={homePath(auth)} replace />;
   if (fieldOnly && !isField && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (gmHome && !isSalesGm && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (monthlyOk && !canViewMonthly) return <Navigate to={homePath(auth)} replace />;
@@ -97,12 +99,13 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
 }
 
 function HomeRedirect() {
-  const { isAccounts, isField, isExecutive, isOemFinance, isSalesGm, isTl } = useAuth();
+  const { isAccounts, isField, isExecutive, isOemFinance, isSalesGm, isTl, isTeamLead } = useAuth();
   if (isOemFinance) return <Navigate to="/oem-finance" replace />;
   if (isAccounts) return <Navigate to="/accounts" replace />;
   if (isField) return <Navigate to="/field" replace />;
   if (isSalesGm) return <SalesGmDashboard />;
   if (isExecutive) return <ExecutiveDashboard />;
+  if (isTeamLead) return <ExecutiveDashboard teamView />;
   if (isTl) {
     return (
       <div data-testid="tl-home">
@@ -128,6 +131,8 @@ function AppRoutes() {
       accountsHome={opts.accountsHome}
       oemOk={opts.oemOk}
       dealDesk={opts.dealDesk}
+      showroomDesk={opts.showroomDesk}
+      staffDesk={opts.staffDesk}
       gmHome={opts.gmHome}
       monthlyOk={opts.monthlyOk}
       oemClaimDesk={opts.oemClaimDesk}
@@ -155,7 +160,7 @@ function AppRoutes() {
       <Route path="/cancellations" element={P(<Cancellations />, { fieldOk: true })} />
       {/* Owner too, so you can see exactly what the OEM sees before issuing a login. */}
       <Route path="/oem-finance" element={P(<OemFinance />, { oemOk: true })} />
-      <Route path="/allocation" element={P(<Allocation />, { dealDesk: true })} />
+      <Route path="/allocation" element={P(<Allocation />, { showroomDesk: true })} />
       <Route path="/payments" element={P(<Payments />, { moneyDesk: true })} />
       <Route path="/finance" element={P(<Finance />, { financeView: true })} />
       <Route path="/insurance" element={P(<Insurance />, { moneyDesk: true })} />
@@ -171,7 +176,7 @@ function AppRoutes() {
       <Route path="/oem-extra-support" element={P(<OemExtraSupport />, { oemClaimDesk: true })} />
       <Route path="/dropped-extra-support" element={P(<DroppedExtraSupport />, { oemClaimDesk: true })} />
       <Route path="/claim-reconciliation" element={P(<ClaimReconciliation />, { ownerOnly: true })} />
-      <Route path="/scheme-master" element={P(<SchemeMaster />, { dealDesk: true })} />
+      <Route path="/scheme-master" element={P(<SchemeMaster />, { showroomDesk: true })} />
       <Route path="/incentive-master" element={P(<IncentiveMaster />, { ownerOnly: true })} />
       <Route path="/executive-incentive" element={P(<ExecutiveIncentive />, { gmHome: true })} />
       <Route path="/dealer-earnings" element={P(<DealerEarnings />, { ownerOnly: true })} />
@@ -185,7 +190,7 @@ function AppRoutes() {
       <Route path="/price-list" element={P(<PriceList />, { salesOnly: true, fieldOk: true })} />
       <Route path="/inventory" element={P(<Inventory />)} />
       <Route path="/price-master" element={P(<PriceMaster />, { ownerOnly: true })} />
-      <Route path="/staff" element={P(<Staff />, { ownerOnly: true })} />
+      <Route path="/staff" element={P(<Staff />, { staffDesk: true })} />
       <Route path="/settings" element={P(<Settings />)} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

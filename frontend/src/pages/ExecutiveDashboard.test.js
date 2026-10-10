@@ -5,7 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 
-const mockAuth = { isTl: false, isExecutive: true };
+const mockAuth = { isTl: false, isTeamLead: false, isExecutive: true };
 
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
 jest.mock("../lib/api", () => ({
@@ -55,6 +55,7 @@ async function renderDash(teamView = false) {
 afterEach(() => {
   document.body.innerHTML = "";
   mockAuth.isTl = false;
+  mockAuth.isTeamLead = false;
   mockAuth.isExecutive = true;
 });
 
@@ -77,5 +78,15 @@ test("TL team pipeline uses New Lead on the same dashboard", async () => {
   expect(btn.textContent).toMatch(/New Lead/);
   await act(async () => { btn.click(); });
   expect(document.querySelector('[data-testid="new-lead-drawer"]')).toBeTruthy();
+  await act(async () => { root.unmount(); });
+});
+
+test("team lead home is Team Dashboard", async () => {
+  mockAuth.isTeamLead = true;
+  mockAuth.isExecutive = false;
+  const { host, root } = await renderDash(true);
+  expect(host.textContent).toMatch(/Team Dashboard/);
+  const btn = host.querySelector('[data-testid="exec-new-lead-btn"]');
+  expect(btn.textContent).toMatch(/New Lead/);
   await act(async () => { root.unmount(); });
 });

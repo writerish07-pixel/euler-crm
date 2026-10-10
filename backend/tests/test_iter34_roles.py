@@ -351,8 +351,8 @@ async def test_an_executive_can_no_longer_deliver_close_or_cancel(client, exec_c
 
 @pytest.mark.asyncio
 async def test_an_executive_cannot_refund_or_post_finance(client, exec_client):
-    """Customer cash after booking is allowed. Refunds and finance stay money desk."""
-    lid = await make_lead(client, "ITER34 No money")
+    """Customer cash and finance receipts after booking are allowed. Refunds stay money desk."""
+    lid = await make_lead(client, "ITER34 No money", executive="Executive")
     assert (await exec_client.post(f"/api/leads/{lid}/payments",
                                    json={"amount": 1000, "paymentMode": "Cash"})).status_code == 409
     assert (await exec_client.post(f"/api/leads/{lid}/refund",
@@ -390,7 +390,10 @@ def test_the_role_constants_say_what_changed():
     assert "tl" in authmod.ALLOWED_ROLES
     assert "executive" in authmod.SALES_ROLES        # still feeds leads
     assert "executive" not in authmod.MONEY_ROLES    # no longer moves money
-    assert authmod.MONEY_ROLES == ("owner", "tl", "accounts")
+    assert authmod.MONEY_ROLES == ("owner", "tl", "team_lead", "accounts")
+    assert "team_lead" in authmod.ALLOWED_ROLES
+    assert "team_lead" in authmod.DEAL_DESK_ROLES
+    assert "team_lead" not in authmod.SHOWROOM_DESK_ROLES
     # ...but an executive can still READ the finance register to answer a customer.
     assert "executive" in authmod.FINANCE_VIEW_ROLES
 
@@ -528,7 +531,9 @@ async def test_a_tl_does_not_get_the_owner_only_commercials(tl):
 
 @pytest.mark.asyncio
 async def test_a_tl_cannot_change_masters_or_staff(tl):
-    assert (await tl.post("/api/staff", json={"name": "x", "role": "owner"})).status_code == 403
+    """Showroom Admin (`tl`) can assign staff under a Team Leader, but not reseeds."""
+    created = await tl.post("/api/staff", json={"name": "ITER34 Showroom Staff", "role": "executive"})
+    assert created.status_code == 200, created.text
     assert (await tl.post("/api/cancel-reasons", json={"reason": "x"})).status_code == 403
     assert (await tl.post("/api/admin/reseed", json={})).status_code == 403
 
@@ -542,7 +547,7 @@ async def test_the_tl_sees_the_whole_showroom(tl, client):
 
 
 def test_the_deal_desk_is_owner_tl_and_sales_gm():
-    assert set(authmod.DEAL_DESK_ROLES) == {"owner", "tl", "sales_gm"}
+    assert set(authmod.DEAL_DESK_ROLES) == {"owner", "tl", "team_lead", "sales_gm"}
     assert "tl" in authmod.SALES_ROLES        # covers for an executive
     assert "sales_gm" in authmod.SALES_ROLES
     assert "tl" in authmod.MONEY_ROLES        # collection precedes delivery

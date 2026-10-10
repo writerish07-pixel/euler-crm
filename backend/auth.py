@@ -19,19 +19,22 @@ JWT_ALGORITHM = "HS256"
 bearer = HTTPBearer(auto_error=False)
 
 # Dealership staff + company field managers + money desk + the OEM's finance desk
-ALLOWED_ROLES = ("owner", "sales_gm", "tl", "executive", "accounts", "asm", "rm", "oem_finance")
-# Executives feed the funnel: leads, booking + booking amount, activities,
-# quotations. A TEAM LEADER then finishes the deal — pricing, scheme, collection
-# and delivery — so a handover never waits for the owner to log in. A TL can do
-# everything an executive can, and so covers for one.
+ALLOWED_ROLES = (
+    "owner", "sales_gm", "tl", "team_lead", "executive", "accounts", "asm", "rm", "oem_finance",
+)
+# `tl` is Showroom Admin — the old full-desk Team Leader (whole showroom).
+# `team_lead` is a working TL: executive + deal/money desk, scoped to their team.
+# Executives feed the funnel. Showroom Admin / team_lead finish the deal.
 # Sales GM runs the whole showroom: same funnel as an executive, same close-the-deal
 # steps as a TL, all leads (not self-scoped). They do not post money or edit Price Master.
-SALES_ROLES = ("owner", "sales_gm", "tl", "executive")
-LEAD_INTAKE_ROLES = ("owner", "sales_gm", "tl", "executive")
-MONEY_ROLES = ("owner", "tl", "accounts")
+SALES_ROLES = ("owner", "sales_gm", "tl", "team_lead", "executive")
+LEAD_INTAKE_ROLES = ("owner", "sales_gm", "tl", "team_lead", "executive")
+MONEY_ROLES = ("owner", "tl", "team_lead", "accounts")
 # Closing the deal: price, scheme, extra income, delivery, close, cancel, revive.
 # The commercial decisions an executive does not make.
-DEAL_DESK_ROLES = ("owner", "sales_gm", "tl")
+DEAL_DESK_ROLES = ("owner", "sales_gm", "tl", "team_lead")
+# Showroom-wide desk: allocation, Scheme Master. Not the team-scoped TL.
+SHOWROOM_DESK_ROLES = ("owner", "sales_gm", "tl")
 # Match OEM debit notes to the scheme register. Sales GM chases files but does
 # not post cash, so this is wider than MONEY_ROLES and does not include payments.
 OEM_CLAIM_ROLES = (*MONEY_ROLES, "sales_gm")
@@ -41,6 +44,14 @@ OEM_CLAIM_SYNC_ROLES = ("owner", "tl", "sales_gm")
 FIELD_ROLES = ("asm", "rm")
 # Money desk can write; ASM/RM / Sales GM may view Finance Register (disbursed vs remaining).
 FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", "sales_gm", *FIELD_ROLES)
+
+
+def is_showroom_admin(user) -> bool:
+    return str((user or {}).get("role") or "").strip().lower() == "tl"
+
+
+def is_team_lead(user) -> bool:
+    return str((user or {}).get("role") or "").strip().lower() == "team_lead"
 
 # Roles belonging to people OUTSIDE the dealership. 37 of 43 GET endpoints carry
 # no role check of their own — the /api router only requires a valid token — so an
@@ -298,7 +309,7 @@ def build_router(db):
         if user.get("role") not in SALES_ROLES:
             raise HTTPException(
                 403,
-                "Only Owner / Sales GM / Team Leader / Executive can add or update leads and bookings.",
+                "Only Owner / Sales GM / Showroom Admin / Team Leader / Executive can add or update leads and bookings.",
             )
         return user
 
@@ -311,8 +322,17 @@ def build_router(db):
         if user.get("role") not in DEAL_DESK_ROLES:
             raise HTTPException(
                 403,
-                "Only the Owner, Sales GM or a Team Leader can price, scheme, deliver, "
+                "Only the Owner, Sales GM, Showroom Admin or a Team Leader can price, scheme, deliver, "
                 "close or cancel a lead.",
+            )
+        return user
+
+    async def showroom_desk_only(user=Depends(current_user)):
+        """Owner + Sales GM + Showroom Admin — whole-showroom tools, not team TL."""
+        if user.get("role") not in SHOWROOM_DESK_ROLES:
+            raise HTTPException(
+                403,
+                "Allocation and Scheme Master are for the Owner, Sales GM or Showroom Admin.",
             )
         return user
 
@@ -321,7 +341,7 @@ def build_router(db):
         if user.get("role") not in MONEY_ROLES:
             raise HTTPException(
                 403,
-                "Only the Owner, a Team Leader or Accounts can record money movements.",
+                "Only the Owner, Showroom Admin, a Team Leader or Accounts can record money movements.",
             )
         return user
 
@@ -529,6 +549,7 @@ def build_router(db):
     router.owner_only = owner_only
     router.sales_staff_only = sales_staff_only
     router.deal_desk_only = deal_desk_only
+    router.showroom_desk_only = showroom_desk_only
     router.money_desk_only = money_desk_only
     router.finance_viewer_only = finance_viewer_only
     router.field_viewer_only = field_viewer_only

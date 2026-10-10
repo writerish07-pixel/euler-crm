@@ -16,8 +16,8 @@ import NewLeadDrawer from "./NewLeadDrawer";
 export default function ExecutiveDashboard({ teamView = false }) {
   // Team Leader home also renders this component so any new executive-dashboard
   // widget appears for TL automatically. Do not fork a second copy.
-  const { isTl, isExecutive } = useAuth();
-  const team = teamView || isTl;
+  const { isTl, isTeamLead, isExecutive } = useAuth();
+  const team = teamView || isTl || isTeamLead;
   const navigate = useNavigate();
   const [d, setD] = useState(null);
   const [masters, setMasters] = useState(null);
@@ -34,10 +34,10 @@ export default function ExecutiveDashboard({ teamView = false }) {
   return (
     <div data-testid="executive-dashboard">
       <PageHeader
-        title={team ? "Team Pipeline" : "Executive Dashboard"}
+        title={isTeamLead ? "Team Dashboard" : team ? "Showroom Pipeline" : "Executive Dashboard"}
         subtitle={d
-          ? `${scope.note || (team ? "All executives" : "My pipeline")} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`
-          : (team ? "All executives" : "My pipeline")}
+          ? `${scope.note || (isTeamLead ? "Your team" : team ? "All executives" : "My pipeline")} · ${scope.matchedLeads || 0} leads · updated ${d.lastUpdated ? fmtTime(d.lastUpdated) : "—"}`
+          : (isTeamLead ? "Your team" : team ? "All executives" : "My pipeline")}
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
           <Button data-testid="exec-new-lead-btn" onClick={() => setShowNew(true)}>

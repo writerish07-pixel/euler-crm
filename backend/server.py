@@ -39,6 +39,8 @@ import sept_2026_schemes
 import oct_2026_schemes
 import scheme_circulars
 import deal_sheet_pdf
+import team_scope
+import inventory_check
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -78,6 +80,7 @@ current_user = auth_router.current_user
 owner_only = auth_router.owner_only
 sales_staff_only = auth_router.sales_staff_only
 deal_desk_only = auth_router.deal_desk_only
+showroom_desk_only = auth_router.showroom_desk_only
 money_desk_only = auth_router.money_desk_only
 field_viewer_only = auth_router.field_viewer_only
 finance_viewer_only = auth_router.finance_viewer_only
@@ -521,7 +524,7 @@ def lead_actions(lead, act=None):
         "canScheme": mutable and not is_exec,
         # Desk can collect on an Active file. Executives collect only after booking.
         "canPayment": mutable and (booked if is_exec else True),
-        "canFinanceReceipt": not_archived and not is_exec,  # finance receipt allowed after close
+        "canFinanceReceipt": not_archived,  # finance receipt allowed after close; execs post it too
         "canDeliver": active and booked and not delivered and not is_exec,
         "canClose": active and not is_exec,                # close exit path (incl. delivered)
         # Cancel is the LOST exit. A delivered vehicle is not a cancellation — that
@@ -1584,12 +1587,13 @@ async def _masters_list_values(category):
     return [r["value"] for r in rows]
 
 
-STAFF_ROLES = ["executive", "TL", "GM", "ASM", "RM", "owner", "accounts"]
+STAFF_ROLES = ["executive", "TL", "team_lead", "GM", "ASM", "RM", "owner", "accounts"]
 # Which daily reports a staff member can receive.
 STAFF_REPORTS = ["exec_morning", "exec_eod", "manager_eod", "owner_eod"]
 DEFAULT_REPORTS_BY_ROLE = {
     "executive": ["exec_morning", "exec_eod"],
     "TL": ["manager_eod"],
+    "team_lead": ["exec_morning", "exec_eod", "manager_eod"],
     "GM": ["manager_eod"],
     "ASM": ["manager_eod"],
     "RM": ["manager_eod"],
@@ -2014,6 +2018,20 @@ def _leads_for_executive(leads, user) -> list:
     and GM / Owner Approve — they are not hidden from the register.
     """
     return [l for l in leads if _executive_name_matches(user, (l or {}).get("executive"))]
+
+
+async def _leads_for_scoped_viewer(leads, user) -> list:
+    role = str((user or {}).get("role") or "").strip().lower()
+    if role == "executive":
+        return _leads_for_executive(leads, user)
+    if authmod.is_team_lead(user):
+        return team_scope.leads_for_names(leads, await team_scope.team_member_names(db, user))
+    return list(leads or [])
+
+
+async def _scoped_lead_ids(user) -> set:
+    leads = await db.leads.find({}, {"leadId": 1, "executive": 1}).to_list(5000)
+    return {l["leadId"] for l in await _leads_for_scoped_viewer(leads, user) if l.get("leadId")}
 
 
 def _exec_request_filter(user) -> dict:
@@ -2534,10 +2552,10 @@ async def executive_dashboard(user=Depends(current_user)):
     fields.
     """
     role = user.get("role")
-    if role not in ("executive", "owner", "tl"):
-        raise HTTPException(403, "Executive dashboard is for Executive, Team Leader, and Owner.")
+    if role not in ("executive", "owner", "tl", "team_lead"):
+        raise HTTPException(403, "Executive dashboard is for Executive, Team Leader, Showroom Admin, and Owner.")
     leads_all = await db.leads.find().to_list(5000)
-    mine = _leads_for_executive(leads_all, user) if role == "executive" else leads_all
+    mine = await _leads_for_scoped_viewer(leads_all, user) if _is_scoped_sales(user) else leads_all
     ym = this_month()
     td = today()
     vol = _volume_period_kpis(mine, include_money=False)
@@ -2631,8 +2649,10 @@ async def executive_dashboard(user=Depends(current_user)):
 
     if role == "executive":
         scope_note = "Scoped to leads where Executive matches your name."
+    elif authmod.is_team_lead(user):
+        scope_note = "Team Leader view — your pipeline and your team's."
     elif role == "tl":
-        scope_note = "Team Leader view — all executives' pipelines."
+        scope_note = "Showroom Admin view — all executives' pipelines."
     else:
         scope_note = "Owner view — all dealership leads."
 
@@ -2641,7 +2661,7 @@ async def executive_dashboard(user=Depends(current_user)):
             "executiveName": user.get("name") or "",
             "matchedLeads": len(mine),
             "note": scope_note,
-            "teamView": role in ("tl", "owner"),
+            "teamView": role in ("tl", "team_lead", "owner"),
         },
         "kpis": {
             "myLeadsMtd": vol["mtd"]["leads"],
@@ -2968,7 +2988,7 @@ async def cancellations_report(period: str = "month", executive: str = "",
 # the OEM's finance manager sees before handing out the login.
 OEM_FINANCE_ROLES = ("owner", "oem_finance")
 # Month-wise MTD/YTD register — every dealership login. OEM stays on /reports/oem-monthly.
-MONTHLY_REGISTER_ROLES = ("owner", "sales_gm", "tl", "accounts", "executive", "asm", "rm")
+MONTHLY_REGISTER_ROLES = ("owner", "sales_gm", "tl", "team_lead", "accounts", "executive", "asm", "rm")
 FIELD_MONTHLY_ROLES = ("asm", "rm")
 EXPORT_ROLES = ("owner", "sales_gm", "tl")
 # Ageing buckets, in days since delivery. The finance receipt SLA is 2 days, so
@@ -3281,14 +3301,16 @@ async def monthly_register(month: str = "", year: str = "", user=Depends(current
     if role not in MONTHLY_REGISTER_ROLES:
         raise HTTPException(403, "Monthly register is for dealership staff.")
     src = await _period_source()
-    if role == "executive":
-        ids = {l["leadId"] for l in _leads_for_executive(src["leads"], user) if l.get("leadId")}
+    if _is_scoped_sales(user):
+        ids = {l["leadId"] for l in await _leads_for_scoped_viewer(src["leads"], user) if l.get("leadId")}
         src = _scope_period_source(src, ids)
     oem = role in FIELD_MONTHLY_ROLES
     staff = role != "owner" and not oem
     body = await _monthly_payload(_parse_period(month, year), oem=oem, src=src, staff=staff)
     if role == "executive":
         body["scope"] = {"kind": "own", "note": "Your assigned leads only. No dealer commercials."}
+    elif authmod.is_team_lead(user):
+        body["scope"] = {"kind": "team", "note": "Your team only. No dealer commercials."}
     elif oem:
         body["scope"] = {
             "kind": "field",
@@ -3516,8 +3538,12 @@ def _is_own_lead(lead, user) -> bool:
 
 
 async def _own_lead_ids(user) -> set:
-    return {l["leadId"] for l in
-            _leads_for_executive(await db.leads.find().to_list(5000), user)}
+    return await _scoped_lead_ids(user)
+
+
+def _is_scoped_sales(user) -> bool:
+    role = str((user or {}).get("role") or "").strip().lower()
+    return role in ("executive", "team_lead")
 
 
 def _require_own_lead(lead, user):
@@ -3533,6 +3559,15 @@ def _require_own_lead(lead, user):
         raise HTTPException(
             403, "This lead is assigned to another executive. "
                  "Ask the owner or your team leader to reallocate it.")
+
+
+async def _require_lead_visible(lead, user):
+    _require_own_lead(lead, user)
+    if not authmod.is_team_lead(user):
+        return
+    names = await team_scope.team_member_names(db, user)
+    if not team_scope.lead_in_names(lead, names):
+        raise HTTPException(403, "This lead is not on your team.")
 
 
 @api.get("/leads")
@@ -3568,9 +3603,10 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         "lastCancelReason": 1, "lastCancelDate": 1,
         "createdDate": 1, "bookingDate": 1, "deliveryDate": 1,
     }).sort("leadId", -1).to_list(cap)
-    # An executive works their own leads only. Owner, Sales GM, TL and Accounts see all.
-    if user.get("role") == "executive":
-        leads = _leads_for_executive(leads, user)
+    # An executive works their own leads only. A team lead sees their team.
+    # Owner, Sales GM, Showroom Admin and Accounts see all.
+    if _is_scoped_sales(user):
+        leads = await _leads_for_scoped_viewer(leads, user)
     period = _parse_period(month, year)
     leads = _rows_in_period(
         leads, period, lambda l: periodmod.lead_register_date(l, status or ""))
@@ -4074,9 +4110,13 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
     """Owner / GM create a live lead. Executive / TL create live when there is
     no dealer discount; a discounted deal waits for GM or Owner Approve."""
     role = str(user.get("role") or "")
-    if role == "tl" and not str(body.executive or "").strip():
+    if role in ("tl", "team_lead") and not str(body.executive or "").strip():
         raise HTTPException(422, "Pick the executive this lead belongs to.")
-    if role in ("executive", "tl"):
+    if role == "team_lead":
+        names = await team_scope.team_member_names(db, user)
+        if not team_scope.name_allowed_for_team_lead(body.executive, names):
+            raise HTTPException(422, "Pick yourself or an executive who reports to you.")
+    if role in ("executive", "tl", "team_lead"):
         payload = body.model_dump()
         another = bool(payload.pop("anotherVehicle", False))
         scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
@@ -4342,6 +4382,19 @@ async def _attach_oem_extra_to_requests(rows):
     return rows
 
 
+async def _team_lead_requests(user, status="pending"):
+    names = await team_scope.team_member_names(db, user)
+    q = {} if status == "all" else {"status": status}
+    rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(2000)]
+    out = []
+    for r in rows:
+        payload = r.get("payload") or {}
+        exec_name = payload.get("executive") or r.get("assignedExecutive") or r.get("submittedByName") or ""
+        if team_scope._norm_name(exec_name) in names or team_scope._norm_name(r.get("assignedExecutiveFold")) in names:
+            out.append(r)
+    return out
+
+
 def _approver_pending_query() -> dict:
     """Owner / GM Approve queue: new enquiries, plus split assignments the executive has asked for."""
     return {
@@ -4362,6 +4415,9 @@ async def lead_request_summary(user=Depends(current_user)):
             **_exec_approval_queue_filter(user),
         })
         return {"pending": n, "mine": n, "canApprove": False}
+    if authmod.is_team_lead(user):
+        n = len(await _team_lead_requests(user, status="pending"))
+        return {"pending": n, "mine": n, "canApprove": False}
     if _can_approve_leads(user):
         n = await db.lead_requests.count_documents(_approver_pending_query())
         return {"pending": n, "mine": n, "canApprove": True}
@@ -4377,11 +4433,15 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
     role = str(user.get("role") or "")
     if role == "executive":
         q.update(_exec_approval_queue_filter(user))
+        rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(2000)]
+    elif authmod.is_team_lead(user):
+        rows = await _team_lead_requests(user, status=st)
     elif not _can_approve_leads(user):
         raise HTTPException(403, "Lead approvals are for Owner / Sales GM.")
-    elif st == "pending":
-        q = _approver_pending_query()
-    rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(2000)]
+    else:
+        if st == "pending":
+            q = _approver_pending_query()
+        rows = [r async for r in db.lead_requests.find(q).sort("createdAt", -1).limit(2000)]
     req_ids = [r.get("requestId") for r in rows if r.get("requestId")]
     docs_by_req = {}
     if req_ids:
@@ -4917,7 +4977,7 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
 @api.get("/leads/{lead_id}")
 async def get_lead(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     lead = clean(await _ensure_booking_advance_receipt(lead) or lead)
     lead = (await _attach_approval_request_ids([clean(lead)]))[0]
     return _lead_for_viewer(lead, user)
@@ -4927,7 +4987,7 @@ async def get_lead(lead_id: str, user=Depends(current_user)):
 async def lead_approval_request(lead_id: str, user=Depends(current_user)):
     """The pending Deal-format request for a split-assigned register lead."""
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     req = await db.lead_requests.find_one({
         "existingLeadId": lead_id,
         "status": {"$in": ["pending", "approving"]},
@@ -4953,7 +5013,7 @@ async def lead_approval_request(lead_id: str, user=Depends(current_user)):
 @api.get("/leads/{lead_id}/360")
 async def customer_360(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     lead = (await _attach_approval_request_ids([clean(dict(lead))]))[0]
     # ASM / RM — pipeline snapshot only (no commercials, payments, claims)
     if user.get("role") in authmod.FIELD_ROLES:
@@ -5053,7 +5113,7 @@ async def _document_own(doc, user) -> bool:
 @api.get("/leads/{lead_id}/documents")
 async def list_lead_documents(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     if user.get("role") in authmod.FIELD_ROLES:
         raise HTTPException(403, "Field logins cannot open customer documents.")
     return await lead_docs.list_docs(db, user, lead_id=lead_id, own=_is_own_lead(lead, user))
@@ -5064,7 +5124,7 @@ async def upload_lead_document(lead_id: str, kind: str = Form(...),
                                file: UploadFile = File(...),
                                user=Depends(current_user), act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     kind = lead_docs.require_kind(kind)
     own = _is_own_lead(lead, user)
     if not lead_docs.can_upload_kind(user, kind, own=own):
@@ -5119,7 +5179,7 @@ async def download_document(document_id: str, user=Depends(current_user)):
         raise HTTPException(404, "Document not found")
     if meta.get("leadId"):
         lead = await db.leads.find_one({"leadId": meta["leadId"]}) or {}
-        _require_own_lead(lead, user)
+        await _require_lead_visible(lead, user)
     own = await _document_own(meta, user)
     return await lead_docs.file_response(db, document_id, user, own=own)
 
@@ -5131,7 +5191,7 @@ async def delete_document(document_id: str, user=Depends(current_user), act=Depe
         raise HTTPException(404, "Document not found")
     if meta.get("leadId"):
         lead = await db.leads.find_one({"leadId": meta["leadId"]}) or {}
-        _require_own_lead(lead, user)
+        await _require_lead_visible(lead, user)
     own = await _document_own(meta, user)
     result = await lead_docs.delete_doc(db, document_id, user, own=own)
     await write_audit(act, "delete", "document", leadId=meta.get("leadId") or "",
@@ -6462,7 +6522,7 @@ async def set_lead_gstin(lead_id: str, body: GstinIn, act=Depends(actor),
                          _sales=Depends(sales_staff_only)):
     """Staff KYC: save the B2B GSTIN number next to the GST certificate."""
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     value = str(body.gstin or "").strip().upper()
     await db.leads.update_one({"leadId": lead_id}, {"$set": {"gstin": value, "lastUpdated": now_iso()}})
     updated = await db.leads.find_one({"leadId": lead_id})
@@ -6834,6 +6894,7 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
 @api.put("/leads/{lead_id}/price-structure")
 async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
     _require_action(lead, "canPrice", "price-structure edits (only Active leads)", act)
     await _require_related_docs(lead, act)
     payload = body.model_dump()
@@ -6916,6 +6977,7 @@ async def scheme_rules(lead_id: str, on: Optional[str] = None, unit: Optional[in
 @api.put("/leads/{lead_id}/scheme")
 async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     payload = body.model_dump()
     await _require_related_docs(
@@ -7084,6 +7146,7 @@ async def set_scheme_allocation(lead_id: str, body: SchemeAllocationIn, act=Depe
     never exceeds schemeAvailable. The OEM claimable share is NOT editable here — it is
     fixed by the circular — and neither are the Scheme Master values themselves."""
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
     _require_action(lead, "canScheme", "scheme edits (only Active leads)", act)
     await _require_related_docs(lead, act)
     _require_owner_reedit(act, _has_persisted_scheme(lead), "Scheme")
@@ -7168,6 +7231,7 @@ async def set_extra_income(lead_id: str, body: ExtraIncomeIn, act=Depends(actor)
 @api.post("/leads/{lead_id}/close")
 async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
     _require_action(lead, "canClose", "closing (only Active leads)", act)
     if not str(body.closeReason or "").strip():
         raise HTTPException(422, "Close Reason is required to close a lead.")
@@ -7239,6 +7303,7 @@ async def cancel_lead(lead_id: str, body: CancelIn, act=Depends(actor), _desk=De
     which a status-based count could not do once the lead flipped back to New.
     """
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
     if _is_delivered(lead):
         raise HTTPException(
             409, "This vehicle is already delivered, so it cannot be cancelled. "
@@ -7438,6 +7503,7 @@ async def amend_cancellation(lead_id: str, body: CancelIn, act=Depends(actor)):
 async def revive_lead(lead_id: str, act=Depends(actor), _desk=Depends(deal_desk_only)):
     """Put a parked cancelled lead back in the funnel by hand, before its date."""
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
     if _acct(lead) == "Active":
         raise HTTPException(409, "This lead is already active.")
     if _acct(lead) != "Cancelled":
@@ -7549,7 +7615,7 @@ class AllocateIn(BaseModel):
 
 
 @api.get("/leads/allocation/summary")
-async def allocation_summary(_desk=Depends(deal_desk_only)):
+async def allocation_summary(_desk=Depends(showroom_desk_only)):
     """Who is carrying what, and what nobody is carrying.
 
     Unassigned leads are the point of the page: with executives scoped to their
@@ -7599,7 +7665,7 @@ async def allocation_summary(_desk=Depends(deal_desk_only)):
 
 
 @api.post("/leads/allocate")
-async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
+async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(showroom_desk_only)):
     """Assign or reassign leads to an executive, in bulk.
 
     The previous owner is kept in an allocation history rather than overwritten.
@@ -7691,7 +7757,7 @@ class MatchExecutiveIn(BaseModel):
 
 
 @api.post("/leads/match-executive")
-async def match_executive(body: MatchExecutiveIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
+async def match_executive(body: MatchExecutiveIn, act=Depends(actor), _desk=Depends(showroom_desk_only)):
     """Move every active lead whose executive spelling folds to `key` onto `executive`."""
     fold = _norm_name(body.key)
     if not fold:
@@ -8475,12 +8541,13 @@ async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = No
 @api.post("/leads/{lead_id}/payments")
 async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, user)
     role = ((act or {}).get("role") or (user or {}).get("role") or "").strip().lower()
     if body.paymentMode == "Finance":
-        if role not in authmod.MONEY_ROLES:
+        if role not in (*authmod.SALES_ROLES, *authmod.MONEY_ROLES):
             raise HTTPException(
                 403,
-                "Finance receipts are posted by the Team Leader, Owner or Accounts.",
+                "Finance receipts are posted by sales staff or the money desk.",
             )
         _require_action(lead, "canFinanceReceipt", "finance receipt (lead is archived)", act)
     else:
@@ -8857,7 +8924,7 @@ async def _enrich_finance_with_delivery(files):
 async def list_finance(view: str = "all", month: Optional[str] = None, year: Optional[str] = None,
                        user=Depends(finance_viewer_only)):
     files = [clean(f) for f in await db.finance.find().to_list(1000)]
-    if user.get("role") == "executive":
+    if _is_scoped_sales(user):
         mine = await _own_lead_ids(user)
         files = [f for f in files if f.get("leadId") in mine]
     period = _parse_period(month, year)
@@ -9043,7 +9110,7 @@ async def list_deliveries(month: Optional[str] = None, year: Optional[str] = Non
 async def lead_oem_sold(lead_id: str, refresh: bool = False, user=Depends(current_user)):
     """Match this lead's unique mobile to a Coulson Sold/Billed vehicle."""
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     if refresh:
         try:
             await oem_sync.refresh_sold_inventory(db)
@@ -9720,6 +9787,7 @@ async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
 @api.put("/leads/{lead_id}/delivery")
 async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
     await _require_related_docs(lead, act)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
     role = ((act or {}).get("role") or "").strip().lower()
@@ -10616,7 +10684,7 @@ async def lead_oem_portal_claims(lead_id: str, user=Depends(current_user)):
     """Claims Euler holds against this lead's vehicle, plus the scheme-register rows
     they should line up with. Scoped like any other lead read."""
     lead = await get_lead_or_404(lead_id)
-    _require_own_lead(lead, user)
+    await _require_lead_visible(lead, user)
     pack = await oem_claims.lead_claim_crosscheck(db, lead_id, lead)
     scheme_rows = await get_scheme_rows()
     shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
@@ -10696,7 +10764,42 @@ async def list_oem_inventory(model: Optional[str] = None, variant: Optional[str]
                              family: bool = False, _user=Depends(current_user)):
     rows = await oem_sync.list_inventory(
         db, model, variant, family=family or bool(variant))
+    await inventory_check.apply_to_rows(db, rows)
     return [clean(r) for r in rows]
+
+
+class InventoryCheckIn(BaseModel):
+    date: Optional[str] = None
+    items: List[dict] = []
+
+
+@api.get("/inventory/check")
+async def get_inventory_check(date: Optional[str] = None, _user=Depends(current_user)):
+    day = str(date or inventory_check.today_iso())[:10]
+    doc = await inventory_check.latest_check(db, day)
+    last = await db.inventory_checks.find(
+        {"submittedAt": {"$exists": True, "$ne": ""}}
+    ).sort("date", -1).to_list(1)
+    out = inventory_check.public_check(doc)
+    out["today"] = inventory_check.today_iso()
+    out["lastConfirmedDate"] = (last[0].get("date") if last else "") or ""
+    return out
+
+
+@api.post("/inventory/check")
+async def submit_inventory_check(body: InventoryCheckIn, user=Depends(current_user),
+                                 act=Depends(actor)):
+    if not (authmod.is_showroom_admin(user) or user.get("role") == "owner"):
+        raise HTTPException(403, "Only Showroom Admin can confirm today's yard.")
+    try:
+        doc = await inventory_check.submit(
+            db, date=body.date, items=body.items, user=user)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await write_audit(act, "confirm", "inventory_check",
+                      new={"date": doc.get("date"), "present": doc.get("presentCount"),
+                           "missing": doc.get("missingCount")})
+    return inventory_check.public_check(doc)
 
 
 @api.get("/inventory/transit")
@@ -10717,17 +10820,26 @@ async def inventory_summary(_user=Depends(current_user)):
     out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
     transit = await db.oem_inventory_transit.count_documents({})
     need = await oem_sync.need_to_order_bookings(db)
+    check = inventory_check.public_check(await inventory_check.latest_check(db))
+    last = await db.inventory_checks.find(
+        {"submittedAt": {"$exists": True, "$ne": ""}}
+    ).sort("date", -1).to_list(1)
     return {
         "total": sum(c["count"] for c in out),
         "transit": transit,
         "needToOrder": len(need),
         "rows": out,
+        "physicalCheck": {
+            **check,
+            "today": inventory_check.today_iso(),
+            "lastConfirmedDate": (last[0].get("date") if last else "") or "",
+        },
     }
 
 
 # ---------------------------------------------------------------- masters registers
 @api.get("/scheme-master")
-async def list_scheme_master(on: Optional[str] = None, _desk=Depends(deal_desk_only)):
+async def list_scheme_master(on: Optional[str] = None, _desk=Depends(showroom_desk_only)):
     rows = [clean(s) for s in await db.scheme_master.find().to_list(1000)]
     iso = str(on or "").strip()[:10]
     if len(iso) == 10 and iso[4] == "-" and iso[7] == "-":
@@ -10943,7 +11055,7 @@ async def list_bookings(month: Optional[str] = None, year: Optional[str] = None,
                         user=Depends(current_user)):
     rows = [clean(b) for b in await db.bookings.find().sort("bookingId", -1).to_list(1000)]
     rows = [b for b in rows if str(b.get("bookingStatus") or "").lower() != "cancelled"]
-    if user.get("role") == "executive":
+    if _is_scoped_sales(user):
         mine = await _own_lead_ids(user)
         rows = [b for b in rows if b.get("leadId") in mine]
     lead_ids = [b.get("leadId") for b in rows if b.get("leadId")]
@@ -10977,7 +11089,7 @@ async def list_activities(lead_id: Optional[str] = None, month: Optional[str] = 
                          year: Optional[str] = None, user=Depends(current_user)):
     q = {"leadId": lead_id} if lead_id else {}
     rows = [clean(a) for a in await db.activities.find(q).sort("activityId", -1).to_list(2000)]
-    if user.get("role") == "executive":
+    if _is_scoped_sales(user):
         mine = await _own_lead_ids(user)
         rows = [a for a in rows if a.get("leadId") in mine]
     rows = _rows_in_period(rows, _parse_period(month, year), lambda a: a.get("date"))
@@ -11094,6 +11206,7 @@ class StaffIn(BaseModel):
     mobile: str = ""
     email: str = ""
     role: str = "executive"
+    reportsTo: str = ""
     monthlyTarget: float = 0          # units per month; 0 = no target
     reports: Optional[List[str]] = None
     whatsappOptIn: bool = True
@@ -11116,6 +11229,7 @@ def _staff_doc(body: dict) -> dict:
         "mobile": wa.digits10(body.get("mobile")),
         "email": str(body.get("email") or "").strip(),
         "role": role,
+        "reportsTo": str(body.get("reportsTo") or "").strip(),
         "monthlyTarget": max(0.0, ce.num(body.get("monthlyTarget"))),
         "reports": list(reports),
         "whatsappOptIn": bool(body.get("whatsappOptIn", True)),
@@ -11132,7 +11246,7 @@ async def list_staff(role: Optional[str] = None):
     return [clean(r) for r in await db.staff.find(q).sort("name", 1).to_list(500)]
 
 
-@api.post("/staff", dependencies=[Depends(owner_only)])
+@api.post("/staff", dependencies=[Depends(showroom_desk_only)])
 async def create_staff(body: StaffIn, act=Depends(actor)):
     data = _staff_doc(body.model_dump())
     if not data["name"]:
@@ -11148,7 +11262,7 @@ async def create_staff(body: StaffIn, act=Depends(actor)):
     return clean(await db.staff.find_one({"staffId": data["staffId"]}))
 
 
-@api.put("/staff/{staff_id}", dependencies=[Depends(owner_only)])
+@api.put("/staff/{staff_id}", dependencies=[Depends(showroom_desk_only)])
 async def update_staff(staff_id: str, body: StaffIn, act=Depends(actor)):
     existing = await db.staff.find_one({"staffId": staff_id})
     if not existing:
@@ -15245,6 +15359,7 @@ async def startup():
         await db.whatsapp_messages.create_index("providerId")
         await db.whatsapp_messages.create_index("phone")
         await db.insurance_agents.create_index("agentId", unique=True)
+        await db.inventory_checks.create_index("date", unique=True)
         await db.insurance.create_index("insuranceAgentId")
         await db.staff.create_index("staffId", unique=True)
         await db.staff.create_index("role")

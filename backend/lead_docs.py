@@ -87,19 +87,19 @@ def can_read_kind(user, kind: str, *, own: bool = False) -> bool:
         return False
     group = info["group"]
     if group == "kyc":
-        if role in ("owner", "sales_gm", "tl", "accounts"):
+        if role in ("owner", "sales_gm", "tl", "team_lead", "accounts"):
             return True
         return role == "executive" and own
     if group == "deal":
-        if role in ("owner", "sales_gm", "tl", "accounts"):
+        if role in ("owner", "sales_gm", "tl", "team_lead", "accounts"):
             return True
         return role == "executive" and own
     if group == "oem_extra":
-        if role in ("owner", "sales_gm", "tl", "accounts"):
+        if role in ("owner", "sales_gm", "tl", "team_lead", "accounts"):
             return True
         return role == "executive" and own
     if group == "delivery":
-        return role in ("owner", "sales_gm", "tl", "accounts")
+        return role in ("owner", "sales_gm", "tl", "team_lead", "accounts")
     if group == "tally":
         return role in ("owner", "sales_gm", "tl", "accounts")
     if group == "refund":
@@ -116,15 +116,15 @@ def can_upload_kind(user, kind: str, *, own: bool = False) -> bool:
         return False
     group = info["group"]
     if group == "kyc":
-        if role in ("owner", "sales_gm", "tl"):
+        if role in ("owner", "sales_gm", "tl", "team_lead"):
             return True
         return role == "executive" and own
     if group == "deal":
-        if role in ("owner", "sales_gm", "tl"):
+        if role in ("owner", "sales_gm", "tl", "team_lead"):
             return True
         return role == "executive" and own
     if group == "oem_extra":
-        if role in ("owner", "sales_gm", "tl"):
+        if role in ("owner", "sales_gm", "tl", "team_lead"):
             return True
         return role == "executive" and own
     if group == "delivery":
