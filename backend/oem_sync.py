@@ -316,7 +316,7 @@ async def _access_token(db, username=None, password=None):
     return "", ""
 
 
-async def sync_from_coulson(db, *, username=None, password=None):
+async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted=None):
     """Pull OEM prices + PRESENT inventory. Fail-soft: raises CoulsonError on auth/API failure."""
     catalog_result = await apply_catalog(db)
     token, src = await _access_token(db, username, password)
@@ -437,7 +437,7 @@ async def sync_from_coulson(db, *, username=None, password=None):
     if transit_docs:
         await db.oem_inventory_transit.insert_many(transit_docs)
     transit_count = len(transit_docs)
-    leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(db)
+    leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(db, on_body_adopted=on_body_adopted)
 
     extra = {
         "inventoryCount": yard_count,
@@ -802,6 +802,114 @@ def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date=""):
     return units
 
 
+def _fold_sku(value):
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def sold_body_fields(row):
+    """Catalog-mapped CRM model/variant/body from a Sold row, or None."""
+    row = row or {}
+    key = str(row.get("oemSkuKey") or "").strip()
+    if key:
+        sku = next((s for s in cat.CATALOG if s.key == key), None)
+        if sku:
+            return {
+                "model": sku.crm_model,
+                "variant": sku.crm_variant,
+                "bodyType": sku.body_type,
+                "oemSkuKey": sku.key,
+            }
+    sku = cat.resolve_sku(row.get("model"), row.get("variant"))
+    if sku:
+        return {
+            "model": sku.crm_model,
+            "variant": sku.crm_variant,
+            "bodyType": sku.body_type,
+            "oemSkuKey": sku.key,
+        }
+    return None
+
+
+def same_sold_family(lead, fields):
+    want = inventory_family_key((lead or {}).get("interestedModel"), (lead or {}).get("variant") or "")
+    got = inventory_family_key((fields or {}).get("model"), (fields or {}).get("variant") or "")
+    return bool(want) and bool(got) and want == got
+
+
+def lead_body_differs(lead, fields, unit=None):
+    if unit:
+        model = unit.get("model") or (lead or {}).get("interestedModel")
+        variant = unit.get("variant") or (lead or {}).get("variant")
+    else:
+        model = (lead or {}).get("interestedModel")
+        variant = (lead or {}).get("variant")
+    return (
+        _fold_sku(model) != _fold_sku((fields or {}).get("model"))
+        or _fold_sku(variant) != _fold_sku((fields or {}).get("variant"))
+    )
+
+
+def lead_allows_body_adopt(lead):
+    """Rewrite variant/price only on a live, not-yet-delivered file."""
+    if _lead_is_cancelled(lead) or _lead_is_delivered(lead) or _lead_is_close_won(lead):
+        return False
+    acct = str((lead or {}).get("accountStatus") or "Active").strip().lower()
+    return acct in ("", "active")
+
+
+def can_adopt_sold_body(lead, row):
+    if _lead_is_cancelled(lead):
+        return False
+    fields = sold_body_fields(row)
+    if not fields or not same_sold_family(lead, fields):
+        return False
+    return lead_body_differs(lead, fields)
+
+
+def sold_body_adopt_patch(lead, row, *, adopt=True):
+    """Lead $set for a billed-body change. adopt=False only records the mismatch."""
+    fields = sold_body_fields(row)
+    if not fields:
+        return {}
+    patch = {
+        "oemBilledModel": fields["model"],
+        "oemBilledVariant": fields["variant"],
+        "oemBilledBodyType": fields["bodyType"],
+    }
+    if not adopt:
+        patch["oemBodyMismatch"] = True
+        return patch
+    if not lead.get("originalVariant") and lead_body_differs(lead, fields):
+        patch["originalModel"] = (lead or {}).get("interestedModel") or ""
+        patch["originalVariant"] = (lead or {}).get("variant") or ""
+    patch["interestedModel"] = fields["model"]
+    patch["variant"] = fields["variant"]
+    patch["bodyType"] = fields["bodyType"]
+    patch["oemSkuKey"] = fields["oemSkuKey"]
+    patch["oemBodyAdoptedAt"] = now_iso()
+    patch["oemBodyMismatch"] = False
+    return patch
+
+
+def apply_sold_body_to_units(units, row, fields, *, adopt=True):
+    ch = _norm_chassis((row or {}).get("chassis"))
+    if not ch or not fields:
+        return units
+    out = [dict(u) for u in (units or []) if isinstance(u, dict)]
+    for u in out:
+        if _norm_chassis(u.get("chassisNumber")) != ch:
+            continue
+        if adopt:
+            if not u.get("originalVariant") and lead_body_differs(None, fields, unit=u):
+                u["originalModel"] = u.get("model") or ""
+                u["originalVariant"] = u.get("variant") or ""
+            u["model"] = fields["model"]
+            u["variant"] = fields["variant"]
+        u["oemBilledVariant"] = fields["variant"]
+        u["oemBilledModel"] = fields["model"]
+    return out
+
+
 def occupied_chassis_numbers(leads, except_id=""):
     """Chassis already sitting on another live lead — skip these when matching Sold."""
     out = set()
@@ -984,14 +1092,17 @@ def match_sold_row(lead, sold_rows, occupied_chassis=None):
 
 
 def _sold_match_payload(row, mobile):
+    fields = sold_body_fields(row) or {}
     return {
         "matched": True,
         "chassis": row.get("chassis") or "",
         "invoiceNumber": row.get("invoiceNumber") or "",
         "numberPlate": row.get("numberPlate") or "",
         "mobile": mobile,
-        "model": row.get("model") or "",
-        "variant": row.get("variant") or "",
+        "model": fields.get("model") or row.get("model") or "",
+        "variant": fields.get("variant") or row.get("variant") or "",
+        "bodyType": fields.get("bodyType") or row.get("bodyType") or "",
+        "oemSkuKey": fields.get("oemSkuKey") or row.get("oemSkuKey") or "",
         "customerName": row.get("customerName") or "",
         "coulsonStatus": row.get("coulsonStatus") or "SOLD",
         "source": "coulson_sold",
@@ -1071,13 +1182,16 @@ def _field_taken(leads, field, value, except_id, *, chassis=False):
     return False
 
 
-async def apply_sold_vehicle_ids_to_leads(db):
+async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
     """Write Coulson Sold chassis / invoice / plate onto every uniquely matched lead.
 
     OEM is the source of truth when the customer mobile maps to exactly one sold
     vehicle, or when a usable customer name is unique on both sides (blank or
     mismatched CRM mobile). Ambiguous matches and live uniqueness conflicts are
     left unchanged. A name match also copies the OEM mobile onto the lead.
+
+    When Coulson billed a different body (FB → DV) on the same chassis, an
+    Active file also takes that variant and the caller can reprice it.
     """
     stats = {
         "updated": 0,
@@ -1086,6 +1200,9 @@ async def apply_sold_vehicle_ids_to_leads(db):
         "skippedAmbiguous": 0,
         "skippedConflict": 0,
         "mobilesUpdated": 0,
+        "bodyAdopted": 0,
+        "bodyMismatch": 0,
+        "bodyAdoptedIds": [],
     }
     sold = [r async for r in db.oem_sold.find({})]
     if not sold:
@@ -1146,6 +1263,17 @@ async def apply_sold_vehicle_ids_to_leads(db):
                 patch["numberPlate"] = plate
         sold_date = str(row.get("soldDate") or "").strip()[:10]
         stamped_units = stamp_unit_vehicle_ids(lead, chassis, invoice, plate, sold_date)
+        body_adopted = False
+        body_mismatch = False
+        if can_adopt_sold_body(lead, row):
+            fields = sold_body_fields(row)
+            adopt = lead_allows_body_adopt(lead)
+            patch.update(sold_body_adopt_patch(lead, row, adopt=adopt))
+            stamped_units = apply_sold_body_to_units(
+                stamped_units or list((lead or {}).get("units") or []),
+                row, fields, adopt=adopt)
+            body_adopted = adopt
+            body_mismatch = not adopt
         if stamped_units and stamped_units != list((lead or {}).get("units") or []):
             patch["units"] = stamped_units
         if oem_mobile and len(oem_mobile) == 10 and oem_mobile != lead_mobile:
@@ -1182,6 +1310,13 @@ async def apply_sold_vehicle_ids_to_leads(db):
         stats["updated"] += 1
         if "mobile" in patch:
             stats["mobilesUpdated"] += 1
+        if body_adopted:
+            stats["bodyAdopted"] += 1
+            stats["bodyAdoptedIds"].append(lid)
+            if on_body_adopted:
+                await on_body_adopted(lid)
+        elif body_mismatch:
+            stats["bodyMismatch"] += 1
     return stats
 
 
