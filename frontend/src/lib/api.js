@@ -203,7 +203,10 @@ async function withFallback(run) {
   throw last;
 }
 
-export const get = (url, params) => withFallback(() => api.get(url, { params }).then((r) => r.data));
+export const get = (url, params, opts = {}) => withFallback(() => api.get(url, {
+  params,
+  ...(opts.timeout ? { timeout: opts.timeout } : {}),
+}).then((r) => r.data));
 export const post = (url, body, opts = {}) => {
   const { retry, timeout } = mutationOpts(url, opts);
   const run = () => api.post(url, body, timeout ? { timeout } : {}).then((r) => r.data);

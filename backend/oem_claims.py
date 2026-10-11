@@ -1166,14 +1166,18 @@ async def relink_stored_claims(db):
     return patched
 
 
-async def register_match_index(db):
+async def register_match_index(db, *, relink=True):
     """What Euler holds, keyed the way the register asks: lead, then chassis, then invoice.
 
     A line with no leadId still belongs to a vehicle. Indexing it by chassis / invoice
     is what stops Divine Public School (and every other row) reading as Not claimed
     when the debit note is sitting in oem_portal_claims unlinked.
+
+    relink=False is the GET /claims path — restamping every debit note on page
+    load is what made the register miss the 25s browser timeout and render empty.
     """
-    await relink_stored_claims(db)
+    if relink:
+        await relink_stored_claims(db)
     by_lead, by_chassis, by_invoice, by_number, by_line = {}, {}, {}, {}, {}
     async for row in db[CLAIMS_COLLECTION].find({}):
         row.pop("_id", None)
@@ -1467,14 +1471,21 @@ def overlay_register_from_oem(row, match):
 async def apply_oem_filing_to_register(db, index=None):
     """Stamp Euler claim number / status / dates onto matching register rows.
 
-    Money is untouched. Called after claim sync and when the register is opened.
+    Money is untouched. Called after claim sync and Match — not on GET /claims.
     """
     index = index or await register_match_index(db)
+    claims = [c async for c in db.claims.find({"manual": {"$ne": True}})]
+    lead_ids = list({c.get("leadId") for c in claims if c.get("leadId")})
+    leads = {}
+    if lead_ids:
+        async for lead in db.leads.find(
+            {"leadId": {"$in": lead_ids}},
+            {"leadId": 1, "chassisNumber": 1, "invoiceNumber": 1, "_id": 0},
+        ):
+            leads[lead.get("leadId")] = lead
     patched = []
-    async for c in db.claims.find({"manual": {"$ne": True}}):
-        lead = await db.leads.find_one(
-            {"leadId": c.get("leadId")},
-            {"chassisNumber": 1, "invoiceNumber": 1, "_id": 0}) or {}
+    for c in claims:
+        lead = leads.get(c.get("leadId")) or {}
         match = match_state(
             index, c.get("leadId") or "", c.get("componentKey") or "",
             chassis=lead.get("chassisNumber") or "",
@@ -1747,7 +1758,7 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
     await relink_stored_claims(db)
     oem = await claims_for_lead(db, lead_id)
     await attach_register_match(db, oem)
-    index = await register_match_index(db)
+    index = await register_match_index(db, relink=False)
     register = []
     async for c in db.claims.find({"leadId": lead_id, "manual": {"$ne": True}}):
         key = c.get("componentKey") or ""

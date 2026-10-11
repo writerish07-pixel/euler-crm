@@ -22,6 +22,7 @@ motor.motor_asyncio.AsyncIOMotorClient = AsyncMongoMockClient
 
 import httpx  # noqa: E402
 import gsheets  # noqa: E402
+import oem_claims  # noqa: E402
 import server  # noqa: E402
 
 
@@ -113,3 +114,44 @@ async def test_received_scheme_claim_survives_when_lead_leaves_register_filter(c
     assert hit[0]["claimStatus"] == "Received"
     assert hit[0]["receivedAmount"] == 8000
     assert hit[0].get("permanent") is True
+
+
+@pytest.mark.asyncio
+async def test_opening_register_is_a_read_no_sheet_or_relink(client, monkeypatch):
+    """GET /claims used to relink every debit note, persist Euler filing, and
+    write the Google Sheet. That missed the 25s browser timeout and the page
+    then rendered an empty register."""
+    relinks = {"n": 0}
+    orig = oem_claims.relink_stored_claims
+
+    async def counted(db):
+        relinks["n"] += 1
+        return await orig(db)
+
+    monkeypatch.setattr(oem_claims, "relink_stored_claims", counted)
+    before = len(client.syncs)
+    await server.db.claims.insert_one({
+        "claimId": "CLM-FAST-1", "leadId": "LD-FAST", "componentKey": "loyaltyBonus",
+        "claimAmount": 2500, "eligibleClaim": 2500, "claimStatus": "Received",
+        "receivedAmount": 2500, "submittedDate": "2026-08-01",
+        "customer": "Fast Load", "bookingDate": "2026-08-01",
+    })
+    rows = (await client.get("/api/claims")).json()
+    assert any(r.get("claimId") == "CLM-FAST-1" for r in rows)
+    assert relinks["n"] == 0
+    assert [s for s in client.syncs[before:] if s["entity"] == "claims"] == []
+
+
+@pytest.mark.asyncio
+async def test_oem_only_does_not_rebuild_the_full_register(client, monkeypatch):
+    calls = {"n": 0}
+    orig = oem_claims.register_match_index
+
+    async def counted(*args, **kwargs):
+        calls["n"] += 1
+        return await orig(*args, **kwargs)
+
+    monkeypatch.setattr(oem_claims, "register_match_index", counted)
+    r = await client.get("/api/claims/oem-only")
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 0

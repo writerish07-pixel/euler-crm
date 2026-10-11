@@ -34,6 +34,7 @@ export default function Claims() {
   const [params] = useSearchParams();
   const leadFilter = params.get("leadId") || "";
   const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [active, setActive] = useState(null);
   const [receipt, setReceipt] = useState(false);
   const [manual, setManual] = useState(false);
@@ -43,10 +44,20 @@ export default function Claims() {
   const [matchClaim, setMatchClaim] = useState(null);
   const period = usePeriodState();
   const load = useCallback(() => {
-    get("/claims", period.params).then((r) => setRows(Array.isArray(r) ? r : [])).catch(() => setRows([]));
+    setLoading(true);
+    get("/claims", period.params, { timeout: 60000 })
+      .then((r) => setRows(Array.isArray(r) ? r : []))
+      .catch((err) => {
+        toast.error(apiErrorMessage(err, "Could not load Scheme Claim Register"));
+      })
+      .finally(() => setLoading(false));
     get("/claims/oem-only").then(setOemOnly).catch(() => setOemOnly(null));
   }, [period.params]);
-  useEffect(() => { load(); get("/leads").then(setLeads); }, [load]);
+  useEffect(() => { load(); }, [load]);
+  const openManual = () => {
+    setManual(true);
+    if (!leads.length) get("/leads").then(setLeads).catch(() => setLeads([]));
+  };
   const { openLead, drawer } = useLeadDrawer(load);
 
   const isIncentive = (r) => String(r.componentKey || "").startsWith("executiveIncentive")
@@ -79,14 +90,14 @@ export default function Claims() {
 
   return (
     <div>
-      <PageHeader title="Scheme Claim Register" subtitle={`${rows.length} claims · ${inr(eligible)} eligible`}
+      <PageHeader title="Scheme Claim Register" subtitle={loading ? "Loading…" : `${rows.length} claims · ${inr(eligible)} eligible`}
         actions={<div className="flex items-center gap-2">
           <ReportActions onRefresh={load} showRebuild />
           <Link to="/oem-claims" data-testid="open-oem-settlements"
             className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
             OEM Claim Settlements <ExternalLink size={14} />
           </Link>
-          <Button variant="secondary" data-testid="add-manual-claim-btn" onClick={() => setManual(true)}><Plus size={16} /> Add Manual Claim</Button>
+          <Button variant="secondary" data-testid="add-manual-claim-btn" onClick={openManual}><Plus size={16} /> Add Manual Claim</Button>
           <Button data-testid="record-claim-receipt-btn" onClick={() => setReceipt(true)}><HandCoins size={16} /> Record Claim Received</Button>
         </div>} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
@@ -253,7 +264,7 @@ export default function Claims() {
           { key: "ageingDays", label: "Ageing", align: "right", render: (r) => r.ageingDays ? <Badge tone={r.ageingDays > 30 ? "bg-red-50 text-red-700 ring-red-600/20" : "bg-amber-50 text-amber-700 ring-amber-600/20"}>{r.ageingDays}d</Badge> : "—" },
         ]}
         rows={visibleRows}
-        empty={matchFilter ? "No claims in this state" : "No claims yet — apply schemes on booked leads, mark incentives paid, or click Add Manual Claim"}
+        empty={loading ? "Loading Scheme Claim Register…" : matchFilter ? "No claims in this state" : "No claims yet — apply schemes on booked leads, mark incentives paid, or click Add Manual Claim"}
       />
 
       {/* The other direction. Euler is processing these and this register has no row

@@ -1338,8 +1338,8 @@ async def test_register_reads_an_unlinked_oem_claim_as_filed_by_chassis(client):
     assert mine, "insurance benefit row missing from the register"
     assert mine[0]["oemMatch"]["state"] == "filed"
     assert "AF-122-CLINS" in mine[0]["oemMatch"]["claimNumbers"]
-    stored = await server.db[oem_claims.CLAIMS_COLLECTION].find_one({"debitNoteId": "divine-1"})
-    assert lead_id in (stored.get("leadIds") or [])
+    # Chassis join is in-memory on GET. Relink writes stay on claim sync so the
+    # register can open without restamping every debit note.
 
 
 def test_has_document_is_the_item_docs_column_not_the_euler_pdf():
