@@ -490,9 +490,12 @@ def lead_actions(lead, act=None):
     active = _acct(lead) == "Active"
     booked = _is_booked(lead)
     delivered = _is_delivered(lead)
+    oem_auto = bool((lead or {}).get("oemAutoDelivered"))
+    really_booked = bool((lead or {}).get("bookingDate")) or ce.num((lead or {}).get("bookingAmount")) > 0
     not_archived = _acct(lead) != "Archived"
     # Owner may correct commercials after delivery until the lead is closed.
-    mutable = active if role == "owner" else (active and not delivered)
+    # OEM-auto delivered files stay desk-editable until scheme / booking / payment.
+    mutable = active if (role == "owner" or oem_auto) else (active and not delivered)
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
     is_exec = role == "executive"
@@ -519,11 +522,11 @@ def lead_actions(lead, act=None):
             "assignmentPending": True,
         }
     return {
-        "canBook": mutable and not booked,
+        "canBook": (mutable and not booked) or (oem_auto and active and not really_booked),
         "canPrice": mutable and not is_exec,
         "canScheme": mutable and not is_exec,
         # Desk can collect on an Active file. Executives collect only after booking.
-        "canPayment": mutable and (booked if is_exec else True),
+        "canPayment": mutable and ((really_booked if oem_auto else booked) if is_exec else True),
         "canFinanceReceipt": not_archived,  # finance receipt allowed after close; execs post it too
         "canDeliver": active and booked and not delivered and not is_exec,
         "canClose": active and not is_exec,                # close exit path (incl. delivered)
@@ -542,6 +545,8 @@ def lead_actions(lead, act=None):
         "schemeCompleted": schemed,
         "deliveryCompleted": delivered,
         "execPipelineOnly": is_exec,
+        "oemAutoDelivered": oem_auto,
+        "oemInvoiced": bool((lead or {}).get("oemInvoiced") or oem_auto),
     }
 
 
@@ -632,8 +637,138 @@ async def _reprice_after_sold_body(lead_id):
 
 
 async def _apply_sold_vehicle_ids():
-    return await oem_sync.apply_sold_vehicle_ids_to_leads(
+    delinked = {}
+    try:
+        delinked = await oem_sync.delink_cancelled_sold_invoices(db)
+    except Exception:
+        logging.exception("OEM Sold cancel-invoice delink failed")
+        delinked = {}
+    stamped = await oem_sync.apply_sold_vehicle_ids_to_leads(
         db, on_body_adopted=_reprice_after_sold_body)
+    auto = await _auto_deliver_oem_sold_leads()
+    stamped["delinkedCount"] = (delinked or {}).get("cleared") or 0
+    stamped["delinkedIds"] = (delinked or {}).get("clearedIds") or []
+    stamped["invoiceMissingCount"] = (delinked or {}).get("flagged") or 0
+    stamped["autoDeliveredCount"] = auto
+    return stamped
+
+
+def _sold_date_for_lead(lead, sold_rows):
+    ch = oem_sync._norm_chassis((lead or {}).get("chassisNumber"))
+    for row in sold_rows or []:
+        if oem_sync._norm_chassis((row or {}).get("chassis")) == ch:
+            d = str((row or {}).get("soldDate") or "")[:10]
+            if d:
+                return d
+    return today()
+
+
+def _should_oem_auto_deliver(lead, sold_chassis, sold_rows=None):
+    """Unique 10-digit mobile + billed chassis — not name-only fleets or OEM stubs."""
+    if not lead:
+        return False
+    if oem_sync._lead_is_close_won(lead):
+        return False
+    if _is_delivered(lead):
+        return False
+    if oem_sync.is_oem_billing_stub(lead):
+        return False
+    if (lead or {}).get("oemBillingCreated") and not oem_sync.is_commercial_original(lead):
+        return False
+    ch = oem_sync._norm_chassis(lead.get("chassisNumber"))
+    inv = oem_sync._norm_invoice(lead.get("invoiceNumber"))
+    if not ch or ch not in set(sold_chassis or ()):
+        return False
+    if not inv:
+        return False
+    lead_m = oem_sync._digits10(lead.get("mobile") or lead.get("altMobile"))
+    if len(lead_m) != 10:
+        return False
+    sold_m = ""
+    for row in sold_rows or []:
+        if oem_sync._norm_chassis((row or {}).get("chassis")) != ch:
+            continue
+        got = oem_sync._digits10((row or {}).get("mobile"))
+        if len(got) == 10:
+            sold_m = got
+            break
+        if not sold_m:
+            sold_m = got
+    return sold_m == lead_m
+
+
+async def _auto_deliver_oem_sold_leads():
+    """OEM billed + unique mobile on the file → Delivered, desk steps stay open."""
+    sold = [r async for r in db.oem_sold.find({})]
+    sold_ch = oem_sync.sold_chassis_set(sold)
+    count = 0
+    async for lead in db.leads.find({}):
+        if not _should_oem_auto_deliver(lead, sold_ch, sold):
+            continue
+        try:
+            await _mark_oem_auto_delivered(lead, sold)
+            count += 1
+        except Exception:
+            logging.exception("OEM auto-deliver failed for %s", lead.get("leadId"))
+    return count
+
+
+async def _mark_oem_auto_delivered(lead, sold_rows=None):
+    lid = (lead or {}).get("leadId")
+    if not lid:
+        return
+    sold_date = _sold_date_for_lead(lead, sold_rows)
+    updates = {}
+    if oem_sync._lead_is_cancelled(lead):
+        updates.update(_revive_updates(lead, anchor=sold_date or today(),
+                                       note="oem sold invoice"))
+        updates["dealCancelled"] = False
+    prev = str((lead or {}).get("currentStatus") or "New").strip() or "New"
+    updates.update({
+        "deliveryStatus": "Delivered",
+        "currentStatus": "Delivered",
+        "deliveryDate": sold_date or today(),
+        "oemAutoDelivered": True,
+        "oemInvoiced": True,
+        "oemStatusBeforeAutoDeliver": prev,
+        "accountStatus": "Active",
+        "lastUpdated": now_iso(),
+    })
+    await db.leads.update_one(
+        {"leadId": lid},
+        {"$set": updates, "$unset": {"oemInvoiceMissing": ""}})
+    await db.deliveries.update_one(
+        {"leadId": lid},
+        {"$set": {
+            "leadId": lid,
+            "customerName": (lead or {}).get("customerName") or "",
+            "delivered": "Yes",
+            "deliveryDate": updates["deliveryDate"],
+            "chassisNumber": (lead or {}).get("chassisNumber") or "",
+            "invoiceNumber": (lead or {}).get("invoiceNumber") or "",
+            "numberPlate": (lead or {}).get("numberPlate") or "",
+        }},
+        upsert=True)
+    try:
+        await oem_sync.take_chassis_from_inventory(db, (lead or {}).get("chassisNumber"))
+    except Exception:
+        logging.exception("Could not drop OEM-auto delivered chassis from yard")
+    try:
+        await recompute_lead(lid)
+    except Exception:
+        logging.exception("Could not recompute OEM-auto delivered lead %s", lid)
+    try:
+        await _upsert_delivery_billing_summary(lid)
+    except Exception:
+        logging.exception("Could not refresh billing summary for %s", lid)
+    try:
+        await _upsert_incentive_register_on_delivery(lid, updates["deliveryDate"])
+    except Exception:
+        logging.exception("Could not upsert incentive on OEM auto-deliver %s", lid)
+    await _log_activity_safe(
+        {**lead, **updates}, "Note",
+        f"OEM billed {lead.get('invoiceNumber') or ''} — marked delivered. "
+        "Complete scheme, payment and booking.".strip())
 
 
 def _sold_body_row_from_match(match):
@@ -6629,7 +6764,8 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
     if extra > 0.01 and _payment_ref_required(body.paymentMode, extra) and not pay_ref:
         raise HTTPException(422, f"Enter the {_payment_ref_label(body.paymentMode).lower()}")
     await db.leads.update_one({"leadId": lead_id}, {"$set": {
-        "currentStatus": "Booked", "bookingDate": bdate, "bookingAmount": requested,
+        "currentStatus": "Delivered" if (lead.get("oemAutoDelivered") and _is_delivered(lead)) else "Booked",
+        "bookingDate": bdate, "bookingAmount": requested,
         "executive": body.executive or lead.get("executive"), "financeRequired": body.financeRequired,
         "exchangeRequired": body.exchangeRequired, "lastPaymentMode": body.paymentMode, "lastUpdated": now_iso(),
         # A lead that cancelled and has now booked again is a live deal: the
@@ -9332,15 +9468,16 @@ _PACK_DO_NOT_CREATE = object()
 
 
 def _pack_target_for_sold(row, leads, sold_rows, *, allow_delivered=False):
-    """Existing same-name/mobile file this leftover Sold should join, or None.
+    """Existing same-mobile file this leftover Sold should join, or None.
 
-    Pack or one open CRM file → append. A delivered single-unit leftover stays
-    unmatched on sync (repeat buyer). Explicit Create may reuse that file
-    (allow_delivered) so a second leadId is never minted for the same mobile.
-    Already-split siblings skip create so a sync cannot keep adding New files.
+    One CRM file on that mobile — enquiry, booked, OEM-auto delivered, or a
+    unique cancelled file — takes the billed chassis. Two live files stay
+    unmatched so sync cannot pick the wrong id.
     """
     live = [l for l in (leads or [])
-            if oem_sync.live_occupies_vehicle_id(l) or oem_sync.repair_original_lead(l)]
+            if oem_sync.live_occupies_vehicle_id(l)
+            or oem_sync.repair_original_lead(l)
+            or oem_sync._lead_is_cancelled(l)]
     same = oem_sync._live_same_mobile(live, (row or {}).get("mobile"))
     if not same:
         same = oem_sync._live_same_name(live, (row or {}).get("customerName"))
@@ -9348,6 +9485,13 @@ def _pack_target_for_sold(row, leads, sold_rows, *, allow_delivered=False):
     same = [l for l in same if chassis not in set(oem_sync.lead_chassis_list(l))]
     if not same:
         return None
+    active = [l for l in same if not oem_sync._lead_is_cancelled(l)]
+    if len(active) > 1:
+        return _PACK_DO_NOT_CREATE
+    if len(active) == 1:
+        same = active
+    elif len(same) > 1:
+        return _PACK_DO_NOT_CREATE
     keepers = [l for l in same if oem_sync.repair_original_lead(l)
                and not oem_sync.is_oem_billing_stub(l)]
     if keepers:
@@ -9357,11 +9501,7 @@ def _pack_target_for_sold(row, leads, sold_rows, *, allow_delivered=False):
         return packs[0]
     if len(same) > 1:
         return _PACK_DO_NOT_CREATE
-    lead = same[0]
-    if oem_sync._lead_is_delivered(lead) and oem_sync.vehicle_count(lead) <= 1:
-        if not allow_delivered:
-            return None
-    return lead
+    return same[0]
 
 
 def _family_sold_for_pack(row, sold_rows, leads, target):
@@ -9638,8 +9778,8 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
                            act=Depends(actor)):
     """Refresh Coulson Sold and stamp chassis/invoice onto matching CRM leads.
 
-    Does not mint New files. Unmatched Sold rows stay in Not in CRM / Needs
-    review so the desk can confirm before Create lead.
+    Does not mint New files. Same-mobile CRM files are attached and marked
+    Delivered. Create lead stays only when no mobile matches.
     """
     try:
         await oem_sync.refresh_sold_inventory(db)
@@ -9662,6 +9802,12 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
         result = await _merge_oem_billing_stub(stub_id, orig_id)
         if result.get("ok"):
             relinked.append(result)
+    try:
+        extra = await _auto_deliver_oem_sold_leads()
+        if isinstance(stamped, dict):
+            stamped["autoDeliveredCount"] = (stamped.get("autoDeliveredCount") or 0) + extra
+    except Exception:
+        logging.exception("OEM billing auto-deliver after attach failed")
     period = _parse_period(month, year)
     rows = await oem_sync.list_oem_billing(db)
     payload = _oem_billing_payload(rows, period)
