@@ -830,7 +830,12 @@ async def link_claim_lines(db, doc, index=None):
     already unique across live leads, and cannot be shared the way a fleet buyer's
     mobile can. A line that matches on chassis but disagrees on invoice is linked and
     FLAGGED rather than silently accepted: that disagreement is real information.
+
+    Cancelled notes are left as stored. Chassis relink must not glue a cancelled
+    debit note back onto the lead after the desk moved to the replacement.
     """
+    if str(doc.get("status") or "") == "Cancelled":
+        return doc
     lines = coerce_line_items(doc)
     lead_ids, conflicts = [], []
     for line in lines:
@@ -1248,11 +1253,14 @@ def _index_packs(index):
 def _state_from_hits(hits):
     live = [h for h in hits if h.get("oemStatus") not in ("Rejected", "Cancelled")]
     rejected = [h for h in hits if h.get("oemStatus") == "Rejected"]
+    cancelled = [h for h in hits if h.get("oemStatus") == "Cancelled"]
     pick = live[0] if live else (rejected[0] if rejected else hits[0])
     if live:
         state = "accepted" if pick.get("oemStatus") in ACCEPTED_STATUSES else "filed"
     elif rejected:
         state = "resubmitted" if rejected[0].get("resubmittedBy") else "rejected"
+    elif cancelled:
+        state = "cancelled"
     else:
         state = "not_filed"
     detail = ""
@@ -1260,6 +1268,8 @@ def _state_from_hits(hits):
         detail = "Euler rejected this and no replacement claim has been filed."
     elif state == "resubmitted":
         detail = f"Rejected, refiled as {rejected[0]['resubmittedBy']}."
+    elif state == "cancelled":
+        detail = "OEM claim was cancelled. Relink the replacement debit note."
     elif state == "filed" and pick.get("stageLabel"):
         detail = f"{pick.get('stageDays') or 0}d at {pick['stageLabel']}."
     return {
@@ -1288,6 +1298,7 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
 
     filed / accepted  — Euler has it, and has agreed it where `accepted`
     rejected          — refused and nobody filed it again: act
+    cancelled         — the matched OEM note was cancelled; relink the replacement
     resubmitted       — refused, but a newer claim exists: informational
     unmapped          — the lead has claims, none of them reads as this component:
                         needs a human, NOT a gap
@@ -1348,15 +1359,30 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
     return _state_from_hits(hits)
 
 
-_LOCK_REGISTER_STATUSES = ("Received", "Partial", "Cancelled", "Dropped")
+_LOCK_REGISTER_STATUSES = ("Received", "Partial", "Dropped")
 _STATUS_RANK = {"Pending": 0, "Submitted": 1, "Approved": 2}
+
+
+def _oem_note_is_dead(status) -> bool:
+    return str(status or "").strip() in ("Cancelled", "Rejected")
+
+
+def _lead_blocks_claim_relink(lead) -> bool:
+    """A cancelled booking stays dead. OEM-cancel on a live file can be relinked."""
+    if not lead:
+        return False
+    if lead.get("dealCancelled"):
+        return True
+    return str(lead.get("accountStatus") or "").strip().lower() == "cancelled"
 
 
 def register_status_from_oem(oem_status, current=""):
     """Map Euler's ladder onto the register's Pending/Submitted/Approved/Received.
 
-    Received / Partial / Cancelled / Dropped stay put — those are money-desk or
-    write-off states this overlay must never invent. Open Euler claims become
+    Received / Partial / Dropped stay put — those are money-desk or write-off
+    states this overlay must never invent. Cancelled stays put while the matched
+    OEM note is still cancelled (or missing). A live replacement note reopens
+    the row so a cancel-and-refile can be relinked. Open Euler claims become
     Submitted; generated / settled notes become Approved. Rejected Euler notes
     become Rejected. Cancelled Euler notes become Cancelled.
     receivedAmount is never touched.
@@ -1365,6 +1391,10 @@ def register_status_from_oem(oem_status, current=""):
     if cur in _LOCK_REGISTER_STATUSES:
         return cur
     oem = str(oem_status or "").strip()
+    if cur == "Cancelled" and (not oem or oem == "Cancelled"):
+        return "Cancelled"
+    if cur == "Cancelled":
+        cur = "Pending"
     if oem == "Rejected":
         return "Rejected"
     if oem == "Cancelled":
@@ -1396,7 +1426,7 @@ def overlay_register_from_oem(row, match):
     row["oemMatchState"] = patch["oemMatchState"]
     row["oemStatus"] = patch["oemStatus"]
     row["oemStageLabel"] = patch["oemStageLabel"]
-    if state in ("filed", "accepted", "rejected", "resubmitted", "unmapped"):
+    if state in ("filed", "accepted", "rejected", "resubmitted", "unmapped", "cancelled"):
         nums = [n for n in (match.get("claimNumbers") or []) if n]
         if nums:
             patch["claimReference"] = nums[0]
@@ -2054,6 +2084,43 @@ async def create_register_from_oem(db, *, claim_number, line_id="", lead_id="",
         db, claim_number=claim_number, line_id=line_id, component_key=component_key)
 
 
+async def _detach_lead_from_oem_claim(db, *, number, lead_id, line_id=""):
+    """Remove a CRM lead from a mirrored OEM debit-note line."""
+    number = str(number or "").strip()
+    lead_id = str(lead_id or "").strip()
+    if not number or not lead_id:
+        return None
+    oem = await find_oem_claim(db, number)
+    if not oem:
+        return None
+    want_line = str(line_id or "").strip()
+    lines = coerce_line_items(oem)
+    changed = False
+    for li in lines:
+        if lead_id not in line_lead_ids(li):
+            continue
+        if want_line and str(li.get("lineId") or "") != want_line:
+            continue
+        _drop_line_lead(li, lead_id)
+        if not line_lead_ids(li) and li.get("matchedBy") == "manual":
+            li.pop("matchedBy", None)
+        changed = True
+    if not changed:
+        return oem
+    lead_ids = collect_claim_lead_ids(lines)
+    patch = {
+        "lineItems": lines,
+        "leadIds": lead_ids,
+        "linkedLineCount": sum(1 for li in lines if line_lead_ids(li)),
+        "unlinkedLineCount": sum(1 for li in lines if not line_lead_ids(li)),
+    }
+    await db[CLAIMS_COLLECTION].update_one(
+        {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
+        {"$set": patch})
+    oem.update(patch)
+    return oem
+
+
 async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line_id=""):
     """Desk-made join. Never copies Coulson amounts into db.claims.
 
@@ -2064,6 +2131,10 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
 
     One Extra Support line can itself cover two leads (5000+5000=10000). Matching
     a second lead ADDS it to that line; it does not replace the first.
+
+    Relink (cancel in OEM, refile under the right head) replaces a previous
+    manualOemClaimNumber: the old debit note loses this lead, and a Cancelled
+    register row reopens from the new live note.
     """
     lead_id = str(lead_id or "").strip()
     component_key = str(component_key or "").strip()
@@ -2071,13 +2142,24 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     oem = await find_oem_claim(db, claim_number)
     if not oem:
         raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
+    if _oem_note_is_dead(oem.get("status")):
+        raise ValueError("That OEM claim is cancelled. Relink to the new live claim.")
     rec = await db.claims.find_one(
         {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}})
     if not rec:
         raise ValueError("Scheme Claim Register has no row for that lead and component.")
+    lead_row = await db.leads.find_one(
+        {"leadId": lead_id},
+        {"customerName": 1, "dealCancelled": 1, "accountStatus": 1, "_id": 0}) or {}
+    if _lead_blocks_claim_relink(lead_row):
+        raise ValueError("This booking is cancelled. The claim cannot be relinked.")
     number = str(oem.get("claimNumber") or "").strip()
+    prev_number = str(rec.get("manualOemClaimNumber") or "").strip()
+    prev_line = str(rec.get("manualOemLineId") or "").strip()
+    if prev_number and prev_number.upper() != number.upper():
+        await _detach_lead_from_oem_claim(
+            db, number=prev_number, lead_id=lead_id, line_id=prev_line)
     lines = coerce_line_items(oem)
-    lead_row = await db.leads.find_one({"leadId": lead_id}, {"customerName": 1, "_id": 0}) or {}
     customer = lead_row.get("customerName") or ""
 
     def _line_key(li):
@@ -2102,7 +2184,6 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
                 f"This OEM claim has {len(pool) or len(lines)} items. "
                 "Match each item separately.")
 
-    prev_line = str(rec.get("manualOemLineId") or "").strip()
     target_ids = {str(li.get("lineId") or "") for li in targets}
     for li in lines:
         if str(li.get("lineId") or "") in target_ids:
@@ -2118,12 +2199,19 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
         _add_line_lead(li, lead_id, customer)
         li["matchedBy"] = "manual"
     chosen_id = str(targets[0].get("lineId") or "")
+    relinked = bool(prev_number) and prev_number.upper() != number.upper()
     patch = {
         "manualOemClaimNumber": number,
         "manualOemLineId": chosen_id,
         "manualOemMatchedAt": now_iso(),
         "claimReference": number,
     }
+    if (str(rec.get("claimStatus") or "") == "Cancelled"
+            and round2(rec.get("receivedAmount") or 0) <= 0):
+        patch["claimStatus"] = "Pending"
+        patch["submittedDate"] = ""
+        patch["approvedDate"] = ""
+        relinked = True
     await db.claims.update_one({"_id": rec["_id"]}, {"$set": patch})
     lead_ids = collect_claim_lead_ids(lines)
     oem_patch = {
@@ -2139,7 +2227,12 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     rec.pop("_id", None)
     oem.update(oem_patch)
     oem.pop("_id", None)
-    return {"register": rec, "oemClaim": stamp_document_flag(oem)}
+    return {
+        "register": rec,
+        "oemClaim": stamp_document_flag(oem),
+        "relinked": relinked,
+        "previousClaimNumber": prev_number if relinked else "",
+    }
 
 
 async def clear_register_oem_link(db, *, lead_id, component_key):
@@ -2154,27 +2247,8 @@ async def clear_register_oem_link(db, *, lead_id, component_key):
         {"$unset": {"manualOemClaimNumber": "", "manualOemLineId": "",
                     "manualOemMatchedAt": ""}})
     if number:
-        oem = await find_oem_claim(db, number)
-        if oem:
-            lines = coerce_line_items(oem)
-            changed = False
-            for li in lines:
-                if lead_id not in line_lead_ids(li):
-                    continue
-                if line_id and str(li.get("lineId") or "") != line_id:
-                    continue
-                _drop_line_lead(li, lead_id)
-                changed = True
-            if changed:
-                lead_ids = collect_claim_lead_ids(lines)
-                await db[CLAIMS_COLLECTION].update_one(
-                    {"_id": oem["_id"]} if oem.get("_id") else {"claimNumber": number},
-                    {"$set": {
-                        "lineItems": lines,
-                        "leadIds": lead_ids,
-                        "linkedLineCount": sum(1 for li in lines if line_lead_ids(li)),
-                        "unlinkedLineCount": sum(1 for li in lines if not line_lead_ids(li)),
-                    }})
+        await _detach_lead_from_oem_claim(
+            db, number=number, lead_id=lead_id, line_id=line_id)
     rec.pop("manualOemClaimNumber", None)
     rec.pop("manualOemLineId", None)
     rec.pop("manualOemMatchedAt", None)

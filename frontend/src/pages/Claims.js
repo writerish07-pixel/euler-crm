@@ -199,7 +199,9 @@ export default function Claims() {
                   <button type="button" data-testid={`claim-manual-match-${r.claimId}`}
                     onClick={(e) => { e.stopPropagation(); setMatchClaim(r); }}
                     className="text-[10px] text-cobalt hover:underline inline-flex items-center gap-0.5">
-                    <Link2 size={10} /> Match OEM claim
+                    {r.claimStatus === "Cancelled" || r.oemMatch?.oemStatus === "Cancelled"
+                      ? <><RotateCcw size={10} /> Relink</>
+                      : <><Link2 size={10} /> Match OEM claim</>}
                   </button>
                 ) : null}
               </div>
@@ -481,24 +483,33 @@ function SettleModal({ claim, onClose, onDone }) {
   );
 }
 
+function isRegisterRelink(claim) {
+  return claim?.claimStatus === "Cancelled"
+    || claim?.oemMatch?.oemStatus === "Cancelled";
+}
+
 function MatchOemModal({ claim, onClose, onDone }) {
+  const relink = isRegisterRelink(claim);
   const [oemRows, setOemRows] = useState([]);
-  const [claimNumber, setClaimNumber] = useState(claim.manualOemClaimNumber || claim.oemMatch?.claimNumbers?.[0] || "");
-  const [lineId, setLineId] = useState(claim.manualOemLineId || claim.oemMatch?.lineId || "");
+  const [claimNumber, setClaimNumber] = useState(
+    relink ? "" : (claim.manualOemClaimNumber || claim.oemMatch?.claimNumbers?.[0] || ""));
+  const [lineId, setLineId] = useState(relink ? "" : (claim.manualOemLineId || claim.oemMatch?.lineId || ""));
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    get("/oem-claims", { unmatchedOnly: true })
+    get("/oem-claims", relink ? {} : { unmatchedOnly: true })
       .then((rows) => setOemRows(Array.isArray(rows) ? rows : []))
       .catch(() => setOemRows([]));
-  }, []);
+  }, [relink]);
 
   const needle = q.trim().toLowerCase();
   const shown = oemRows.filter((r) => {
+    if (["Cancelled", "Rejected"].includes(r.status || "")) return false;
+    if (relink && r.claimNumber && r.claimNumber === claim.manualOemClaimNumber) return false;
     const st = r.registerMatch?.state || "";
     const alreadyPicked = r.claimNumber && r.claimNumber === claimNumber;
-    if (!alreadyPicked && st === "in_register") return false;
+    if (!alreadyPicked && st === "in_register" && !relink) return false;
     if (!needle) return true;
     const blob = `${r.claimNumber || ""} ${rowLeadIds(r).join(" ")} ${rowLineItems(r).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""} ${li.description || ""} ${li.customerName || ""}`).join(" ")}`.toLowerCase();
     return blob.includes(needle);
@@ -519,7 +530,9 @@ function MatchOemModal({ claim, onClose, onDone }) {
         claimNumber: claimNumber.trim(),
         lineId: lineId || (lines.length === 1 ? (lines[0].lineId || "") : ""),
       });
-      toast.success(`Matched ${claim.component} to ${claimNumber.trim()}`);
+      toast.success(relink
+        ? `Relinked ${claim.component} to ${claimNumber.trim()}`
+        : `Matched ${claim.component} to ${claimNumber.trim()}`);
       onDone();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not save match"));
@@ -542,15 +555,16 @@ function MatchOemModal({ claim, onClose, onDone }) {
   return (
     <Modal onClose={onClose} width="max-w-lg" testid="claim-match-oem-modal">
       <div className="p-5 border-b border-line">
-        <div className="font-heading font-bold text-ink">Match OEM claim</div>
+        <div className="font-heading font-bold text-ink">{relink ? "Relink OEM claim" : "Match OEM claim"}</div>
         <div className="text-xs text-ink-faint mt-1">
           {claim.customer} · {claim.component} · {claim.leadId}
         </div>
       </div>
       <div className="p-5 space-y-3 overflow-y-auto">
         <p className="text-sm text-ink-soft">
-          Pick the debit note — and the item, when Euler bundled several Extra Support
-          rows under one claim id. Money on this register is never taken from Coulson.
+          {relink
+            ? "The previous OEM claim was cancelled. Pick the new debit note filed under the right head. This lead leaves the cancelled note. Money on this register is never taken from Coulson."
+            : "Pick the debit note — and the item, when Euler bundled several Extra Support rows under one claim id. Money on this register is never taken from Coulson."}
         </p>
         <Field label="OEM claim number">
           <Input data-testid="manual-oem-claim-number" value={claimNumber}
@@ -595,7 +609,7 @@ function MatchOemModal({ claim, onClose, onDone }) {
         <div className="flex gap-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-oem-match-btn" onClick={save} disabled={busy}>
-            {busy ? "Saving…" : "Save match"}
+            {busy ? "Saving…" : (relink ? "Relink" : "Save match")}
           </Button>
         </div>
       </div>

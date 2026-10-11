@@ -13224,6 +13224,20 @@ async def claim_match_options():
     scheme share, overlays Euler, and often exceeds the 25s browser timeout —
     the Lead dropdown then stays on 'pick lead' with nothing in it.
     """
+    dead_oem = {}
+    async for row in db[oem_claims.CLAIMS_COLLECTION].find(
+            {"status": {"$in": ["Cancelled", "Rejected"]}},
+            {"claimNumber": 1, "status": 1, "_id": 0}):
+        num = str(row.get("claimNumber") or "").strip().upper()
+        if num:
+            dead_oem[num] = str(row.get("status") or "")
+    blocked_leads = set()
+    async for lead in db.leads.find(
+            {"$or": [{"dealCancelled": True}, {"accountStatus": "Cancelled"}]},
+            {"leadId": 1, "_id": 0}):
+        lid = str(lead.get("leadId") or "").strip()
+        if lid:
+            blocked_leads.add(lid)
     rows = []
     lead_ids = set()
     async for c in db.claims.find(
@@ -13232,19 +13246,30 @@ async def claim_match_options():
              "claimStatus": 1, "manualOemClaimNumber": 1, "_id": 0}):
         lid = str(c.get("leadId") or "").strip()
         key = str(c.get("componentKey") or "").strip()
-        if not lid or not key:
+        if not lid or not key or lid in blocked_leads:
             continue
-        if _scheme_claim_is_dropped(c) or str(c.get("claimStatus") or "") == "Cancelled":
+        status = str(c.get("claimStatus") or "").strip()
+        if _scheme_claim_is_dropped(c) or status in ("Received", "Partial"):
             continue
-        if str(c.get("manualOemClaimNumber") or "").strip():
+        manual = str(c.get("manualOemClaimNumber") or "").strip()
+        linked_status = dead_oem.get(manual.upper()) if manual else ""
+        relinkable = False
+        if manual and linked_status:
+            relinkable = True
+        elif manual:
             continue
+        elif status == "Cancelled":
+            relinkable = True
         lead_ids.add(lid)
         rows.append({
             "leadId": lid,
             "customer": c.get("customer") or "",
             "componentKey": key,
             "component": c.get("component") or ce.SCHEME_COMPONENT_LABELS.get(key, key),
-            "claimStatus": c.get("claimStatus") or "Pending",
+            "claimStatus": status or "Pending",
+            "relinkable": relinkable,
+            "linkedOemClaimNumber": manual if relinkable else "",
+            "linkedOemStatus": linked_status if relinkable else "",
         })
     if lead_ids:
         names = {}
@@ -13285,9 +13310,11 @@ async def create_claim_from_oem(body: OemClaimMatchIn, act=Depends(actor)):
 async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
     """Manually join a Scheme Claim Register row to an OEM Claim Settlements debit note.
 
-    Use when chassis/wording auto-match is wrong or missing. Money on the register is
-    never taken from Coulson. A debit note with several items (Extra Support) is
-    matched one line at a time via `lineId`.
+    Use when chassis/wording auto-match is wrong or missing. Relink uses the
+    same path when the previous OEM note was cancelled and a new claim was
+    filed under the right head. Money on the register is never taken from
+    Coulson. A debit note with several items (Extra Support) is matched one
+    line at a time via `lineId`.
     """
     lead_ids = _oem_match_lead_ids(body)
     if not lead_ids:
@@ -13301,9 +13328,11 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
     except ValueError as e:
         raise HTTPException(422, str(e))
     await oem_claims.apply_oem_filing_to_register(db)
-    await write_audit(act, "oem-match", "claim", leadId=lead_ids[0],
+    action = "oem-relink" if last.get("relinked") else "oem-match"
+    await write_audit(act, action, "claim", leadId=lead_ids[0],
                       new={"componentKey": body.componentKey, "claimNumber": body.claimNumber,
-                           "lineId": body.lineId, "leadIds": lead_ids})
+                           "lineId": body.lineId, "leadIds": lead_ids,
+                           "previousClaimNumber": last.get("previousClaimNumber") or ""})
     return {"ok": True, **last}
 
 

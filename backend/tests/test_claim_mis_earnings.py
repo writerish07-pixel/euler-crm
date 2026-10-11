@@ -66,6 +66,11 @@ def test_oem_cancelled_maps_to_cancelled():
     assert oem_claims.register_status_from_oem("Cancelled", "Submitted") == "Cancelled"
     assert oem_claims.register_status_from_oem("Rejected", "Dropped") == "Dropped"
     assert oem_claims.register_status_from_oem("Settled", "Pending") == "Approved"
+    assert oem_claims.register_status_from_oem("Cancelled", "Cancelled") == "Cancelled"
+    assert oem_claims.register_status_from_oem("", "Cancelled") == "Cancelled"
+    assert oem_claims.register_status_from_oem(
+        "RM Approval Pending", "Cancelled") == "Submitted"
+    assert oem_claims.register_status_from_oem("Settled", "Cancelled") == "Approved"
 
 
 @pytest.mark.asyncio

@@ -437,6 +437,8 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                       className="text-xs text-cobalt hover:underline inline-flex items-center gap-1">
                       <Link2 size={12} /> {lineLeadIds(li).length ? "Add lead" : "Match"}
                     </button>
+                    <RelinkButton row={r} line={li}
+                      onClick={(e) => { e.stopPropagation(); setMatchRow({ ...r, matchLine: li, relink: true }); }} />
                     {lineNeedsCreate(r, li) ? (
                       <CreateOemButton row={r} line={li} onDone={load} />
                     ) : null}
@@ -470,6 +472,8 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                 className="text-xs text-cobalt hover:underline inline-flex items-center gap-1">
                 <Link2 size={12} /> {lineLeadIds(rowLineItems(r)[0] || {}).length ? "Add lead" : "Match"}
               </button>
+              <RelinkButton row={r} line={rowLineItems(r)[0] || {}}
+                onClick={(e) => { e.stopPropagation(); setMatchRow({ ...r, matchLine: rowLineItems(r)[0], relink: true }); }} />
               {lineNeedsCreate(r, rowLineItems(r)[0] || {}) ? (
                 <CreateOemButton row={r} line={rowLineItems(r)[0] || {}} onDone={load} />
               ) : null}
@@ -518,10 +522,30 @@ function CreateOemButton({ row, line, onDone }) {
 }
 
 function isOpenRegisterRow(r) {
-  return !["Received", "Dropped", "Cancelled"].includes(r?.claimStatus || "");
+  return !["Received", "Dropped", "Cancelled"].includes(r?.claimStatus || "") && !r?.relinkable;
+}
+
+function isRelinkableRegisterRow(r) {
+  return !!r?.relinkable;
+}
+
+function canRelinkTo(row) {
+  return !["Cancelled", "Rejected"].includes(row?.status || "");
+}
+
+function RelinkButton({ row, line, onClick }) {
+  if (!canRelinkTo(row)) return null;
+  return (
+    <button type="button" data-testid={`oem-relink-${row.claimNumber}${line?.lineId ? `-${line.lineId}` : ""}`}
+      onClick={onClick}
+      className="text-xs text-cobalt hover:underline inline-flex items-center gap-1">
+      <RotateCcw size={12} /> Relink
+    </button>
+  );
 }
 
 function MatchRegisterModal({ row, onClose, onDone }) {
+  const relink = !!row.relink;
   const line = row.matchLine || {};
   const already = lineLeadIds(line);
   const relatedKey = line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "";
@@ -545,12 +569,14 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   }, []);
 
   const picked = [leadId, ...extraLeadIds].filter(Boolean);
-  const openRows = register.filter(isOpenRegisterRow);
+  const poolRows = relink
+    ? register.filter(isRelinkableRegisterRow)
+    : register.filter(isOpenRegisterRow);
   const relatedRows = relatedKey
-    ? openRows.filter((r) => r.componentKey === relatedKey)
+    ? poolRows.filter((r) => r.componentKey === relatedKey)
     : [];
   // Prefer the related component, but never leave the Lead list empty after load.
-  const leadSource = relatedRows.length ? relatedRows : (openRows.length ? openRows : register);
+  const leadSource = relatedRows.length ? relatedRows : (poolRows.length ? poolRows : register);
   const leads = [...new Map(leadSource.map((r) => [r.leadId, r])).values()];
   for (const id of picked) {
     if (id && !leads.some((r) => r.leadId === id)) {
@@ -559,14 +585,14 @@ function MatchRegisterModal({ row, onClose, onDone }) {
     }
   }
   const leadRows = leadId ? register.filter((r) => r.leadId === leadId) : [];
-  const openLeadRows = leadRows.filter(isOpenRegisterRow);
+  const scopedLeadRows = leadRows.filter(relink ? isRelinkableRegisterRow : isOpenRegisterRow);
   let options = relatedKey
-    ? openLeadRows.filter((r) => r.componentKey === relatedKey)
-    : openLeadRows;
-  if (!options.length) options = openLeadRows.length ? openLeadRows : leadRows;
+    ? scopedLeadRows.filter((r) => r.componentKey === relatedKey)
+    : scopedLeadRows;
+  if (!options.length) options = scopedLeadRows.length ? scopedLeadRows : leadRows;
   const extraCandidates = leads.filter((r) => r.leadId && !picked.includes(r.leadId)
     && (!componentKey || register.some((c) => c.leadId === r.leadId && c.componentKey === componentKey
-      && isOpenRegisterRow(c))));
+      && (relink ? isRelinkableRegisterRow(c) : isOpenRegisterRow(c)))));
 
   const save = async () => {
     if (!leadId || !componentKey) return toast.error("Pick a lead and a scheme component");
@@ -576,9 +602,13 @@ function MatchRegisterModal({ row, onClose, onDone }) {
         leadId, leadIds: picked, componentKey,
         claimNumber: row.claimNumber, lineId: line.lineId || "",
       });
-      toast.success(picked.length > 1
-        ? `Matched ${row.claimNumber} to ${picked.length} leads`
-        : `Matched ${row.claimNumber} to the scheme register`);
+      toast.success(relink
+        ? (picked.length > 1
+          ? `Relinked ${row.claimNumber} to ${picked.length} leads`
+          : `Relinked ${row.claimNumber} in place of the cancelled OEM claim`)
+        : (picked.length > 1
+          ? `Matched ${row.claimNumber} to ${picked.length} leads`
+          : `Matched ${row.claimNumber} to the scheme register`));
       onDone();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not save match"));
@@ -600,7 +630,9 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   return (
     <Modal onClose={onClose} width="max-w-lg" testid="oem-match-register-modal">
       <div className="p-5 border-b border-line">
-        <div className="font-heading font-bold text-ink">Match to Scheme Claim Register</div>
+        <div className="font-heading font-bold text-ink">
+          {relink ? "Relink to Scheme Claim Register" : "Match to Scheme Claim Register"}
+        </div>
         <div className="text-xs text-ink-faint mt-1 font-mono">{row.claimNumber}</div>
         {oemLineText(line) ? (
           <div className="text-xs text-ink-soft mt-2 whitespace-normal leading-snug">{oemLineText(line)}</div>
@@ -608,9 +640,9 @@ function MatchRegisterModal({ row, onClose, onDone }) {
       </div>
       <div className="p-5 space-y-3 overflow-y-auto">
         <p className="text-sm text-ink-soft">
-          Use this when chassis or claim wording did not join automatically. A debit
-          note with several Extra Support items is matched one item at a time. Money
-          stays on the register; this only links the OEM claim.
+          {relink
+            ? "Use this when the previous OEM claim was cancelled and refiled under the right head. This lead is detached from the cancelled note and attached here. Money stays on the register."
+            : "Use this when chassis or claim wording did not join automatically. A debit note with several Extra Support items is matched one item at a time. Money stays on the register; this only links the OEM claim."}
         </p>
         {looksCombinedSupport(line) ? (
           <p className="text-xs text-amber-800">
@@ -626,13 +658,17 @@ function MatchRegisterModal({ row, onClose, onDone }) {
             }}>
             <option value="">{loading ? "Loading register…" : "— pick lead —"}</option>
             {leads.map((r) => (
-              <option key={r.leadId} value={r.leadId}>{r.leadId} · {r.customer || r.customerName || lineLeadLabel(line, r.leadId)}</option>
+              <option key={r.leadId} value={r.leadId}>
+                {r.leadId} · {r.customer || r.customerName || lineLeadLabel(line, r.leadId)}
+                {r.relinkable && r.linkedOemClaimNumber ? ` · was ${r.linkedOemClaimNumber}` : ""}
+              </option>
             ))}
           </Select>
           {!loading && !leads.length ? (
             <p className="text-xs text-amber-800 mt-1">
-              No Scheme Claim Register rows yet. Use Create on this OEM line first,
-              or open Scheme Claim Register.
+              {relink
+                ? "No cancelled OEM matches to relink. Use Match for a lead that is not already attached."
+                : "No Scheme Claim Register rows yet. Use Create on this OEM line first, or open Scheme Claim Register."}
             </p>
           ) : null}
         </Field>
@@ -642,6 +678,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
             {options.map((r) => (
               <option key={`${r.leadId}-${r.componentKey}`} value={r.componentKey}>
                 {r.component || componentLabel(r.componentKey) || r.componentKey} · {r.claimStatus}
+                {r.linkedOemClaimNumber ? ` · was ${r.linkedOemClaimNumber}` : ""}
               </option>
             ))}
           </Select>
@@ -681,7 +718,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
         <div className="flex gap-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button onClick={save} disabled={busy} data-testid="oem-create-save">
-            {busy ? "Saving…" : "Save match"}
+            {busy ? "Saving…" : (relink ? "Relink" : "Save match")}
           </Button>
         </div>
       </div>

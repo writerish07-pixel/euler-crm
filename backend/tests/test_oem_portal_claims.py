@@ -1037,7 +1037,7 @@ async def test_register_rows_carry_a_match_state_without_changing_money(client, 
         assert "oemMatch" in row
         assert row["oemMatch"]["state"] in (
             "filed", "accepted", "rejected", "resubmitted", "unmapped",
-            "not_filed", "not_applicable")
+            "cancelled", "not_filed", "not_applicable")
         if row["claimId"] in baseline:
             assert (row["eligibleClaim"], row["receivedAmount"]) == baseline[row["claimId"]], \
                 f"the OEM mirror changed money on {row['claimId']}"
@@ -2136,3 +2136,106 @@ async def test_match_options_hide_dropped_and_already_matched(client):
     mine = [r for r in rows if r["leadId"] == lead_id]
     assert not any(r["componentKey"] == "loyaltyBonus" for r in mine)
     assert not any(r["componentKey"] == "referralBonus" for r in mine)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_oem_match_is_relinkable_not_hidden(client):
+    lead_id = await _delivered_lead(client, chassis="MD9REL26G900001",
+                                    invoice="AF-999-I26286001")
+    await _register_row(lead_id, "oemExtraSupport", 5000.0)
+    await _orphan_oem("AF-999-CLWRONG", line_id="wrong-1", claimed=5000.0,
+                      chassis="MD9REL26G900001", invoice="AF-999-I26286001",
+                      description="Insurance Benefits Up to for invoice AF-999-I26286001")
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLWRONG", "lineId": "wrong-1"})
+    assert r.status_code == 200, r.text
+    await server.db[oem_claims.CLAIMS_COLLECTION].update_one(
+        {"claimNumber": "AF-999-CLWRONG"}, {"$set": {"status": "Cancelled"}})
+    await oem_claims.apply_oem_filing_to_register(server.db)
+    rec = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport"})
+    assert rec["claimStatus"] == "Cancelled"
+    rows = (await client.get("/api/claims/match-options")).json()
+    mine = [x for x in rows if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport"]
+    assert len(mine) == 1, rows
+    assert mine[0]["relinkable"] is True
+    assert mine[0]["linkedOemClaimNumber"] == "AF-999-CLWRONG"
+    assert mine[0]["linkedOemStatus"] == "Cancelled"
+    assert not any(x["leadId"] == lead_id and not x.get("relinkable") for x in rows)
+
+
+@pytest.mark.asyncio
+async def test_relink_replaces_cancelled_oem_claim(client):
+    lead_id = await _delivered_lead(client, chassis="MD9REL26G900002",
+                                    invoice="AF-999-I26286002")
+    await _register_row(lead_id, "oemExtraSupport", 5000.0)
+    await _orphan_oem("AF-999-CLOLD", line_id="old-1", claimed=5000.0,
+                      chassis="MD9REL26G900002", invoice="AF-999-I26286002",
+                      description="Insurance Benefits Up to for invoice AF-999-I26286002")
+    assert (await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLOLD", "lineId": "old-1"})).status_code == 200
+    await server.db[oem_claims.CLAIMS_COLLECTION].update_one(
+        {"claimNumber": "AF-999-CLOLD"}, {"$set": {"status": "Cancelled"}})
+    await oem_claims.apply_oem_filing_to_register(server.db)
+    await _orphan_oem("AF-999-CLNEW", line_id="new-1", claimed=5000.0,
+                      chassis="MD9REL26G900002", invoice="AF-999-I26286002",
+                      claim_type="Additional Support",
+                      description="Claim Type :- Additional Support Customer Name:- Relink")
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLNEW", "lineId": "new-1"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("relinked") is True
+    assert body.get("previousClaimNumber") == "AF-999-CLOLD"
+    rec = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport"})
+    assert rec["manualOemClaimNumber"] == "AF-999-CLNEW"
+    assert rec["claimStatus"] != "Cancelled"
+    old = (await client.get("/api/oem-claims", params={"q": "AF-999-CLOLD"})).json()[0]
+    new = (await client.get("/api/oem-claims", params={"q": "AF-999-CLNEW"})).json()[0]
+    assert lead_id not in (old.get("leadIds") or [])
+    assert not old["lineItems"][0].get("leadId")
+    assert lead_id in (new.get("leadIds") or [])
+    assert new["lineItems"][0]["matchedBy"] == "manual"
+    register = (await client.get("/api/claims")).json()
+    row = next(x for x in register
+               if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport")
+    assert row["claimStatus"] != "Cancelled"
+    assert row["manualOemClaimNumber"] == "AF-999-CLNEW"
+
+
+@pytest.mark.asyncio
+async def test_cannot_relink_onto_cancelled_oem_or_cancelled_booking(client):
+    lead_id = await _delivered_lead(client, chassis="MD9REL26G900003",
+                                    invoice="AF-999-I26286003")
+    await _register_row(lead_id, "oemExtraSupport", 5000.0)
+    await _orphan_oem("AF-999-CLDEAD", line_id="dead-1", claimed=5000.0,
+                      chassis="MD9REL26G900003", invoice="AF-999-I26286003",
+                      description="Additional Support for invoice AF-999-I26286003")
+    await server.db[oem_claims.CLAIMS_COLLECTION].update_one(
+        {"claimNumber": "AF-999-CLDEAD"}, {"$set": {"status": "Cancelled"}})
+    dead = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLDEAD", "lineId": "dead-1"})
+    assert dead.status_code == 422, dead.text
+    await _orphan_oem("AF-999-CLLIVE", line_id="live-1", claimed=5000.0,
+                      chassis="MD9REL26G900003", invoice="AF-999-I26286003",
+                      description="Additional Support for invoice AF-999-I26286003")
+    await server.db.leads.update_one(
+        {"leadId": lead_id},
+        {"$set": {"dealCancelled": True, "accountStatus": "Cancelled"}})
+    blocked = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLLIVE", "lineId": "live-1"})
+    assert blocked.status_code == 422, blocked.text
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        login = await c.post("/api/auth/login",
+                             json={"email": "executive@euler.com", "password": "euler@123"})
+        c.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+        assert (await c.post("/api/claims/oem-match", json={
+            "leadId": lead_id, "componentKey": "oemExtraSupport",
+            "claimNumber": "AF-999-CLLIVE", "lineId": "live-1"})).status_code == 403

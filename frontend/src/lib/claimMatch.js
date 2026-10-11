@@ -10,6 +10,7 @@ export const OEM_MATCH = {
   filed:       { label: "Filed with Euler",  tone: "bg-blue-50 text-blue-700 ring-blue-600/20",          row: "" },
   resubmitted: { label: "Refiled",           tone: "bg-sky-50 text-sky-700 ring-sky-600/20",             row: "" },
   rejected:    { label: "Rejected — refile", tone: "bg-rose-100 text-rose-800 ring-rose-600/30",         row: "bg-rose-50/60" },
+  cancelled:   { label: "Cancelled in OEM",  tone: "bg-zinc-100 text-zinc-600 ring-zinc-500/20",         row: "bg-zinc-50/60" },
   not_filed:   { label: "Not claimed",       tone: "bg-red-50 text-red-700 ring-red-600/20",             row: "bg-red-50/50" },
   unmapped:    { label: "Check match",       tone: "bg-amber-50 text-amber-800 ring-amber-600/20",       row: "bg-amber-50/40" },
   not_applicable: { label: "", tone: "", row: "" },
