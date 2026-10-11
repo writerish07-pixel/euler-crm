@@ -1320,6 +1320,146 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
     return stats
 
 
+def sold_chassis_set(sold_rows):
+    return {
+        _norm_chassis((r or {}).get("chassis"))
+        for r in (sold_rows or [])
+        if _norm_chassis((r or {}).get("chassis"))
+    }
+
+
+def _staff_delivery_locked(lead):
+    """A desk-completed delivery / Close Won is not auto-delinked."""
+    if _lead_is_close_won(lead):
+        return True
+    if _lead_is_delivered(lead) and not (lead or {}).get("oemAutoDelivered"):
+        return True
+    return False
+
+
+def clear_gone_sold_chassis(lead, sold_chassis):
+    """Drop chassis / invoice / plate that Coulson Sold no longer holds."""
+    sold_chassis = set(sold_chassis or ())
+    held = lead_chassis_list(lead)
+    gone = [c for c in held if c not in sold_chassis]
+    if not gone:
+        return None
+    gone_set = set(gone)
+    patch = {}
+    units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    changed_units = False
+    for u in units:
+        if _norm_chassis(u.get("chassisNumber")) not in gone_set:
+            continue
+        u["chassisNumber"] = ""
+        u["invoiceNumber"] = ""
+        u["numberPlate"] = ""
+        changed_units = True
+    if changed_units:
+        patch["units"] = units
+    if _norm_chassis((lead or {}).get("chassisNumber")) in gone_set:
+        remaining = [
+            _norm_chassis(u.get("chassisNumber"))
+            for u in (patch.get("units") or units)
+            if _norm_chassis(u.get("chassisNumber"))
+        ]
+        if remaining:
+            patch["chassisNumber"] = remaining[0]
+            first = next(
+                (u for u in (patch.get("units") or units)
+                 if _norm_chassis(u.get("chassisNumber")) == remaining[0]),
+                {},
+            )
+            patch["invoiceNumber"] = (first or {}).get("invoiceNumber") or ""
+            patch["numberPlate"] = (first or {}).get("numberPlate") or ""
+        else:
+            patch["chassisNumber"] = ""
+            patch["invoiceNumber"] = ""
+            patch["numberPlate"] = ""
+    return patch
+
+
+def oem_auto_deliver_revert_patch(lead):
+    """Undo OEM-auto delivery when the billed chassis left Sold."""
+    if not (lead or {}).get("oemAutoDelivered"):
+        return {}
+    if lead_chassis_list(lead):
+        return {}
+    if (lead or {}).get("bookingDate"):
+        status = "Booked"
+    else:
+        status = str((lead or {}).get("oemStatusBeforeAutoDeliver") or "In Progress").strip() or "In Progress"
+        if status.lower() in ("delivered", "close won", "closewon"):
+            status = "In Progress"
+    return {
+        "deliveryStatus": "",
+        "currentStatus": status,
+        "deliveryDate": "",
+        "oemAutoDelivered": False,
+        "oemInvoiced": False,
+    }
+
+
+async def delink_cancelled_sold_invoices(db):
+    """When Coulson drops a billed chassis, free that id on the CRM file.
+
+    Staff-completed Delivered / Close Won files are only flagged. OEM-auto
+    delivered enquiries lose the chassis and, if nothing remains, the
+    auto-delivery stamp so a rebill can attach again.
+    """
+    sold = [r async for r in db.oem_sold.find({})]
+    sold_ch = sold_chassis_set(sold)
+    stats = {"cleared": 0, "flagged": 0, "reverted": 0, "clearedIds": []}
+    async for lead in db.leads.find({}):
+        if _lead_is_cancelled(lead):
+            continue
+        held = lead_chassis_list(lead)
+        gone = [c for c in held if c not in sold_ch]
+        if not gone:
+            if lead.get("oemInvoiceMissing"):
+                await db.leads.update_one(
+                    {"leadId": lead.get("leadId")},
+                    {"$unset": {"oemInvoiceMissing": ""}})
+            continue
+        lid = lead.get("leadId")
+        if not lid:
+            continue
+        if _staff_delivery_locked(lead):
+            if not lead.get("oemInvoiceMissing"):
+                await db.leads.update_one(
+                    {"leadId": lid},
+                    {"$set": {"oemInvoiceMissing": True}})
+                stats["flagged"] += 1
+            continue
+        patch = clear_gone_sold_chassis(lead, sold_ch) or {}
+        merged = {**lead, **patch}
+        revert = oem_auto_deliver_revert_patch(merged)
+        patch.update(revert)
+        if not patch:
+            continue
+        patch["oemSoldSyncedAt"] = now_iso()
+        unset = {}
+        if revert:
+            unset["oemInvoiceMissing"] = ""
+            stats["reverted"] += 1
+        op = {"$set": patch}
+        if unset:
+            op["$unset"] = unset
+        await db.leads.update_one({"leadId": lid}, op)
+        delivery_ids = {k: patch[k] for k in ("chassisNumber", "invoiceNumber", "numberPlate")
+                        if k in patch}
+        if delivery_ids or revert:
+            await db.deliveries.update_one(
+                {"leadId": lid},
+                {"$set": delivery_ids} if delivery_ids else {"$set": {"chassisNumber": "",
+                                                                     "invoiceNumber": "",
+                                                                     "numberPlate": ""}},
+            )
+        stats["cleared"] += 1
+        stats["clearedIds"].append(lid)
+    return stats
+
+
 def _delivered_missing_vehicle_ids(lead):
     if not _lead_is_delivered(lead):
         return False

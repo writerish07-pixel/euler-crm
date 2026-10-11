@@ -834,6 +834,22 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
         <OwnerKV label="Lead Source" field="leadSource" value={lead.leadSource || ""}
           options={(masters.leadSources || []).map((s) => s)} leadId={lid} onSaved={onSaved} />
       </Card>
+      {lead.oemAutoDelivered && (
+        <Card className="p-3 sm:col-span-2 border-sky-200 bg-sky-50/70" data-testid="oem-auto-deliver-banner">
+          <p className="text-sm text-sky-950">
+            OEM billed this file{lead.invoiceNumber ? ` (${lead.invoiceNumber})` : ""} and marked it Delivered.
+            Showroom Admin completes scheme and payment; the executive completes booking and payment.
+          </p>
+        </Card>
+      )}
+      {lead.oemInvoiceMissing && (
+        <Card className="p-3 sm:col-span-2 border-rose-200 bg-rose-50/70" data-testid="oem-invoice-missing-banner">
+          <p className="text-sm text-rose-900">
+            This chassis is no longer on Coulson Sold. The OEM invoice was cancelled.
+            Chassis was kept because this file was already delivered here.
+          </p>
+        </Card>
+      )}
       {(lead.oemBodyMismatch || (lead.originalVariant && lead.originalVariant !== lead.variant)) && (
         <Card className="p-3 sm:col-span-2 border-amber-200 bg-amber-50/70" data-testid="oem-body-banner">
           {lead.oemBodyMismatch
