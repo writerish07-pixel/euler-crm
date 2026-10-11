@@ -13147,6 +13147,41 @@ async def _prune_inactive_scheme_claims(lead_id, live_keys):
         await db.claims.delete_one({"_id": c["_id"]})
 
 
+def _claim_pair_key(doc):
+    return (str((doc or {}).get("leadId") or ""), str((doc or {}).get("componentKey") or ""))
+
+
+async def _claims_by_pair():
+    """One pass over db.claims — GET /claims must not find_one per component."""
+    by_pair = {}
+    manuals = []
+    stored = []
+    async for c in db.claims.find({}):
+        stored.append(c)
+        if c.get("manual"):
+            manuals.append(c)
+            continue
+        key = _claim_pair_key(c)
+        if key[0] and key[1]:
+            by_pair[key] = c
+    return by_pair, manuals, stored
+
+
+async def _leads_for_claim_register(commercial, stored):
+    """Commercial files plus any persisted-claim leads that left that filter."""
+    by_id = {l.get("leadId"): l for l in (commercial or []) if l.get("leadId")}
+    missing = {
+        c.get("leadId") for c in (stored or [])
+        if c.get("leadId") and c.get("leadId") not in by_id
+    }
+    if missing:
+        async for lead in db.leads.find({"leadId": {"$in": list(missing)}}):
+            lid = lead.get("leadId")
+            if lid:
+                by_id[lid] = lead
+    return by_id
+
+
 @api.get("/claims")
 async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads.
@@ -13165,24 +13200,19 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     After the Euler mirror is attached, filing status / dates / claim reference follow
     the OEM debit note. eligibleClaim / claimAmount / receivedAmount are never taken
     from Coulson.
-    """
-    oem_index = await oem_claims.register_match_index(db)
-    patches = await oem_claims.apply_oem_filing_to_register(db, oem_index)
-    leads_to_recompute = set()
-    for doc in patches:
-        await sheet_sync("claims", doc)
-        if str(doc.get("claimStatus") or "") in ("Rejected", "Cancelled"):
-            if doc.get("leadId"):
-                leads_to_recompute.add(doc["leadId"])
-    for lid in leads_to_recompute:
-        await recompute_lead(lid)
 
-    leads = await _commercial_leads()
+    This is a read. Relink, sheet writes, and recompute belong on claim sync / Match —
+    doing them here timed out the page and the UI then showed an empty register.
+    """
+    oem_index = await oem_claims.register_match_index(db, relink=False)
+    by_pair, manuals, stored = await _claims_by_pair()
+    commercial = await _commercial_leads()
+    lead_by_id = await _leads_for_claim_register(commercial, stored)
     scheme_rows = await get_scheme_rows()
     result = []
     seen_ids = set()
     live_by_lead = {}
-    for l in leads:
+    for l in commercial:
         snap = lead_to_snapshot(l)
         shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
         display = shares["displayByComponent"]
@@ -13191,7 +13221,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
         for key, company_share in display.items():
             if company_share <= 0:
                 continue
-            existing = await db.claims.find_one({"leadId": l["leadId"], "componentKey": key})
+            existing = by_pair.get((l["leadId"], key))
             if existing and _scheme_claim_is_dropped(existing):
                 continue
             elig = ce.round2(eligible.get(key, 0))
@@ -13218,7 +13248,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
                 "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
             })
     # Manual claims (OEM incentives / executive incentives) — merged into the register
-    for m in await db.claims.find({"manual": True}).to_list(2000):
+    for m in manuals:
         elig = ce.round2(ce.num(m.get("eligibleClaim") if m.get("eligibleClaim") is not None else m.get("claimAmount")))
         claim_id = m.get("claimId")
         if claim_id:
@@ -13248,7 +13278,9 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     # share recomputed to 0) — Received / filed money still belongs in the register.
     # Dropped Extra Support lives only on Dropped Extra Support. Unused / Use=No
     # Pending shells are not "not claimed" work.
-    for c in await db.claims.find({"manual": {"$ne": True}}).to_list(5000):
+    for c in stored:
+        if c.get("manual"):
+            continue
         claim_id = c.get("claimId") or f"CLM-{c.get('leadId')}-{c.get('componentKey')}"
         if claim_id in seen_ids:
             continue
@@ -13266,8 +13298,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
                     or ce.num(c.get("claimAmount")) > 0 or ce.num(c.get("eligibleClaim")) > 0):
                 continue
         elig = ce.round2(ce.num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount")))
-        key = c.get("componentKey") or ""
-        lead = await db.leads.find_one({"leadId": c.get("leadId")}) or {}
+        lead = lead_by_id.get(c.get("leadId")) or {}
         result.append({
             "claimId": claim_id, "leadId": c.get("leadId", ""),
             "customer": c.get("customer") or lead.get("customerName", ""),
@@ -13293,16 +13324,8 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
 
     # Chassis and invoice live on the lead. Copy them BEFORE matching so a debit
     # note that was never stamped with leadId still joins this row on the vehicle.
-    lead_ids = list({r.get("leadId") for r in result if r.get("leadId")})
-    by_id = {}
-    if lead_ids:
-        async for lead in db.leads.find(
-            {"leadId": {"$in": lead_ids}},
-            {"leadId": 1, "chassisNumber": 1, "invoiceNumber": 1, "_id": 0},
-        ):
-            by_id[lead.get("leadId")] = lead
     for row in result:
-        lead = by_id.get(row.get("leadId") or "") or {}
+        lead = lead_by_id.get(row.get("leadId") or "") or {}
         row["chassisNumber"] = lead.get("chassisNumber") or row.get("chassisNumber") or ""
         row["invoiceNumber"] = lead.get("invoiceNumber") or row.get("invoiceNumber") or ""
 
@@ -13495,6 +13518,21 @@ async def clear_claim_oem_match(body: OemClaimMatchIn, act=Depends(actor)):
     return {"ok": True, "register": rec}
 
 
+async def _scheme_register_pairs():
+    """Lead+component keys already on the register — no full GET /claims rebuild."""
+    pairs = set()
+    async for c in db.claims.find(
+            {"manual": {"$ne": True}},
+            {"leadId": 1, "componentKey": 1, "claimStatus": 1, "_id": 0}):
+        if _scheme_claim_is_dropped(c):
+            continue
+        lid = str(c.get("leadId") or "").strip()
+        key = str(c.get("componentKey") or "").strip()
+        if lid and key:
+            pairs.add((lid, key))
+    return pairs
+
+
 @api.get("/claims/oem-only", dependencies=[Depends(oem_claim_desk_only)])
 async def claims_only_in_oem():
     """The reverse direction: claims Euler is processing that this register has no row for.
@@ -13502,10 +13540,11 @@ async def claims_only_in_oem():
     Together with the oemMatch state on each register row, this closes the loop in both
     directions — nothing filed here goes unclaimed there, and nothing claimed there is
     missing from the books here.
+
+    Does not call GET /claims. That rebuild used to run twice on the same page
+    and empty the register when the browser timed out.
     """
-    register = await list_claims()
-    pairs = {(r.get("leadId") or "", r.get("componentKey") or "")
-             for r in register if not r.get("manual")}
+    pairs = await _scheme_register_pairs()
     rows = await oem_claims.oem_only_lines(db, pairs)
     return {"rows": rows,
             "total": ce.round2(sum(ce.num(r["amount"]) for r in rows)),
