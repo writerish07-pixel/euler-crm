@@ -54,10 +54,13 @@ def test_build_summary_passed_discounts_only():
     }
     s = ce.build_delivery_billing_summary(lead)
     assert s["kind"] == "delivery_billing_summary"
-    assert "full amount" in s["disclaimer"].lower() or "Tally" in s["disclaimer"]
+    assert "Tally" in s["disclaimer"]
+    assert "vehicle" in s["disclaimer"].lower()
     assert s["totals"]["customerPayable"] == 825000
     assert s["totals"]["customerBenefitPassed"] == 9499
-    assert s["totals"]["tallyBillTotal"] == 825000
+    assert s["totals"]["tallyBillTotal"] == 800500
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 825000
     assert s["noBenefitPassed"] is False
     codes = [d["code"] for d in s["discountLines"]]
     assert "additionalDiscount" in codes
@@ -85,7 +88,9 @@ def test_build_summary_zero_passed_has_no_discount_line():
     s = ce.build_delivery_billing_summary(lead)
     assert s["discountLines"] == []
     assert s["noBenefitPassed"] is True
-    assert s["totals"]["tallyBillTotal"] == 794500
+    assert s["totals"]["tallyBillTotal"] == 770000
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 794500
     assert s["totals"]["grossVehicleCost"] == 794500
 
 
@@ -102,7 +107,9 @@ def test_build_summary_uses_lead_additional_discount_when_breakup_empty():
     }
     s = ce.build_delivery_billing_summary(lead)
     assert s["totals"]["customerBenefitPassed"] == 4500
-    assert s["totals"]["tallyBillTotal"] == 790000
+    assert s["totals"]["tallyBillTotal"] == 765500
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 790000
     assert any(d["code"] == "additionalDiscount" for d in s["discountLines"])
 
 
@@ -129,8 +136,62 @@ def test_build_summary_vaibhav_style_two_passed_benefits():
     s = ce.build_delivery_billing_summary(lead)
     assert s["totals"]["customerBenefitPassed"] == 30000
     assert s["totals"]["customerPayable"] == 764500
+    assert s["totals"]["tallyBillTotal"] == 740000
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 764500
     assert abs(s["totals"]["grossVehicleCost"] - s["totals"]["customerBenefitPassed"]
                - s["totals"]["customerPayable"]) < 0.05
+
+
+def test_tally_bill_is_vehicle_only_gst_not_on_rto_insurance():
+    """Turbo deal ₹8,05,000: Tally invoice is Ex − discount; RTO/insurance off-invoice.
+
+    House rates: RTO ₹5,500 on 3W and 4W; insurance ₹19,000 (4W) / ₹10,000 (3W).
+    """
+    lead = {
+        "leadId": "LD_TURBO_805",
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)",
+        "exShowroom": 785000,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "additionalDiscount": 4500,
+        "customerPayable": 805000,
+        "totalReceived": 805000,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    assert s["totals"]["tallyBillTotal"] == 780500
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 805000
+    assert s["totals"]["customerPayable"] == 805000
+    gst = s["gstReference"]
+    assert gst["netVehicleInclGst"] == 780500
+    assert abs(gst["taxableValue"] - round(780500 / 1.05, 2)) < 0.02
+    assert abs((gst["cgst"] + gst["sgst"]) - (780500 - gst["taxableValue"])) < 0.02
+    off = {ln["code"]: ln["amount"] for ln in s["offTallyLines"]}
+    assert off == {"rto": 5500, "insurance": 19000}
+    tally_codes = {ln["code"] for ln in s["tallyChargeLines"]}
+    assert tally_codes == {"exShowroom"}
+    assert "do not charge gst on rto" in gst["note"].lower()
+
+
+def test_three_wheeler_same_rto_lower_insurance():
+    lead = {
+        "leadId": "LD_3W",
+        "interestedModel": "Hi-Load",
+        "variant": "XR (PV)",
+        "exShowroom": 456134,
+        "rto": 5500,
+        "insuranceAmount": 10000,
+        "customerPayable": 471634,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    off = {ln["code"]: ln["amount"] for ln in s["offTallyLines"]}
+    assert off["rto"] == 5500
+    assert off["insurance"] == 10000
+    assert s["totals"]["tallyBillTotal"] == 456134
+    assert s["totals"]["offTallyTotal"] == 15500
+    assert s["totals"]["customerCollectTotal"] == 471634
 
 
 @pytest_asyncio.fixture
@@ -172,6 +233,133 @@ async def _booked_priced_lead(client, mobile="9111100099"):
         await client.post(f"/api/leads/{lid}/payments", json={
             "amount": os_amt, "paymentMode": "Cash", "date": "2026-08-10"})
     return lid
+
+
+@pytest.mark.asyncio
+async def test_price_structure_insurance_change_recomputes_payable_and_tally(client):
+    """Edited insurance on Price Structure must move GVC, payable and Tally off-invoice."""
+    lid = await _booked_priced_lead(client, "9111100095")
+    before = await server.db.leads.find_one({"leadId": lid})
+    old_ins = ce.round2(ce.num(before.get("insuranceAmount") or before.get("insurance")))
+    assert old_ins > 0
+    new_ins = 15000.0
+    assert new_ins != old_ins
+    r = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": ce.num(before.get("exShowroom")),
+        "rto": ce.num(before.get("rto")),
+        "insuranceAmount": new_ins,
+        "insuranceArrangedBy": before.get("insuranceArrangedBy") or "dealer",
+        "accessoriesAmount": ce.num(before.get("accessoriesAmount")),
+        "handlingCharges": ce.num(before.get("handlingCharges")),
+        "trc": ce.num(before.get("trc")),
+        "fastag": ce.num(before.get("fastag")),
+        "extendedWarranty": ce.num(before.get("extendedWarranty")),
+        "otherCharges": ce.num(before.get("otherCharges")),
+        "rsaAmc": ce.num(before.get("rsaAmc")),
+        "tcsApplicable": before.get("tcsApplicable") or "No",
+    })
+    assert r.status_code == 200, r.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(after.get("insuranceAmount")) == new_ins
+    delta = ce.round2(new_ins - old_ins)
+    assert ce.num(after.get("grossVehicleCost")) == ce.round2(
+        ce.num(before.get("grossVehicleCost")) + delta)
+    if after.get("useDealPrice") and ce.num(after.get("cxDemand")) > 0:
+        assert ce.num(after.get("customerPayable")) == ce.num(before.get("customerPayable"))
+        assert ce.num(after.get("additionalDiscount")) == ce.round2(
+            ce.num(before.get("additionalDiscount")) + delta)
+    else:
+        assert ce.num(after.get("customerPayable")) == ce.round2(
+            ce.num(before.get("customerPayable")) + delta)
+
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-95",
+        "chassisNumber": "CH-BILL-95",
+        "numberPlate": "RJ14-BILL-95",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+    summary = (await client.get(f"/api/leads/{lid}/billing-summary")).json()
+    off = {ln["code"]: ln["amount"] for ln in summary.get("offTallyLines") or []}
+    assert off.get("insurance") == new_ins
+    assert summary["totals"]["tallyBillTotal"] == ce.round2(
+        ce.num(after.get("exShowroom")) - ce.num(after.get("additionalDiscount")))
+    ins_row = await server.db.insurance.find_one({"leadId": lid})
+    assert ins_row is not None
+    assert ce.num(ins_row.get("insuranceAmount")) == new_ins
+
+    later = 12000.0
+    r = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": ce.num(after.get("exShowroom")),
+        "rto": ce.num(after.get("rto")),
+        "insuranceAmount": later,
+        "insuranceArrangedBy": after.get("insuranceArrangedBy") or "dealer",
+    })
+    assert r.status_code == 200, r.text
+    summary = (await client.get(f"/api/leads/{lid}/billing-summary")).json()
+    off = {ln["code"]: ln["amount"] for ln in summary.get("offTallyLines") or []}
+    assert off.get("insurance") == later
+    ins_row = await server.db.insurance.find_one({"leadId": lid})
+    assert ce.num(ins_row.get("insuranceAmount")) == later
+
+
+def test_showroom_admin_can_price_after_delivery():
+    lead = {
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active", "bookingDate": "2026-08-09",
+        "priceStructureSaved": True,
+    }
+    admin = server.lead_actions(lead, {"role": "tl"})
+    assert admin["canPrice"] is True
+    assert admin["canScheme"] is False
+    team = server.lead_actions(lead, {"role": "team_lead"})
+    assert team["canPrice"] is False
+    exec_acts = server.lead_actions(lead, {"role": "executive"})
+    assert exec_acts["canPrice"] is False
+
+
+@pytest.mark.asyncio
+async def test_showroom_admin_reedits_price_and_tally_syncs(client):
+    lid = await _booked_priced_lead(client, "9111100096")
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-96",
+        "chassisNumber": "CH-BILL-96",
+        "numberPlate": "RJ14-BILL-96",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    await server.db.users.delete_many({"email": "admin.price@euler.com"})
+    cr = await client.post("/api/auth/users", json={
+        "email": "admin.price@euler.com", "password": "euler@123",
+        "name": "Showroom Admin", "role": "tl"})
+    assert cr.status_code == 200, cr.text
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as admin:
+        login = await admin.post("/api/auth/login",
+                                 json={"email": "admin.price@euler.com", "password": "euler@123"})
+        assert login.status_code == 200, login.text
+        admin.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+        r = await admin.put(f"/api/leads/{lid}/price-structure", json={
+            "exShowroom": ce.num(lead.get("exShowroom")),
+            "rto": ce.num(lead.get("rto")),
+            "insuranceAmount": 16000,
+            "insuranceArrangedBy": "dealer",
+        })
+        assert r.status_code == 200, r.text
+        acts = (await admin.get(f"/api/leads/{lid}/360")).json()["actions"]
+        assert acts["canPrice"] is True
+        summary = (await admin.get(f"/api/leads/{lid}/billing-summary")).json()
+    off = {ln["code"]: ln["amount"] for ln in summary.get("offTallyLines") or []}
+    assert off.get("insurance") == 16000
+    stored = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(stored.get("insuranceAmount")) == 16000
 
 
 @pytest.mark.asyncio
@@ -294,3 +482,40 @@ async def test_billing_summary_upsert_no_set_setoninsert_conflict(client):
     r = await client.get(f"/api/leads/{lid}/360")
     assert r.status_code == 200, r.text
     assert (r.json().get("billingSummary") or {}).get("leadId") == lid
+
+
+@pytest.mark.asyncio
+async def test_rebuild_overwrites_old_full_amount_tally(client):
+    """Existing stored summaries that taxed the full deal are rewritten."""
+    lid = await _booked_priced_lead(client, "9111100094")
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-94",
+        "chassisNumber": "CH-BILL-94",
+        "numberPlate": "RJ14-BILL-94",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    ex = ce.round2(ce.num(lead.get("exShowroom")))
+    rto = ce.round2(ce.num(lead.get("rto")))
+    ins = ce.round2(ce.num(lead.get("insuranceAmount") or lead.get("insurance")))
+    stale_total = ce.round2(ex + rto + ins)
+    await server.db.billing_summaries.update_one(
+        {"leadId": lid},
+        {"$set": {
+            "disclaimer": "Tally customer bill = full amount taken from customer",
+            "totals.tallyBillTotal": stale_total,
+        },
+         "$unset": {"totals.offTallyTotal": "", "offTallyLines": ""}},
+    )
+    n = await server._rebuild_all_delivery_billing_summaries()
+    assert n >= 1
+    stored = await server.db.billing_summaries.find_one({"leadId": lid})
+    assert "offTallyTotal" in (stored.get("totals") or {})
+    assert stored["totals"]["tallyBillTotal"] == ex
+    assert stored["totals"]["offTallyTotal"] == ce.round2(rto + ins)
+    assert stored["totals"]["customerCollectTotal"] == stale_total
+    assert "vehicle" in (stored.get("disclaimer") or "").lower()

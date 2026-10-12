@@ -985,6 +985,7 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
 
 /* -------------------------------------------------- Price Structure */
 function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno: unitSnoProp, onUnitSno }) {
+  const { isShowroomAdmin } = useAuth();
   const units = packUnitList(lead);
   const [unitSnoLocal, setUnitSnoLocal] = useState(unitSnoProp || 1);
   const unitSno = unitSnoProp || unitSnoLocal;
@@ -993,7 +994,8 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
   const src = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
   const unitPriced = !!(src.priceStructureSaved || (!unitIdx && actions.priceCompleted));
   const inactive = !actions.canPrice;
-  const staffLocked = !isOwner && unitPriced;
+  const canReeditPrice = isOwner || isShowroomAdmin;
+  const staffLocked = !canReeditPrice && unitPriced;
   const locked = inactive || staffLocked;
   const [priceDate, setPriceDate] = useState(unitBilledDate(src, lead) || lead.createdDate || todayISO());
   const [masterMsg, setMasterMsg] = useState("");
@@ -1086,7 +1088,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
         </p>
       )}
       {inactive && <StepLock text="This lead is not Active — price structure is read-only." />}
-      {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner can edit a completed step." />}
+      {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner or Showroom Admin can edit a completed step." />}
       {masterMsg && <p className="text-xs text-ink-soft mb-3" data-testid="exshowroom-lock-note">{masterMsg}</p>}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <Field label="Price Date"><Input data-testid="price-date" type="date" value={priceDate} onChange={(e) => setPriceDate(e.target.value)} disabled={locked} /></Field>
@@ -2329,30 +2331,26 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
                   <td className="py-1 pr-2 text-right font-mono">{inr(t.grossVehicleCost)}</td>
                   <td className="py-1 pr-2 text-right font-mono">{inr(t.additionalDiscount)}</td>
                   <td className="py-1 pr-2 text-right font-mono">{inr(t.oemExtraSupportPassed)}</td>
-                  <td className="py-1 text-right font-mono">{inr(t.tallyBillTotal ?? t.customerPayable)}</td>
+                  <td className="py-1 text-right font-mono">{inr(t.customerCollectTotal ?? t.customerPayable)}</td>
                 </tr>
               </tbody>
             </table>
           </div>
         )}
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Customer charges (full amount on Tally)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Tally GST invoice (vehicle only)</h2>
         <table className="w-full text-sm">
           <tbody>
-            {(summary.chargeLines || []).map((ln) => (
+            {(summary.tallyChargeLines || (summary.chargeLines || []).filter((ln) => ln.code === "exShowroom" || ln.code === "tcs")).map((ln) => (
               <tr key={ln.code}>
                 <td>{ln.label}</td>
                 <td className="text-right font-mono">{inr(ln.amount)}</td>
               </tr>
             ))}
-            <tr className="font-semibold">
-              <td>Gross (before passed benefits)</td>
-              <td className="text-right font-mono">{inr(t.grossVehicleCost)}</td>
-            </tr>
           </tbody>
         </table>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Benefit passed to customer (only these on Tally)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Benefit passed (reduces Tally invoice only)</h2>
         <table className="w-full text-sm">
           <tbody>
             {(summary.discountLines || []).length === 0 && (
@@ -2371,10 +2369,39 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
           </tbody>
         </table>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">C. Tally bill total (= amount from customer)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">C. Tally bill (vehicle incl. GST)</h2>
         <table className="w-full text-sm">
           <tbody>
-            <tr><td>Tally / customer bill</td><td className="text-right font-mono font-bold">{inr(t.tallyBillTotal ?? t.netAfterBenefits ?? t.customerPayable)}</td></tr>
+            <tr><td>Tally GST invoice</td><td className="text-right font-mono font-bold">{inr(t.tallyBillTotal ?? t.netVehicleInclGst)}</td></tr>
+            <tr><td>Taxable value</td><td className="text-right font-mono">{inr(gst.taxableValue)}</td></tr>
+            <tr><td>CGST / SGST @ {gst.ratePct}%</td><td className="text-right font-mono">{inr(gst.cgst)} / {inr(gst.sgst)}</td></tr>
+          </tbody>
+        </table>
+        <p className="text-[11px] text-ink-faint mt-1">{gst.note}</p>
+
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">D. Collect separately — not on Tally (no GST)</h2>
+        <table className="w-full text-sm">
+          <tbody>
+            {(summary.offTallyLines || []).length === 0 && (
+              <tr><td colSpan={2} className="text-ink-faint text-xs">No RTO / insurance / other off-invoice charges</td></tr>
+            )}
+            {(summary.offTallyLines || []).map((ln) => (
+              <tr key={ln.code}>
+                <td>{ln.label}</td>
+                <td className="text-right font-mono">{inr(ln.amount)}</td>
+              </tr>
+            ))}
+            <tr className="font-semibold">
+              <td>Off-Tally total</td>
+              <td className="text-right font-mono">{inr(t.offTallyTotal)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">E. Customer payable (Tally + separate receipts)</h2>
+        <table className="w-full text-sm">
+          <tbody>
+            <tr><td>Customer collect (Tally + RTO/insurance)</td><td className="text-right font-mono font-bold">{inr(t.customerCollectTotal ?? t.customerPayable)}</td></tr>
             <tr><td>Customer payable (CRM)</td><td className="text-right font-mono">{inr(t.customerPayable)}</td></tr>
             <tr><td>Amount received</td><td className="text-right font-mono">{inr(t.totalReceived)}</td></tr>
             <tr><td>Customer outstanding</td><td className="text-right font-mono">{inr(t.customerOutstanding)}</td></tr>
@@ -2385,19 +2412,9 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
           </tbody>
         </table>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">D. GST reference (optional — Tally is final)</h2>
-        <table className="w-full text-sm">
-          <tbody>
-            <tr><td>Assumed rate</td><td className="text-right font-mono">{gst.ratePct}%</td></tr>
-            <tr><td>Taxable value (ref.)</td><td className="text-right font-mono">{inr(gst.taxableValue)}</td></tr>
-            <tr><td>CGST / SGST (ref.)</td><td className="text-right font-mono">{inr(gst.cgst)} / {inr(gst.sgst)}</td></tr>
-          </tbody>
-        </table>
-        <p className="text-[11px] text-ink-faint mt-1">{gst.note}</p>
-
         {(summary.doNotPostInTally || []).length > 0 && isOwner && (
           <>
-            <h2 className="text-[11px] font-semibold uppercase tracking-wide text-red-700/80 mt-4 mb-1">E. Do not post on customer bill in Tally</h2>
+            <h2 className="text-[11px] font-semibold uppercase tracking-wide text-red-700/80 mt-4 mb-1">F. Do not post on customer bill in Tally</h2>
             <table className="w-full text-sm">
               <tbody>
                 {(summary.doNotPostInTally || []).map((ln, i) => (

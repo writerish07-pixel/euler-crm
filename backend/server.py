@@ -494,8 +494,12 @@ def lead_actions(lead, act=None):
     really_booked = bool((lead or {}).get("bookingDate")) or ce.num((lead or {}).get("bookingAmount")) > 0
     not_archived = _acct(lead) != "Archived"
     # Owner may correct commercials after delivery until the lead is closed.
+    # Showroom Admin may still correct Price Structure (Tally / insurance) after delivery.
     # OEM-auto delivered files stay desk-editable until scheme / booking / payment.
+    is_showroom_admin = authmod.is_showroom_admin(act)
     mutable = active if (role == "owner" or oem_auto) else (active and not delivered)
+    price_mutable = active if (role == "owner" or is_showroom_admin or oem_auto) else (
+        active and not delivered)
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
     is_exec = role == "executive"
@@ -523,7 +527,7 @@ def lead_actions(lead, act=None):
         }
     return {
         "canBook": (mutable and not booked) or (oem_auto and active and not really_booked),
-        "canPrice": mutable and not is_exec,
+        "canPrice": price_mutable and not is_exec,
         "canScheme": mutable and not is_exec,
         # Desk can collect on an Active file. Executives collect only after booking.
         "canPayment": mutable and ((really_booked if oem_auto else booked) if is_exec else True),
@@ -557,6 +561,19 @@ def _require_owner_reedit(act, completed, step_label):
             403,
             f"{step_label} is already saved. Only the owner can edit a completed step.",
         )
+
+
+def _require_price_reedit(act, completed):
+    """First price save is desk-wide; later edits are Owner or Showroom Admin."""
+    if not completed:
+        return
+    role = ((act or {}).get("role") or "").strip().lower()
+    if role == "owner" or authmod.is_showroom_admin(act):
+        return
+    raise HTTPException(
+        403,
+        "Price structure is already saved. Only the owner or Showroom Admin can edit it.",
+    )
 
 
 def _require_mutable_lead(lead, verb="edits", act=None):
@@ -2647,7 +2664,13 @@ async def accounts_dashboard():
     do_not_post_claims = company_os
     for l in delivered[:40]:
         stored = await db.billing_summaries.find_one({"leadId": l["leadId"]})
-        summary = clean(stored) if stored else ce.build_delivery_billing_summary(l)
+        if stored and _billing_summary_has_vehicle_tally(stored):
+            summary = clean(stored)
+        else:
+            try:
+                summary = clean(await _upsert_delivery_billing_summary(l["leadId"]) or {})
+            except Exception:
+                summary = ce.build_delivery_billing_summary(l)
         t = summary.get("totals") or {}
         for item in summary.get("doNotPostInTally") or []:
             label = (item.get("label") or "").lower()
@@ -7078,7 +7101,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     unit_sno = payload.pop("unitSno", None)
     idx, units = _resolve_unit_index(lead, unit_sno)
     chosen = units[idx] if units else {}
-    _require_owner_reedit(act, _unit_is_priced(lead, chosen, idx), "Price structure")
+    _require_price_reedit(act, _unit_is_priced(lead, chosen, idx))
     payload["insuranceArrangedBy"] = ce.normalize_insurance_arranged_by(
         payload.get("insuranceArrangedBy"))
     # Ex-Showroom is Price Master–authoritative and not staff-editable. Prefer the
@@ -7101,6 +7124,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
                 f"Price Master entry not found for {model or '(none)'}/"
                 f"{variant or '(none)'}. Select a valid vehicle before pricing.")
     payload["priceStructureSaved"] = True
+    payload["insurance"] = ce.num(payload.get("insuranceAmount"))
     if idx == 0 and (_is_booked_lead(lead) or _is_delivered_lead(lead)):
         # Booked / delivered unit 1 prices stay. Staff may still mark the step saved
         # and edit non-ex-showroom fields when the owner re-edit gate allows.
@@ -7125,6 +7149,12 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     else:
         await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
+    live = await db.leads.find_one({"leadId": lead_id}) or {}
+    if _is_delivered(live):
+        try:
+            await _upsert_insurance_on_delivery(lead_id, live.get("deliveryDate") or today())
+        except Exception:
+            logging.exception("Could not refresh insurance payout after price edit %s", lead_id)
     await write_audit(act, "update", "price-structure", leadId=lead_id, old=old,
                       new={**payload, "unitSno": idx + 1})
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
@@ -10153,9 +10183,33 @@ async def _refresh_billing_summary_if_delivered(lead_id):
     return None
 
 
+def _billing_summary_has_vehicle_tally(summary):
+    """True when the stored snapshot already splits Tally vs RTO/insurance."""
+    t = (summary or {}).get("totals") or {}
+    return "offTallyTotal" in t and "tallyBillTotal" in t
+
+
+async def _rebuild_all_delivery_billing_summaries():
+    """Rewrite stored Tally summaries for every delivered lead (existing files)."""
+    n = 0
+    async for lead in db.leads.find({}):
+        if not _is_delivered(lead):
+            continue
+        lid = lead.get("leadId")
+        if not lid:
+            continue
+        try:
+            await _upsert_delivery_billing_summary(lid)
+            n += 1
+        except Exception:
+            logging.exception("Could not rebuild billing summary for %s", lid)
+    logging.info("BILLING_SUMMARY_REBUILD: %s delivered leads", n)
+    return n
+
+
 @api.get("/leads/{lead_id}/billing-summary")
 async def get_billing_summary(lead_id: str, user=Depends(current_user)):
-    """Delivery Billing Summary for Tally (full customer amount − benefits passed).
+    """Delivery Billing Summary: Tally vehicle invoice + separate RTO/insurance.
 
     Always rebuilds from the current lead when Delivered, so scheme / Additional
     (Dealer) changes are reflected immediately (not stuck on the first snapshot).
@@ -15607,6 +15661,12 @@ async def _run_boot_maintenance():
             await oct_2026_schemes.ensure_oct_2026_schemes(db)
         except Exception:
             logging.exception("OCT_2026_SCHEME_BOOT_ERROR")
+        try:
+            if not _is_test_env():
+                rebuilt = await _rebuild_all_delivery_billing_summaries()
+                logging.info("BILLING_SUMMARY_REBUILD_BOOT: %s", rebuilt)
+        except Exception:
+            logging.exception("BILLING_SUMMARY_REBUILD_ERROR")
         _boot_state["maintenance"] = "done"
         logging.info("BOOT_MAINTENANCE: finished")
     except Exception:

@@ -219,21 +219,28 @@ export default function AccountsDashboard() {
                   <div className="text-xs text-ink-soft">{fmtDate(summary.deliveryDate)}</div>
                 </div>
               </div>
-              <h2>A. Charges</h2>
-              <table>{(summary.chargeLines || []).map((ln) => (
-                <tr key={ln.code}><td>{ln.label}</td><td className="num">{inr(ln.amount)}</td></tr>
-              ))}
-                <tr><td><b>Gross</b></td><td className="num"><b>{inr(summary.totals?.grossVehicleCost)}</b></td></tr>
-              </table>
-              <h2>B. Customer discounts (passed)</h2>
+              <h2>A. Tally GST invoice (vehicle only)</h2>
               <table>
-                {(summary.discountLines || []).length === 0 && <tr><td colSpan={2}>None</td></tr>}
+                {(summary.tallyChargeLines || []).map((ln) => (
+                  <tr key={ln.code}><td>{ln.label}</td><td className="num">{inr(ln.amount)}</td></tr>
+                ))}
                 {(summary.discountLines || []).map((ln) => (
                   <tr key={ln.code + ln.label}><td>{ln.label}</td><td className="num">{inr(ln.amount)}</td></tr>
                 ))}
+                <tr><td><b>Tally GST invoice</b></td><td className="num"><b>{inr(summary.totals?.tallyBillTotal)}</b></td></tr>
+                <tr><td>Taxable / CGST / SGST</td><td className="num">{inr(summary.gstReference?.taxableValue)} · {inr(summary.gstReference?.cgst)} / {inr(summary.gstReference?.sgst)}</td></tr>
               </table>
-              <h2>C. Settlement (enter in Tally)</h2>
+              <h2>B. Collect separately — not on Tally (no GST)</h2>
               <table>
+                {(summary.offTallyLines || []).length === 0 && <tr><td colSpan={2}>None</td></tr>}
+                {(summary.offTallyLines || []).map((ln) => (
+                  <tr key={ln.code}><td>{ln.label}</td><td className="num">{inr(ln.amount)}</td></tr>
+                ))}
+                <tr><td>Off-Tally total</td><td className="num">{inr(summary.totals?.offTallyTotal)}</td></tr>
+              </table>
+              <h2>C. Customer payable (Tally + separate receipts)</h2>
+              <table>
+                <tr><td>Customer collect</td><td className="num">{inr(summary.totals?.customerCollectTotal ?? summary.totals?.customerPayable)}</td></tr>
                 <tr><td>Customer Payable</td><td className="num"><b>{inr(summary.totals?.customerPayable)}</b></td></tr>
                 <tr><td>Received</td><td className="num">{inr(summary.totals?.totalReceived)}</td></tr>
                 <tr><td>Outstanding</td><td className="num">{inr(summary.totals?.customerOutstanding)}</td></tr>
