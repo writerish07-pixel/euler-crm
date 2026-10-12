@@ -107,6 +107,7 @@ describe("bulk mutations", () => {
   });
 
   test("allocate and import are bulk paths", () => {
+    expect(isBulkMutationPath("/agents/scan")).toBe(true);
     expect(isBulkMutationPath("/leads/allocate")).toBe(true);
     expect(isBulkMutationPath("/leads/import/commit")).toBe(true);
     expect(isBulkMutationPath("/insurance/mis/apply")).toBe(true);

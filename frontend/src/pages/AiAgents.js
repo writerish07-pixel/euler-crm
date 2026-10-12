@@ -32,7 +32,10 @@ export default function AiAgents() {
   const load = useCallback(() => {
     return get("/agents/suggestions", { status: "open", agent: agent || undefined })
       .then(setD)
-      .catch(() => toast.error("Could not load AI Agents"));
+      .catch((e) => {
+        toast.error(apiErrorMessage(e, "Could not load AI Agents"));
+        setD({ suggestions: [], open: 0, agents: {}, lastScanAt: "", loadError: true });
+      });
   }, [agent]);
 
   useEffect(() => { load(); }, [load]);
@@ -40,7 +43,7 @@ export default function AiAgents() {
   const scan = async () => {
     setBusy("scan");
     try {
-      const r = await post("/agents/scan", {});
+      const r = await post("/agents/scan", {}, { timeout: 120000, retry: false });
       setD(r);
       toast.success(`Scan done · ${r.open || 0} open`);
     } catch (e) {
@@ -102,8 +105,14 @@ export default function AiAgents() {
       {d && rows.length === 0 && (
         <Card className="p-8 flex flex-col items-center gap-3 text-center" data-testid="agents-empty">
           <CheckCircle2 size={40} className="text-emerald-500" />
-          <div className="font-heading font-bold text-ink">No open suggestions</div>
-          <div className="text-sm text-ink-soft">Scan to look for missing papers, PDF vs Price Structure, OEM gaps, Coulson expiry, follow-ups and Tally type-in lists.</div>
+          <div className="font-heading font-bold text-ink">
+            {d.loadError ? "Could not load suggestions" : "No open suggestions"}
+          </div>
+          <div className="text-sm text-ink-soft">
+            {d.loadError
+              ? "The list request failed. Use Scan now — listing never runs the heavy scan."
+              : "Scan to look for missing papers, PDF vs Price Structure, OEM gaps, Coulson expiry, follow-ups and Tally type-in lists."}
+          </div>
         </Card>
       )}
       <div className="space-y-3">

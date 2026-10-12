@@ -10818,13 +10818,20 @@ def _agent_view(user, row) -> dict:
 
 
 @api.get("/agents/suggestions", dependencies=[Depends(agent_desk_only)])
-async def agent_suggestions(status: str = "open", agent: str = "", user=Depends(current_user)):
+async def agent_suggestions(status: str = "open", agent: str = "",
+                            countOnly: bool = False, user=Depends(current_user)):
+    """List only. Never scan here — a live scan of PDFs/leads exceeds the 25s browser timeout."""
     meta = await db["system"].find_one({"_id": agentmod.SCAN_META}) or {}
-    if not meta.get("lastScanAt"):
-        await agentmod.run_scan(db)
-        meta = await db["system"].find_one({"_id": agentmod.SCAN_META}) or {}
-    rows = await agentmod.list_suggestions(db, status=status, agent=agent)
     open_n = await db[agentmod.COLLECTION].count_documents({"status": "open"})
+    if countOnly:
+        return {
+            "open": open_n,
+            "count": 0,
+            "lastScanAt": meta.get("lastScanAt") or "",
+            "agents": agentmod.AGENT_LABELS,
+            "suggestions": [],
+        }
+    rows = await agentmod.list_suggestions(db, status=status, agent=agent)
     return {
         "open": open_n,
         "count": len(rows),
