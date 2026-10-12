@@ -494,8 +494,12 @@ def lead_actions(lead, act=None):
     really_booked = bool((lead or {}).get("bookingDate")) or ce.num((lead or {}).get("bookingAmount")) > 0
     not_archived = _acct(lead) != "Archived"
     # Owner may correct commercials after delivery until the lead is closed.
+    # Showroom Admin may still correct Price Structure (Tally / insurance) after delivery.
     # OEM-auto delivered files stay desk-editable until scheme / booking / payment.
+    is_showroom_admin = authmod.is_showroom_admin(act)
     mutable = active if (role == "owner" or oem_auto) else (active and not delivered)
+    price_mutable = active if (role == "owner" or is_showroom_admin or oem_auto) else (
+        active and not delivered)
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
     is_exec = role == "executive"
@@ -523,7 +527,7 @@ def lead_actions(lead, act=None):
         }
     return {
         "canBook": (mutable and not booked) or (oem_auto and active and not really_booked),
-        "canPrice": mutable and not is_exec,
+        "canPrice": price_mutable and not is_exec,
         "canScheme": mutable and not is_exec,
         # Desk can collect on an Active file. Executives collect only after booking.
         "canPayment": mutable and ((really_booked if oem_auto else booked) if is_exec else True),
@@ -557,6 +561,19 @@ def _require_owner_reedit(act, completed, step_label):
             403,
             f"{step_label} is already saved. Only the owner can edit a completed step.",
         )
+
+
+def _require_price_reedit(act, completed):
+    """First price save is desk-wide; later edits are Owner or Showroom Admin."""
+    if not completed:
+        return
+    role = ((act or {}).get("role") or "").strip().lower()
+    if role == "owner" or authmod.is_showroom_admin(act):
+        return
+    raise HTTPException(
+        403,
+        "Price structure is already saved. Only the owner or Showroom Admin can edit it.",
+    )
 
 
 def _require_mutable_lead(lead, verb="edits", act=None):
@@ -7084,7 +7101,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     unit_sno = payload.pop("unitSno", None)
     idx, units = _resolve_unit_index(lead, unit_sno)
     chosen = units[idx] if units else {}
-    _require_owner_reedit(act, _unit_is_priced(lead, chosen, idx), "Price structure")
+    _require_price_reedit(act, _unit_is_priced(lead, chosen, idx))
     payload["insuranceArrangedBy"] = ce.normalize_insurance_arranged_by(
         payload.get("insuranceArrangedBy"))
     # Ex-Showroom is Price Master–authoritative and not staff-editable. Prefer the

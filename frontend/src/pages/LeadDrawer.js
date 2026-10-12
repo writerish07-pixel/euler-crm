@@ -985,6 +985,7 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
 
 /* -------------------------------------------------- Price Structure */
 function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno: unitSnoProp, onUnitSno }) {
+  const { isShowroomAdmin } = useAuth();
   const units = packUnitList(lead);
   const [unitSnoLocal, setUnitSnoLocal] = useState(unitSnoProp || 1);
   const unitSno = unitSnoProp || unitSnoLocal;
@@ -993,7 +994,8 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
   const src = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
   const unitPriced = !!(src.priceStructureSaved || (!unitIdx && actions.priceCompleted));
   const inactive = !actions.canPrice;
-  const staffLocked = !isOwner && unitPriced;
+  const canReeditPrice = isOwner || isShowroomAdmin;
+  const staffLocked = !canReeditPrice && unitPriced;
   const locked = inactive || staffLocked;
   const [priceDate, setPriceDate] = useState(unitBilledDate(src, lead) || lead.createdDate || todayISO());
   const [masterMsg, setMasterMsg] = useState("");
@@ -1086,7 +1088,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
         </p>
       )}
       {inactive && <StepLock text="This lead is not Active — price structure is read-only." />}
-      {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner can edit a completed step." />}
+      {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner or Showroom Admin can edit a completed step." />}
       {masterMsg && <p className="text-xs text-ink-soft mb-3" data-testid="exshowroom-lock-note">{masterMsg}</p>}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <Field label="Price Date"><Input data-testid="price-date" type="date" value={priceDate} onChange={(e) => setPriceDate(e.target.value)} disabled={locked} /></Field>

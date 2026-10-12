@@ -306,6 +306,62 @@ async def test_price_structure_insurance_change_recomputes_payable_and_tally(cli
     assert ce.num(ins_row.get("insuranceAmount")) == later
 
 
+def test_showroom_admin_can_price_after_delivery():
+    lead = {
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active", "bookingDate": "2026-08-09",
+        "priceStructureSaved": True,
+    }
+    admin = server.lead_actions(lead, {"role": "tl"})
+    assert admin["canPrice"] is True
+    assert admin["canScheme"] is False
+    team = server.lead_actions(lead, {"role": "team_lead"})
+    assert team["canPrice"] is False
+    exec_acts = server.lead_actions(lead, {"role": "executive"})
+    assert exec_acts["canPrice"] is False
+
+
+@pytest.mark.asyncio
+async def test_showroom_admin_reedits_price_and_tally_syncs(client):
+    lid = await _booked_priced_lead(client, "9111100096")
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-96",
+        "chassisNumber": "CH-BILL-96",
+        "numberPlate": "RJ14-BILL-96",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    await server.db.users.delete_many({"email": "admin.price@euler.com"})
+    cr = await client.post("/api/auth/users", json={
+        "email": "admin.price@euler.com", "password": "euler@123",
+        "name": "Showroom Admin", "role": "tl"})
+    assert cr.status_code == 200, cr.text
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as admin:
+        login = await admin.post("/api/auth/login",
+                                 json={"email": "admin.price@euler.com", "password": "euler@123"})
+        assert login.status_code == 200, login.text
+        admin.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+        r = await admin.put(f"/api/leads/{lid}/price-structure", json={
+            "exShowroom": ce.num(lead.get("exShowroom")),
+            "rto": ce.num(lead.get("rto")),
+            "insuranceAmount": 16000,
+            "insuranceArrangedBy": "dealer",
+        })
+        assert r.status_code == 200, r.text
+        acts = (await admin.get(f"/api/leads/{lid}/360")).json()["actions"]
+        assert acts["canPrice"] is True
+        summary = (await admin.get(f"/api/leads/{lid}/billing-summary")).json()
+    off = {ln["code"]: ln["amount"] for ln in summary.get("offTallyLines") or []}
+    assert off.get("insurance") == 16000
+    stored = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(stored.get("insuranceAmount")) == 16000
+
+
 @pytest.mark.asyncio
 async def test_delivery_creates_billing_summary(client):
     lid = await _booked_priced_lead(client, "9111100091")
