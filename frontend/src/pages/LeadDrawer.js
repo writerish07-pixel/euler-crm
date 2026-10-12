@@ -2324,48 +2324,24 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
           </div>
         )}
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Tally GST invoice (vehicle only)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Tally GST invoice (vehicle without GST → discount → GST)</h2>
         <table className="w-full text-sm">
           <tbody>
-            {(summary.tallyChargeLines || (summary.chargeLines || []).filter((ln) => ln.code === "exShowroom" || ln.code === "tcs")).map((ln) => (
-              <tr key={ln.code}>
-                <td>{ln.label}</td>
-                <td className="text-right font-mono">{inr(ln.amount)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Benefit passed (reduces Tally invoice only)</h2>
-        <table className="w-full text-sm">
-          <tbody>
-            {(summary.discountLines || []).length === 0 && (
-              <tr><td colSpan={2} className="text-ink-faint text-xs">No benefit passed — do not show any scheme/discount line on the Tally invoice</td></tr>
-            )}
-            {(summary.discountLines || []).map((ln) => (
-              <tr key={ln.code + ln.label}>
+            {(summary.tallyInvoiceLines || []).map((ln) => (
+              <tr key={ln.code + ln.label} className={ln.code === "taxableValue" ? "font-semibold" : ""}>
                 <td>{ln.label}{ln.fundHint ? <span className="text-ink-faint text-xs ml-1">({ln.fundHint})</span> : null}</td>
                 <td className="text-right font-mono">{inr(ln.amount)}</td>
               </tr>
             ))}
             <tr className="font-semibold">
-              <td>Total benefit passed</td>
-              <td className="text-right font-mono">− {inr(t.customerBenefitPassed)}</td>
+              <td>Tally GST invoice</td>
+              <td className="text-right font-mono">{inr(t.tallyBillTotal ?? t.netVehicleInclGst)}</td>
             </tr>
-          </tbody>
-        </table>
-
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">C. Tally bill (vehicle incl. GST)</h2>
-        <table className="w-full text-sm">
-          <tbody>
-            <tr><td>Tally GST invoice</td><td className="text-right font-mono font-bold">{inr(t.tallyBillTotal ?? t.netVehicleInclGst)}</td></tr>
-            <tr><td>Taxable value</td><td className="text-right font-mono">{inr(gst.taxableValue)}</td></tr>
-            <tr><td>CGST / SGST @ {gst.ratePct}%</td><td className="text-right font-mono">{inr(gst.cgst)} / {inr(gst.sgst)}</td></tr>
           </tbody>
         </table>
         <p className="text-[11px] text-ink-faint mt-1">{gst.note}</p>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">D. Collect separately — not on Tally (no GST)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Other heads — not on Tally (no GST)</h2>
         <table className="w-full text-sm">
           <tbody>
             {(summary.offTallyLines || []).length === 0 && (
@@ -2384,7 +2360,7 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
           </tbody>
         </table>
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">E. Customer payable (Tally + separate receipts)</h2>
+        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">C. Customer payable (Tally + other heads)</h2>
         <table className="w-full text-sm">
           <tbody>
             <tr><td>Customer collect (Tally + RTO/insurance)</td><td className="text-right font-mono font-bold">{inr(t.customerCollectTotal ?? t.customerPayable)}</td></tr>
@@ -2400,7 +2376,7 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
 
         {(summary.doNotPostInTally || []).length > 0 && isOwner && (
           <>
-            <h2 className="text-[11px] font-semibold uppercase tracking-wide text-red-700/80 mt-4 mb-1">F. Do not post on customer bill in Tally</h2>
+            <h2 className="text-[11px] font-semibold uppercase tracking-wide text-red-700/80 mt-4 mb-1">D. Do not post on customer bill in Tally</h2>
             <table className="w-full text-sm">
               <tbody>
                 {(summary.doNotPostInTally || []).map((ln, i) => (

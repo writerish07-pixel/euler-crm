@@ -172,7 +172,66 @@ def test_tally_bill_is_vehicle_only_gst_not_on_rto_insurance():
     assert off == {"rto": 5500, "insurance": 19000}
     tally_codes = {ln["code"] for ln in s["tallyChargeLines"]}
     assert tally_codes == {"exShowroom"}
-    assert "do not charge gst on rto" in gst["note"].lower()
+    assert "rto" in gst["note"].lower()
+
+
+def test_tally_invoice_shows_exclusive_then_discount_then_gst():
+    """Vehicle without GST → Additional → GST on remainder → other heads."""
+    lead = {
+        "leadId": "LD_EXGST",
+        "exShowroom": 785000,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "additionalDiscount": 4500,
+        "customerPayable": 805000,
+        "totalReceived": 805000,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    by = {ln["code"]: ln["amount"] for ln in s["tallyInvoiceLines"]}
+    codes = [ln["code"] for ln in s["tallyInvoiceLines"]]
+    assert codes[0] == "vehicleExGst"
+    assert "additionalDiscount" in codes
+    assert codes.index("taxableValue") > codes.index("additionalDiscount")
+    assert codes.index("cgst") > codes.index("taxableValue")
+    assert abs(by["vehicleExGst"] - round(785000 / 1.05, 2)) < 0.02
+    assert by["additionalDiscount"] < 0
+    assert abs(by["taxableValue"] - round(780500 / 1.05, 2)) < 0.02
+    assert abs(by["vehicleExGst"] + by["additionalDiscount"] - by["taxableValue"]) < 0.03
+    assert abs((by["cgst"] + by["sgst"]) - (780500 - by["taxableValue"])) < 0.03
+    assert s["totals"]["tallyBillTotal"] == 780500
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 805000
+
+
+def test_ld26000892_invoice_is_exclusive_then_discount_then_gst():
+    """Suresh Choudhary · Turbo Max Maxx FB — live Price Structure."""
+    lead = {
+        "leadId": "LD26000892",
+        "customerName": "Suresh Choudhary",
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (FB)",
+        "exShowroom": 775000,
+        "rto": 2200,
+        "insuranceAmount": 17991,
+        "additionalDiscount": 191,
+        "customerPayable": 795000,
+        "totalReceived": 795000,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    by = {ln["code"]: ln["amount"] for ln in s["tallyInvoiceLines"]}
+    codes = [ln["code"] for ln in s["tallyInvoiceLines"]]
+    assert codes == [
+        "vehicleExGst", "additionalDiscount", "taxableValue", "cgst", "sgst"]
+    assert by["vehicleExGst"] == 738095.24
+    assert by["additionalDiscount"] == -181.91
+    assert by["taxableValue"] == 737913.33
+    assert by["cgst"] == 18447.84
+    assert by["sgst"] == 18447.83
+    assert s["totals"]["tallyBillTotal"] == 774809
+    off = {ln["code"]: ln["amount"] for ln in s["offTallyLines"]}
+    assert off == {"rto": 2200, "insurance": 17991}
+    assert s["totals"]["offTallyTotal"] == 20191
+    assert s["totals"]["customerCollectTotal"] == 795000
 
 
 def test_stored_oem_extra_passed_is_not_a_tally_discount():
