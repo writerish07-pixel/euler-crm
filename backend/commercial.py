@@ -2216,6 +2216,10 @@ def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
         "totals": {
             "grossVehicleCost": gross,
             "customerBenefitPassed": benefit_total,
+            "additionalDiscount": add_disc,
+            "oemExtraSupportReceived": oem_extra["oemExtraSupportReceived"],
+            "oemExtraSupportPassed": oem_extra["oemExtraSupportPassed"],
+            "oemExtraSupportRetained": oem_extra["oemExtraSupportRetained"],
             "tcs": tcs,
             "tcsBase": books["tcsBase"],
             "netAfterBenefits": after_discount,

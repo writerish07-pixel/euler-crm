@@ -117,6 +117,9 @@ async def _booked_lead(c, mobile="9777712345"):
     await c.put(f"/api/leads/{lid}/price-structure", json=ps)
     await c.post(f"/api/leads/{lid}/convert-booking",
                  json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+    await server.db.lead_documents.insert_one({
+        "leadId": lid, "kind": "oem_extra_support", "filename": "asm-mail.pdf",
+    })
     return lid
 
 
