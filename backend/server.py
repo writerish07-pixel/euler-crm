@@ -2647,7 +2647,13 @@ async def accounts_dashboard():
     do_not_post_claims = company_os
     for l in delivered[:40]:
         stored = await db.billing_summaries.find_one({"leadId": l["leadId"]})
-        summary = clean(stored) if stored else ce.build_delivery_billing_summary(l)
+        if stored and _billing_summary_has_vehicle_tally(stored):
+            summary = clean(stored)
+        else:
+            try:
+                summary = clean(await _upsert_delivery_billing_summary(l["leadId"]) or {})
+            except Exception:
+                summary = ce.build_delivery_billing_summary(l)
         t = summary.get("totals") or {}
         for item in summary.get("doNotPostInTally") or []:
             label = (item.get("label") or "").lower()
@@ -10153,9 +10159,33 @@ async def _refresh_billing_summary_if_delivered(lead_id):
     return None
 
 
+def _billing_summary_has_vehicle_tally(summary):
+    """True when the stored snapshot already splits Tally vs RTO/insurance."""
+    t = (summary or {}).get("totals") or {}
+    return "offTallyTotal" in t and "tallyBillTotal" in t
+
+
+async def _rebuild_all_delivery_billing_summaries():
+    """Rewrite stored Tally summaries for every delivered lead (existing files)."""
+    n = 0
+    async for lead in db.leads.find({}):
+        if not _is_delivered(lead):
+            continue
+        lid = lead.get("leadId")
+        if not lid:
+            continue
+        try:
+            await _upsert_delivery_billing_summary(lid)
+            n += 1
+        except Exception:
+            logging.exception("Could not rebuild billing summary for %s", lid)
+    logging.info("BILLING_SUMMARY_REBUILD: %s delivered leads", n)
+    return n
+
+
 @api.get("/leads/{lead_id}/billing-summary")
 async def get_billing_summary(lead_id: str, user=Depends(current_user)):
-    """Delivery Billing Summary for Tally (full customer amount − benefits passed).
+    """Delivery Billing Summary: Tally vehicle invoice + separate RTO/insurance.
 
     Always rebuilds from the current lead when Delivered, so scheme / Additional
     (Dealer) changes are reflected immediately (not stuck on the first snapshot).
@@ -15607,6 +15637,12 @@ async def _run_boot_maintenance():
             await oct_2026_schemes.ensure_oct_2026_schemes(db)
         except Exception:
             logging.exception("OCT_2026_SCHEME_BOOT_ERROR")
+        try:
+            if not _is_test_env():
+                rebuilt = await _rebuild_all_delivery_billing_summaries()
+                logging.info("BILLING_SUMMARY_REBUILD_BOOT: %s", rebuilt)
+        except Exception:
+            logging.exception("BILLING_SUMMARY_REBUILD_ERROR")
         _boot_state["maintenance"] = "done"
         logging.info("BOOT_MAINTENANCE: finished")
     except Exception:

@@ -54,10 +54,13 @@ def test_build_summary_passed_discounts_only():
     }
     s = ce.build_delivery_billing_summary(lead)
     assert s["kind"] == "delivery_billing_summary"
-    assert "full amount" in s["disclaimer"].lower() or "Tally" in s["disclaimer"]
+    assert "Tally" in s["disclaimer"]
+    assert "vehicle" in s["disclaimer"].lower()
     assert s["totals"]["customerPayable"] == 825000
     assert s["totals"]["customerBenefitPassed"] == 9499
-    assert s["totals"]["tallyBillTotal"] == 825000
+    assert s["totals"]["tallyBillTotal"] == 800500
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 825000
     assert s["noBenefitPassed"] is False
     codes = [d["code"] for d in s["discountLines"]]
     assert "additionalDiscount" in codes
@@ -85,7 +88,9 @@ def test_build_summary_zero_passed_has_no_discount_line():
     s = ce.build_delivery_billing_summary(lead)
     assert s["discountLines"] == []
     assert s["noBenefitPassed"] is True
-    assert s["totals"]["tallyBillTotal"] == 794500
+    assert s["totals"]["tallyBillTotal"] == 770000
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 794500
     assert s["totals"]["grossVehicleCost"] == 794500
 
 
@@ -102,7 +107,9 @@ def test_build_summary_uses_lead_additional_discount_when_breakup_empty():
     }
     s = ce.build_delivery_billing_summary(lead)
     assert s["totals"]["customerBenefitPassed"] == 4500
-    assert s["totals"]["tallyBillTotal"] == 790000
+    assert s["totals"]["tallyBillTotal"] == 765500
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 790000
     assert any(d["code"] == "additionalDiscount" for d in s["discountLines"])
 
 
@@ -129,8 +136,40 @@ def test_build_summary_vaibhav_style_two_passed_benefits():
     s = ce.build_delivery_billing_summary(lead)
     assert s["totals"]["customerBenefitPassed"] == 30000
     assert s["totals"]["customerPayable"] == 764500
+    assert s["totals"]["tallyBillTotal"] == 740000
+    assert s["totals"]["offTallyTotal"] == 24500
+    assert s["totals"]["customerCollectTotal"] == 764500
     assert abs(s["totals"]["grossVehicleCost"] - s["totals"]["customerBenefitPassed"]
                - s["totals"]["customerPayable"]) < 0.05
+
+
+def test_tally_bill_is_vehicle_only_gst_not_on_rto_insurance():
+    """Turbo deal ₹8,05,000: Tally invoice is Ex − discount; RTO/insurance off-invoice."""
+    lead = {
+        "leadId": "LD_TURBO_805",
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (PV)",
+        "exShowroom": 785000,
+        "rto": 15000,
+        "insuranceAmount": 22000,
+        "additionalDiscount": 17000,
+        "customerPayable": 805000,
+        "totalReceived": 805000,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    assert s["totals"]["tallyBillTotal"] == 768000
+    assert s["totals"]["offTallyTotal"] == 37000
+    assert s["totals"]["customerCollectTotal"] == 805000
+    assert s["totals"]["customerPayable"] == 805000
+    gst = s["gstReference"]
+    assert gst["netVehicleInclGst"] == 768000
+    assert abs(gst["taxableValue"] - round(768000 / 1.05, 2)) < 0.02
+    assert abs((gst["cgst"] + gst["sgst"]) - (768000 - gst["taxableValue"])) < 0.02
+    off_codes = {ln["code"] for ln in s["offTallyLines"]}
+    assert off_codes == {"rto", "insurance"}
+    tally_codes = {ln["code"] for ln in s["tallyChargeLines"]}
+    assert tally_codes == {"exShowroom"}
+    assert "do not charge gst on rto" in gst["note"].lower()
 
 
 @pytest_asyncio.fixture
@@ -294,3 +333,40 @@ async def test_billing_summary_upsert_no_set_setoninsert_conflict(client):
     r = await client.get(f"/api/leads/{lid}/360")
     assert r.status_code == 200, r.text
     assert (r.json().get("billingSummary") or {}).get("leadId") == lid
+
+
+@pytest.mark.asyncio
+async def test_rebuild_overwrites_old_full_amount_tally(client):
+    """Existing stored summaries that taxed the full deal are rewritten."""
+    lid = await _booked_priced_lead(client, "9111100094")
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-94",
+        "chassisNumber": "CH-BILL-94",
+        "numberPlate": "RJ14-BILL-94",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    ex = ce.round2(ce.num(lead.get("exShowroom")))
+    rto = ce.round2(ce.num(lead.get("rto")))
+    ins = ce.round2(ce.num(lead.get("insuranceAmount") or lead.get("insurance")))
+    stale_total = ce.round2(ex + rto + ins)
+    await server.db.billing_summaries.update_one(
+        {"leadId": lid},
+        {"$set": {
+            "disclaimer": "Tally customer bill = full amount taken from customer",
+            "totals.tallyBillTotal": stale_total,
+        },
+         "$unset": {"totals.offTallyTotal": "", "offTallyLines": ""}},
+    )
+    n = await server._rebuild_all_delivery_billing_summaries()
+    assert n >= 1
+    stored = await server.db.billing_summaries.find_one({"leadId": lid})
+    assert "offTallyTotal" in (stored.get("totals") or {})
+    assert stored["totals"]["tallyBillTotal"] == ex
+    assert stored["totals"]["offTallyTotal"] == ce.round2(rto + ins)
+    assert stored["totals"]["customerCollectTotal"] == stale_total
+    assert "vehicle" in (stored.get("disclaimer") or "").lower()
