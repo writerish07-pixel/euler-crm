@@ -386,7 +386,7 @@ export default function Layout({ children }) {
   useEffect(() => {
     if (!canViewAgents) return undefined;
     let live = true;
-    const load = () => get("/agents/suggestions").then((d) => {
+    const load = () => get("/agents/suggestions", { countOnly: true }).then((d) => {
       if (live) setPendingAgents(Number(d?.open || 0));
     }).catch(() => {});
     load();
