@@ -7107,6 +7107,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
                 f"Price Master entry not found for {model or '(none)'}/"
                 f"{variant or '(none)'}. Select a valid vehicle before pricing.")
     payload["priceStructureSaved"] = True
+    payload["insurance"] = ce.num(payload.get("insuranceAmount"))
     if idx == 0 and (_is_booked_lead(lead) or _is_delivered_lead(lead)):
         # Booked / delivered unit 1 prices stay. Staff may still mark the step saved
         # and edit non-ex-showroom fields when the owner re-edit gate allows.
@@ -7131,6 +7132,12 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     else:
         await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)
+    live = await db.leads.find_one({"leadId": lead_id}) or {}
+    if _is_delivered(live):
+        try:
+            await _upsert_insurance_on_delivery(lead_id, live.get("deliveryDate") or today())
+        except Exception:
+            logging.exception("Could not refresh insurance payout after price edit %s", lead_id)
     await write_audit(act, "update", "price-structure", leadId=lead_id, old=old,
                       new={**payload, "unitSno": idx + 1})
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)

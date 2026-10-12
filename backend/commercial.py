@@ -105,18 +105,29 @@ def default_rto_insurance_for_model(model, variant=""):
     return None
 
 
+def _rto_amount(s):
+    """RTO on a lead, snapshot, or Price Master row."""
+    s = s or {}
+    if "rto" in s and s.get("rto") not in (None, ""):
+        return max(0.0, num(s.get("rto")))
+    return max(0.0, num(s.get("registrationRto")))
+
+
+def _insurance_premium_amount(s):
+    """Premium from price structure (`insuranceAmount`) or a commercial snapshot."""
+    s = s or {}
+    if "insuranceAmount" in s and s.get("insuranceAmount") not in (None, ""):
+        return max(0.0, num(s.get("insuranceAmount")))
+    return max(0.0, num(s.get("insurance")))
+
+
 def deal_price_total(s):
     """Ex + RTO + dealer insurance — the create-lead 'my total' used vs Cx Demand."""
     s = s or {}
-    rto = s.get("rto")
-    if rto is None:
-        rto = s.get("registrationRto")
-    ins = s.get("insurance")
-    if ins is None:
-        ins = s.get("insuranceAmount")
+    ins = _insurance_premium_amount(s)
     return round2(
-        num(s.get("exShowroom")) + num(rto)
-        + insurance_charge_for_payable({**s, "insurance": ins}))
+        num(s.get("exShowroom")) + _rto_amount(s)
+        + insurance_charge_for_payable({**s, "insurance": ins, "insuranceAmount": ins}))
 
 
 def scheme_customer_benefit_ex_additional(alloc):
@@ -183,7 +194,7 @@ def apply_deal_additional(deal, cx_demand=None, scheme_passed=None):
     cx = round2(max(0.0, num(cx_demand if cx_demand is not None else deal.get("cxDemand"))))
     passed = round2(max(0.0, num(scheme_passed if scheme_passed is not None else deal.get("schemePassed"))))
     price_total = round2(
-        num(deal.get("exShowroom")) + num(deal.get("rto")) + num(deal.get("insurance")))
+        num(deal.get("exShowroom")) + _rto_amount(deal) + _insurance_premium_amount(deal))
     diff = round2(price_total - cx - passed)
     deal["cxDemand"] = cx
     deal["priceTotal"] = price_total
@@ -332,7 +343,7 @@ def insurance_charge_for_payable(s):
     s = s or {}
     if normalize_insurance_arranged_by(s.get("insuranceArrangedBy")) == "self":
         return 0.0
-    return max(0.0, num(s.get("insurance")))
+    return _insurance_premium_amount(s)
 
 
 def compute_commercial_totals(s, scheme_rows=None):
@@ -1722,11 +1733,11 @@ def _billing_charge_lines(s):
     """Customer charge lines for one vehicle snapshot (not a pack roll-up)."""
     s = s or {}
     ex = round2(num(s.get("exShowroom")))
-    rto = round2(num(s.get("rto")))
+    rto = round2(_rto_amount(s))
     if normalize_insurance_arranged_by(s.get("insuranceArrangedBy")) == "self":
         insurance = 0.0
     else:
-        insurance = round2(num(s.get("insuranceAmount")))
+        insurance = round2(_insurance_premium_amount(s))
     accessories = round2(num(s.get("accessoriesAmount")))
     handling = round2(num(s.get("handlingCharges")))
     trc = round2(num(s.get("trc")))

@@ -236,6 +236,77 @@ async def _booked_priced_lead(client, mobile="9111100099"):
 
 
 @pytest.mark.asyncio
+async def test_price_structure_insurance_change_recomputes_payable_and_tally(client):
+    """Edited insurance on Price Structure must move GVC, payable and Tally off-invoice."""
+    lid = await _booked_priced_lead(client, "9111100095")
+    before = await server.db.leads.find_one({"leadId": lid})
+    old_ins = ce.round2(ce.num(before.get("insuranceAmount") or before.get("insurance")))
+    assert old_ins > 0
+    new_ins = 15000.0
+    assert new_ins != old_ins
+    r = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": ce.num(before.get("exShowroom")),
+        "rto": ce.num(before.get("rto")),
+        "insuranceAmount": new_ins,
+        "insuranceArrangedBy": before.get("insuranceArrangedBy") or "dealer",
+        "accessoriesAmount": ce.num(before.get("accessoriesAmount")),
+        "handlingCharges": ce.num(before.get("handlingCharges")),
+        "trc": ce.num(before.get("trc")),
+        "fastag": ce.num(before.get("fastag")),
+        "extendedWarranty": ce.num(before.get("extendedWarranty")),
+        "otherCharges": ce.num(before.get("otherCharges")),
+        "rsaAmc": ce.num(before.get("rsaAmc")),
+        "tcsApplicable": before.get("tcsApplicable") or "No",
+    })
+    assert r.status_code == 200, r.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(after.get("insuranceAmount")) == new_ins
+    delta = ce.round2(new_ins - old_ins)
+    assert ce.num(after.get("grossVehicleCost")) == ce.round2(
+        ce.num(before.get("grossVehicleCost")) + delta)
+    if after.get("useDealPrice") and ce.num(after.get("cxDemand")) > 0:
+        assert ce.num(after.get("customerPayable")) == ce.num(before.get("customerPayable"))
+        assert ce.num(after.get("additionalDiscount")) == ce.round2(
+            ce.num(before.get("additionalDiscount")) + delta)
+    else:
+        assert ce.num(after.get("customerPayable")) == ce.round2(
+            ce.num(before.get("customerPayable")) + delta)
+
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes",
+        "rc": "Yes", "pdi": "Yes", "delivered": "Yes",
+        "deliveryDate": "2026-08-10",
+        "invoiceNumber": "INV-BILL-95",
+        "chassisNumber": "CH-BILL-95",
+        "numberPlate": "RJ14-BILL-95",
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "TestIns",
+    })
+    assert r.status_code == 200, r.text
+    summary = (await client.get(f"/api/leads/{lid}/billing-summary")).json()
+    off = {ln["code"]: ln["amount"] for ln in summary.get("offTallyLines") or []}
+    assert off.get("insurance") == new_ins
+    assert summary["totals"]["tallyBillTotal"] == ce.round2(
+        ce.num(after.get("exShowroom")) - ce.num(after.get("additionalDiscount")))
+    ins_row = await server.db.insurance.find_one({"leadId": lid})
+    assert ins_row is not None
+    assert ce.num(ins_row.get("insuranceAmount")) == new_ins
+
+    later = 12000.0
+    r = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": ce.num(after.get("exShowroom")),
+        "rto": ce.num(after.get("rto")),
+        "insuranceAmount": later,
+        "insuranceArrangedBy": after.get("insuranceArrangedBy") or "dealer",
+    })
+    assert r.status_code == 200, r.text
+    summary = (await client.get(f"/api/leads/{lid}/billing-summary")).json()
+    off = {ln["code"]: ln["amount"] for ln in summary.get("offTallyLines") or []}
+    assert off.get("insurance") == later
+    ins_row = await server.db.insurance.find_one({"leadId": lid})
+    assert ce.num(ins_row.get("insuranceAmount")) == later
+
+
+@pytest.mark.asyncio
 async def test_delivery_creates_billing_summary(client):
     lid = await _booked_priced_lead(client, "9111100091")
     r = await client.get(f"/api/leads/{lid}/billing-summary")
