@@ -1,4 +1,4 @@
-"""Cx Demand is the deal. Extra Passed / Additional fill the leftover after scheme."""
+"""Cx Demand is the deal. Additional fills the leftover after scheme."""
 import os
 import sys
 
@@ -58,14 +58,14 @@ def test_derive_overshoot_insurance_zeroes_extra_passed():
     assert out["extraFromCustomer"] == 500
 
 
-def test_derive_leftover_after_scheme_uses_extra_then_additional():
+def test_derive_leftover_after_scheme_uses_additional_only():
     out = ce.derive_deal_customer_pass(1000500, 960000, 30000, 15000)
-    assert out["oemExtraSupportPassed"] == 10500
-    assert out["additionalDiscount"] == 0
+    assert out["oemExtraSupportPassed"] == 0
+    assert out["additionalDiscount"] == 10500
     assert out["extraFromCustomer"] == 0
     short = ce.derive_deal_customer_pass(989500, 960000, 0, 15000)
-    assert short["oemExtraSupportPassed"] == 15000
-    assert short["additionalDiscount"] == 14500
+    assert short["oemExtraSupportPassed"] == 0
+    assert short["additionalDiscount"] == 29500
     assert short["extraFromCustomer"] == 0
 
 
@@ -117,3 +117,28 @@ async def test_create_lead_meets_cx_demand_without_passing_extra(client):
     assert ce.num(body["lead"]["customerOutstanding"]) == 960000
     assert ce.num(body["lead"]["extraIncomeFromCustomer"]) == 500
     assert ce.num(body["commercials"]["grossVehicleCost"]) == 989500
+
+
+@pytest.mark.asyncio
+async def test_create_lead_leftover_goes_to_additional_not_extra_passed(client):
+    created = await client.post("/api/leads", json={
+        "customerName": "Kailash Additional Only",
+        "mobile": "9950993704",
+        "interestedModel": "Storm",
+        "variant": "Storm TR (PV) Reg C7 Deal",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "createdDate": "2026-09-23",
+        "budget": 960000,
+        "oemExtraSupportReceived": 15000,
+        "schemePassOn": {},
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("grossVehicleCost")) == 989500
+    assert ce.num(lead.get("customerPayable")) == 960000
+    assert ce.num(lead.get("oemExtraSupportReceived")) == 15000
+    assert ce.num(lead.get("oemExtraSupportPassed")) == 0
+    assert ce.num(lead.get("oemExtraSupportRetained")) == 15000
+    assert ce.num(lead.get("additionalDiscount")) == 29500

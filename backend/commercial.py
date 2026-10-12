@@ -140,11 +140,11 @@ def scheme_customer_benefit_ex_additional(alloc):
 
 
 def derive_deal_customer_pass(price_total, deal, scheme_passed, extra_received):
-    """Meet Cx Demand: scheme first (unchanged dealer-share), then Extra Passed, then Additional.
+    """Meet Cx Demand: scheme first (unchanged dealer-share), then Additional.
 
     leftover = GVC (all charges) − deal − scheme customer benefit.
-    leftover > 0  → Extra Passed = min(Received, leftover), Additional = the rest.
-    leftover ≤ 0  → Extra Passed = 0, Additional = 0, extraFromCustomer = −leftover.
+    leftover > 0  → Additional = leftover. Extra Passed is always 0.
+    leftover ≤ 0  → Additional = 0, extraFromCustomer = −leftover.
     Extra Received is a claim only. Dealer-share scheme math is not rewritten here.
     """
     price_total = round2(max(0.0, num(price_total)))
@@ -164,16 +164,14 @@ def derive_deal_customer_pass(price_total, deal, scheme_passed, extra_received):
         }
     leftover = round2(price_total - deal - scheme_passed)
     if leftover > 0:
-        extra_passed = round2(min(extra_received, leftover))
-        additional = round2(leftover - extra_passed)
+        additional = leftover
         extra_from = 0.0
     else:
-        extra_passed = 0.0
         additional = 0.0
         extra_from = round2(-leftover)
     return {
         "applied": True,
-        "oemExtraSupportPassed": extra_passed,
+        "oemExtraSupportPassed": 0.0,
         "additionalDiscount": additional,
         "extraFromCustomer": extra_from,
         "leftover": leftover,
@@ -350,7 +348,8 @@ def compute_commercial_totals(s, scheme_rows=None):
     """The ONLY place Customer Payable is derived.
 
     Customer Payable may be reduced ONLY by amounts actually passed to the
-    customer (Σ customerBenefit + OEM extra support passed). When scheme_rows
+    customer (Σ customerBenefit, including Additional). OEM Extra Support
+    Received is a claim — it is never a customer discount. When scheme_rows
     are supplied, customerBenefit comes from compute_scheme_allocation.
     """
     s = s or {}
@@ -494,20 +493,38 @@ def compute_oem_extra_support(s):
     """OEM Extra Support — staff-typed side ledger (NOT a Scheme Master component).
 
     Received  = amount taken from OEM against the lead → fully claimable from OEM.
-    Passed    = flexible portion given to the customer (≤ Received) → reduces payable.
-    Retained  = Received − Passed → dealer earnings (full Received when Passed is 0).
+    Passed    = unused. Customer discount lives only in Additional (Dealer).
+    Retained  = full Received → dealer earnings.
     """
     s = s or {}
     received = round2(max(0.0, num(s.get("oemExtraSupportReceived"))))
-    passed = round2(max(0.0, min(num(s.get("oemExtraSupportPassed")), received)))
-    retained = round2(max(0.0, received - passed))
     return {
         "oemExtraSupportReceived": received,
-        "oemExtraSupportPassed": passed,
-        "oemExtraSupportRetained": retained,
+        "oemExtraSupportPassed": 0.0,
+        "oemExtraSupportRetained": received,
         "oemClaimable": received,
-        "customerBenefit": passed,
-        "dealerRetained": retained,
+        "customerBenefit": 0.0,
+        "dealerRetained": received,
+    }
+
+
+def fold_oem_extra_passed_into_additional(s):
+    """Move stored OEM Extra Passed into Additional so payable stays the same.
+
+    Passed is no longer a customer discount. Additional is the only dealer-funded cut.
+    """
+    s = s or {}
+    received = round2(max(0.0, num(s.get("oemExtraSupportReceived"))))
+    moved = round2(max(0.0, min(num(s.get("oemExtraSupportPassed")), received)))
+    additional = round2(max(0.0, num(s.get("additionalDiscount"))))
+    if moved > 0:
+        additional = round2(additional + moved)
+    return {
+        "additionalDiscount": additional,
+        "oemExtraSupportPassed": 0.0,
+        "oemExtraSupportReceived": received,
+        "oemExtraSupportRetained": received,
+        "moved": moved,
     }
 
 
@@ -1834,13 +1851,6 @@ def _billing_discount_lines(s, *, use_allocation_summary=True):
         seen_codes.add("additionalDiscount")
 
     oem_extra = compute_oem_extra_support(s)
-    if oem_extra["customerBenefit"] > 0 and OEM_EXTRA_SUPPORT_KEY not in seen_codes:
-        discount_lines.append({
-            "code": OEM_EXTRA_SUPPORT_KEY,
-            "label": "Less: OEM Extra Support (passed to customer)",
-            "amount": round2(-oem_extra["customerBenefit"]),
-            "fundHint": "OEM Extra Support",
-        })
     return discount_lines, oem_extra, add_disc
 
 
@@ -2206,6 +2216,10 @@ def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
         "totals": {
             "grossVehicleCost": gross,
             "customerBenefitPassed": benefit_total,
+            "additionalDiscount": add_disc,
+            "oemExtraSupportReceived": oem_extra["oemExtraSupportReceived"],
+            "oemExtraSupportPassed": oem_extra["oemExtraSupportPassed"],
+            "oemExtraSupportRetained": oem_extra["oemExtraSupportRetained"],
             "tcs": tcs,
             "tcsBase": books["tcsBase"],
             "netAfterBenefits": after_discount,

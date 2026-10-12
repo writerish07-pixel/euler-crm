@@ -620,8 +620,8 @@ def test_pack_unit_overlay_keeps_own_oem_extra():
     assert ce.num(o2.get("oemExtraSupportPassed")) == 3000
     rolled = server._pack_oem_extra_totals(lead)
     assert rolled["oemExtraSupportReceived"] == 58000
-    assert rolled["oemExtraSupportPassed"] == 3000
-    assert rolled["oemExtraSupportRetained"] == 55000
+    assert rolled["oemExtraSupportPassed"] == 0
+    assert rolled["oemExtraSupportRetained"] == 58000
     p1 = ce.compute_commercial_totals(server.lead_to_snapshot(o1), None)
     p1_plain = ce.compute_commercial_totals(
         server.lead_to_snapshot({**o1, "oemExtraSupportReceived": 0, "oemExtraSupportPassed": 0}),
@@ -631,7 +631,7 @@ def test_pack_unit_overlay_keeps_own_oem_extra():
     p2_plain = ce.compute_commercial_totals(
         server.lead_to_snapshot({**o2, "oemExtraSupportReceived": 0, "oemExtraSupportPassed": 0}),
         None)
-    assert p2["customerPayable"] == ce.round2(p2_plain["customerPayable"] - 3000)
+    assert p2["customerPayable"] == p2_plain["customerPayable"]
 
 
 def test_overlay_does_not_dump_pack_extra_or_additional_on_unit1():
@@ -665,7 +665,8 @@ def test_overlay_does_not_dump_pack_extra_or_additional_on_unit1():
     dumped = ce.compute_commercial_totals(server.lead_to_snapshot({
         **o1, "oemExtraSupportReceived": 240000, "oemExtraSupportPassed": 240000,
     }), None)["customerPayable"]
-    assert p1 > dumped
+    # OEM Extra is a claim, not a discount — dumping pack extra does not cut payable.
+    assert p1 == dumped
 
 
 def test_pack_billing_summary_lists_each_unit_then_totals():
@@ -696,10 +697,10 @@ def test_pack_billing_summary_lists_each_unit_then_totals():
     assert s["units"][0]["chassisNumber"] == "CH1"
     assert s["units"][0]["invoiceNumber"] == "INV1"
     assert s["units"][1]["chassisNumber"] == "CH2"
-    assert ce.num(s["units"][0]["oemExtraSupportPassed"]) == 48000
-    assert ce.num(s["units"][1]["oemExtraSupportPassed"]) == 48000
+    assert ce.num(s["units"][0]["oemExtraSupportPassed"]) == 0
+    assert ce.num(s["units"][1]["oemExtraSupportPassed"]) == 0
     assert ce.num(s["units"][0]["additionalDiscount"]) == 115000
-    assert ce.num(s["totals"]["oemExtraSupportPassed"]) == 96000
+    assert ce.num(s["totals"]["oemExtraSupportPassed"]) == 0
     assert ce.num(s["totals"]["additionalDiscount"]) == 230000
     assert ce.num(s["totals"]["grossVehicleCost"]) == 1698998
     assert ce.num(s["units"][0]["tallyBillTotal"]) == ce.num(s["units"][1]["tallyBillTotal"])
@@ -813,7 +814,8 @@ async def test_pack_units_own_oem_extra_scheme(client):
     units = done.get("units") or []
     assert ce.num(units[0].get("oemExtraSupportReceived")) == 8000
     assert ce.num(units[1].get("oemExtraSupportReceived")) == 5000
-    assert ce.num(units[1].get("oemExtraSupportPassed")) == 2000
+    assert ce.num(units[1].get("oemExtraSupportPassed")) == 0
+    assert ce.num(units[1].get("additionalDiscount")) == 2000
     assert ce.num(units[0].get("customerPayable")) == base1
     assert ce.num(units[1].get("customerPayable")) == ce.round2(base2 - 2000)
     pack = ce.num(done.get("customerPayable"))
@@ -821,8 +823,8 @@ async def test_pack_units_own_oem_extra_scheme(client):
         ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
     assert pack == ce.round2(pack1 - 2000)
     assert ce.num(done.get("oemExtraSupportReceived")) == 13000
-    assert ce.num(done.get("oemExtraSupportPassed")) == 2000
-    assert ce.num(done.get("oemExtraSupportRetained")) == 11000
+    assert ce.num(done.get("oemExtraSupportPassed")) == 0
+    assert ce.num(done.get("oemExtraSupportRetained")) == 13000
     again = await client.put(f"/api/leads/{lid}/scheme", json={
         "benefitMode": "Partial Benefit",
         "additionalDiscount": 0,
@@ -883,7 +885,8 @@ def test_fill_copies_per_unit_extra_and_additional_to_same_sku_siblings():
         assert ce.num(u.get("additionalDiscount")) == 11500
     rolled = server._pack_oem_extra_totals({**lead, "units": filled}, filled)
     assert rolled["oemExtraSupportReceived"] == 240000
-    assert rolled["oemExtraSupportPassed"] == 240000
+    assert rolled["oemExtraSupportPassed"] == 0
+    assert rolled["oemExtraSupportRetained"] == 240000
 
 
 def test_fill_splits_pack_oem_total_dumped_on_unit1():
@@ -952,11 +955,11 @@ def test_same_sku_pack_payables_each_get_extra_and_additional():
         server._lead_overlay_unit({**lead, "units": units}, units[0], 0)
     ), None)["customerPayable"]
     assert pays[0] == one
-    # 8,49,499 − 48,000 OEM passed − 11,500 dealer funded
-    assert pays[0] == 789999
-    assert total == ce.round2(789999 * 5)
+    # 8,49,499 − 11,500 dealer funded. OEM Extra Received is a claim, not a cut.
+    assert pays[0] == 837999
+    assert total == ce.round2(837999 * 5)
     for u in units:
-        assert ce.num(u.get("oemExtraSupportPassed")) == 48000
+        assert ce.num(u.get("oemExtraSupportReceived")) == 48000
         assert ce.num(u.get("additionalDiscount")) == 11500
 
 
@@ -970,9 +973,10 @@ def test_pack_billing_summary_uses_per_unit_48000_and_11500():
                                           pack_units=overlays)
     assert len(s["units"]) == 5
     for row in s["units"]:
-        assert ce.num(row["oemExtraSupportPassed"]) == 48000
+        assert ce.num(row["oemExtraSupportPassed"]) == 0
         assert ce.num(row["additionalDiscount"]) == 11500
-    assert ce.num(s["totals"]["oemExtraSupportPassed"]) == 240000
+        assert ce.num(row["oemExtraSupportReceived"]) == 48000
+    assert ce.num(s["totals"]["oemExtraSupportPassed"]) == 0
     assert ce.num(s["totals"]["additionalDiscount"]) == 57500
 
 

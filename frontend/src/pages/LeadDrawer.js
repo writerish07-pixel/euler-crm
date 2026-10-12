@@ -813,12 +813,6 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
           value={lead.oemExtraSupportReceived || 0}
           display={inr(lead.oemExtraSupportReceived || c.oemExtraSupport?.oemExtraSupportReceived || 0)}
           numeric leadId={lid} onSaved={onSaved} tone="text-amber-600" />
-        {!isExecutive && (
-        <OwnerKV label="OEM Extra Support Passed" field="oemExtraSupportPassed"
-          value={lead.oemExtraSupportPassed || 0}
-          display={inr(lead.oemExtraSupportPassed || c.oemExtraSupport?.oemExtraSupportPassed || 0)}
-          numeric leadId={lid} onSaved={onSaved} />
-        )}
         {canSeeOwnerCommercials && (
           <>
             <KV label="OEM Extra Support Retained" value={inr(lead.oemExtraSupportRetained || c.oemExtraSupport?.oemExtraSupportRetained || 0)} tone="text-emerald-600" />
@@ -1293,7 +1287,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       benefitMode: "Partial Benefit",
       schemeDate,
       oemExtraSupportReceived: +form.oemExtraSupportReceived || 0,
-      oemExtraSupportPassed: +form.oemExtraSupportPassed || 0,
+      oemExtraSupportPassed: 0,
       additionalDiscount: +form.additionalDiscount || 0,
       // Offer pools are filled by the backend from Scheme Master on explicit save.
       consumerDiscount: 0, exchangeBonus: 0, loyaltyBonus: 0, referralBonus: 0, dsaDiscount: 0,
@@ -1341,12 +1335,11 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     return s + Math.max(0, Math.min(comp.dealerShare, Math.max(0, cb - comp.oemShare)));
   }, 0);
 
-  // OEM Extra Support (NOT Additional Dealer): Received = full OEM claim;
-  // Passed ≤ Received reduces payable; Retained = Received − Passed → earnings.
+  // OEM Extra Support: Received = full OEM claim. Customer discount lives only
+  // in Additional (Dealer). Retained = full Received → earnings.
   const oemRecv = Math.max(0, +form.oemExtraSupportReceived || 0);
   const dealLocked = Number(lead.cxDemand || lead.budget) > 0 && !!lead.useDealPrice;
-  const oemPass = Math.max(0, Math.min(+form.oemExtraSupportPassed || 0, oemRecv));
-  const oemRetained = Math.max(0, oemRecv - oemPass);
+  const oemRetained = oemRecv;
   const previewOemTotal = previewOem + oemRecv;
 
   return (
@@ -1370,7 +1363,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       )}
       <SchemeCircularPic circular={rules?.circular} />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-2">
         <Field label="Scheme Date">
           <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
           <p className="text-[11px] text-ink-faint mt-1">
@@ -1380,10 +1373,6 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         <Field label="OEM Extra Support Received">
           <Input data-testid="oem-extra-received" type="number" value={form.oemExtraSupportReceived}
             onChange={set("oemExtraSupportReceived")} disabled={locked} />
-        </Field>
-        <Field label="OEM Extra Support Passed">
-          <Input data-testid="oem-extra-passed" type="number" value={form.oemExtraSupportPassed}
-            onChange={set("oemExtraSupportPassed")} disabled={locked || dealLocked} readOnly={dealLocked} />
         </Field>
         <Field label="Additional (Dealer)">
           <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount}
@@ -1403,8 +1392,8 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         )}
         <div className="text-[11px] text-ink-faint self-end">
           {dealLocked
-            ? "Passed and Additional are set so payable matches Cx Demand. Scheme dealer share is unchanged. Extra Received is a claim only."
-            : "Passed comes from Received only. Additional (Dealer) is a customer discount — separate."}
+            ? "Additional is set so payable matches Cx Demand. Scheme dealer share is unchanged. Extra Received is a claim only."
+            : "Additional (Dealer) is the customer discount. OEM Extra Received is a claim only — it is not passed to the customer."}
         </div>
       </div>
       {hiddenFields.length > 0 && (
@@ -2309,7 +2298,6 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
                   <th className="py-1 pr-2">Plate</th>
                   <th className="py-1 pr-2 text-right">Deal</th>
                   <th className="py-1 pr-2 text-right">Dealer funded</th>
-                  <th className="py-1 pr-2 text-right">OEM Extra passed</th>
                   <th className="py-1 text-right">Payable</th>
                 </tr>
               </thead>
@@ -2322,7 +2310,6 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
                     <td className="py-1 pr-2 font-mono">{u.numberPlate || "—"}</td>
                     <td className="py-1 pr-2 text-right font-mono">{inr(u.grossVehicleCost)}</td>
                     <td className="py-1 pr-2 text-right font-mono">{inr(u.additionalDiscount)}</td>
-                    <td className="py-1 pr-2 text-right font-mono">{inr(u.oemExtraSupportPassed)}</td>
                     <td className="py-1 text-right font-mono">{inr(u.customerPayable)}</td>
                   </tr>
                 ))}
@@ -2330,7 +2317,6 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
                   <td className="py-1 pr-2" colSpan={4}>Pack total</td>
                   <td className="py-1 pr-2 text-right font-mono">{inr(t.grossVehicleCost)}</td>
                   <td className="py-1 pr-2 text-right font-mono">{inr(t.additionalDiscount)}</td>
-                  <td className="py-1 pr-2 text-right font-mono">{inr(t.oemExtraSupportPassed)}</td>
                   <td className="py-1 text-right font-mono">{inr(t.customerCollectTotal ?? t.customerPayable)}</td>
                 </tr>
               </tbody>

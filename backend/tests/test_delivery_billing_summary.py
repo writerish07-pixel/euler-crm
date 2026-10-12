@@ -175,6 +175,50 @@ def test_tally_bill_is_vehicle_only_gst_not_on_rto_insurance():
     assert "do not charge gst on rto" in gst["note"].lower()
 
 
+def test_stored_oem_extra_passed_is_not_a_tally_discount():
+    lead = {
+        "leadId": "LD_BILL_NO_EXTRA_PASS",
+        "exShowroom": 785000,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "additionalDiscount": 4500,
+        "oemExtraSupportReceived": 7000,
+        "oemExtraSupportPassed": 2000,
+        "customerPayable": 805000,
+        "totalReceived": 805000,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    codes = [d["code"] for d in s["discountLines"]]
+    assert "oemExtraSupport" not in codes
+    assert "additionalDiscount" in codes
+    assert s["totals"]["tallyBillTotal"] == 780500
+    assert s["totals"]["oemExtraSupportPassed"] == 0
+    assert s["totals"]["oemExtraSupportRetained"] == 7000
+
+
+def test_fold_existing_passed_keeps_tally_payable():
+    before = {
+        "leadId": "LD_BILL_FOLD",
+        "exShowroom": 785000,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "additionalDiscount": 4500,
+        "oemExtraSupportReceived": 7000,
+        "oemExtraSupportPassed": 2000,
+        "customerPayable": 803000,
+    }
+    # Historical engine treated Passed as a discount. After fold, Additional holds it.
+    folded = ce.fold_oem_extra_passed_into_additional(before)
+    after = {**before, **{k: folded[k] for k in (
+        "additionalDiscount", "oemExtraSupportPassed", "oemExtraSupportRetained")}}
+    s = ce.build_delivery_billing_summary(after)
+    assert folded["moved"] == 2000
+    assert folded["additionalDiscount"] == 6500
+    assert s["totals"]["tallyBillTotal"] == 778500
+    assert s["totals"]["customerCollectTotal"] == 803000
+    assert "oemExtraSupport" not in [d["code"] for d in s["discountLines"]]
+
+
 def test_three_wheeler_same_rto_lower_insurance():
     lead = {
         "leadId": "LD_3W",
