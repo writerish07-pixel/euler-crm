@@ -1730,7 +1730,7 @@ def compute_full_commercials(s, scheme_rows=None):
 # ===========================================================================
 # DELIVERY BILLING SUMMARY — Tally GST invoice is the vehicle only
 # ===========================================================================
-# Tally Sales Invoice = Ex-Showroom − benefits passed (GST already inside Ex).
+# Tally Sales Invoice = vehicle without GST, less discount, then GST on remainder.
 # RTO / insurance / other non-vehicle charges = separate receipts, no GST.
 # Customer payable stays the full collection (Tally invoice + those receipts).
 
@@ -1869,11 +1869,85 @@ def _sum_discount_lines(lines):
 
 _TALLY_INVOICE_CHARGE_CODES = frozenset({"exShowroom"})
 BILLING_SUMMARY_DISCLAIMER = (
-    "Tally GST invoice = vehicle Ex-Showroom only (minus benefits passed). "
-    "RTO and insurance are collected separately — do not add GST on them. "
-    "Customer payable is the Tally invoice plus those separate receipts. "
+    "Tally GST invoice = vehicle price without GST, less discount, then GST on "
+    "the remainder. RTO and insurance are collected separately — do not add GST "
+    "on them. Customer payable is the Tally invoice plus those separate receipts. "
     "Scheme with ₹0 passed → no discount line on the Tally invoice."
 )
+
+
+def _incl_to_exclusive(amount, rate):
+    amount = num(amount)
+    if rate <= 0:
+        return round2(amount)
+    return round2(amount / (1 + rate))
+
+
+def _tally_invoice_lines(ex_incl, discount_lines, benefit_total, rate, tcs=0):
+    """Tally invoice as: vehicle without GST → discount → GST on remainder."""
+    ex_incl = round2(max(0.0, num(ex_incl)))
+    benefit_total = round2(max(0.0, num(benefit_total)))
+    vehicle_ex = _incl_to_exclusive(ex_incl, rate)
+    net_incl = round2(max(0.0, ex_incl - benefit_total))
+    taxable = _incl_to_exclusive(net_incl, rate)
+    gst_amt = round2(net_incl - taxable)
+    cgst = round2(gst_amt / 2)
+    sgst = round2(gst_amt - cgst)
+    target_disc_ex = round2(max(0.0, vehicle_ex - taxable))
+
+    lines = [{
+        "code": "vehicleExGst",
+        "label": "Vehicle price (without GST)",
+        "amount": vehicle_ex,
+    }]
+    rows = []
+    for ln in discount_lines or []:
+        incl = abs(round2(num(ln.get("amount"))))
+        if incl <= 0:
+            continue
+        rows.append(ln)
+    if not rows and target_disc_ex > 0:
+        rows.append({
+            "code": "discount",
+            "label": "Less: Discount",
+            "amount": round2(-target_disc_ex),
+        })
+        benefit_total = target_disc_ex
+    allocated = 0.0
+    for i, ln in enumerate(rows):
+        if i == len(rows) - 1:
+            ex_amt = round2(target_disc_ex - allocated)
+        elif benefit_total > 0:
+            incl = abs(round2(num(ln.get("amount"))))
+            ex_amt = round2(target_disc_ex * (incl / benefit_total))
+            allocated = round2(allocated + ex_amt)
+        else:
+            ex_amt = 0.0
+        if ex_amt <= 0:
+            continue
+        lines.append({
+            "code": ln.get("code") or "discount",
+            "label": ln.get("label") or "Less: Discount",
+            "amount": round2(-ex_amt),
+            "fundHint": ln.get("fundHint"),
+        })
+    lines.append({
+        "code": "taxableValue",
+        "label": "Taxable value (after discount)",
+        "amount": taxable,
+    })
+    if rate > 0 and (cgst > 0 or sgst > 0):
+        half_pct = round2((rate * 100.0) / 2.0)
+        lines.append({"code": "cgst", "label": f"Add: CGST {half_pct}%", "amount": cgst})
+        lines.append({"code": "sgst", "label": f"Add: SGST {half_pct}%", "amount": sgst})
+    tcs = round2(max(0.0, num(tcs)))
+    if tcs > 0:
+        lines.append({
+            "code": "tcs",
+            "label": "TCS 1% (on Tally vehicle invoice, when above ₹10,00,000)",
+            "amount": tcs,
+        })
+    return lines, vehicle_ex, taxable, cgst, sgst
 
 
 def _tally_vehicle_split(charge_lines, ex, benefit_total, rate):
@@ -1915,12 +1989,12 @@ def _tally_vehicle_split(charge_lines, ex, benefit_total, rate):
             "amount": tcs,
         })
 
-    taxable = round2(net_vehicle / (1 + rate)) if rate > 0 else net_vehicle
-    gst_amt = round2(net_vehicle - taxable)
-    cgst = round2(gst_amt / 2)
-    sgst = round2(gst_amt - cgst)
+    invoice_lines, vehicle_ex, taxable, cgst, sgst = _tally_invoice_lines(
+        ex, [], vehicle_cut, rate, tcs)
     return {
         "tallyChargeLines": tally_charges,
+        "tallyInvoiceLines": invoice_lines,
+        "vehicleExGst": vehicle_ex,
         "vehicleBenefitPassed": vehicle_cut,
         "netVehicleInclGst": net_vehicle,
         "tcs": tcs,
@@ -1933,8 +2007,8 @@ def _tally_vehicle_split(charge_lines, ex, benefit_total, rate):
         "cgst": cgst,
         "sgst": sgst,
         "gstNote": (
-            "GST is only on the Tally vehicle invoice (Ex-Showroom after passed "
-            "benefits). Do not charge GST on RTO or insurance."
+            "Enter vehicle price without GST, then discount, then GST on the "
+            "remainder. Do not charge GST on RTO or insurance."
         ),
     }
 
@@ -1958,6 +2032,8 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
             snap, use_allocation_summary=False)
         unit_benefit = round2(sum(-ln["amount"] for ln in discounts))
         books = _tally_vehicle_split(charges, ex, unit_benefit, rate)
+        invoice_lines, _, _, _, _ = _tally_invoice_lines(
+            ex, discounts, unit_benefit, rate, books["tcs"])
         stored_pay = round2(num(snap.get("customerPayable")))
         unit_pay = stored_pay if stored_pay > 0 else books["customerCollectTotal"]
         unit_rows.append({
@@ -1970,6 +2046,7 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
             "chargeLines": charges,
             "discountLines": discounts,
             "tallyChargeLines": books["tallyChargeLines"],
+            "tallyInvoiceLines": invoice_lines,
             "offTallyLines": books["offTallyLines"],
             "grossVehicleCost": unit_gross,
             "additionalDiscount": add_disc,
@@ -1998,6 +2075,9 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
     discount_lines = _sum_discount_lines(all_discounts)
     after_discount = round2(max(0.0, gross - benefit_total))
     pack_books = _tally_vehicle_split(charge_lines, ex_total, benefit_total, rate)
+    pack_invoice, _, _, _, _ = _tally_invoice_lines(
+        ex_total, discount_lines, benefit_total, rate, pack_books["tcs"])
+    pack_books["tallyInvoiceLines"] = pack_invoice
     # Per-unit Tally already sits on each row; pack Tally is the sum of unit invoices.
     tally_total = round2(sum(r["tallyBillTotal"] for r in unit_rows))
     off_tally_total = round2(sum(r.get("offTallyTotal") or 0.0 for r in unit_rows))
@@ -2072,6 +2152,7 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
         "units": unit_rows,
         "chargeLines": charge_lines,
         "tallyChargeLines": pack_books["tallyChargeLines"],
+        "tallyInvoiceLines": pack_books.get("tallyInvoiceLines") or [],
         "offTallyLines": pack_books["offTallyLines"],
         "discountLines": discount_lines,
         "noBenefitPassed": benefit_total <= 0,
@@ -2084,6 +2165,7 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
             "tcs": tcs,
             "tcsBase": pack_books["tcsBase"],
             "netAfterBenefits": after_discount,
+            "vehicleExGst": pack_books.get("vehicleExGst"),
             "netVehicleInclGst": pack_books["netVehicleInclGst"],
             "tallyBillTotal": tally_total,
             "offTallyTotal": off_tally_total,
@@ -2111,8 +2193,8 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
 def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
     """Build a Delivery Billing Summary for accounts to enter the Tally GST invoice.
 
-    Tally GST invoice = vehicle Ex-Showroom − benefits passed (GST already inside).
-    RTO and insurance are separate receipts with no GST on the vehicle bill.
+    Tally GST invoice = vehicle price without GST, less discount, then GST on
+    the remainder. RTO and insurance are separate receipts with no GST.
     Customer payable stays the full collection (Tally + those receipts).
 
     Scheme on the lead with ₹0 passed → no discount line on the invoice.
@@ -2137,6 +2219,13 @@ def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
     benefit_total = round2(sum(-ln["amount"] for ln in discount_lines))
     after_discount = round2(max(0.0, gross - benefit_total))
     books = _tally_vehicle_split(charge_lines, ex, benefit_total, rate)
+    invoice_lines, vehicle_ex, taxable, cgst, sgst = _tally_invoice_lines(
+        ex, discount_lines, benefit_total, rate, books["tcs"])
+    books["tallyInvoiceLines"] = invoice_lines
+    books["vehicleExGst"] = vehicle_ex
+    books["taxableValue"] = taxable
+    books["cgst"] = cgst
+    books["sgst"] = sgst
     tcs = books["tcs"]
     tally_total = books["tallyBillTotal"]
     collect_total = books["customerCollectTotal"]
@@ -2210,6 +2299,7 @@ def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
         },
         "chargeLines": charge_lines,
         "tallyChargeLines": books["tallyChargeLines"],
+        "tallyInvoiceLines": books.get("tallyInvoiceLines") or [],
         "offTallyLines": books["offTallyLines"],
         "discountLines": discount_lines,
         "noBenefitPassed": benefit_total <= 0,
@@ -2223,6 +2313,7 @@ def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
             "tcs": tcs,
             "tcsBase": books["tcsBase"],
             "netAfterBenefits": after_discount,
+            "vehicleExGst": books.get("vehicleExGst"),
             "netVehicleInclGst": books["netVehicleInclGst"],
             "tallyBillTotal": tally_total,
             "offTallyTotal": books["offTallyTotal"],
@@ -2235,6 +2326,7 @@ def build_delivery_billing_summary(lead, *, gst_rate=None, pack_units=None):
         },
         "gstReference": {
             "ratePct": round2(rate * 100),
+            "vehicleExGst": books.get("vehicleExGst"),
             "netVehicleInclGst": books["netVehicleInclGst"],
             "taxableValue": books["taxableValue"],
             "cgst": books["cgst"],

@@ -219,18 +219,14 @@ export default function AccountsDashboard() {
                   <div className="text-xs text-ink-soft">{fmtDate(summary.deliveryDate)}</div>
                 </div>
               </div>
-              <h2>A. Tally GST invoice (vehicle only)</h2>
+              <h2>A. Tally GST invoice (vehicle without GST → discount → GST)</h2>
               <table>
-                {(summary.tallyChargeLines || []).map((ln) => (
-                  <tr key={ln.code}><td>{ln.label}</td><td className="num">{inr(ln.amount)}</td></tr>
-                ))}
-                {(summary.discountLines || []).map((ln) => (
+                {(summary.tallyInvoiceLines || []).map((ln) => (
                   <tr key={ln.code + ln.label}><td>{ln.label}</td><td className="num">{inr(ln.amount)}</td></tr>
                 ))}
                 <tr><td><b>Tally GST invoice</b></td><td className="num"><b>{inr(summary.totals?.tallyBillTotal)}</b></td></tr>
-                <tr><td>Taxable / CGST / SGST</td><td className="num">{inr(summary.gstReference?.taxableValue)} · {inr(summary.gstReference?.cgst)} / {inr(summary.gstReference?.sgst)}</td></tr>
               </table>
-              <h2>B. Collect separately — not on Tally (no GST)</h2>
+              <h2>B. Other heads — not on Tally (no GST)</h2>
               <table>
                 {(summary.offTallyLines || []).length === 0 && <tr><td colSpan={2}>None</td></tr>}
                 {(summary.offTallyLines || []).map((ln) => (
@@ -238,7 +234,7 @@ export default function AccountsDashboard() {
                 ))}
                 <tr><td>Off-Tally total</td><td className="num">{inr(summary.totals?.offTallyTotal)}</td></tr>
               </table>
-              <h2>C. Customer payable (Tally + separate receipts)</h2>
+              <h2>C. Customer payable (Tally + other heads)</h2>
               <table>
                 <tr><td>Customer collect</td><td className="num">{inr(summary.totals?.customerCollectTotal ?? summary.totals?.customerPayable)}</td></tr>
                 <tr><td>Customer Payable</td><td className="num"><b>{inr(summary.totals?.customerPayable)}</b></td></tr>
