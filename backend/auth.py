@@ -41,6 +41,8 @@ OEM_CLAIM_ROLES = (*MONEY_ROLES, "sales_gm")
 # Pull the Coulson claim mirror. TL and Sales GM need this when a multi-item
 # debit note is missing lines or descriptions; Accounts does not.
 OEM_CLAIM_SYNC_ROLES = ("owner", "tl", "sales_gm")
+# Confirm-only AI desk. Executives and OEM finance stay off it.
+AGENT_DESK_ROLES = ("owner", "sales_gm", "tl", "team_lead", "accounts")
 FIELD_ROLES = ("asm", "rm")
 # Money desk can write; ASM/RM / Sales GM may view Finance Register (disbursed vs remaining).
 FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", "sales_gm", *FIELD_ROLES)
@@ -385,6 +387,15 @@ def build_router(db):
             )
         return user
 
+    async def agent_desk_only(user=Depends(current_user)):
+        """Owner / GM / TL / team TL / Accounts — review confirm-only AI suggestions."""
+        if user.get("role") not in AGENT_DESK_ROLES:
+            raise HTTPException(
+                403,
+                "AI Agents is for the Owner, Sales GM, a Team Leader or Accounts.",
+            )
+        return user
+
     @router.post("/login")
     async def login(body: LoginIn):
         # The field is still called `email` so existing clients keep working, but
@@ -556,6 +567,7 @@ def build_router(db):
     router.sales_gm_only = sales_gm_only
     router.oem_claim_desk_only = oem_claim_desk_only
     router.oem_claim_sync_only = oem_claim_sync_only
+    router.agent_desk_only = agent_desk_only
     return router
 
 
