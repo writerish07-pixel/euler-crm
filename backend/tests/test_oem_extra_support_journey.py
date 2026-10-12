@@ -1,9 +1,8 @@
 """OEM Extra Support — full financial journey.
 
 Received = amount from OEM against the lead → ALWAYS the OEM claim amount.
-Passed   = portion given to customer from Received → reduces payable, not earnings.
-Retained = Received − Passed → dealer earnings (full Received when Passed = 0).
-Additional (Dealer) stays a separate dealer-funded discount and is not tested here.
+Passed   = unused. Customer discount lives only in Additional (Dealer).
+Retained = full Received → dealer earnings.
 """
 import json
 import os
@@ -42,20 +41,23 @@ def test_compute_oem_extra_support_math():
     assert full["oemExtraSupportRetained"] == 7000
     assert full["customerBenefit"] == 0
 
-    split = ce.compute_oem_extra_support({
+    stored_passed = ce.compute_oem_extra_support({
         "oemExtraSupportReceived": 7000, "oemExtraSupportPassed": 2500})
-    assert split["oemClaimable"] == 7000  # full Received is always the claim
-    assert split["oemExtraSupportPassed"] == 2500
-    assert split["oemExtraSupportRetained"] == 4500
+    assert stored_passed["oemClaimable"] == 7000
+    assert stored_passed["oemExtraSupportPassed"] == 0
+    assert stored_passed["oemExtraSupportRetained"] == 7000
+    assert stored_passed["customerBenefit"] == 0
 
-    clamped = ce.compute_oem_extra_support({
-        "oemExtraSupportReceived": 5000, "oemExtraSupportPassed": 9000})
-    assert clamped["oemExtraSupportPassed"] == 5000
-    assert clamped["oemExtraSupportRetained"] == 0
-    assert clamped["oemClaimable"] == 5000
+    folded = ce.fold_oem_extra_passed_into_additional({
+        "oemExtraSupportReceived": 7000, "oemExtraSupportPassed": 2500,
+        "additionalDiscount": 4500})
+    assert folded["moved"] == 2500
+    assert folded["additionalDiscount"] == 7000
+    assert folded["oemExtraSupportPassed"] == 0
+    assert folded["oemExtraSupportRetained"] == 7000
 
 
-def test_passed_reduces_payable_and_claim_shares_include_full_received():
+def test_passed_does_not_reduce_payable_and_claim_shares_include_full_received():
     snap = {
         "exShowroom": 400000, "rto": 0, "insurance": 0,
         "oemExtraSupportReceived": 7000, "oemExtraSupportPassed": 2000,
@@ -66,10 +68,9 @@ def test_passed_reduces_payable_and_claim_shares_include_full_received():
         "model": MODEL, "variant": VARIANT, "bookingDate": "2026-08-09",
     }
     totals = ce.compute_commercial_totals(snap, TURBO)
-    # Payable reduced by Passed only (not by full Received).
     base = ce.compute_commercial_totals({**snap, "oemExtraSupportPassed": 0}, TURBO)
-    assert totals["customerPayable"] == ce.round2(base["customerPayable"] - 2000)
-    assert totals["oemExtraSupportRetained"] == 5000
+    assert totals["customerPayable"] == base["customerPayable"]
+    assert totals["oemExtraSupportRetained"] == 7000
 
     shares = ce.compute_scheme_claim_shares(snap, TURBO)
     assert shares["displayByComponent"]["oemExtraSupport"] == 7000
@@ -136,14 +137,16 @@ async def test_scheme_save_wires_claim_earnings_and_payable(client):
     lead = r.json()
 
     assert lead["oemExtraSupportReceived"] == 7000
-    assert lead["oemExtraSupportPassed"] == 2000
-    assert lead["oemExtraSupportRetained"] == 5000
+    assert lead["oemExtraSupportPassed"] == 0
+    assert lead["oemExtraSupportRetained"] == 7000
+    # Incoming Passed folded into Additional so payable stays the same.
+    assert lead["additionalDiscount"] == 6500
     # Full Received is in company outstanding / OEM claimable.
     assert lead["companyOutstanding"] >= 7000
     assert lead["oemClaimCompanyShare"] >= 7000
     # Retained is inside dealer earnings.
-    assert lead["dealerTotalEarnings"] >= 5000
-    assert lead["oemExtraSupportRetained"] == 5000
+    assert lead["dealerTotalEarnings"] >= 7000
+    assert lead["oemExtraSupportRetained"] == 7000
 
     claims = (await client.get("/api/claims")).json()
     oem_rows = [c for c in claims
@@ -197,6 +200,32 @@ async def test_passed_above_received_is_clamped(client):
     })
     assert r.status_code == 200, r.text
     lead = r.json()
-    assert lead["oemExtraSupportPassed"] == 5000
-    assert lead["oemExtraSupportRetained"] == 0
+    assert lead["oemExtraSupportPassed"] == 0
+    assert lead["oemExtraSupportRetained"] == 5000
+    assert lead["additionalDiscount"] == 5000
     assert lead["oemClaimCompanyShare"] >= 5000
+
+
+@pytest.mark.asyncio
+async def test_fold_existing_passed_into_additional_is_idempotent(client):
+    await server.db.leads.insert_one({
+        "leadId": "LD_FOLD_1",
+        "customerName": "Fold Case",
+        "exShowroom": 400000,
+        "rto": 0,
+        "insuranceAmount": 0,
+        "oemExtraSupportReceived": 7000,
+        "oemExtraSupportPassed": 2000,
+        "additionalDiscount": 4500,
+        "accountStatus": "Active",
+    })
+    n = await server._fold_oem_extra_passed_into_additional_leads()
+    assert n >= 1
+    lead = await server.db.leads.find_one({"leadId": "LD_FOLD_1"})
+    assert ce.num(lead.get("oemExtraSupportPassed")) == 0
+    assert ce.num(lead.get("additionalDiscount")) == 6500
+    assert ce.num(lead.get("oemExtraSupportRetained")) == 7000
+    await server._fold_oem_extra_passed_into_additional_leads()
+    again = await server.db.leads.find_one({"leadId": "LD_FOLD_1"})
+    assert ce.num(again.get("additionalDiscount")) == 6500
+    assert ce.num(again.get("oemExtraSupportPassed")) == 0

@@ -117,10 +117,6 @@
       '<label id="lbl_oemExtraSupportReceived"><span>OEM Extra Support Received (case-wise)</span></label>' +
       '<input class="offer" id="oemExtraSupportReceived" name="oemExtraSupportReceived" type="number" min="0" step="0.01" value="0" placeholder="Type amount ₹" />' +
       '</div>' +
-      '<div class="field offer-wrap" id="wrap_oemExtraSupportPassed">' +
-      '<label id="lbl_oemExtraSupportPassed"><span>OEM Extra Support Passed To Customer</span></label>' +
-      '<input class="offer" id="oemExtraSupportPassed" name="oemExtraSupportPassed" type="number" min="0" step="0.01" value="0" placeholder="Type amount ₹" />' +
-      '</div>' +
       '<label class="field"><span>OEM Extra Support Retained</span><input id="oemExtraSupportRetained" disabled /></label>'
     );
   }
@@ -253,10 +249,8 @@
     var dealerPool = Math.max(0, all - oem);
     var passedOem = resolvePassed(oem);
     var extraRecv = Math.max(0, num(el('oemExtraSupportReceived') && el('oemExtraSupportReceived').value));
-    var extraPass = Math.max(0, Math.min(num(el('oemExtraSupportPassed') && el('oemExtraSupportPassed').value), extraRecv));
-    if (el('oemExtraSupportPassed') && num(el('oemExtraSupportPassed').value) !== extraPass) setVal('oemExtraSupportPassed', extraPass);
-    var extraRet = Math.max(0, extraRecv - extraPass);
-    var totalPass = passedOem + dealerPool + extraPass;
+    var extraRet = extraRecv;
+    var totalPass = passedOem + dealerPool;
     setVal('totalDiscount', all.toFixed(2));
     setVal('oemEligible', oem.toFixed(2));
     setVal('benefitPassedShow', passedOem.toFixed(2));
@@ -462,8 +456,7 @@
       oemExtraSupportRetained: o.oemExtraSupportRetained || 0
     };
     setVal('oemExtraSupportReceived', num(o.oemExtraSupportReceived || res.oemExtraSupportReceived || 0));
-    setVal('oemExtraSupportPassed', num(o.oemExtraSupportPassed || res.oemExtraSupportPassed || 0));
-    setVal('oemExtraSupportRetained', num(o.oemExtraSupportRetained || res.oemExtraSupportRetained || 0).toFixed(2));
+    setVal('oemExtraSupportRetained', num(o.oemExtraSupportReceived || res.oemExtraSupportReceived || 0).toFixed(2));
     setBenefitMode(res.benefitMode || 'Full Benefit');
     if (st) {
       st.textContent = 'Lead: ' + (l.leadId || '') + ' | ' + (CTX.model || '') + ' / ' + (CTX.variant || '') +
@@ -516,13 +509,11 @@
 
   function readOemExtraSupportForSave() {
     var recvEl = el('oemExtraSupportReceived') || el('oemExtraSupport');
-    var passEl = el('oemExtraSupportPassed');
     var recv = Math.max(0, num(recvEl && recvEl.value));
-    var pass = Math.max(0, Math.min(num(passEl && passEl.value), recv));
     return {
       oemExtraSupportReceived: recv,
-      oemExtraSupportPassed: pass,
-      oemExtraSupportRetained: Math.max(0, recv - pass),
+      oemExtraSupportPassed: 0,
+      oemExtraSupportRetained: recv,
       oemExtraSupport: recv
     };
   }

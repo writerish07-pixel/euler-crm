@@ -1480,7 +1480,7 @@ async def recompute_lead(lead_id):
         await _prune_inactive_scheme_claims(
             lead_id,
             {k for k, amt in shares["displayByComponent"].items() if ce.num(amt) > 0})
-        # OEM Extra Support Register — Received is the claim; Passed/Retained track usage.
+        # OEM Extra Support Register — Received is the claim; Retained = full Received.
         if oem_extra_recv > 0:
             _bk = await _live_booking(lead_id) or {}
             extra_claim = await db.claims.find_one(
@@ -5620,25 +5620,31 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
         updated = await db.leads.find_one({"leadId": lead_id})
         await sheet_sync("leads", clean(dict(updated)))
         return _lead_for_viewer(clean(updated), act)
-    # Scheme extras
+    # Scheme extras. Passed is not a customer discount — move it into Additional.
     patch_val = ce.round2(max(0.0, ce.num(value)))
+    extra_fold = None
     if field == "oemExtraSupportPassed":
-        recv = ce.num(lead.get("oemExtraSupportReceived"))
-        patch_val = ce.round2(min(patch_val, recv))
+        extra_fold = ce.fold_oem_extra_passed_into_additional({**lead, "oemExtraSupportPassed": patch_val})
+        patch_val = 0.0
     old = {field: lead.get(field)}
     scheme_set = {
         field: patch_val, "lastUpdated": now_iso(),
         "lastUpdatedBy": act.get("email", ""),
     }
+    if extra_fold:
+        scheme_set["additionalDiscount"] = extra_fold["additionalDiscount"]
+        scheme_set["oemExtraSupportPassed"] = 0.0
     if oem_sync.is_same_order_pack(lead) and field in OWNER_SCHEME_FIELDS:
         units = _ensure_lead_units(lead)
         if units:
             u0 = dict(units[0])
-            if field == "oemExtraSupportPassed":
-                recv = ce.num(u0.get("oemExtraSupportReceived") or lead.get("oemExtraSupportReceived"))
-                patch_val = ce.round2(min(patch_val, recv))
-                scheme_set[field] = patch_val
-            u0[field] = patch_val
+            if extra_fold:
+                u_fold = ce.fold_oem_extra_passed_into_additional({**u0, "oemExtraSupportPassed": ce.num(value)})
+                u0["oemExtraSupportPassed"] = 0.0
+                u0["additionalDiscount"] = u_fold["additionalDiscount"]
+                scheme_set["additionalDiscount"] = extra_fold["additionalDiscount"]
+            else:
+                u0[field] = patch_val
             units[0] = u0
             scheme_set["units"] = units
     await db.leads.update_one({"leadId": lead_id}, {"$set": scheme_set})
@@ -6230,7 +6236,7 @@ def _prepare_pack_unit_scheme(lead, units):
 
 
 def _pack_oem_extra_totals(lead, units=None):
-    """Sum each unit's OEM Extra. Received is a claim; Passed discounts that unit."""
+    """Sum each unit's OEM Extra. Received is a claim; Passed is not a discount."""
     rows = list(units) if units is not None else _ensure_lead_units(lead)
     rows, _ = _prepare_pack_unit_scheme(lead, rows)
     recv = 0.0
@@ -6248,9 +6254,8 @@ def _lead_overlay_unit(lead, unit, index=0):
     """Lead-shaped dict for one unit so compute_commercial_totals can price it.
 
     Extra units do not inherit unit 1 / lead-level price or scheme. OEM Extra
-    Support is per unit (Received = claim, Passed = that unit's customer
-    discount). Pack-deal additionalDiscount leftover on the lead is not a
-    per-unit discount.
+    Support is per unit (Received = claim). Pack-deal additionalDiscount leftover
+    on the lead is not a per-unit discount.
     """
     u = unit or {}
     out = dict(lead or {})
@@ -6593,10 +6598,8 @@ async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None,
     }
     if oem_extra_received is not None:
         recv = ce.round2(max(0.0, ce.num(oem_extra_received)))
-        live = await db.leads.find_one({"leadId": lead_id}) or {}
-        passed = ce.round2(min(ce.num(live.get("oemExtraSupportPassed")), recv))
         patch["oemExtraSupportReceived"] = recv
-        patch["oemExtraSupportPassed"] = passed
+        patch["oemExtraSupportPassed"] = 0
     if deal.get("priceFound"):
         row = await _price_master_row(model, variant)
         if row:
@@ -7301,11 +7304,12 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         payload["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
         payload["schemeComponentsUsed"] = _json.dumps({k: (v > 0) for k, v in clean_bk.items()})
 
-    # OEM Extra Support is per unit. Received = OEM claim; Passed ≤ Received
-    # reduces that unit's customer payable. Additional (Dealer) stays separate.
-    _oem = ce.compute_oem_extra_support(payload)
-    payload["oemExtraSupportReceived"] = _oem["oemExtraSupportReceived"]
-    payload["oemExtraSupportPassed"] = _oem["oemExtraSupportPassed"]
+    # OEM Extra Support is per unit. Received = OEM claim. Passed is not a
+    # customer discount — fold any leftover Passed into Additional (Dealer).
+    folded = ce.fold_oem_extra_passed_into_additional(payload)
+    payload["oemExtraSupportReceived"] = folded["oemExtraSupportReceived"]
+    payload["oemExtraSupportPassed"] = 0
+    payload["additionalDiscount"] = folded["additionalDiscount"]
 
     units = _ensure_lead_units(lead)
     if idx >= len(units):
@@ -10187,6 +10191,62 @@ def _billing_summary_has_vehicle_tally(summary):
     """True when the stored snapshot already splits Tally vs RTO/insurance."""
     t = (summary or {}).get("totals") or {}
     return "offTallyTotal" in t and "tallyBillTotal" in t
+
+
+async def _fold_oem_extra_passed_into_additional_leads():
+    """Move stored OEM Extra Passed into Additional on existing leads, then recompute.
+
+    Packs fold each unit so that unit's payable stays the same. Lead-level pack
+    Additional is a leftover figure — do not add the roll-up Passed onto it.
+    """
+    n = 0
+    async for lead in db.leads.find({}):
+        lid = lead.get("leadId")
+        if not lid:
+            continue
+        patch = {}
+        units = list(lead.get("units") or [])
+        pack = oem_sync.is_same_order_pack(lead)
+        if pack and units:
+            new_units = []
+            any_u = False
+            for raw in units:
+                rec = dict(raw or {})
+                folded = ce.fold_oem_extra_passed_into_additional(rec)
+                if folded["moved"] > 0:
+                    rec["additionalDiscount"] = folded["additionalDiscount"]
+                    rec["oemExtraSupportPassed"] = 0.0
+                    any_u = True
+                new_units.append(rec)
+            if any_u:
+                patch["units"] = new_units
+            if ce.num(lead.get("oemExtraSupportPassed")) > 0:
+                patch["oemExtraSupportPassed"] = 0.0
+        else:
+            folded = ce.fold_oem_extra_passed_into_additional(lead)
+            if folded["moved"] > 0:
+                patch["additionalDiscount"] = folded["additionalDiscount"]
+                patch["oemExtraSupportPassed"] = 0.0
+            if units:
+                u0 = dict(units[0] or {})
+                u_fold = ce.fold_oem_extra_passed_into_additional(u0)
+                moved = folded["moved"] or u_fold["moved"]
+                if moved > 0:
+                    u0["additionalDiscount"] = patch.get(
+                        "additionalDiscount", u_fold["additionalDiscount"])
+                    u0["oemExtraSupportPassed"] = 0.0
+                    units[0] = u0
+                    patch["units"] = units
+        if not patch:
+            continue
+        await db.leads.update_one({"leadId": lid}, {"$set": patch})
+        try:
+            await recompute_lead(lid)
+        except Exception:
+            logging.exception("Could not recompute after folding OEM Extra Passed on %s", lid)
+        n += 1
+    logging.info("OEM_EXTRA_PASSED_FOLD: %s leads", n)
+    return n
 
 
 async def _rebuild_all_delivery_billing_summaries():
@@ -14663,9 +14723,8 @@ async def dealer_earnings_report(month: Optional[str] = None, year: Optional[str
         scheme = alloc["totals"]["dealerRetained"]
         insurance = ins_by_lead.get(l.get("leadId"), 0)
         oem_recv = max(0.0, ce.num(l.get("oemExtraSupportReceived")))
-        oem_pass = max(0.0, min(ce.num(l.get("oemExtraSupportPassed")), oem_recv))
         wo = ce.unpayable_write_off_from_claims(claims_by.get(l.get("leadId")) or [])
-        other = 0.0 if wo["extraSupportUnpayable"] else ce.round2(max(0.0, oem_recv - oem_pass))
+        other = 0.0 if wo["extraSupportUnpayable"] else oem_recv
         # Extra dealer income lines (C1) — full port of DEALER_EARNINGS_MANUAL_COLS_
         doc_inc = ce.num(l.get("documentationIncome"))
         war_inc = ce.num(l.get("warrantyIncome"))
@@ -15661,6 +15720,11 @@ async def _run_boot_maintenance():
             await oct_2026_schemes.ensure_oct_2026_schemes(db)
         except Exception:
             logging.exception("OCT_2026_SCHEME_BOOT_ERROR")
+        try:
+            folded = await _fold_oem_extra_passed_into_additional_leads()
+            logging.info("OEM_EXTRA_PASSED_FOLD_BOOT: %s", folded)
+        except Exception:
+            logging.exception("OEM_EXTRA_PASSED_FOLD_ERROR")
         try:
             if not _is_test_env():
                 rebuilt = await _rebuild_all_delivery_billing_summaries()

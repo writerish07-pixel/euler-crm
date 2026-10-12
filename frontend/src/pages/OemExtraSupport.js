@@ -22,19 +22,17 @@ export default function OemExtraSupport() {
   const { openLead, drawer } = useLeadDrawer(load);
   useEffect(() => { load(); }, [load]);
   const received = rows.reduce((s, r) => s + Number(r.oemExtraSupportReceived || 0), 0);
-  const passed = rows.reduce((s, r) => s + Number(r.oemExtraSupportPassed || 0), 0);
   const retained = rows.reduce((s, r) => s + Number(r.oemExtraSupportRetained || 0), 0);
 
   return (
     <div>
       <PageHeader title="OEM Extra Support"
-        subtitle="Received / Passed / Retained for every lead with extra support — same register as the old sheet"
+        subtitle="Received / Retained for every lead with extra support — same register as the old sheet"
         actions={<ReportActions onRefresh={load} showRebuild />} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
         <StatCard label="Leads" value={rows.length} />
         <StatCard label="Received" value={inr(received)} tone="text-amber-700" />
-        <StatCard label="Passed to customer" value={inr(passed)} />
         {canSeeOwnerCommercials && <StatCard label="Retained" value={inr(retained)} tone="text-emerald-700" />}
       </div>
       <Table
@@ -53,8 +51,6 @@ export default function OemExtraSupport() {
           { key: "bookingDate", label: "Booked", render: (r) => fmtDate(r.bookingDate) },
           { key: "oemExtraSupportReceived", label: "Received", align: "right", mono: true,
             render: (r) => <span className="text-amber-700 font-semibold">{inr(r.oemExtraSupportReceived)}</span> },
-          { key: "oemExtraSupportPassed", label: "Passed", align: "right", mono: true,
-            render: (r) => inr(r.oemExtraSupportPassed) },
           ...(canSeeOwnerCommercials ? [{
             key: "oemExtraSupportRetained", label: "Retained", align: "right", mono: true,
             render: (r) => <span className="text-emerald-700">{inr(r.oemExtraSupportRetained)}</span>,

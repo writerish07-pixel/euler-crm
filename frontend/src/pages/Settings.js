@@ -249,7 +249,7 @@ export default function Settings() {
                     <ListPlus size={14} /> {ensuringOem ? "Adding columns…" : "Add OEM Extra Support columns"}
                   </Button>
                   <span className="text-xs text-ink-faint ml-2">
-                    Places Received / Passed / Retained before Dealer Earnings (total last) on Lead Register & Dealer Earnings; creates OEM Extra Support Register if missing
+                    Places Received / Retained before Dealer Earnings (total last) on Lead Register & Dealer Earnings; creates OEM Extra Support Register if missing
                   </span>
                 </div>
                 <div>
