@@ -144,32 +144,54 @@ def test_build_summary_vaibhav_style_two_passed_benefits():
 
 
 def test_tally_bill_is_vehicle_only_gst_not_on_rto_insurance():
-    """Turbo deal ₹8,05,000: Tally invoice is Ex − discount; RTO/insurance off-invoice."""
+    """Turbo deal ₹8,05,000: Tally invoice is Ex − discount; RTO/insurance off-invoice.
+
+    House rates: RTO ₹5,500 on 3W and 4W; insurance ₹19,000 (4W) / ₹10,000 (3W).
+    """
     lead = {
         "leadId": "LD_TURBO_805",
         "interestedModel": "Turbo Max",
         "variant": "Maxx (PV)",
         "exShowroom": 785000,
-        "rto": 15000,
-        "insuranceAmount": 22000,
-        "additionalDiscount": 17000,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "additionalDiscount": 4500,
         "customerPayable": 805000,
         "totalReceived": 805000,
     }
     s = ce.build_delivery_billing_summary(lead)
-    assert s["totals"]["tallyBillTotal"] == 768000
-    assert s["totals"]["offTallyTotal"] == 37000
+    assert s["totals"]["tallyBillTotal"] == 780500
+    assert s["totals"]["offTallyTotal"] == 24500
     assert s["totals"]["customerCollectTotal"] == 805000
     assert s["totals"]["customerPayable"] == 805000
     gst = s["gstReference"]
-    assert gst["netVehicleInclGst"] == 768000
-    assert abs(gst["taxableValue"] - round(768000 / 1.05, 2)) < 0.02
-    assert abs((gst["cgst"] + gst["sgst"]) - (768000 - gst["taxableValue"])) < 0.02
-    off_codes = {ln["code"] for ln in s["offTallyLines"]}
-    assert off_codes == {"rto", "insurance"}
+    assert gst["netVehicleInclGst"] == 780500
+    assert abs(gst["taxableValue"] - round(780500 / 1.05, 2)) < 0.02
+    assert abs((gst["cgst"] + gst["sgst"]) - (780500 - gst["taxableValue"])) < 0.02
+    off = {ln["code"]: ln["amount"] for ln in s["offTallyLines"]}
+    assert off == {"rto": 5500, "insurance": 19000}
     tally_codes = {ln["code"] for ln in s["tallyChargeLines"]}
     assert tally_codes == {"exShowroom"}
     assert "do not charge gst on rto" in gst["note"].lower()
+
+
+def test_three_wheeler_same_rto_lower_insurance():
+    lead = {
+        "leadId": "LD_3W",
+        "interestedModel": "Hi-Load",
+        "variant": "XR (PV)",
+        "exShowroom": 456134,
+        "rto": 5500,
+        "insuranceAmount": 10000,
+        "customerPayable": 471634,
+    }
+    s = ce.build_delivery_billing_summary(lead)
+    off = {ln["code"]: ln["amount"] for ln in s["offTallyLines"]}
+    assert off["rto"] == 5500
+    assert off["insurance"] == 10000
+    assert s["totals"]["tallyBillTotal"] == 456134
+    assert s["totals"]["offTallyTotal"] == 15500
+    assert s["totals"]["customerCollectTotal"] == 471634
 
 
 @pytest_asyncio.fixture

@@ -85,7 +85,8 @@ def calculate_tcs(taxable, rate=TCS_RATE, threshold=TCS_THRESHOLD):
 
 DEAL_OTHER_CHARGE_KEYS = ("accessories", "trc", "fastag", "extendedWarranty", "otherCharges")
 
-# Price Master dealer charges (not OEM / Coulson). Storm + Turbo vs 3-wheelers.
+# Price Master dealer charges (not OEM / Coulson).
+# RTO is the same on 3-wheeler and 4-wheeler. Insurance is 4W vs 3W.
 RTO_STORM_TURBO = 5500.0
 INSURANCE_STORM_TURBO = 19000.0
 RTO_THREE_WHEELER = 5500.0
