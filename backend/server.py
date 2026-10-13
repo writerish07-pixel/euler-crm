@@ -41,7 +41,6 @@ import scheme_circulars
 import deal_sheet_pdf
 import team_scope
 import inventory_check
-import agents as agentmod
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -88,7 +87,6 @@ finance_viewer_only = auth_router.finance_viewer_only
 sales_gm_only = auth_router.sales_gm_only
 oem_claim_desk_only = auth_router.oem_claim_desk_only
 oem_claim_sync_only = auth_router.oem_claim_sync_only
-agent_desk_only = auth_router.agent_desk_only
 
 api = APIRouter(prefix="/api", dependencies=[Depends(current_user)])
 public = APIRouter(prefix="/api")
@@ -10809,186 +10807,6 @@ async def _coulson_status_payload(viewer=None):
     }
 
 
-def _agent_view(user, row) -> dict:
-    out = dict(row or {})
-    out["canConfirm"] = agentmod.can_confirm(user, row)
-    out["confirmKind"] = agentmod.confirm_kind(row)
-    out["agentLabel"] = agentmod.AGENT_LABELS.get(out.get("agent"), out.get("agent"))
-    return out
-
-
-@api.get("/agents/suggestions", dependencies=[Depends(agent_desk_only)])
-async def agent_suggestions(status: str = "open", agent: str = "",
-                            countOnly: bool = False, user=Depends(current_user)):
-    """List only. Never scan here — a live scan of PDFs/leads exceeds the 25s browser timeout."""
-    meta = await db["system"].find_one({"_id": agentmod.SCAN_META}) or {}
-    open_n = await db[agentmod.COLLECTION].count_documents({"status": "open"})
-    if countOnly:
-        return {
-            "open": open_n,
-            "count": 0,
-            "lastScanAt": meta.get("lastScanAt") or "",
-            "agents": agentmod.AGENT_LABELS,
-            "suggestions": [],
-        }
-    rows = await agentmod.list_suggestions(db, status=status, agent=agent)
-    return {
-        "open": open_n,
-        "count": len(rows),
-        "lastScanAt": meta.get("lastScanAt") or "",
-        "agents": agentmod.AGENT_LABELS,
-        "suggestions": [_agent_view(user, r) for r in rows],
-    }
-
-
-@api.post("/agents/scan", dependencies=[Depends(agent_desk_only)])
-async def agent_scan(user=Depends(current_user)):
-    summary = await agentmod.run_scan(db)
-    rows = await agentmod.list_suggestions(db, status="open")
-    return {
-        **summary,
-        "count": len(rows),
-        "suggestions": [_agent_view(user, r) for r in rows],
-    }
-
-
-@api.post("/agents/suggestions/{suggestion_id}/dismiss", dependencies=[Depends(agent_desk_only)])
-async def agent_dismiss(suggestion_id: str, act=Depends(actor)):
-    row = await agentmod.get_suggestion(db, suggestion_id)
-    if not row:
-        raise HTTPException(404, "Suggestion not found")
-    if row.get("status") != "open":
-        raise HTTPException(409, "That suggestion is already closed")
-    out = await agentmod.dismiss(db, suggestion_id, act)
-    await write_audit(act, "dismiss", "ai-agent", leadId=row.get("leadId") or "",
-                      new={"suggestionId": suggestion_id, "agent": row.get("agent")})
-    return _agent_view(act, out)
-
-
-@api.post("/agents/suggestions/{suggestion_id}/confirm", dependencies=[Depends(agent_desk_only)])
-async def agent_confirm(suggestion_id: str, act=Depends(actor)):
-    """Apply a suggestion. Scheme, Ex-Showroom, OEM Extra and Tally books are never written."""
-    row = await agentmod.get_suggestion(db, suggestion_id)
-    if not row:
-        raise HTTPException(404, "Suggestion not found")
-    if row.get("status") != "open":
-        raise HTTPException(409, "That suggestion is already closed")
-    if not agentmod.can_confirm(act, row):
-        raise HTTPException(403, "You cannot confirm this suggestion")
-    result = await _apply_agent_suggestion(row, act)
-    out = await agentmod.mark_confirmed(db, suggestion_id, act, result)
-    await write_audit(act, "confirm", "ai-agent", leadId=row.get("leadId") or "",
-                      old={"payload": row.get("payload")},
-                      new={"suggestionId": suggestion_id, "agent": row.get("agent"),
-                           "result": result})
-    return _agent_view(act, out)
-
-
-async def _apply_agent_suggestion(row, act) -> dict:
-    agent = row.get("agent")
-    payload = row.get("payload") or {}
-    if agent == agentmod.AGENT_PDF:
-        return await _apply_pdf_price(row, act)
-    if agent == agentmod.AGENT_OEM_MATCH:
-        return await _apply_oem_match(row, act)
-    if agent == agentmod.AGENT_COULSON:
-        return await _apply_coulson_renew(act)
-    if agent == agentmod.AGENT_FOLLOWUP:
-        return await _apply_followup(row, act)
-    return {"acknowledged": True, "agent": agent, **{k: payload.get(k) for k in ("field", "kind") if k in payload}}
-
-
-async def _apply_pdf_price(row, act) -> dict:
-    payload = row.get("payload") or {}
-    field = payload.get("field")
-    if field not in ("rto", "insuranceAmount"):
-        raise HTTPException(422, "This PDF note cannot rewrite Price Structure")
-    lead_id = row.get("leadId") or ""
-    lead = await get_lead_or_404(lead_id)
-    scheme_before = {
-        "insuranceBenefit": ce.num(lead.get("insuranceBenefit")),
-        "rtoBenefit": ce.num(lead.get("rtoBenefit")),
-        "rtoInsuranceBenefit": ce.num(lead.get("rtoInsuranceBenefit")),
-        "oemExtraSupportReceived": ce.num(lead.get("oemExtraSupportReceived")),
-        "oemExtraSupportPassed": ce.num(lead.get("oemExtraSupportPassed")),
-        "exShowroom": ce.num(lead.get("exShowroom")),
-    }
-    to_amt = ce.round2(ce.num(payload.get("toAmount")))
-    body = PriceStructureIn(**agentmod.price_payload_from_lead(
-        lead,
-        rto=to_amt if field == "rto" else None,
-        insurance_amount=to_amt if field == "insuranceAmount" else None,
-    ))
-    await set_price_structure(lead_id, body, act, None)
-    live = await db.leads.find_one({"leadId": lead_id}) or {}
-    return {
-        "field": field,
-        "fromAmount": ce.num(payload.get("fromAmount")),
-        "toAmount": ce.num(live.get(field)),
-        "schemeUnchanged": {
-            "insuranceBenefit": ce.num(live.get("insuranceBenefit")) == scheme_before["insuranceBenefit"],
-            "rtoBenefit": ce.num(live.get("rtoBenefit")) == scheme_before["rtoBenefit"],
-            "oemExtraSupportPassed": ce.num(live.get("oemExtraSupportPassed")) == scheme_before["oemExtraSupportPassed"],
-        },
-    }
-
-
-async def _apply_oem_match(row, act) -> dict:
-    payload = row.get("payload") or {}
-    chassis = oem_sync._norm_chassis(payload.get("chassis"))
-    lead_id = payload.get("proposedLeadId") or row.get("leadId") or ""
-    if not chassis or not lead_id:
-        raise HTTPException(422, "No single lead ranked for this Sold chassis")
-    lead = await get_lead_or_404(lead_id)
-    await _require_lead_visible(lead, act)
-    live = await _connect_oem_sold(lead, {
-        "chassis": chassis,
-        "invoiceNumber": payload.get("invoiceNumber") or "",
-        "soldDate": payload.get("soldDate") or "",
-    })
-    return {"connected": True, "leadId": (live or {}).get("leadId"), "chassis": chassis}
-
-
-async def _apply_coulson_renew(act) -> dict:
-    try:
-        r = await oem_sync.sync_from_coulson(db)
-    except coulson_client.CoulsonError as e:
-        return {"ok": False, "error": str(e), "pasteNeeded": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:300], "pasteNeeded": True}
-    return {"ok": bool(r.get("ok")), "reason": r.get("reason") or "", "pasteNeeded": r.get("reason") == "not_configured"}
-
-
-async def _apply_followup(row, act) -> dict:
-    lead_id = row.get("leadId") or ""
-    lead = await get_lead_or_404(lead_id)
-    if _acct(lead) != "Active":
-        raise HTTPException(409, "This lead is not Active")
-    due = agentmod.tomorrow()
-    draft = ((row.get("payload") or {}).get("draftNote") or "Follow-up scheduled from AI desk")[:400]
-    doc = {
-        "activityId": await next_id("activity", "AC26"),
-        "leadId": lead_id,
-        "date": today(),
-        "time": datetime.now(timezone.utc).strftime("%H:%M"),
-        "activityType": "Follow-up",
-        "discussion": draft,
-        "executive": lead.get("executive") or (act or {}).get("email") or "",
-        "nextFollowup": due,
-        "customerName": lead.get("customerName"),
-        "mobile": lead.get("mobile"),
-        "model": lead.get("interestedModel"),
-    }
-    await db.activities.insert_one(doc)
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {
-        "nextFollowupDate": due,
-        "lastActivity": f"Follow-up · {draft}"[:200],
-        "lastUpdated": now_iso(),
-    }})
-    await sheet_sync("activities", doc)
-    return {"nextFollowupDate": due, "activityId": doc["activityId"]}
-
-
 @api.get("/integrations/coulson")
 async def coulson_status(viewer=Depends(current_user)):
     return await _coulson_status_payload(viewer)
@@ -13021,9 +12839,6 @@ CRITICAL_ENDPOINTS = [
     ("PUT", "/api/leads/{lead_id}/delivery"),
     ("GET", "/api/leads/{lead_id}/oem-sold"),
     ("GET", "/api/leads/{lead_id}/billing-summary"),
-    ("GET", "/api/agents/suggestions"), ("POST", "/api/agents/scan"),
-    ("POST", "/api/agents/suggestions/{suggestion_id}/confirm"),
-    ("POST", "/api/agents/suggestions/{suggestion_id}/dismiss"),
     ("GET", "/api/payments"), ("GET", "/api/oem-extra-support"),
     ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),

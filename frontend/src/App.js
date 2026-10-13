@@ -48,7 +48,6 @@ import Allocation from "./pages/Allocation";
 import SalesGmDashboard from "./pages/SalesGmDashboard";
 import Approvals from "./pages/Approvals";
 import MonthlyRegister from "./pages/MonthlyRegister";
-import AiAgents from "./pages/AiAgents";
 
 function homePath(auth) {
   // The OEM finance desk has exactly one page. Sending it anywhere else would
@@ -59,9 +58,9 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, showroomDesk, staffDesk, gmHome, monthlyOk, oemClaimDesk, agentsDesk }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, showroomDesk, staffDesk, gmHome, monthlyOk, oemClaimDesk }) {
   const auth = useAuth();
-  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canViewMonthly, canMatchOemClaims, canViewAgents, sessionError, retrySession } = auth;
+  const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = auth;
   const loc = useLocation();
   if (user === undefined) {
     return (
@@ -93,7 +92,6 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   if (financeView && !canViewFinance) return <Navigate to={homePath(auth)} replace />;
   if (moneyDesk && !isMoneyDesk) return <Navigate to={homePath(auth)} replace />;
   if (oemClaimDesk && !canMatchOemClaims) return <Navigate to={homePath(auth)} replace />;
-  if (agentsDesk && !canViewAgents) return <Navigate to={homePath(auth)} replace />;
   if (salesOnly && !isSalesStaff && !(fieldOk && isField)) {
     return <Navigate to={homePath(auth)} replace />;
   }
@@ -138,7 +136,6 @@ function AppRoutes() {
       gmHome={opts.gmHome}
       monthlyOk={opts.monthlyOk}
       oemClaimDesk={opts.oemClaimDesk}
-      agentsDesk={opts.agentsDesk}
     >
       {el}
     </Protected>
@@ -152,7 +149,6 @@ function AppRoutes() {
       <Route path="/accounts" element={P(<AccountsDashboard />, { accountsHome: true })} />
       <Route path="/field" element={P(<FieldDashboard />, { fieldOnly: true })} />
       <Route path="/gm" element={P(<SalesGmDashboard />, { gmHome: true })} />
-      <Route path="/agents" element={P(<AiAgents />, { agentsDesk: true })} />
       <Route path="/leads" element={P(<Leads />, { salesOnly: true, fieldOk: true })} />
       <Route path="/approvals" element={P(<Approvals />, { salesOnly: true })} />
       <Route path="/bookings" element={P(<Bookings />, { salesOnly: true, fieldOk: true })} />

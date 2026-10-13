@@ -6,7 +6,7 @@ import {
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
   MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse, Bell,
-  FileCheck, Scale, CalendarDays, Sparkles,
+  FileCheck, Scale, CalendarDays,
 } from "lucide-react";
 import { cx, Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
@@ -23,7 +23,6 @@ const NAV = [
     { to: "/gm", label: "Sales GM Dashboard", icon: BarChart3, ownerOnly: true },
     { to: "/field", label: "Field Dashboard", icon: Map, fieldHome: true },
     { to: "/accounts", label: "Accounts Dashboard", icon: Calculator, accountsHome: true },
-    { to: "/agents", label: "AI Agents", icon: Sparkles, agentsDesk: true },
   ]},
   { section: "Sales Pipeline", pipeline: true, items: [
     { to: "/leads", label: "Lead Register", icon: Users },
@@ -88,7 +87,7 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, canViewAgents, pendingApprovals, pendingAgents, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
   const deskLabel = isOemFinance ? "OEM finance desk"
     : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk"
       : isTl ? "Showroom Admin desk" : isTeamLead ? "Team Leader desk" : "EV Dealership";
@@ -136,7 +135,6 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             if (i.gmHome && !isSalesGm && !isOwner) return false;
             if (i.monthly && !canViewMonthly) return false;
             if (i.approvals && !canApproveLeads && !isExecutive && !isTeamLead) return false;
-            if (i.agentsDesk && !canViewAgents) return false;
             return true;
           });
           if (!items.length) return null;
@@ -153,9 +151,6 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
                     <span className="truncate">{item.label}</span>
                     {item.approvals && pendingApprovals > 0 && (
                       <span className="ml-auto text-[10px] font-bold tabular bg-red-50 text-red-700 px-1.5 py-0.5 rounded-full">{pendingApprovals}</span>
-                    )}
-                    {item.agentsDesk && pendingAgents > 0 && (
-                      <span className="ml-auto text-[10px] font-bold tabular bg-cobalt-tint text-cobalt px-1.5 py-0.5 rounded-full">{pendingAgents}</span>
                     )}
                   </NavLink>
                 ))}
@@ -366,10 +361,9 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, canViewAgents, sessionError, retrySession } = useAuth();
+  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
-  const [pendingAgents, setPendingAgents] = useState(0);
   const location = useLocation();
 
   useEffect(() => {
@@ -382,17 +376,6 @@ export default function Layout({ children }) {
     const t = setInterval(load, 30000);
     return () => { live = false; clearInterval(t); };
   }, [canApproveLeads, isExecutive, isTeamLead, location.pathname]);
-
-  useEffect(() => {
-    if (!canViewAgents) return undefined;
-    let live = true;
-    const load = () => get("/agents/suggestions", { countOnly: true }).then((d) => {
-      if (live) setPendingAgents(Number(d?.open || 0));
-    }).catch(() => {});
-    load();
-    const t = setInterval(load, 60000);
-    return () => { live = false; clearInterval(t); };
-  }, [canViewAgents, location.pathname]);
 
   // Close mobile drawer on route change
   useEffect(() => { setNavOpen(false); }, [location.pathname]);
@@ -436,9 +419,7 @@ export default function Layout({ children }) {
         isTeamLead={isTeamLead}
         canViewMonthly={canViewMonthly}
         canMatchOemClaims={canMatchOemClaims}
-        canViewAgents={canViewAgents}
         pendingApprovals={pendingApprovals}
-        pendingAgents={pendingAgents}
         open={navOpen}
         onClose={() => setNavOpen(false)}
         onNavigate={() => setNavOpen(false)}
