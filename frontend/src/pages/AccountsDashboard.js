@@ -149,7 +149,7 @@ export default function AccountsDashboard() {
             <ol className="text-xs text-ink-soft space-y-1.5 list-decimal list-inside">
               <li>Open <b>Summary</b> for a delivered invoice</li>
               <li>Print / check charges &amp; passed discounts only</li>
-              <li>Create the GST invoice in <b>Tally</b>, then upload the scan here</li>
+              <li>Create the GST invoice in <b>Tally</b>, then upload the scan or ZIP here</li>
               <li>Record that lead’s money from Summary → Record payment</li>
             </ol>
           </Card>

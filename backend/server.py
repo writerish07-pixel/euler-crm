@@ -3778,6 +3778,13 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     query = {}
     if status and status != "all":
         query["currentStatus"] = status
+    # Showroom Admin (tl) works approved / progressed files only — New stays
+    # on Allocation and Approvals, not on their Lead Register.
+    if authmod.is_showroom_admin(user):
+        if query.get("currentStatus") == "New":
+            return []
+        if "currentStatus" not in query:
+            query["currentStatus"] = {"$exists": True, "$nin": ["New", ""]}
     if q:
         query["$or"] = [
             {"customerName": {"$regex": q, "$options": "i"}},
@@ -5328,7 +5335,7 @@ async def upload_lead_document(lead_id: str, kind: str = Form(...),
     own = _is_own_lead(lead, user)
     if not lead_docs.can_upload_kind(user, kind, own=own):
         raise HTTPException(403, "You cannot upload this kind of document.")
-    data, ctype, filename = await lead_docs.read_upload(file)
+    data, ctype, filename = await lead_docs.read_upload(file, kind=kind)
     row = await lead_docs.save_doc(
         db, next_id=next_id, user=user, kind=kind, data=data,
         content_type=ctype, filename=filename, lead_id=lead_id)
@@ -5354,7 +5361,7 @@ async def upload_request_document(request_id: str, kind: str = Form(...),
         raise HTTPException(422, "Only KYC, deal sheet or OEM Extra Support files can be attached to a lead request.")
     if not lead_docs.can_upload_kind(user, kind, own=own or _can_approve_leads(user)):
         raise HTTPException(403, "You cannot upload this kind of document.")
-    data, ctype, filename = await lead_docs.read_upload(file)
+    data, ctype, filename = await lead_docs.read_upload(file, kind=kind)
     return await lead_docs.save_doc(
         db, next_id=next_id, user=user, kind=kind, data=data,
         content_type=ctype, filename=filename, request_id=request_id)
