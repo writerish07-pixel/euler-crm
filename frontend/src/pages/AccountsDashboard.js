@@ -11,6 +11,7 @@ import { Card, PageHeader, StatCard, Table, Badge, Button, Portal, Field, Input,
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
 import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
+import TallyPackCheck from "../components/TallyPackCheck";
 import { useAuth } from "../context/AuthContext";
 
 export default function AccountsDashboard() {
@@ -258,6 +259,7 @@ export default function AccountsDashboard() {
               canUploadKinds={canTallyUpload ? ["tally_invoice"] : []}
               title="Documents"
             />
+            <TallyPackCheck leadId={summary.leadId} canUpload={canTallyUpload} showUpload={false} />
             <Link to={`/payments?leadId=${encodeURIComponent(summary.leadId)}`} className="inline-flex items-center gap-1 text-xs text-cobalt mt-3" data-testid="record-payment-link">
               Record payment <ExternalLink size={12} />
             </Link>

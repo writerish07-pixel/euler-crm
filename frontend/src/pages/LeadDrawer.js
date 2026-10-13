@@ -9,6 +9,7 @@ import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileC
 import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
 import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady, B2bGstinField, PrintDealSheetButton } from "../components/LeadDocuments";
+import TallyPackCheck from "../components/TallyPackCheck";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
@@ -2089,6 +2090,15 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           onChanged={onSaved}
         />
       )}
+      {(isOwner || isAccounts || canEditCommercials) && (
+        <TallyPackCheck
+          leadId={lead.leadId}
+          canUpload={isOwner || isAccounts}
+          canCheck={isOwner || isAccounts || canEditCommercials}
+          documents={documents}
+          onChanged={onSaved}
+        />
+      )}
       <p className="text-xs text-ink-soft mb-3" data-testid="delivery-oem-ids-hint">
         Chassis and invoice come from the OEM Sold list, matched on this customer’s unique mobile.
         TL / GM / Owner mark delivered here — Euler fills those numbers when Coulson bills this mobile.
@@ -2391,13 +2401,12 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
         )}
       </div>
       {leadId && (
-        <LeadDocsStrip
+        <TallyPackCheck
           leadId={leadId}
-          kinds={["tally_invoice"]}
-          canUploadKinds={canUploadTally ? ["tally_invoice"] : []}
-          title="Tally GST invoice (print into the physical file)"
+          canUpload={canUploadTally}
           documents={documents}
           onChanged={onDocsChanged}
+          showUpload={false}
         />
       )}
     </Card>
