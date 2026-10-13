@@ -14,7 +14,12 @@ jest.mock("../lib/api", () => ({
   get: (url) => {
     if (String(url) === "/leads" || String(url).indexOf("/leads") === 0) {
       return Promise.resolve([
-        { leadId: "LD26001001", customerName: "Approved Singh", currentStatus: "Contacted", executive: "Amit" },
+        {
+          leadId: "LD26001001", customerName: "Approved Singh", currentStatus: "Contacted",
+          executive: "Amit", needsUpdate: true,
+          updateFlags: [{ code: "kyc", message: "KYC missing: Aadhaar front" }],
+        },
+        { leadId: "LD26001002", customerName: "Ready Ram", currentStatus: "Contacted", executive: "Amit", needsUpdate: false, updateFlags: [] },
       ]);
     }
     if (String(url) === "/masters") {
@@ -77,5 +82,17 @@ test("showroom admin lead register hides New and keeps approved statuses", async
   expect(document.querySelector('[data-testid="filter-New"]')).toBeFalsy();
   expect(document.querySelector('[data-testid="filter-Contacted"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="filter-all"]')).toBeTruthy();
+  await act(async () => { root.unmount(); });
+});
+
+test("showroom admin sees exact update gaps and can filter to those leads", async () => {
+  mockAuth.isShowroomAdmin = true;
+  const { host, root } = await renderLeads();
+  expect(host.textContent).toMatch(/KYC missing: Aadhaar front/);
+  const chip = document.querySelector('[data-testid="filter-needs-update"]');
+  expect(chip).toBeTruthy();
+  await act(async () => { chip.click(); });
+  expect(host.textContent).toMatch(/Approved Singh/);
+  expect(host.textContent).not.toMatch(/Ready Ram/);
   await act(async () => { root.unmount(); });
 });

@@ -62,6 +62,12 @@ export default function ExecutiveDashboard({ teamView = false }) {
         <StatCard label="Follow-ups overdue" value={num(k.followupOverdue)} icon={AlertCircle} tone="text-red-600" />
         <StatCard label="Finance stuck" value={num(k.financeStuck)} icon={Landmark} tone="text-violet-600" />
         <StatCard label="Customer OS (mine)" value={compactInr(k.customerOutstanding)} icon={IndianRupee} tone="text-red-600" />
+        {isTl && (
+          <Link to="/leads?needsUpdate=1" className="block" data-testid="tl-needs-update">
+            <StatCard label="Needs update" value={num(k.needsUpdate)}
+              sub="Docs or entries missing before delivery" icon={AlertCircle} tone="text-amber-700" />
+          </Link>
+        )}
       </div>
 
       <div className="flex flex-wrap gap-2 mt-5">
@@ -69,6 +75,11 @@ export default function ExecutiveDashboard({ teamView = false }) {
           <Plus size={14} /> {isExecutive && !team ? "Request lead" : "New Lead"}
         </Button>
         <Link to="/leads"><Button variant="secondary" data-testid="exec-go-leads"><Users size={14} /> Leads</Button></Link>
+        {isTl && (
+          <Link to="/leads?needsUpdate=1">
+            <Button variant="secondary" data-testid="exec-go-needs-update"><AlertCircle size={14} /> Needs update</Button>
+          </Link>
+        )}
         <Link to="/monthly"><Button variant="secondary" data-testid="exec-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="exec-go-bookings"><ClipboardList size={14} /> Bookings</Button></Link>
         <Link to="/activities"><Button variant="secondary" data-testid="exec-go-activities"><Activity size={14} /> Activities</Button></Link>
@@ -112,6 +123,36 @@ export default function ExecutiveDashboard({ teamView = false }) {
           </div>
         </Card>
       </div>
+
+      {isTl && (
+        <Card className="p-5 mt-6" data-testid="tl-update-queue">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-heading font-bold text-ink">Needs update before delivery</h3>
+            <Link to="/leads?needsUpdate=1" className="text-xs text-cobalt">Open register</Link>
+          </div>
+          <Table
+            rowKey="leadId"
+            empty="Every live file has the docs and entries needed to deliver"
+            columns={[
+              { key: "customerName", label: "Customer", render: (r) => (
+                <div>
+                  <Link to={`/leads?open=${encodeURIComponent(r.leadId)}`} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                  {r.executive ? <div className="text-[11px] text-ink-faint">{r.executive}</div> : null}
+                </div>
+              ) },
+              { key: "status", label: "Status" },
+              { key: "updateSummary", label: "Exact gap", render: (r) => (
+                <div className="space-y-0.5">
+                  {(r.updateFlags || []).map((f) => (
+                    <Badge key={f.code} tone="bg-amber-50 text-amber-900 ring-amber-600/20">{f.message}</Badge>
+                  ))}
+                </div>
+              ) },
+            ]}
+            rows={d.updateQueue || []}
+          />
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
         <Card className="p-5">
