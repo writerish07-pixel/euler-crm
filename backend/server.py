@@ -3801,13 +3801,6 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     query = {}
     if status and status != "all":
         query["currentStatus"] = status
-    # Showroom Admin (tl) works approved / progressed files only — New stays
-    # on Allocation and Approvals, not on their Lead Register.
-    if authmod.is_showroom_admin(user):
-        if query.get("currentStatus") == "New":
-            return []
-        if "currentStatus" not in query:
-            query["currentStatus"] = {"$exists": True, "$nin": ["New", ""]}
     if q:
         query["$or"] = [
             {"customerName": {"$regex": q, "$options": "i"}},

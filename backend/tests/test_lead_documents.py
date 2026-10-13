@@ -477,32 +477,28 @@ async def test_tally_invoice_accepts_zip_kyc_rejects_zip(client, accounts_client
 
 
 @pytest.mark.asyncio
-async def test_showroom_admin_lead_register_hides_new(client, tl_client):
+async def test_showroom_admin_lead_register_includes_new(client, tl_client):
+    """OEM billing / approvals land as New — Showroom Admin must still see them."""
     fresh = await client.post("/api/leads", json={
-        "customerName": "Brand New Enquiry", "mobile": next_mobile(),
+        "customerName": "OEM Billing New", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
     live = await client.post("/api/leads", json={
         "customerName": "Approved Contact", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
     new_id, live_id = fresh.json()["leadId"], live.json()["leadId"]
     await server.db.leads.update_one(
+        {"leadId": new_id}, {"$set": {"oemBillingCreated": True}})
+    await server.db.leads.update_one(
         {"leadId": live_id}, {"$set": {"currentStatus": "Contacted"}})
-    owner_all = (await client.get("/api/leads")).json()
-    owner_ids = {row["leadId"] for row in owner_all}
-    assert new_id in owner_ids
-    assert live_id in owner_ids
     tl_all = (await tl_client.get("/api/leads")).json()
     tl_ids = {row["leadId"] for row in tl_all}
-    assert new_id not in tl_ids
+    assert new_id in tl_ids
     assert live_id in tl_ids
-    assert all(row.get("currentStatus") != "New" for row in tl_all)
-    empty = (await tl_client.get("/api/leads", params={"status": "New"})).json()
-    assert empty == []
+    assert any(row["leadId"] == new_id and row.get("currentStatus") == "New" for row in tl_all)
+    only_new = (await tl_client.get("/api/leads", params={"status": "New"})).json()
+    assert any(row["leadId"] == new_id for row in only_new)
     contacted = (await tl_client.get("/api/leads", params={"status": "Contacted"})).json()
     assert any(row["leadId"] == live_id for row in contacted)
-    one = await tl_client.get(f"/api/leads/{new_id}")
-    assert one.status_code == 200
-    assert one.json()["leadId"] == new_id
 
 
 @pytest.mark.asyncio

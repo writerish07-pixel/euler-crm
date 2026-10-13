@@ -34,9 +34,6 @@ def is_closed_for_update(lead) -> bool:
     acct = str(lead.get("accountStatus") or "Active").strip().lower()
     if lead.get("dealCancelled"):
         return True
-    # Showroom Admin register hides New — flags stay off those rows.
-    if status == "new":
-        return True
     if status in ("delivered", "close won", "closed", "lost"):
         return True
     if acct in ("cancelled", "closed", "archived", "inactive"):

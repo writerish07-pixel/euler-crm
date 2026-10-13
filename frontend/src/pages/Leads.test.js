@@ -76,10 +76,10 @@ test("owner lead register still offers the New status filter", async () => {
   await act(async () => { root.unmount(); });
 });
 
-test("showroom admin lead register hides New and keeps approved statuses", async () => {
+test("showroom admin lead register keeps New so OEM and approved files stay visible", async () => {
   mockAuth.isShowroomAdmin = true;
   const { root } = await renderLeads();
-  expect(document.querySelector('[data-testid="filter-New"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="filter-New"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="filter-Contacted"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="filter-all"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
