@@ -33,6 +33,7 @@ import coulson as coulson_client
 import botspace as wa
 import web_push
 import lead_docs
+import lead_gaps
 import tab_export
 import insurance_mis as ins_mis
 import sept_2026_schemes
@@ -2816,6 +2817,25 @@ async def executive_dashboard(user=Depends(current_user)):
 
     cust_os = ce.round2(sum(ce.num(l.get("customerOutstanding")) for l in mine))
 
+    update_queue = []
+    if role == "tl":
+        kinds_by = await _doc_kinds_by_lead([l.get("leadId") for l in mine])
+        for l in mine:
+            flags = lead_gaps.flags_for_lead(l, kinds=kinds_by.get(l.get("leadId") or "", set()))
+            if not flags:
+                continue
+            update_queue.append({
+                "leadId": l.get("leadId") or "",
+                "customerName": l.get("customerName") or "",
+                "executive": l.get("executive") or "",
+                "kind": "Needs update",
+                "date": "",
+                "status": l.get("currentStatus") or "",
+                "model": l.get("interestedModel") or "",
+                "updateFlags": flags,
+                "updateSummary": lead_gaps.summarize(flags),
+            })
+
     worklist = []
     for l in followup_overdue[:15]:
         worklist.append({
@@ -2878,12 +2898,14 @@ async def executive_dashboard(user=Depends(current_user)):
             "customerOutstanding": cust_os,
             "todayLeads": len([l for l in mine if is_today(l.get("createdDate"))]),
             "activeBookings": len(active_booked),
+            "needsUpdate": len(update_queue),
         },
         "period": vol,
         "funnel": [{"status": k, "count": funnel.get(k, 0)} for k in funnel_order],
         "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
         "worklist": worklist[:25],
+        "updateQueue": update_queue[:40],
         "incentive": incentive,
         "lastUpdated": now_iso(),
     }
@@ -3808,6 +3830,12 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         "assignmentPending": 1, "cancelCount": 1,
         "lastCancelReason": 1, "lastCancelDate": 1,
         "createdDate": 1, "bookingDate": 1, "deliveryDate": 1,
+        "customerType": 1, "gstin": 1, "oemExtraSupportReceived": 1,
+        "exShowroom": 1, "priceStructureSaved": 1, "bookingAmount": 1,
+        "chassisNumber": 1, "invoiceNumber": 1, "dealCancelled": 1,
+        "deliveryStatus": 1, "insurance": 1, "insurerName": 1,
+        "insuranceAgentId": 1, "insuranceArrangedBy": 1,
+        "registration": 1, "invoice": 1, "pdi": 1,
     }).sort("leadId", -1).to_list(cap)
     # An executive works their own leads only. A team lead sees their team.
     # Owner, Sales GM, Showroom Admin and Accounts see all.
@@ -3825,7 +3853,38 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
             ]
     rows = [clean(l) for l in leads]
     rows = await _attach_approval_request_ids(rows)
-    return [_lead_for_viewer(l, user) for l in rows]
+    rows = [_lead_for_viewer(l, user) for l in rows]
+    if authmod.is_showroom_admin(user):
+        rows = await _attach_update_flags(rows)
+    return rows
+
+
+async def _doc_kinds_by_lead(lead_ids: list) -> dict:
+    """leadId → set of document kinds. One query for a register page."""
+    by = {}
+    lids = [lid for lid in lead_ids if lid]
+    if not lids:
+        return by
+    cursor = db[lead_docs.COLLECTION].find(
+        {"leadId": {"$in": lids}, "kind": {"$in": list(lead_gaps.DOC_KINDS)}},
+        {"leadId": 1, "kind": 1, "_id": 0},
+    )
+    async for d in cursor:
+        lid = d.get("leadId")
+        if not lid:
+            continue
+        by.setdefault(lid, set()).add(d.get("kind"))
+    return by
+
+
+async def _attach_update_flags(rows: list) -> list:
+    kinds_by = await _doc_kinds_by_lead([r.get("leadId") for r in rows])
+    for row in rows:
+        flags = lead_gaps.flags_for_lead(row, kinds=kinds_by.get(row.get("leadId") or "", set()))
+        row["updateFlags"] = flags
+        row["needsUpdate"] = bool(flags)
+        row["updateSummary"] = lead_gaps.summarize(flags)
+    return rows
 
 
 async def _attach_approval_request_ids(rows: list) -> list:

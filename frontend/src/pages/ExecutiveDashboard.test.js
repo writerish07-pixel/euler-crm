@@ -12,9 +12,13 @@ jest.mock("../lib/api", () => ({
   get: (url) => {
     if (String(url).indexOf("/executive/dashboard") >= 0) {
       return Promise.resolve({
-        kpis: { myLeadsMtd: 2, myBookingsMtd: 1, myDeliveriesMtd: 0, conversion: 50 },
+        kpis: { myLeadsMtd: 2, myBookingsMtd: 1, myDeliveriesMtd: 0, conversion: 50, needsUpdate: 1 },
         scope: { note: "My pipeline", matchedLeads: 2 },
         worklist: [],
+        updateQueue: [{
+          leadId: "LD26001001", customerName: "Gap Flag", status: "Booked",
+          updateFlags: [{ code: "kyc", message: "KYC missing: PAN" }],
+        }],
         funnel: [],
         sourceMix: [],
         modelMix: [],
@@ -72,10 +76,12 @@ test("executive dashboard has a visible Request lead control", async () => {
 test("TL team pipeline uses New Lead on the same dashboard", async () => {
   mockAuth.isTl = true;
   mockAuth.isExecutive = false;
-  const { root } = await renderDash(true);
+  const { host, root } = await renderDash(true);
   const btn = document.querySelector('[data-testid="exec-new-lead-btn"]');
   expect(btn).toBeTruthy();
   expect(btn.textContent).toMatch(/New Lead/);
+  expect(host.textContent).toMatch(/Needs update before delivery/);
+  expect(host.textContent).toMatch(/KYC missing: PAN/);
   await act(async () => { btn.click(); });
   expect(document.querySelector('[data-testid="new-lead-drawer"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
