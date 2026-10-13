@@ -2,6 +2,7 @@
 import io
 import os
 import sys
+import zipfile
 
 import pytest
 import pytest_asyncio
@@ -429,3 +430,76 @@ def test_tl_kyc_permissions_do_not_need_own_lead():
     assert server.lead_docs.can_upload_kind(exec_u, "deal_sheet", own=True) is True
     assert server.lead_docs.can_upload_kind(exec_u, "deal_sheet", own=False) is False
     assert server.lead_docs.can_read_kind(tl, "deal_sheet", own=False) is True
+
+
+def _zip_bytes(name="tally-bill.pdf"):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(name, b"%PDF-1.4 tally")
+    return buf.getvalue()
+
+
+async def upload_bytes(c, url, kind, raw, name, content_type):
+    return await c.post(
+        url,
+        files={"file": (name, io.BytesIO(raw), content_type)},
+        data={"kind": kind},
+    )
+
+
+@pytest.mark.asyncio
+async def test_tally_invoice_accepts_zip_kyc_rejects_zip(client, accounts_client):
+    r = await client.post("/api/leads", json={
+        "customerName": "Tally Zip", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    lid = r.json()["leadId"]
+    zipped = _zip_bytes()
+    ok = await upload_bytes(
+        accounts_client, f"/api/leads/{lid}/documents", "tally_invoice",
+        zipped, "bills.zip", "application/zip")
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["contentType"] == "application/zip"
+    assert ok.json()["filename"].endswith(".zip")
+    docs = (await accounts_client.get(f"/api/leads/{lid}/documents")).json()
+    tally = [d for d in docs if d["kind"] == "tally_invoice"]
+    assert len(tally) == 1
+    raw = await accounts_client.get(f"/api/documents/{tally[0]['documentId']}/file")
+    assert raw.status_code == 200
+    assert raw.content[:2] == b"PK"
+    denied = await upload_bytes(
+        client, f"/api/leads/{lid}/documents", "kyc_pan",
+        zipped, "kyc.zip", "application/zip")
+    assert denied.status_code == 422, denied.text
+    fake = await upload_bytes(
+        accounts_client, f"/api/leads/{lid}/documents", "tally_invoice",
+        b"not-a-zip", "bills.zip", "application/zip")
+    assert fake.status_code == 422, fake.text
+
+
+@pytest.mark.asyncio
+async def test_showroom_admin_lead_register_hides_new(client, tl_client):
+    fresh = await client.post("/api/leads", json={
+        "customerName": "Brand New Enquiry", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    live = await client.post("/api/leads", json={
+        "customerName": "Approved Contact", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    new_id, live_id = fresh.json()["leadId"], live.json()["leadId"]
+    await server.db.leads.update_one(
+        {"leadId": live_id}, {"$set": {"currentStatus": "Contacted"}})
+    owner_all = (await client.get("/api/leads")).json()
+    owner_ids = {row["leadId"] for row in owner_all}
+    assert new_id in owner_ids
+    assert live_id in owner_ids
+    tl_all = (await tl_client.get("/api/leads")).json()
+    tl_ids = {row["leadId"] for row in tl_all}
+    assert new_id not in tl_ids
+    assert live_id in tl_ids
+    assert all(row.get("currentStatus") != "New" for row in tl_all)
+    empty = (await tl_client.get("/api/leads", params={"status": "New"})).json()
+    assert empty == []
+    contacted = (await tl_client.get("/api/leads", params={"status": "Contacted"})).json()
+    assert any(row["leadId"] == live_id for row in contacted)
+    one = await tl_client.get(f"/api/leads/{new_id}")
+    assert one.status_code == 200
+    assert one.json()["leadId"] == new_id

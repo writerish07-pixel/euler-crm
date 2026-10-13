@@ -18,7 +18,7 @@ import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
 
 export default function Leads() {
-  const { isField, isExecutive } = useAuth();
+  const { isField, isExecutive, isShowroomAdmin } = useAuth();
   const [leads, setLeads] = useState([]);
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
@@ -148,7 +148,7 @@ export default function Leads() {
 
       <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="flex gap-1 overflow-x-auto bg-white rounded-lg p-1 border border-line shadow-card scrollbar-thin -mx-1 px-1 sm:mx-0 sm:flex-wrap">
-          {STATUS_FILTERS.map((s) => (
+          {(isShowroomAdmin ? STATUS_FILTERS.filter((s) => s !== "New") : STATUS_FILTERS).map((s) => (
             <button
               key={s}
               data-testid={`filter-${s}`}

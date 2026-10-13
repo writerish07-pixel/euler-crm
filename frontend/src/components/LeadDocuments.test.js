@@ -3,7 +3,7 @@
  */
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock } from "./LeadDocuments";
+import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, acceptForKind, hintForKind } from "./LeadDocuments";
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -53,4 +53,11 @@ test("deal sheet block offers print then upload", async () => {
   expect(onPrint).toHaveBeenCalled();
   await act(async () => { root.unmount(); });
   host.remove();
+});
+
+test("tally invoice slot accepts a ZIP; KYC does not", () => {
+  expect(acceptForKind("tally_invoice")).toMatch(/zip/i);
+  expect(hintForKind("tally_invoice")).toMatch(/ZIP/);
+  expect(acceptForKind("kyc_pan")).not.toMatch(/zip/i);
+  expect(hintForKind("kyc_pan")).toMatch(/PDF/);
 });

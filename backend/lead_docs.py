@@ -18,7 +18,16 @@ from fastapi.responses import StreamingResponse
 import auth as authmod
 
 MAX_BYTES = 5 * 1024 * 1024
+# Zip of Tally bills stays under Mongo's 16 MB BSON document limit.
+ZIP_MAX_BYTES = 12 * 1024 * 1024
 COLLECTION = "lead_documents"
+TALLY_KIND = "tally_invoice"
+ZIP_TYPES = {
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/x-zip",
+}
+ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 KINDS = {
     "kyc_aadhaar_front": {"group": "kyc", "label": "Aadhaar front", "unique": True},
@@ -57,6 +66,7 @@ EXT_TYPES = {
     ".webp": "image/webp", ".heic": "image/heic", ".heif": "image/heif",
     ".pdf": "application/pdf",
 }
+ZIP_EXT = ".zip"
 
 _META_PROJ = {"data": 0}
 
@@ -146,24 +156,47 @@ def public_row(doc) -> dict:
     return row
 
 
-def _content_type(upload: UploadFile) -> str:
+def _is_zip_name(name: str) -> bool:
+    return str(name or "").lower().endswith(ZIP_EXT)
+
+
+def _looks_like_zip(raw: str, name: str) -> bool:
+    return raw in ZIP_TYPES or _is_zip_name(name)
+
+
+def _content_type(upload: UploadFile, *, kind: str = "") -> str:
     raw = (upload.content_type or "").split(";")[0].strip().lower()
     name = (upload.filename or "").lower()
+    if kind == TALLY_KIND and _looks_like_zip(raw, name):
+        return "application/zip"
     if raw in ALLOWED_TYPES:
         return "image/jpeg" if raw == "image/jpg" else raw
     for ext, ctype in EXT_TYPES.items():
         if name.endswith(ext):
             return ctype
+    if kind == TALLY_KIND:
+        raise HTTPException(422, "Upload a photo, PDF or ZIP of the Tally GST invoice.")
     raise HTTPException(422, "Upload a photo or PDF (JPEG, PNG, WebP, HEIC, PDF).")
 
 
-async def read_upload(upload: UploadFile) -> tuple[bytes, str, str]:
-    ctype = _content_type(upload)
+def _max_bytes(ctype: str, kind: str) -> int:
+    if kind == TALLY_KIND and ctype == "application/zip":
+        return ZIP_MAX_BYTES
+    return MAX_BYTES
+
+
+async def read_upload(upload: UploadFile, *, kind: str = "") -> tuple[bytes, str, str]:
+    ctype = _content_type(upload, kind=kind)
     data = await upload.read()
     if not data:
         raise HTTPException(422, "The file is empty.")
-    if len(data) > MAX_BYTES:
+    limit = _max_bytes(ctype, kind)
+    if len(data) > limit:
+        if ctype == "application/zip":
+            raise HTTPException(422, "ZIP is over 12 MB. Send a smaller archive.")
         raise HTTPException(422, "File is over 5 MB. Compress the photo or send a smaller PDF.")
+    if ctype == "application/zip" and not data.startswith(ZIP_MAGIC):
+        raise HTTPException(422, "That file is not a ZIP. Export the Tally bills as a .zip.")
     filename = (upload.filename or "document").strip() or "document"
     filename = re.sub(r"[^\w.\-]+", "_", filename)[:120]
     return data, ctype, filename

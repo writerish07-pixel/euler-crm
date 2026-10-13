@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Camera, FileUp, Download, Trash2, FileText, Image as ImageIcon, Printer } from "lucide-react";
+import { Camera, FileUp, Download, Trash2, FileText, Image as ImageIcon, Printer, Archive } from "lucide-react";
 import { toast } from "sonner";
 import { api, del, get, put, uploadFile, apiErrorMessage } from "../lib/api";
 
@@ -17,9 +17,25 @@ export const DOC_LABELS = {
 };
 
 const ACCEPT = "image/*,application/pdf";
+const TALLY_ACCEPT = "image/*,application/pdf,.zip,application/zip,application/x-zip-compressed";
+const TALLY_KIND = "tally_invoice";
+
+export function acceptForKind(kind) {
+  return kind === TALLY_KIND ? TALLY_ACCEPT : ACCEPT;
+}
+
+export function hintForKind(kind) {
+  return kind === TALLY_KIND ? "Photo, PDF or ZIP, max 12 MB" : "Photo or PDF, max 5 MB";
+}
+
+function isZipDoc(doc) {
+  const ctype = String(doc?.contentType || "");
+  const name = String(doc?.filename || "");
+  return ctype.includes("zip") || name.toLowerCase().endsWith(".zip");
+}
 
 /** Phone rear camera plus a separate file picker — iOS `capture` forces camera-only. */
-export function CameraFilePick({ onFile, disabled, testId }) {
+export function CameraFilePick({ onFile, disabled, testId, accept = ACCEPT }) {
   const takeId = `${testId || "doc"}-camera`;
   const fileId = `${testId || "doc"}-file`;
   const onChange = (e) => {
@@ -30,7 +46,7 @@ export function CameraFilePick({ onFile, disabled, testId }) {
   return (
     <div className="flex flex-wrap gap-1.5">
       <input id={takeId} type="file" accept="image/*" capture="environment" className="sr-only" disabled={disabled} onChange={onChange} />
-      <input id={fileId} type="file" accept={ACCEPT} className="sr-only" disabled={disabled} onChange={onChange} />
+      <input id={fileId} type="file" accept={accept} className="sr-only" disabled={disabled} onChange={onChange} />
       <label htmlFor={takeId} data-testid={takeId}
         className={`inline-flex items-center gap-1 rounded-lg ring-1 ring-inset ring-line px-2 py-1 text-[11px] font-medium ${disabled ? "opacity-50 pointer-events-none" : "bg-white text-ink hover:bg-zinc-50 cursor-pointer"}`}>
         <Camera size={12} /> Camera
@@ -74,7 +90,8 @@ function DocThumb({ doc }) {
   if (url) return <img src={url} alt={doc.filename || "scan"} className="h-16 w-16 object-cover rounded-md ring-1 ring-line" />;
   return (
     <div className="h-16 w-16 rounded-md bg-zinc-50 ring-1 ring-line grid place-items-center text-ink-faint">
-      {(doc.contentType || "").includes("pdf") ? <FileText size={18} /> : <ImageIcon size={18} />}
+      {isZipDoc(doc) ? <Archive size={18} />
+        : (doc.contentType || "").includes("pdf") ? <FileText size={18} /> : <ImageIcon size={18} />}
     </div>
   );
 }
@@ -117,9 +134,9 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
       )}
       <div className="min-w-0 flex-1">
         <div className="text-xs font-semibold text-ink">{label}</div>
-        <div className="text-[11px] text-ink-faint truncate">{doc?.filename || localFile?.name || "Photo or PDF, max 5 MB"}</div>
+        <div className="text-[11px] text-ink-faint truncate">{doc?.filename || localFile?.name || hintForKind(kind)}</div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {canUpload && <CameraFilePick onFile={save} disabled={busy} testId={`doc-${kind}`} />}
+          {canUpload && <CameraFilePick onFile={save} disabled={busy} testId={`doc-${kind}`} accept={acceptForKind(kind)} />}
           {doc && canDownload && (
             <button type="button" className="inline-flex items-center gap-1 text-[11px] text-cobalt" data-testid={`doc-dl-${kind}`}
               onClick={() => openDocumentFile(doc.documentId, doc.filename).catch(() => toast.error("Download failed"))}>
