@@ -33,6 +33,7 @@ import coulson as coulson_client
 import botspace as wa
 import web_push
 import lead_docs
+import tally_pack
 import tab_export
 import insurance_mis as ins_mis
 import sept_2026_schemes
@@ -5341,6 +5342,11 @@ async def upload_lead_document(lead_id: str, kind: str = Form(...),
         content_type=ctype, filename=filename, lead_id=lead_id)
     await write_audit(act, "upload", "document", leadId=lead_id,
                       new={"kind": kind, "documentId": row.get("documentId")})
+    if kind == lead_docs.TALLY_KIND and str((user or {}).get("role") or "") in authmod.MONEY_ROLES:
+        try:
+            await _run_tally_pack_check(lead_id, user)
+        except Exception:
+            logging.exception("Tally pack check after upload failed for %s", lead_id)
     return row
 
 
@@ -5403,6 +5409,60 @@ async def delete_document(document_id: str, user=Depends(current_user), act=Depe
     await write_audit(act, "delete", "document", leadId=meta.get("leadId") or "",
                       old={"kind": meta.get("kind"), "documentId": document_id})
     return result
+
+
+async def _load_tally_pack_files(lead_id: str) -> list:
+    doc = await db[lead_docs.COLLECTION].find_one(
+        {"leadId": lead_id, "kind": lead_docs.TALLY_KIND})
+    if not doc:
+        return []
+    raw = doc.get("data") or b""
+    try:
+        from bson.binary import Binary
+        if isinstance(raw, Binary):
+            raw = bytes(raw)
+    except Exception:
+        raw = bytes(raw or b"")
+    return tally_pack.unpack(raw, doc.get("filename") or "", doc.get("contentType") or "")
+
+
+async def _run_tally_pack_check(lead_id: str, user=None) -> dict:
+    lead = await get_lead_or_404(lead_id)
+    files = await _load_tally_pack_files(lead_id)
+    pays = [clean(p) for p in await db.payments.find({"leadId": lead_id}).to_list(400)]
+    summary = ce.build_delivery_billing_summary(lead)
+    kinds = set()
+    async for d in db[lead_docs.COLLECTION].find({"leadId": lead_id}, {"kind": 1, "_id": 0}):
+        if d.get("kind"):
+            kinds.add(d["kind"])
+    result = tally_pack.run_check(
+        lead=lead, files=files, payments=pays, summary=summary, kinds=kinds)
+    result["checkedBy"] = (user or {}).get("email") or ""
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {"tallyPackCheck": result}})
+    return result
+
+
+@api.get("/leads/{lead_id}/tally-pack")
+async def get_tally_pack(lead_id: str, user=Depends(current_user)):
+    lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, user)
+    if not lead_docs.can_read_kind(user, lead_docs.TALLY_KIND, own=_is_own_lead(lead, user)):
+        raise HTTPException(403, "You cannot open the Tally pack for this file.")
+    stored = lead.get("tallyPackCheck") or {}
+    return {"leadId": lead_id, **stored} if stored else {"leadId": lead_id, "ok": None, "flags": []}
+
+
+@api.post("/leads/{lead_id}/tally-pack/check", dependencies=[Depends(money_desk_only)])
+async def check_tally_pack(lead_id: str, user=Depends(current_user), act=Depends(actor)):
+    lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, user)
+    try:
+        result = await _run_tally_pack_check(lead_id, user)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await write_audit(act, "check", "tally-pack", leadId=lead_id,
+                      new={"ok": result.get("ok"), "flagCount": result.get("flagCount")})
+    return {"leadId": lead_id, **result}
 
 
 # System/calculated fields a lead document carries that must never be settable
@@ -12846,6 +12906,8 @@ CRITICAL_ENDPOINTS = [
     ("PUT", "/api/leads/{lead_id}/delivery"),
     ("GET", "/api/leads/{lead_id}/oem-sold"),
     ("GET", "/api/leads/{lead_id}/billing-summary"),
+    ("GET", "/api/leads/{lead_id}/tally-pack"),
+    ("POST", "/api/leads/{lead_id}/tally-pack/check"),
     ("GET", "/api/payments"), ("GET", "/api/oem-extra-support"),
     ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),

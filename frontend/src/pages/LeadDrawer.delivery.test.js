@@ -23,6 +23,7 @@ jest.mock("../components/LeadDocuments", () => ({
   LeadDocsStrip: () => null,
   kycKinds: [],
 }));
+jest.mock("../components/TallyPackCheck", () => () => null);
 
 import { DeliveryTab } from "./LeadDrawer";
 
