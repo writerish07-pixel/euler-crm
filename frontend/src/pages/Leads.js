@@ -179,7 +179,7 @@ export default function Leads() {
               Needs update{updateN ? ` (${updateN})` : ""}
             </button>
           )}
-          {(isShowroomAdmin ? STATUS_FILTERS.filter((s) => s !== "New") : STATUS_FILTERS).map((s) => (
+          {STATUS_FILTERS.map((s) => (
             <button
               key={s}
               data-testid={`filter-${s}`}

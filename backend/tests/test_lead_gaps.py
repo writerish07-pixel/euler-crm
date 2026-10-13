@@ -10,10 +10,24 @@ os.environ.setdefault("JWT_SECRET", "lead-gaps-secret-32chars!!xxxx")
 import lead_gaps  # noqa: E402
 
 
-def test_new_and_delivered_are_not_flagged():
-    assert lead_gaps.flags_for_lead({"currentStatus": "New", "executive": ""}) == []
+def test_delivered_and_cancelled_are_not_flagged():
     assert lead_gaps.flags_for_lead({"currentStatus": "Delivered", "executive": ""}) == []
     assert lead_gaps.flags_for_lead({"currentStatus": "Contacted", "dealCancelled": True}) == []
+
+
+def test_new_oem_or_approved_file_is_flagged():
+    flags = lead_gaps.flags_for_lead({
+        "currentStatus": "New",
+        "accountStatus": "Active",
+        "oemBillingCreated": True,
+        "executive": "",
+        "interestedModel": "Turbo Max",
+        "customerType": "Individual",
+        "exShowroom": 0,
+    }, kinds=set())
+    codes = [f["code"] for f in flags]
+    assert "executive" in codes
+    assert "kyc" in codes
 
 
 def test_open_lead_lists_each_missing_item():
