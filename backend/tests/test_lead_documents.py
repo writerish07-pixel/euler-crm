@@ -503,3 +503,27 @@ async def test_showroom_admin_lead_register_hides_new(client, tl_client):
     one = await tl_client.get(f"/api/leads/{new_id}")
     assert one.status_code == 200
     assert one.json()["leadId"] == new_id
+
+
+@pytest.mark.asyncio
+async def test_showroom_admin_register_flags_exact_delivery_gaps(client, tl_client):
+    r = await client.post("/api/leads", json={
+        "customerName": "Gap Flag", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    lid = r.json()["leadId"]
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "currentStatus": "Booked", "bookingDate": "2026-10-01",
+        "exShowroom": 0, "customerOutstanding": 2500,
+    }})
+    owner = next(row for row in (await client.get("/api/leads")).json() if row["leadId"] == lid)
+    assert "needsUpdate" not in owner
+    tl_row = next(row for row in (await tl_client.get("/api/leads")).json() if row["leadId"] == lid)
+    assert tl_row["needsUpdate"] is True
+    messages = [f["message"] for f in tl_row["updateFlags"]]
+    assert any("KYC missing" in m for m in messages)
+    assert any("Deal sheet" in m for m in messages)
+    assert any("Price Structure" in m for m in messages)
+    assert any("outstanding" in m.lower() for m in messages)
+    dash = (await tl_client.get("/api/executive/dashboard")).json()
+    assert dash["kpis"]["needsUpdate"] >= 1
+    assert any(q["leadId"] == lid for q in dash.get("updateQueue") or [])
