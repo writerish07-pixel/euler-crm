@@ -84,24 +84,6 @@ async def test_executive_cannot_open_agents_desk(client):
 
 
 @pytest.mark.asyncio
-async def test_list_does_not_scan(client):
-    await server.db.leads.insert_one({
-        "leadId": "LD26AGNOSCAN", "customerName": "No Scan", "mobile": "9811100099",
-        "interestedModel": "Turbo Max", "currentStatus": "New", "accountStatus": "Active",
-        "nextFollowupDate": "2020-01-01",
-    })
-    r = await client.get("/api/agents/suggestions")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["suggestions"] == []
-    assert body["lastScanAt"] == ""
-    assert await server.db["system"].find_one({"_id": agentmod.SCAN_META}) is None
-    counted = await client.get("/api/agents/suggestions", params={"countOnly": True})
-    assert counted.status_code == 200
-    assert counted.json()["suggestions"] == []
-
-
-@pytest.mark.asyncio
 async def test_document_and_followup_scan(client):
     await server.db.leads.insert_one({
         "leadId": "LD26AGDOC1", "customerName": "Stale Lead", "mobile": "9811100001",

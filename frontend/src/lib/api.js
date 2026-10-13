@@ -109,8 +109,7 @@ export function isBulkMutationPath(url) {
     || p.indexOf("/leads/import/") === 0
     || p.indexOf("/insurance/mis/") === 0
     || p.indexOf("/integrations/gsheets/backfill") === 0
-    ||     p.indexOf("/integrations/coulson/sync") === 0
-    || p === "/agents/scan"
+    || p.indexOf("/integrations/coulson/sync") === 0
     || p === "/admin/reset-transactions"
   );
 }

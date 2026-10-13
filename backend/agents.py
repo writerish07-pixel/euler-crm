@@ -195,16 +195,12 @@ async def _upsert(db, row: dict):
     return sid, "created"
 
 
-async def _close_stale(db, keep_fps, complete_agents):
-    """Drop open cards only for agents that scanned their full population this run."""
-    if not complete_agents:
-        return 0
+async def _close_stale(db, keep_fps):
+    """Open suggestions whose fingerprint was not re-emitted this scan are done."""
     open_rows = [r async for r in db[COLLECTION].find({"status": "open"})]
     closed = 0
     now = now_iso()
     for row in open_rows:
-        if row.get("agent") not in complete_agents:
-            continue
         if row.get("fingerprint") in keep_fps:
             continue
         await db[COLLECTION].update_one(
@@ -245,51 +241,15 @@ def _is_booked(lead) -> bool:
 # --- scanners -----------------------------------------------------------------
 
 
-_DOC_META = {"leadId": 1, "kind": 1, "_id": 0}
-_LIVE_LEAD_PROJ = {
-    "leadId": 1, "customerName": 1, "customerType": 1, "gstin": 1,
-    "currentStatus": 1, "accountStatus": 1, "dealCancelled": 1,
-    "deliveryStatus": 1, "bookingDate": 1, "bookingAmount": 1,
-    "oemExtraSupportReceived": 1, "executive": 1, "interestedModel": 1,
-    "nextFollowupDate": 1, "nextFollowup": 1, "_id": 0,
-}
-_DOC_KINDS_SCAN = (
-    *lead_docs.KYC_INDIVIDUAL, *lead_docs.KYC_B2B, lead_docs.EXTRA_SUPPORT_KIND,
-    *DELIVERY_DOC_KINDS,
-)
-PDF_SCAN_CAP = 40
-
-
 async def scan_documents(db) -> list:
-    """One leads pass + one docs pass. Never N queries per lead (that 25s-timeouted)."""
-    live = []
-    async for lead in db.leads.find({}, _LIVE_LEAD_PROJ):
+    out = []
+    async for lead in db.leads.find({}):
         if _dead_lead(lead) or _is_delivered(lead):
             continue
-        if lead.get("leadId"):
-            live.append(lead)
-    if not live:
-        return [], True
-    ids = [l["leadId"] for l in live]
-    have = {}
-    async for d in db[lead_docs.COLLECTION].find(
-            {"leadId": {"$in": ids}, "kind": {"$in": list(_DOC_KINDS_SCAN)}}, _DOC_META):
-        have.setdefault(d.get("leadId"), set()).add(d.get("kind"))
-    out = []
-    for lead in live:
-        lid = lead["leadId"]
-        kinds_have = have.get(lid) or set()
-        missing = [
-            k for k in lead_docs.required_kyc_kinds(lead.get("customerType") or "Individual")
-            if k not in kinds_have]
-        if (lead_docs.normalize_customer_type(lead.get("customerType")) == "B2B"
-                and not str(lead.get("gstin") or "").strip()
-                and "kyc_gst" not in kinds_have
-                and "gstin" not in missing):
-            missing.append("gstin")
-        if lead_docs.extra_support_required(lead.get("oemExtraSupportReceived")):
-            if lead_docs.EXTRA_SUPPORT_KIND not in kinds_have:
-                missing.append(lead_docs.EXTRA_SUPPORT_KIND)
+        lid = lead.get("leadId") or ""
+        if not lid:
+            continue
+        missing = await lead_docs.missing_related_docs(db, lead=lead, require_kyc=True)
         if missing:
             labels = lead_docs.missing_doc_labels(missing)
             out.append({
@@ -303,7 +263,14 @@ async def scan_documents(db) -> list:
                 "payload": {"kinds": missing, "stage": "kyc"},
             })
         if _is_booked(lead):
-            need = [k for k in DELIVERY_DOC_KINDS if k not in kinds_have]
+            have = {
+                d.get("kind")
+                async for d in db[lead_docs.COLLECTION].find(
+                    {"leadId": lid, "kind": {"$in": list(DELIVERY_DOC_KINDS)}},
+                    {"kind": 1},
+                )
+            }
+            need = [k for k in DELIVERY_DOC_KINDS if k not in have]
             if need:
                 labels = lead_docs.missing_doc_labels(need)
                 out.append({
@@ -316,7 +283,7 @@ async def scan_documents(db) -> list:
                     "detail": f"{lead.get('customerName') or ''} · booked, papers not on file",
                     "payload": {"kinds": need, "stage": "delivery"},
                 })
-    return out, True
+    return out
 
 
 def _doc_bytes(doc) -> bytes:
@@ -327,25 +294,18 @@ def _doc_bytes(doc) -> bytes:
         return b""
 
 
-async def scan_pdf_rto_insurance(db) -> tuple:
-    """Compare insurance / RTO PDF amounts to Price Structure. Never Scheme.
-
-    Metadata first (no binaries). Fetch at most PDF_SCAN_CAP files, one at a time.
-    """
+async def scan_pdf_rto_insurance(db) -> list:
+    """Compare insurance / RTO PDF amounts to Price Structure. Never Scheme."""
     out = []
-    metas = [d async for d in db[lead_docs.COLLECTION].find(
-        {"kind": {"$in": list(DELIVERY_DOC_KINDS)}},
-        {"data": 0},
-    ).sort("uploadedAt", -1)]
-    complete = len(metas) <= PDF_SCAN_CAP
-    metas = metas[:PDF_SCAN_CAP]
+    docs = [d async for d in db[lead_docs.COLLECTION].find(
+        {"kind": {"$in": list(DELIVERY_DOC_KINDS)}})]
     by_lead = {}
-    for d in metas:
+    for d in docs:
         lid = d.get("leadId") or ""
         if lid:
             by_lead.setdefault(lid, []).append(d)
     if not by_lead:
-        return out, True
+        return out
     leads = {
         l["leadId"]: l
         async for l in db.leads.find({"leadId": {"$in": list(by_lead)}})
@@ -360,16 +320,9 @@ async def scan_pdf_rto_insurance(db) -> tuple:
         lead_ch = oem_sync._norm_chassis(lead.get("chassisNumber"))
         scheme_ins = ce.round2(ce.num(lead.get("insuranceBenefit")))
         scheme_rto = ce.round2(ce.num(lead.get("rtoBenefit") or lead.get("rtoInsuranceBenefit")))
-        for meta in files:
-            kind = meta.get("kind")
-            ctype = str(meta.get("contentType") or "")
-            if ctype.startswith("image/"):
-                text = ""
-            else:
-                full = await db[lead_docs.COLLECTION].find_one(
-                    {"documentId": meta.get("documentId")},
-                    {"data": 1, "contentType": 1, "kind": 1})
-                text = pdf_extract.pdf_text(_doc_bytes(full), ctype)
+        for doc in files:
+            kind = doc.get("kind")
+            text = pdf_extract.pdf_text(_doc_bytes(doc), doc.get("contentType") or "")
             if len((text or "").strip()) < 8:
                 out.append({
                     "agent": AGENT_PDF,
@@ -452,14 +405,14 @@ async def scan_pdf_rto_insurance(db) -> tuple:
                         "detail": "Do not stamp the wrong unit. Open the lead and match by eye.",
                         "payload": {"pdfChassis": ch, "leadChassis": lead_ch, "kind": kind},
                     })
-    return out, complete
+    return out
 
 
-async def scan_oem_match(db) -> tuple:
+async def scan_oem_match(db) -> list:
     sold = [r async for r in db.oem_sold.find({})]
     leads = [l async for l in db.leads.find({})]
     if not sold:
-        return [], True
+        return []
     classified = oem_sync.classify_oem_billing(sold, leads)
     live = [l for l in leads if not _dead_lead(l)]
     out = []
@@ -510,14 +463,13 @@ async def scan_oem_match(db) -> tuple:
                 "candidates": candidates[:5],
             },
         })
-    return out, True
+    return out
 
 
-async def scan_oem_settlement(db) -> tuple:
+async def scan_oem_settlement(db) -> list:
     rows = await oem_claims.list_claims(db, unmatched_only=True)
     out = []
-    pool = rows or []
-    for row in pool[:60]:
+    for row in (rows or [])[:60]:
         num = str(row.get("claimNumber") or row.get("oemClaimNumber") or "").strip()
         if not num:
             continue
@@ -535,13 +487,13 @@ async def scan_oem_settlement(db) -> tuple:
                 "acknowledgeOnly": True,
             },
         })
-    return out, len(pool) <= 60
+    return out
 
 
-async def scan_coulson(db) -> tuple:
+async def scan_coulson(db) -> list:
     doc = await db["system"].find_one({"_id": "coulson"}) or {}
     if not doc:
-        return [], True
+        return []
     expired = oem_sync.session_expired(doc)
     has_session = bool(oem_sync.session_from_doc(doc))
     user, pw, _src = await oem_sync.resolve_credentials(db)
@@ -556,7 +508,7 @@ async def scan_coulson(db) -> tuple:
             if when:
                 hours = (when - datetime.now(timezone.utc)).total_seconds() / 3600
                 if hours > 12:
-                    return [], True
+                    return []
                 return [{
                     "agent": AGENT_COULSON,
                     "fingerprint": fingerprint(AGENT_COULSON, "expiring"),
@@ -569,8 +521,8 @@ async def scan_coulson(db) -> tuple:
                         "If Euler refuses this server, paste coulson_auth in Settings."
                     ),
                     "payload": {"action": "renew_sync", "sessionExpiresAt": exp},
-                }], True
-        return [], True
+                }]
+        return []
     if expired or (configured and not has_session):
         return [{
             "agent": AGENT_COULSON,
@@ -585,21 +537,14 @@ async def scan_coulson(db) -> tuple:
                 "If renew fails, paste localStorage coulson_auth."
             ),
             "payload": {"action": "renew_sync", "sessionExpired": True},
-        }], True
-    return [], True
+        }]
+    return []
 
 
-_FOLLOWUP_STATUSES = ("New", "Contacted", "Follow-up", "Hot", "In Progress", "")
-
-
-async def scan_followup(db) -> tuple:
+async def scan_followup(db) -> list:
     out = []
     today_s = today()
-    async for lead in db.leads.find(
-            {"accountStatus": {"$nin": ["Cancelled", "Inactive", "Archived"]},
-             "dealCancelled": {"$ne": True},
-             "currentStatus": {"$in": list(_FOLLOWUP_STATUSES) + ["New"]}},
-            _LIVE_LEAD_PROJ):
+    async for lead in db.leads.find({}):
         if len(out) >= 80:
             break
         if _dead_lead(lead) or _is_delivered(lead) or _is_booked(lead):
@@ -634,18 +579,14 @@ async def scan_followup(db) -> tuple:
                 ),
             },
         })
-    return out, True
+    return out
 
 
-async def scan_tally_prep(db) -> tuple:
+async def scan_tally_prep(db) -> list:
     out = []
-    async for lead in db.leads.find({
-            "$or": [
-                {"deliveryStatus": "Delivered"},
-                {"currentStatus": "Delivered"},
-            ]}).sort("deliveryDate", -1):
+    async for lead in db.leads.find({}).sort("deliveryDate", -1):
         if len(out) >= 40:
-            return out, False
+            break
         if not _is_delivered(lead):
             continue
         if _dead_lead(lead) and str(lead.get("currentStatus") or "").lower() != "delivered":
@@ -700,18 +641,8 @@ async def scan_tally_prep(db) -> tuple:
                 "hadStoredSummary": bool(stored),
             },
         })
-    return out, True
+    return out
 
-
-SCANNER_AGENTS = {
-    "scan_documents": {AGENT_DOCUMENT},
-    "scan_pdf_rto_insurance": {AGENT_PDF, AGENT_PDF_CHASSIS},
-    "scan_oem_match": {AGENT_OEM_MATCH},
-    "scan_oem_settlement": {AGENT_OEM_SETTLEMENT},
-    "scan_coulson": {AGENT_COULSON},
-    "scan_followup": {AGENT_FOLLOWUP},
-    "scan_tally_prep": {AGENT_TALLY},
-}
 
 SCANNERS = (
     scan_documents,
@@ -728,20 +659,13 @@ async def run_scan(db) -> dict:
     created = updated = skipped = 0
     keep = set()
     counts = {a: 0 for a in AGENTS}
-    complete_agents = set()
     for fn in SCANNERS:
         try:
-            got = await fn(db)
+            rows = await fn(db)
         except Exception:
             log.exception("agent scan %s failed", fn.__name__)
             continue
-        if isinstance(got, tuple):
-            rows, complete = got[0], bool(got[1])
-        else:
-            rows, complete = got, False
-        if complete:
-            complete_agents |= SCANNER_AGENTS.get(fn.__name__, set())
-        for row in rows or []:
+        for row in rows:
             keep.add(row["fingerprint"])
             counts[row["agent"]] = counts.get(row["agent"], 0) + 1
             _sid, action = await _upsert(db, row)
@@ -751,7 +675,7 @@ async def run_scan(db) -> dict:
                 updated += 1
             else:
                 skipped += 1
-    closed = await _close_stale(db, keep, complete_agents)
+    closed = await _close_stale(db, keep)
     open_n = await db[COLLECTION].count_documents({"status": "open"})
     meta = {
         "_id": SCAN_META,
