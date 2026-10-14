@@ -489,6 +489,7 @@ def build_router(db):
                "passwordHash": hash_password(pw),
                "passwordPlain": pw,
                "name": name, "role": role, "createdAt": datetime.now(timezone.utc).isoformat()}
+        await _clear_deleted_user(db, email=email, login_id=login_id)
         await db.users.insert_one(doc)
         return _owner_user_row(doc)
 
@@ -543,6 +544,8 @@ def build_router(db):
             owners = await db.users.count_documents({"role": "owner"})
             if owners <= 1:
                 raise HTTPException(400, "Cannot delete the last owner")
+        if target:
+            await _remember_deleted_user(db, target)
         await db.users.delete_one({"userId": user_id})
         return {"ok": True}
 
@@ -558,6 +561,64 @@ def build_router(db):
     router.oem_claim_desk_only = oem_claim_desk_only
     router.oem_claim_sync_only = oem_claim_sync_only
     return router
+
+
+DELETED_USERS = "deleted_users"
+
+
+def _tombstone_keys(row) -> list:
+    keys = []
+    email = str((row or {}).get("email") or "").strip().lower()
+    if email:
+        keys.append(email)
+    login = norm_login_id((row or {}).get("loginId") or "")
+    if login:
+        keys.append(f"login:{login}")
+    uid = str((row or {}).get("userId") or "").strip()
+    if uid:
+        keys.append(f"user:{uid}")
+    return keys
+
+
+async def _remember_deleted_user(db, row):
+    now = datetime.now(timezone.utc).isoformat()
+    for key in _tombstone_keys(row):
+        await db[DELETED_USERS].update_one(
+            {"key": key},
+            {"$set": {
+                "key": key,
+                "email": str((row or {}).get("email") or "").strip().lower(),
+                "loginId": (row or {}).get("loginId") or "",
+                "userId": (row or {}).get("userId") or "",
+                "deletedAt": now,
+            }},
+            upsert=True,
+        )
+
+
+async def _clear_deleted_user(db, *, email="", login_id=""):
+    keys = []
+    em = str(email or "").strip().lower()
+    if em:
+        keys.append(em)
+    norm = norm_login_id(login_id)
+    if norm:
+        keys.append(f"login:{norm}")
+    if keys:
+        await db[DELETED_USERS].delete_many({"key": {"$in": keys}})
+
+
+async def _is_deleted_account(db, *, email="", login_id=""):
+    keys = []
+    em = str(email or "").strip().lower()
+    if em:
+        keys.append(em)
+    norm = norm_login_id(login_id)
+    if norm:
+        keys.append(f"login:{norm}")
+    if not keys:
+        return False
+    return bool(await db[DELETED_USERS].find_one({"key": {"$in": keys}}))
 
 
 def _reset_marker(pw: str) -> str:
@@ -622,13 +683,16 @@ async def seed_users(db):
     owner_pw = os.environ.get("OWNER_PASSWORD", "euler@123")
     existing = await db.users.find_one({"email": owner_email})
     if not existing:
-        await db.users.insert_one({
-            "userId": str(uuid.uuid4()), "email": owner_email,
-            "loginId": "owner", "loginIdNorm": "owner",
-            "passwordHash": hash_password(owner_pw),
-            "passwordPlain": owner_pw,
-            "name": "Owner", "role": "owner", "createdAt": datetime.now(timezone.utc).isoformat(),
-        })
+        owner_deleted = await _is_deleted_account(db, email=owner_email, login_id="owner")
+        other_owners = await db.users.count_documents({"role": "owner"})
+        if not owner_deleted or other_owners == 0:
+            await db.users.insert_one({
+                "userId": str(uuid.uuid4()), "email": owner_email,
+                "loginId": "owner", "loginIdNorm": "owner",
+                "passwordHash": hash_password(owner_pw),
+                "passwordPlain": owner_pw,
+                "name": "Owner", "role": "owner", "createdAt": datetime.now(timezone.utc).isoformat(),
+            })
     else:
         # Never reset an existing owner's password on startup — that would undo
         # Settings → Change password after every deploy/restart.
@@ -659,6 +723,8 @@ async def seed_users(db):
         ("oemfinance@euler.com", "OEM Finance", "oem_finance", "oemfinance"),
     ]
     for email, name, role, login_id in demos:
+        if await _is_deleted_account(db, email=email, login_id=login_id):
+            continue
         if not await db.users.find_one({"email": email}):
             await db.users.insert_one({
                 "userId": str(uuid.uuid4()), "email": email,

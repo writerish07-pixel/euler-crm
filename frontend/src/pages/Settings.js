@@ -190,7 +190,15 @@ export default function Settings() {
       loadUsers();
     } catch (e) { toast.error(apiErrorMessage(e, "Failed")); }
   };
-  const removeUser = async (id) => { await del(`/auth/users/${id}`); toast.success("User removed"); loadUsers(); };
+  const removeUser = async (id) => {
+    try {
+      await del(`/auth/users/${id}`);
+      toast.success("User removed");
+      loadUsers();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not remove user"));
+    }
+  };
 
   const shareUrl = `${window.location.origin}/share`;
 
