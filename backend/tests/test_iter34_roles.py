@@ -279,29 +279,20 @@ async def test_staff_roles_cannot_open_the_oem_report(exec_client):
 # ============================================== the narrowed executive
 @pytest.mark.asyncio
 async def test_an_executive_still_feeds_leads_and_booking_amount(client, exec_client):
-    """Enquiry goes to GM/Owner first. After Approve, the executive can still book."""
+    """Enquiry creates live. After KYC, the executive can still book."""
     r = await exec_client.post("/api/leads", json={
         "customerName": "ITER34 Exec lead", "mobile": next_mobile(),
         "interestedModel": TURBO[0], "variant": TURBO[1],
-        "executive": "Executive", "budget": 185000})
+        "executive": "Executive"})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body.get("pending") is True
-    rid = body["requestId"]
+    assert body.get("leadId")
+    assert not body.get("pending")
+    lid = body["leadId"]
     names = {l["customerName"] for l in (await exec_client.get("/api/leads")).json()}
-    assert "ITER34 Exec lead" not in names
-    assert (await exec_client.post(f"/api/lead-requests/{rid}/approve")).status_code == 403
-    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
-        up = await exec_client.post(
-            f"/api/lead-requests/{rid}/documents",
-            files={"file": ("scan.png", io.BytesIO(b"\x89PNG kyc"), "image/png")},
-            data={"kind": kind},
-        )
-        assert up.status_code == 200, up.text
-    ap = await client.post(f"/api/lead-requests/{rid}/approve")
-    assert ap.status_code == 200, ap.text
-    lid = ap.json()["leadId"]
+    assert "ITER34 Exec lead" in names
     assert lid.startswith("LD26")
+    await attach_kyc(exec_client, lid)
     acts = (await exec_client.get(f"/api/leads/{lid}/360")).json()["actions"]
     assert acts["canEditLead"] is False
     assert (await exec_client.put(f"/api/leads/{lid}",

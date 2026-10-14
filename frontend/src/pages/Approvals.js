@@ -115,7 +115,10 @@ export default function Approvals() {
               <div className="font-semibold">{r.customerName}</div>
               <CallLink mobile={r.mobile} compact />
               {r.existingLeadId && (
-                <div className="text-[10px] text-cobalt mt-0.5">On register · {r.existingLeadId}</div>
+                <div className="text-[10px] text-cobalt mt-0.5">
+                  {r.requestKind === "booking_deal" ? "Booking deal · " : "On register · "}
+                  {r.existingLeadId}
+                </div>
               )}
             </div>
           ) },

@@ -4,14 +4,14 @@ import { get, post, apiErrorMessage, apiErrorDetail, downloadPost } from "../lib
 import { todayISO, digitsLast10 } from "../lib/format";
 import { Button, Drawer, Field, Input, Select, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
-import { LocalKycBlock, kycReady, uploadKycFiles, extraSupportReady, LocalOemExtraBlock, dealSheetReady, LocalDealSheetBlock } from "../components/LeadDocuments";
+import { LocalKycBlock, uploadKycFiles, LocalOemExtraBlock } from "../components/LeadDocuments";
 import DealFormatCard from "../components/DealFormatCard";
 
 function sameExecName(a, b) {
   return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
 }
 
-/** Create a lead. Exec / TL send for GM/Owner only when the deal has a discount. */
+/** Create a live enquiry. KYC and GM/Owner deal approval run at Book. */
 export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {} }) {
   const { isExecutive, isTl, isTeamLead, user, canSeeOwnerCommercials } = useAuth();
   const [form, setForm] = useState({
@@ -34,7 +34,6 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   });
   const [kyc, setKyc] = useState({});
   const [extraProof, setExtraProof] = useState({});
-  const [dealSheet, setDealSheet] = useState({});
   const [busy, setBusy] = useState(false);
   const [variants, setVariants] = useState([]);
   const [deal, setDeal] = useState(null);
@@ -168,20 +167,11 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   // Executives cannot open a second file on another executive's mobile.
   // TL / owner / GM can add another unit when assigning to the same executive.
   const otherExecLock = isExecutive && otherExecHold;
-  const quotedCx = Number(form.budget) || 0;
-  const priced = deal?.priceFound === true
-    || (deal != null && deal.priceFound == null
-      && (Number(deal.exShowroom) > 0 || Number(deal.priceTotal) > 0));
-  const needsApproval = (isExecutive || isTl || isTeamLead)
-    && quotedCx > 0
-    && (deal?.needsApproval === true || Number(deal?.additionalDiscount) >= 1 || !priced);
-  const saveLabel = needsApproval ? "Send for approval" : "Create Lead";
-  const drawerTitle = needsApproval && isExecutive ? "Request a lead" : "New Lead";
-  const drawerSubtitle = needsApproval
-    ? "Discounted deal — waits for GM or Owner"
-    : isExecutive || isTl || isTeamLead
-      ? "Creates live when there is no extra discount"
-      : "Capture a fresh enquiry";
+  const saveLabel = "Create Lead";
+  const drawerTitle = "New Lead";
+  const drawerSubtitle = isExecutive || isTl || isTeamLead
+    ? "Walk-in enquiry goes live now. WhatsApp follow-up starts. KYC and deal approval at booking."
+    : "Capture a fresh enquiry";
 
   const saveLead = async (extra = {}) => {
     setBusy(true);
@@ -201,9 +191,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       setClash(null);
       try {
         if (lead.pending && lead.requestId) {
-          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, { ...kyc, ...extraProof, ...dealSheet });
+          await uploadKycFiles(`/lead-requests/${lead.requestId}/documents`, { ...kyc, ...extraProof });
         } else if (lead.leadId) {
-          await uploadKycFiles(`/leads/${lead.leadId}/documents`, { ...kyc, ...extraProof, ...dealSheet });
+          await uploadKycFiles(`/leads/${lead.leadId}/documents`, { ...kyc, ...extraProof });
         }
       } catch (ue) {
         toast.error(apiErrorMessage(ue, "Lead saved but a KYC file failed — attach it again."));
@@ -230,8 +220,6 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     if (!form.createdDate) return toast.error("Lead date is required");
     if ((isTl || isTeamLead) && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
     if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required");
-    if (isExecutive && !(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
-    if (needsApproval && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required before sending for approval");
     if (anotherVehicle && !digitsLast10(form.mobile)) {
       return toast.error("Enter the 10-digit mobile this extra unit belongs to");
     }
@@ -240,16 +228,6 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     }
     if (sameOrder && extraUnits.filter((u) => u.model).length < 1) {
       return toast.error("Add at least one more unit for a same-order pack");
-    }
-    const kycErr = copyDocsFromSibling ? "" : kycReady(form.customerType, kyc, form.gstin);
-    if (kycErr) return toast.error(kycErr);
-    const extraErr = extraSupportReady(
-      form.oemExtraSupportReceived, extraProof, siblingDocs,
-      { copyFromSibling: copyDocsFromSibling });
-    if (extraErr) return toast.error(extraErr);
-    if (needsApproval) {
-      const sheetErr = dealSheetReady(dealSheet);
-      if (sheetErr) return toast.error(sheetErr);
     }
     await saveLead({ anotherVehicle: anotherVehicle && !sameOrder, sameOrderMultiUnit: sameOrder });
   };
@@ -459,10 +437,6 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
           existingDocs={siblingDocs}
           copyFromSibling={copyDocsFromSibling}
         />
-        {needsApproval && (
-          <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={[]}
-            onPrint={printDealSheet} printBusy={busy} />
-        )}
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} copyFromSibling={copyDocsFromSibling} />
       </div>

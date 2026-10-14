@@ -202,13 +202,10 @@ async def test_exec_submit_stores_additional(exec_client, client):
         "executive": "Executive", "budget": 790000,
     })
     assert r.status_code == 200, r.text
-    rid = r.json()["requestId"]
-    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
-    row = next(x for x in listed if x["requestId"] == rid)
-    assert row["additionalDiscount"] == 19500
-    assert row["needsOwnerApproval"] is True
-    assert row["needsApproval"] is True
-    assert row["dealFormat"]["priceTotal"] == MY_TOTAL
+    lead = await server.db.leads.find_one({"leadId": r.json()["leadId"]})
+    assert ce.num(lead["additionalDiscount"]) == 19500
+    assert ce.num(lead["customerPayable"]) == 790000
+    assert not r.json().get("pending")
 
 
 @pytest.mark.asyncio
@@ -219,16 +216,27 @@ async def test_gm_forbidden_when_deal_differs(exec_client, gm_client, client):
         "interestedModel": "Storm", "variant": "Deal Gate LR",
         "executive": "Executive", "budget": 790000,
     })
-    rid = r.json()["requestId"]
-    await attach_kyc(exec_client, rid)
-    ap = await gm_client.post(f"/api/lead-requests/{rid}/approve")
+    lid = r.json()["leadId"]
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        up = await exec_client.post(
+            f"/api/leads/{lid}/documents",
+            files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},
+            data={"kind": kind},
+        )
+        assert up.status_code == 200, up.text
+    wait = await exec_client.post(
+        f"/api/leads/{lid}/convert-booking",
+        json={"bookingAmount": 0, "executive": "Executive", "bookingDate": "2026-10-10"})
+    assert wait.status_code == 409, wait.text
+    req = await server.db.lead_requests.find_one(
+        {"existingLeadId": lid, "requestKind": "booking_deal", "status": "pending"})
+    assert req is not None
+    ap = await gm_client.post(f"/api/lead-requests/{req['requestId']}/approve")
     assert ap.status_code == 403, ap.text
     assert "Owner" in ap.text
-    pending = await server.db.lead_requests.find_one({"requestId": rid})
-    assert pending["status"] == "pending"
-    owner = await client.post(f"/api/lead-requests/{rid}/approve")
+    owner = await client.post(f"/api/lead-requests/{req['requestId']}/approve")
     assert owner.status_code == 200, owner.text
-    lead = await server.db.leads.find_one({"leadId": owner.json()["leadId"]})
+    lead = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(lead["additionalDiscount"]) == 19500
     assert ce.num(lead["customerPayable"]) == 790000
 
@@ -268,8 +276,9 @@ async def test_tl_discount_waits_for_owner_gm(client):
             "executive": "Amit", "budget": 790000,
         })
         assert r.status_code == 200, r.text
-        assert r.json().get("pending") is True
-        assert await server.db.leads.count_documents({"customerName": "TL Discount"}) == 0
+        assert r.json().get("leadId")
+        assert not r.json().get("pending")
+        assert await server.db.leads.count_documents({"customerName": "TL Discount"}) == 1
         exact = await tl.post("/api/leads", json={
             "customerName": "TL Exact", "mobile": next_mobile(),
             "interestedModel": "Storm", "variant": "Deal Gate LR",
@@ -317,7 +326,8 @@ async def test_exec_exact_blocked_when_pending_same_mobile(exec_client):
         "executive": "Executive", "budget": 790000,
     })
     assert first.status_code == 200, first.text
-    assert first.json().get("pending") is True
+    assert first.json().get("leadId")
+    assert not first.json().get("pending")
     blocked = await exec_client.post("/api/leads", json={
         "customerName": "Pending Disc", "mobile": mobile,
         "interestedModel": "Storm", "variant": "Deal Gate LR",
@@ -346,8 +356,9 @@ async def test_exec_partial_pack_waits_for_approval(exec_client):
         "units": [{"model": "No Price Van", "variant": "X"}],
     })
     assert r.status_code == 200, r.text
-    assert r.json().get("pending") is True
-    assert await server.db.leads.count_documents({"customerName": "Partial Pack"}) == 0
+    assert r.json().get("leadId")
+    assert not r.json().get("pending")
+    assert await server.db.leads.count_documents({"customerName": "Partial Pack"}) == 1
 
 
 def test_quoted_deal_needs_approval_only_for_discount():

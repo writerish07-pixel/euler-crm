@@ -83,6 +83,27 @@ async def matching_deal_budget(model="Turbo Max", variant="Maxx (PV)"):
     return server.ce.round2(server.ce.num(deal.get("priceTotal")))
 
 
+async def seed_pending(payload, user=None):
+    """Keep the Approvals pipeline testable now that POST /leads creates live."""
+    body = server.LeadIn(**payload)
+    dumped = body.model_dump()
+    another = bool(dumped.pop("anotherVehicle", False))
+    dumped.pop("sameOrderMultiUnit", None)
+    dumped.pop("units", None)
+    scheme_pass_on = server._parse_scheme_pass_on(dumped.pop("schemePassOn", None))
+    deal_amount = server.ce.round2(server.ce.num(body.budget))
+    deal_format = await server._deal_format_for(
+        dumped.get("interestedModel"), dumped.get("variant"), deal_amount,
+        dumped.get("createdDate"), scheme_pass_on)
+    dumped["customerType"] = server.lead_docs.normalize_customer_type(dumped.get("customerType"))
+    actor = user or {
+        "email": "executive@euler.com", "name": "Executive", "role": "executive",
+    }
+    return await server._create_pending_lead_request(
+        body, actor, deal_format=deal_format, deal_amount=deal_amount,
+        scheme_pass_on=scheme_pass_on, payload=dumped, another=another)
+
+
 def _enquiry(name="Wait Approve", **over):
     body = {
         "customerName": name,
@@ -121,10 +142,12 @@ async def test_executive_without_mobile_is_rejected(exec_client):
 
 
 @pytest.mark.asyncio
-async def test_executive_without_deal_amount_is_rejected(exec_client):
-    r = await exec_client.post("/api/leads", json=_enquiry(budget=0))
-    assert r.status_code == 422, r.text
-    assert await server.db.leads.count_documents({}) == 0
+async def test_executive_without_deal_amount_creates_live_enquiry(exec_client):
+    r = await exec_client.post("/api/leads", json=_enquiry("Zero Budget", budget=0))
+    assert r.status_code == 200, r.text
+    assert r.json().get("leadId")
+    assert not r.json().get("pending")
+    assert await server.db.leads.count_documents({"customerName": "Zero Budget"}) == 1
     assert await server.db.lead_requests.count_documents({}) == 0
 
 
@@ -143,22 +166,19 @@ async def test_executive_exact_deal_creates_live(exec_client):
 
 
 @pytest.mark.asyncio
-async def test_executive_submit_is_pending_not_a_live_lead(exec_client, client):
+async def test_executive_discount_create_is_live_enquiry(exec_client, client):
     payload = _enquiry("Pending Cust")
     r = await exec_client.post("/api/leads", json=payload)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["pending"] is True
-    assert body["status"] == "pending"
-    assert body["requestId"].startswith("LR26")
-    assert "leadId" not in body or not body.get("leadId")
-
+    assert body.get("leadId")
+    assert not body.get("pending")
     leads = (await client.get("/api/leads")).json()
-    assert all(l.get("customerName") != "Pending Cust" for l in leads)
-    assert await server.db.leads.count_documents({"customerName": "Pending Cust"}) == 0
+    assert any(l.get("customerName") == "Pending Cust" for l in leads)
 
+    seeded = await seed_pending(_enquiry("Queue Cust"))
     waiting = (await exec_client.get("/api/lead-requests", params={"status": "pending"})).json()
-    assert any(x["requestId"] == body["requestId"] for x in waiting)
+    assert any(x["requestId"] == seeded["requestId"] for x in waiting)
     summary = (await client.get("/api/lead-requests/summary")).json()
     assert summary["pending"] >= 1
     assert summary["canApprove"] is True
@@ -166,8 +186,8 @@ async def test_executive_submit_is_pending_not_a_live_lead(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_owner_approve_creates_the_live_lead(exec_client, client):
-    r = await exec_client.post("/api/leads", json=_enquiry("Approved Cust"))
-    rid = r.json()["requestId"]
+    seeded = await seed_pending(_enquiry("Approved Cust"))
+    rid = seeded["requestId"]
     await attach_kyc(exec_client, rid)
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
@@ -188,8 +208,8 @@ async def test_owner_approve_creates_the_live_lead(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_approve_without_deal_sheet_is_rejected(exec_client, client):
-    r = await exec_client.post("/api/leads", json=_enquiry("No Deal Sheet"))
-    rid = r.json()["requestId"]
+    seeded = await seed_pending(_enquiry("No Deal Sheet"))
+    rid = seeded["requestId"]
     for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
         up = await exec_client.post(
             f"/api/lead-requests/{rid}/documents",
@@ -235,8 +255,8 @@ async def test_sales_gm_can_approve(exec_client, gm_client, client):
 
 @pytest.mark.asyncio
 async def test_reject_creates_no_lead(exec_client, client):
-    r = await exec_client.post("/api/leads", json=_enquiry("Rejected Cust"))
-    rid = r.json()["requestId"]
+    seeded = await seed_pending(_enquiry("Rejected Cust"))
+    rid = seeded["requestId"]
     rej = await client.post(f"/api/lead-requests/{rid}/reject", json={"reason": "price too low"})
     assert rej.status_code == 200, rej.text
     assert await server.db.leads.count_documents({"customerName": "Rejected Cust"}) == 0
@@ -248,8 +268,8 @@ async def test_reject_creates_no_lead(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_executive_cannot_approve_or_reject(exec_client, client):
-    r = await exec_client.post("/api/leads", json=_enquiry("No Self Approve"))
-    rid = r.json()["requestId"]
+    seeded = await seed_pending(_enquiry("No Self Approve"))
+    rid = seeded["requestId"]
     assert (await exec_client.post(f"/api/lead-requests/{rid}/approve")).status_code == 403
     assert (await exec_client.post(f"/api/lead-requests/{rid}/reject")).status_code == 403
     assert await server.db.leads.count_documents({"customerName": "No Self Approve"}) == 0
@@ -313,17 +333,16 @@ async def test_notify_never_breaks_submit(exec_client, monkeypatch):
     monkeypatch.setattr(server.web_push, "notify_lead_approvers", boom)
     r = await exec_client.post("/api/leads", json=_enquiry("Push Fail"))
     assert r.status_code == 200, r.text
-    assert r.json()["pending"] is True
-    assert await server.db.leads.count_documents({"customerName": "Push Fail"}) == 0
+    assert r.json().get("leadId")
+    assert await server.db.leads.count_documents({"customerName": "Push Fail"}) == 1
 
 
 @pytest.mark.asyncio
 async def test_approval_oem_extra_support_lands_on_scheme(exec_client, client):
-    r = await exec_client.post("/api/leads", json=_enquiry(
+    seeded = await seed_pending(_enquiry(
         "Extra Cust", oemExtraSupportReceived=7000,
         interestedModel="No Price Van", variant="X"))
-    assert r.status_code == 200, r.text
-    rid = r.json()["requestId"]
+    rid = seeded["requestId"]
     waiting = (await exec_client.get("/api/lead-requests", params={"status": "pending"})).json()
     row = next(x for x in waiting if x["requestId"] == rid)
     assert row["oemExtraSupportReceived"] == 7000
@@ -438,9 +457,9 @@ async def test_approval_autofills_oem_extra_from_existing_claim(client):
 
 @pytest.mark.asyncio
 async def test_approval_oem_extra_without_proof_is_rejected(exec_client, client):
-    r = await exec_client.post("/api/leads", json=_enquiry(
+    seeded = await seed_pending(_enquiry(
         "No Proof Extra", oemExtraSupportReceived=6000))
-    rid = r.json()["requestId"]
+    rid = seeded["requestId"]
     await attach_kyc(exec_client, rid)
     listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
     row = next(x for x in listed if x["requestId"] == rid)
