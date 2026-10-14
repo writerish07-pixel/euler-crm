@@ -2424,8 +2424,7 @@ def _staff_safe_deal_preview(d):
 def _exec_safe_deal_preview(d):
     """Executives price the customer deal — they must not see Scheme Master lines.
 
-    `needsApproval` stays so the create-lead button can switch to Send for
-    approval when there is a dealer discount.
+    `needsApproval` stays so booking can send a discounted deal to Approvals.
     """
     out = _staff_safe_deal_preview(d)
     if not out:
@@ -4322,6 +4321,90 @@ def _quoted_deal_needs_approval(deal, cx_demand) -> bool:
     return ce.num(deal.get("additionalDiscount")) >= ce.DEAL_AMOUNT_EQUAL_RUPEES
 
 
+def _close_rupee(a, b) -> bool:
+    return abs(ce.round2(ce.num(a)) - ce.round2(ce.num(b))) <= 1.00
+
+
+async def _require_booking_deal_approval(lead, user):
+    """Discounted Book waits for GM / Owner. Enquiries create live without this."""
+    role = str((user or {}).get("role") or "")
+    if role in ("owner", "sales_gm"):
+        return
+    cx = ce.round2(ce.num(lead.get("cxDemand") or lead.get("budget") or lead.get("customerPayable")))
+    addl = ce.round2(ce.num(lead.get("additionalDiscount")))
+    if addl < 1 and cx > 0:
+        deal = await _deal_format_for(
+            lead.get("interestedModel"), lead.get("variant"), cx,
+            lead.get("bookingDate") or lead.get("createdDate"),
+            lead.get("schemePassOn"))
+        addl = ce.round2(ce.num(deal.get("additionalDiscount")))
+        if not _quoted_deal_needs_approval(deal, cx):
+            return
+    elif addl < 1:
+        return
+    if (lead.get("bookingDealApprovedAt")
+            and _close_rupee(lead.get("bookingDealAdditional"), addl)
+            and _close_rupee(lead.get("bookingDealCxDemand"), cx)):
+        return
+    lid = lead.get("leadId") or ""
+    pending = await db.lead_requests.find_one({
+        "existingLeadId": lid, "requestKind": "booking_deal", "status": "pending",
+    })
+    if pending:
+        raise HTTPException(
+            409,
+            "This deal has a dealer discount and is waiting on Approvals. "
+            "Book after GM / Owner approve.",
+        )
+    payload = {
+        "customerName": lead.get("customerName") or "",
+        "mobile": lead.get("mobile") or "",
+        "interestedModel": lead.get("interestedModel") or "",
+        "variant": lead.get("variant") or "",
+        "executive": lead.get("executive") or "",
+        "budget": cx,
+        "createdDate": lead.get("createdDate") or today(),
+        "customerType": lead.get("customerType") or "Individual",
+        "gstin": lead.get("gstin") or "",
+        "oemExtraSupportReceived": ce.num(lead.get("oemExtraSupportReceived")),
+        "schemePassOn": lead.get("schemePassOn") or {},
+    }
+    deal_format = await _deal_format_for(
+        payload["interestedModel"], payload["variant"], cx,
+        payload["createdDate"], payload.get("schemePassOn"))
+    request_id = await next_id("lead_request", "LR26")
+    await db.lead_requests.insert_one({
+        "requestId": request_id,
+        "status": "pending",
+        "requestKind": "booking_deal",
+        "askedForApproval": True,
+        "existingLeadId": lid,
+        "payload": payload,
+        "dealAmount": cx,
+        "cxDemand": cx,
+        "dealFormat": deal_format,
+        "submittedBy": (user or {}).get("email") or "",
+        "submittedByName": (user or {}).get("name") or "",
+        "submittedByUserId": (user or {}).get("userId") or (user or {}).get("email") or "",
+        "createdAt": now_iso(),
+    })
+    name = (payload["customerName"] or "Customer").strip()
+    try:
+        await web_push.notify_lead_approvers(
+            db,
+            title="Booking deal waiting for approval",
+            body=f"{name} · {lid} · dealer discount. Open Approvals in Euler CRM.",
+            url="/approvals",
+        )
+    except Exception:
+        logger.exception("booking-deal push notify failed")
+    raise HTTPException(
+        409,
+        "This deal has a dealer discount — sent to GM / Owner on Approvals. "
+        "Book after they approve.",
+    )
+
+
 async def _create_pending_lead_request(body: LeadIn, user, *, deal_format, deal_amount,
                                        scheme_pass_on, payload, another):
     request_id = await next_id("lead_request", "LR26")
@@ -4366,8 +4449,7 @@ async def _create_pending_lead_request(body: LeadIn, user, *, deal_format, deal_
 
 @api.post("/leads")
 async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
-    """Owner / GM create a live lead. Executive / TL create live when there is
-    no dealer discount; a discounted deal waits for GM or Owner Approve."""
+    """Create a live enquiry. KYC and GM/Owner deal approval run at Book."""
     role = str(user.get("role") or "")
     if role in ("tl", "team_lead") and not str(body.executive or "").strip():
         raise HTTPException(422, "Pick the executive this lead belongs to.")
@@ -4375,48 +4457,21 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
         names = await team_scope.team_member_names(db, user)
         if not team_scope.name_allowed_for_team_lead(body.executive, names):
             raise HTTPException(422, "Pick yourself or an executive who reports to you.")
-    if role in ("executive", "tl", "team_lead"):
-        payload = body.model_dump()
-        another = bool(payload.pop("anotherVehicle", False))
-        scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
-        deal_amount = ce.round2(ce.num(body.budget))
-        same_order = bool(payload.get("sameOrderMultiUnit"))
-        specs = _unit_specs_from(
-            payload.get("interestedModel"), payload.get("variant"), payload.get("units"))
-        if same_order and len(specs) > 1:
-            deal_format = await _deal_format_for_pack(
-                specs, deal_amount, payload.get("createdDate"), scheme_pass_on)
-        else:
-            deal_format = await _deal_format_for(
-                payload.get("interestedModel"), payload.get("variant"), deal_amount,
-                payload.get("createdDate"), scheme_pass_on)
-        needs_approval = _quoted_deal_needs_approval(deal_format, deal_amount)
+    if role == "executive":
         mobile_digits = re.sub(r"\D", "", str(body.mobile or ""))
-        if role == "executive":
-            if len(mobile_digits) < 10:
-                raise HTTPException(422, "A 10-digit mobile is required.")
-            if deal_amount <= 0:
-                raise HTTPException(422, "Enter Cx Demand.")
-        incoming_exec = str(payload.get("executive") or user.get("name") or "")
-        if role == "executive":
-            incoming_exec = str(user.get("name") or payload.get("executive") or "")
+        if len(mobile_digits) < 10:
+            raise HTTPException(422, "A 10-digit mobile is required.")
+        incoming_exec = str(user.get("name") or body.executive or "")
+        body.executive = incoming_exec
         await _raise_if_mobile_taken(
             body.mobile, incoming_name=body.customerName,
             incoming_executive=incoming_exec,
-            allow=another, check_pending=True)
-        if needs_approval:
-            if len(mobile_digits) < 10:
-                raise HTTPException(
-                    422, "A 10-digit mobile is required before sending for approval.")
-            payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
-            payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
-            if payload["customerType"] != "B2B":
-                payload["gstin"] = ""
-            if not str(payload.get("executive") or "").strip():
-                payload["executive"] = user.get("name") or ""
-            return await _create_pending_lead_request(
-                body, user, deal_format=deal_format, deal_amount=deal_amount,
-                scheme_pass_on=scheme_pass_on, payload=payload, another=another)
+            allow=bool(body.anotherVehicle), check_pending=True)
+    elif role in ("tl", "team_lead"):
+        await _raise_if_mobile_taken(
+            body.mobile, incoming_name=body.customerName,
+            incoming_executive=str(body.executive or user.get("name") or ""),
+            allow=bool(body.anotherVehicle), check_pending=True)
     return await _insert_live_lead(body, viewer=user)
 
 
@@ -4551,6 +4606,8 @@ def _request_out(doc):
     row["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
     row["gstin"] = payload.get("gstin") or ""
     row["existingLeadId"] = row.get("existingLeadId") or ""
+    row["requestKind"] = row.get("requestKind") or (
+        "assignment" if row["existingLeadId"] else "create")
     row["source"] = row.get("source") or ""
     row["askedForApproval"] = bool(row.get("askedForApproval"))
     row["oemExtraSupportReceived"] = ce.round2(ce.num(
@@ -4806,13 +4863,17 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         missing = await lead_docs.missing_kyc(
             db, request_id=request_id,
             customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
+    if missing and str(claimed.get("existingLeadId") or "").strip():
+        missing = await lead_docs.missing_kyc(
+            db, lead_id=str(claimed.get("existingLeadId") or ""),
+            customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
     if missing:
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
         labels = [lead_docs.KINDS.get(k, {}).get("label") or k for k in missing]
         raise HTTPException(422, "KYC is incomplete — " + ", ".join(labels) + ".")
     existing_id = str(claimed.get("existingLeadId") or "").strip()
-    if not await lead_docs.has_deal_sheet(
+    if str(claimed.get("requestKind") or "") != "booking_deal" and not await lead_docs.has_deal_sheet(
             db, request_id=request_id, lead_id=existing_id):
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
@@ -4856,6 +4917,16 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
                 payload.get("budget"), payload.get("createdDate"),
                 oem_extra_received=extra if extra > 0 else None,
                 scheme_pass_on=scheme_pass_on)
+            if str(claimed.get("requestKind") or "") == "booking_deal":
+                fresh = await db.leads.find_one({"leadId": existing_id}) or {}
+                await db.leads.update_one({"leadId": existing_id}, {"$set": {
+                    "bookingDealApprovedAt": now_iso(),
+                    "bookingDealApprovedBy": user.get("email") or "",
+                    "bookingDealCxDemand": ce.round2(ce.num(
+                        payload.get("budget") or claimed.get("dealAmount"))),
+                    "bookingDealAdditional": ce.round2(ce.num(
+                        fresh.get("additionalDiscount"))),
+                }})
             lead = clean(await db.leads.find_one({"leadId": existing_id}))
         else:
             body = LeadIn(**{**payload, "schemePassOn": scheme_pass_on, "anotherVehicle": True})
@@ -6893,6 +6964,7 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
                                             "lastUpdated": now_iso()}})
         await recompute_lead(lead_id)
         lead = await db.leads.find_one({"leadId": lead_id})
+    await _require_booking_deal_approval(lead, act)
     if ce.num(lead.get("grossVehicleCost")) <= 0 or ce.num(lead.get("customerPayable")) <= 0:
         # Never persist a booking whose commercial calculation did not resolve.
         raise HTTPException(422,

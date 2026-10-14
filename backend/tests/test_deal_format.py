@@ -167,21 +167,8 @@ async def test_approve_sets_outstanding_to_deal_price(client):
             "executive": "Executive", "budget": 1400000,
         })
         assert sub.status_code == 200, sub.text
-        rid = sub.json()["requestId"]
-        listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
-        row = next(x for x in listed if x["requestId"] == rid)
-        assert row["dealFormat"]["schemeIncluded"] is False
-        assert row["dealFormat"]["supportRequired"] == 74600
-        for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
-            up = await ex.post(
-                f"/api/lead-requests/{rid}/documents",
-                files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},
-                data={"kind": kind},
-            )
-            assert up.status_code == 200, up.text
-    ap = await client.post(f"/api/lead-requests/{rid}/approve")
-    assert ap.status_code == 200, ap.text
-    lead = await server.db.leads.find_one({"leadId": ap.json()["leadId"]})
+        lid = sub.json()["leadId"]
+    lead = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(lead["customerOutstanding"]) == 1400000
     assert ce.num(lead["customerPayable"]) == 1400000
     assert lead["useDealPrice"] is True

@@ -116,6 +116,25 @@ afterEach(() => {
   post.mockClear();
 });
 
+test("executive can create a walk-in enquiry without Cx Demand", async () => {
+  const { root } = await renderDrawer();
+  await act(async () => {
+    setInput(document.querySelector('[data-testid="lead-name"]'), "Walk In");
+    setInput(document.querySelector('[data-testid="lead-mobile"]'), "9876500011");
+  });
+  await act(async () => {
+    document.querySelector('[data-testid="save-lead-btn"]').click();
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(document.querySelector('[data-testid="save-lead-btn"]').textContent).toMatch(/Create Lead/);
+  expect(post).toHaveBeenCalledWith("/leads", expect.objectContaining({
+    customerName: "Walk In",
+    mobile: "9876500011",
+    budget: 0,
+  }));
+  await act(async () => { root.unmount(); });
+});
+
 test("executive create form shows OEM extra support and another-vehicle checkbox", async () => {
   const { root } = await renderDrawer();
   expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeTruthy();

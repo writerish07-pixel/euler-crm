@@ -114,6 +114,26 @@ async def upload(c, url, kind, name="scan.png"):
     return await c.post(url, files={"file": _png(name)}, data={"kind": kind})
 
 
+async def seed_pending(payload, user=None):
+    body = server.LeadIn(**payload)
+    dumped = body.model_dump()
+    another = bool(dumped.pop("anotherVehicle", False))
+    dumped.pop("sameOrderMultiUnit", None)
+    dumped.pop("units", None)
+    scheme_pass_on = server._parse_scheme_pass_on(dumped.pop("schemePassOn", None))
+    deal_amount = server.ce.round2(server.ce.num(body.budget))
+    deal_format = await server._deal_format_for(
+        dumped.get("interestedModel"), dumped.get("variant"), deal_amount,
+        dumped.get("createdDate"), scheme_pass_on)
+    dumped["customerType"] = server.lead_docs.normalize_customer_type(dumped.get("customerType"))
+    actor = user or {
+        "email": "executive@euler.com", "name": "Executive", "role": "executive",
+    }
+    return await server._create_pending_lead_request(
+        body, actor, deal_format=deal_format, deal_amount=deal_amount,
+        scheme_pass_on=scheme_pass_on, payload=dumped, another=another)
+
+
 async def attach_kyc(c, request_id):
     for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
         r = await upload(c, f"/api/lead-requests/{request_id}/documents", kind)
@@ -122,11 +142,11 @@ async def attach_kyc(c, request_id):
 
 @pytest.mark.asyncio
 async def test_approve_without_kyc_is_rejected(exec_client, client):
-    r = await exec_client.post("/api/leads", json={
+    seeded = await seed_pending({
         "customerName": "No KYC", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
         "executive": "Executive", "budget": 185000})
-    rid = r.json()["requestId"]
+    rid = seeded["requestId"]
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 422, ap.text
     assert "KYC" in ap.json()["detail"]
@@ -137,11 +157,11 @@ async def test_approve_without_kyc_is_rejected(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_kyc_then_approve_copies_docs_onto_the_lead(exec_client, client):
-    r = await exec_client.post("/api/leads", json={
+    seeded = await seed_pending({
         "customerName": "With KYC", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
         "executive": "Executive", "budget": 185000, "customerType": "Individual"})
-    rid = r.json()["requestId"]
+    rid = seeded["requestId"]
     await attach_kyc(exec_client, rid)
     listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
     row = next(x for x in listed if x["requestId"] == rid)
@@ -162,12 +182,12 @@ async def test_kyc_then_approve_copies_docs_onto_the_lead(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_b2b_aadhaar_is_optional(exec_client, client):
-    r = await exec_client.post("/api/leads", json={
+    seeded = await seed_pending({
         "customerName": "B2B No Aadhaar", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
         "executive": "Executive", "budget": 200000,
         "customerType": "B2B", "gstin": "22AAAAA0000A1Z5"})
-    rid = r.json()["requestId"]
+    rid = seeded["requestId"]
     pan = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "kyc_pan")
     gst = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "kyc_gst")
     sheet = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "deal_sheet")
@@ -177,12 +197,12 @@ async def test_b2b_aadhaar_is_optional(exec_client, client):
     assert row["kycComplete"] is True
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 200, ap.text
-    r = await exec_client.post("/api/leads", json={
+    seeded = await seed_pending({
         "customerName": "B2B Co", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
         "executive": "Executive", "budget": 200000,
         "customerType": "B2B"})
-    rid = r.json()["requestId"]
+    rid = seeded["requestId"]
     await attach_kyc(exec_client, rid)
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     assert ap.status_code == 422
@@ -207,7 +227,7 @@ async def test_b2b_gst_certificate_books_without_gstin_number(exec_client, clien
     pan = await upload(client, f"/api/leads/{lid}/documents", "kyc_pan")
     gst = await upload(client, f"/api/leads/{lid}/documents", "kyc_gst")
     assert pan.status_code == 200 and gst.status_code == 200
-    ok = await exec_client.post(f"/api/leads/{lid}/convert-booking", json={
+    ok = await client.post(f"/api/leads/{lid}/convert-booking", json={
         "bookingDate": "2026-10-09", "bookingAmount": 0, "executive": "Executive"})
     assert ok.status_code == 200, ok.text
     lead = await server.db.leads.find_one({"leadId": lid})
@@ -228,11 +248,11 @@ async def test_staff_can_save_gstin_on_a_b2b_lead(exec_client, client):
 
 @pytest.mark.asyncio
 async def test_oem_cannot_read_documents(client, exec_client, oem):
-    r = await exec_client.post("/api/leads", json={
+    seeded = await seed_pending({
         "customerName": "Secret KYC", "mobile": next_mobile(),
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
         "executive": "Executive", "budget": 185000})
-    rid = r.json()["requestId"]
+    rid = seeded["requestId"]
     await attach_kyc(exec_client, rid)
     ap = await client.post(f"/api/lead-requests/{rid}/approve")
     lid = ap.json()["leadId"]
