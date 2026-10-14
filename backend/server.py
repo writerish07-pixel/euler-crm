@@ -4732,7 +4732,8 @@ async def _team_lead_requests(user, status="pending"):
     for r in rows:
         payload = r.get("payload") or {}
         exec_name = payload.get("executive") or r.get("assignedExecutive") or r.get("submittedByName") or ""
-        if team_scope._norm_name(exec_name) in names or team_scope._norm_name(r.get("assignedExecutiveFold")) in names:
+        if (team_scope.name_allowed_for_team_lead(exec_name, names)
+                or team_scope.name_allowed_for_team_lead(r.get("assignedExecutiveFold"), names)):
             out.append(r)
     return out
 

@@ -180,7 +180,7 @@ function StaffDrawer({ row, people = [], onClose, onSaved }) {
           <Field label="Reports to (Team Leader)">
             <Select data-testid="staff-reports-to" value={form.reportsTo} onChange={set("reportsTo")}>
               <option value="">—</option>
-              {people.filter((p) => p.role === "team_lead").map((p) => (
+              {people.filter((p) => p.role === "team_lead" || p.role === "TL").map((p) => (
                 <option key={p.staffId} value={p.name}>{p.name}</option>
               ))}
             </Select>

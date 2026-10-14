@@ -20,8 +20,68 @@ motor.motor_asyncio.AsyncIOMotorClient = AsyncMongoMockClient
 
 import httpx  # noqa: E402
 import server  # noqa: E402
+import team_scope  # noqa: E402
 
 PW = "euler@123"
+
+
+class _FakeStaff:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def find(self, *_a, **_k):
+        return self
+
+    async def to_list(self, _n):
+        return list(self.rows)
+
+
+class _FakeDb:
+    def __init__(self, rows):
+        self.staff = _FakeStaff(rows)
+
+
+def test_team_scope_matches_short_login_to_reports_to():
+    assert team_scope.names_match("Amit", "Amit TL")
+    assert team_scope.names_match("Ravi", "Ravi Sharma")
+    assert not team_scope.names_match("Neha Exec", "Ravi Sharma")
+
+
+def test_lead_in_names_accepts_short_executive_spelling():
+    names = {"amit tl", "ravi sharma"}
+    assert team_scope.lead_in_names({"executive": "Ravi"}, names)
+    assert team_scope.lead_in_names({"executive": "Ravi Sharma"}, names)
+    assert team_scope.lead_in_names({"executive": "Amit TL"}, names)
+    assert not team_scope.lead_in_names({"executive": "Neha Exec"}, names)
+
+
+@pytest.mark.asyncio
+async def test_team_member_names_resolve_login_aliases_and_staff_id():
+    db = _FakeDb([
+        {"name": "Amit TL", "role": "team_lead", "email": "amit.tl@euler.com",
+         "staffId": "ST26001", "status": "Active"},
+        {"name": "Ravi Sharma", "role": "executive", "reportsTo": "Amit",
+         "email": "ravi@euler.com", "status": "Active"},
+        {"name": "Pooja", "role": "executive", "reportsTo": "ST26001",
+         "status": "Active"},
+        {"name": "Neha Exec", "role": "executive", "reportsTo": "Other TL",
+         "status": "Active"},
+        {"name": "Gone", "role": "executive", "reportsTo": "Amit TL",
+         "status": "Inactive"},
+    ])
+    user = {"name": "Amit", "email": "amit.tl@euler.com", "role": "team_lead",
+            "loginId": "amit.tl"}
+    names = await team_scope.team_member_names(db, user)
+    assert "amit" in names
+    assert "amit tl" in names
+    assert "ravi sharma" in names
+    assert "ravi" in names
+    assert "pooja" in names
+    assert "neha exec" not in names
+    assert "gone" not in names
+    assert team_scope.name_allowed_for_team_lead("Ravi", names)
+    assert team_scope.name_allowed_for_team_lead("Pooja", names)
+    assert not team_scope.name_allowed_for_team_lead("Neha Exec", names)
 
 
 @pytest_asyncio.fixture
@@ -77,6 +137,69 @@ async def test_team_lead_sees_only_own_team(client):
         assert (await tl.post("/api/staff", json={"name": "Nope", "role": "executive"})).status_code == 403
         assert (await tl.post("/api/inventory/check", json={"items": [
             {"chassis": "X", "status": "present"}]})).status_code == 403
+    finally:
+        await tl.aclose()
+
+
+@pytest.mark.asyncio
+async def test_team_lead_sees_team_when_login_name_is_short(client):
+    """Live TLs often log in as 'Amit' while Staff Reports-to says 'Amit TL'."""
+    await server.db.users.delete_many({"email": {"$in": ["tl.short@euler.com"]}})
+    await server.db.staff.delete_many({"name": {"$in": ["Amit TL", "Ravi Sharma", "Kiran Other"]}})
+    assert (await client.post("/api/staff", json={"name": "Amit TL", "role": "team_lead"})).status_code in (200, 201)
+    assert (await client.post("/api/staff", json={
+        "name": "Ravi Sharma", "role": "executive", "reportsTo": "Amit TL"})).status_code in (200, 201)
+    assert (await client.post("/api/staff", json={
+        "name": "Kiran Other", "role": "executive", "reportsTo": "Someone Else"})).status_code in (200, 201)
+    created = await client.post("/api/auth/users", json={
+        "email": "tl.short@euler.com", "password": PW, "name": "Amit", "role": "team_lead"})
+    assert created.status_code in (200, 201), created.text
+    mine = await client.post("/api/leads", json={
+        "customerName": "Short-name Team", "mobile": "9811100011", "executive": "Ravi",
+        "interestedModel": "Turbo Max", "createdDate": "2026-10-10"})
+    other = await client.post("/api/leads", json={
+        "customerName": "Other Team", "mobile": "9811100012", "executive": "Kiran Other",
+        "interestedModel": "Storm", "createdDate": "2026-10-10"})
+    assert mine.status_code == 200 and other.status_code == 200, (mine.text, other.text)
+    tl = await _login("tl.short@euler.com", PW)
+    try:
+        rows = (await tl.get("/api/leads")).json()
+        names = {r["customerName"] for r in rows}
+        assert "Short-name Team" in names
+        assert "Other Team" not in names
+        dash = (await tl.get("/api/executive/dashboard")).json()
+        assert dash["scope"]["matchedLeads"] >= 1
+        assert (await tl.get(f"/api/leads/{mine.json()['leadId']}")).status_code == 200
+        assert (await tl.get(f"/api/leads/{other.json()['leadId']}")).status_code == 403
+    finally:
+        await tl.aclose()
+
+
+@pytest.mark.asyncio
+async def test_team_lead_sees_execs_who_report_to_showroom_admin_same_name(client):
+    """Staff Reports-to used to list only team_lead, so many execs report to TL."""
+    await server.db.users.delete_many({"email": {"$in": ["tl.showroom@euler.com"]}})
+    await server.db.staff.delete_many({"name": {"$in": ["Sunil TL", "Deepak Exec", "Off Team"]}})
+    assert (await client.post("/api/staff", json={"name": "Sunil TL", "role": "TL"})).status_code in (200, 201)
+    assert (await client.post("/api/staff", json={
+        "name": "Deepak Exec", "role": "executive", "reportsTo": "Sunil TL"})).status_code in (200, 201)
+    assert (await client.post("/api/staff", json={
+        "name": "Off Team", "role": "executive", "reportsTo": "Other Desk"})).status_code in (200, 201)
+    created = await client.post("/api/auth/users", json={
+        "email": "tl.showroom@euler.com", "password": PW, "name": "Sunil", "role": "team_lead"})
+    assert created.status_code in (200, 201), created.text
+    mine = await client.post("/api/leads", json={
+        "customerName": "Showroom Team", "mobile": "9811100021", "executive": "Deepak Exec",
+        "interestedModel": "Turbo Max", "createdDate": "2026-10-10"})
+    other = await client.post("/api/leads", json={
+        "customerName": "Not Sunil", "mobile": "9811100022", "executive": "Off Team",
+        "interestedModel": "Storm", "createdDate": "2026-10-10"})
+    assert mine.status_code == 200 and other.status_code == 200, (mine.text, other.text)
+    tl = await _login("tl.showroom@euler.com", PW)
+    try:
+        names = {r["customerName"] for r in (await tl.get("/api/leads")).json()}
+        assert "Showroom Team" in names
+        assert "Not Sunil" not in names
     finally:
         await tl.aclose()
 
