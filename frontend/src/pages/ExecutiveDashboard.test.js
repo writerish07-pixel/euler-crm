@@ -15,6 +15,10 @@ jest.mock("../lib/api", () => ({
         kpis: { myLeadsMtd: 2, myBookingsMtd: 1, myDeliveriesMtd: 0, conversion: 50, needsUpdate: 1 },
         scope: { note: "My pipeline", matchedLeads: 2 },
         worklist: [],
+        recentLeads: [{
+          leadId: "LD26001002", customerName: "Team Cust", executive: "Ravi",
+          status: "New", model: "Turbo Max", createdDate: "2026-10-14",
+        }],
         updateQueue: [{
           leadId: "LD26001001", customerName: "Gap Flag", status: "Booked",
           updateFlags: [{ code: "kyc", message: "KYC missing: PAN" }],
@@ -92,6 +96,8 @@ test("team lead home is Team Dashboard", async () => {
   mockAuth.isExecutive = false;
   const { host, root } = await renderDash(true);
   expect(host.textContent).toMatch(/Team Dashboard/);
+  expect(host.querySelector('[data-testid="team-leads-table"]')).toBeTruthy();
+  expect(host.textContent).toMatch(/Team Cust/);
   const btn = host.querySelector('[data-testid="exec-new-lead-btn"]');
   expect(btn.textContent).toMatch(/New Lead/);
   await act(async () => { root.unmount(); });

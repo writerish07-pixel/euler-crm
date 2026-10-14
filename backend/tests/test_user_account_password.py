@@ -293,6 +293,29 @@ async def test_seed_backfills_missing_login_id_norm(client):
 
 
 @pytest.mark.asyncio
+async def test_deleted_user_is_not_recreated_by_seed(client):
+    import auth as authmod
+
+    listed = (await client.get("/api/auth/users")).json()
+    row = next(u for u in listed if u["email"] == "executive@euler.com")
+    gone = await client.delete(f"/api/auth/users/{row['userId']}")
+    assert gone.status_code == 200, gone.text
+    after = (await client.get("/api/auth/users")).json()
+    assert not any(u["email"] == "executive@euler.com" for u in after)
+    await authmod.seed_users(server.db)
+    still = (await client.get("/api/auth/users")).json()
+    assert not any(u["email"] == "executive@euler.com" for u in still)
+    again = await client.post("/api/auth/users", json={
+        "email": "executive@euler.com", "password": "euler@123",
+        "name": "Executive", "role": "executive", "loginId": "executive",
+    })
+    assert again.status_code == 200, again.text
+    await authmod.seed_users(server.db)
+    restored = (await client.get("/api/auth/users")).json()
+    assert any(u["email"] == "executive@euler.com" for u in restored)
+
+
+@pytest.mark.asyncio
 async def test_ping_is_public(client):
     r = await client.get("/api/ping")
     assert r.status_code == 200, r.text

@@ -86,6 +86,32 @@ export default function ExecutiveDashboard({ teamView = false }) {
         <Link to="/inventory"><Button variant="secondary" data-testid="exec-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
       </div>
 
+      {(isTeamLead || isTl) && (
+        <Card className="p-5 mt-6" data-testid="team-leads-table">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-heading font-bold text-ink">Team leads</h3>
+            <Link to="/leads" className="text-xs text-cobalt">Open register</Link>
+          </div>
+          <Table
+            rowKey="leadId"
+            empty="No team leads in scope — create one or assign executives under Staff → Reports to"
+            columns={[
+              { key: "customerName", label: "Customer", render: (r) => (
+                <div>
+                  <Link to={`/leads?open=${encodeURIComponent(r.leadId)}`} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                  <div className="text-[11px] font-mono text-ink-faint">{r.leadId}</div>
+                </div>
+              ) },
+              { key: "executive", label: "Executive" },
+              { key: "model", label: "Model" },
+              { key: "status", label: "Status", render: (r) => <Badge>{r.status || "New"}</Badge> },
+              { key: "createdDate", label: "Date", mono: true },
+            ]}
+            rows={d.recentLeads || []}
+          />
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
         <Card className="p-5 lg:col-span-2">
           <h3 className="font-heading font-bold text-ink mb-3">Today’s worklist</h3>
