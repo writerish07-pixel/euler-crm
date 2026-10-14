@@ -995,18 +995,24 @@ async def test_a_cancelled_note_does_not_count_as_a_resubmission(client, monkeyp
     assert rej["needsResubmission"] is True
 
 
-async def _register_row(lead_id, component_key, amount=5000.0):
+async def _register_row(lead_id, component_key, amount=5000.0, unit_sno=None,
+                        chassis="", invoice=""):
     """A persisted Scheme Claim Register row, the way a settled component leaves one."""
+    suffix = f"-u{unit_sno}" if unit_sno else ""
     doc = {
-        "claimId": f"CLM-{lead_id}-{component_key}", "leadId": lead_id,
+        "claimId": f"CLM-{lead_id}-{component_key}{suffix}", "leadId": lead_id,
         "componentKey": component_key, "claimAmount": amount, "eligibleClaim": amount,
         "claimStatus": "Pending", "receivedAmount": 0.0, "submittedDate": "2026-09-01",
+        "chassisNumber": chassis, "invoiceNumber": invoice,
         # Tagged so the fixture can take it back out — every module in this suite
         # shares one database and other modules count rows in db.claims.
         "_testSeed": SEED_TAG,
     }
-    await server.db.claims.update_one(
-        {"leadId": lead_id, "componentKey": component_key}, {"$set": doc}, upsert=True)
+    filt = {"leadId": lead_id, "componentKey": component_key}
+    if unit_sno:
+        doc["unitSno"] = unit_sno
+        filt["unitSno"] = unit_sno
+    await server.db.claims.update_one(filt, {"$set": doc}, upsert=True)
     return doc
 
 
@@ -2239,3 +2245,175 @@ async def test_cannot_relink_onto_cancelled_oem_or_cancelled_booking(client):
         assert (await c.post("/api/claims/oem-match", json={
             "leadId": lead_id, "componentKey": "oemExtraSupport",
             "claimNumber": "AF-999-CLLIVE", "lineId": "live-1"})).status_code == 403
+
+
+async def _pack_extra_lead(client, extras):
+    r = await client.post("/api/leads", json={
+        "customerName": "Pack Extra Support", "mobile": next_mobile(),
+        "interestedModel": "Turbo", "variant": "Range Maxx", "executive": "Amit",
+        "sameOrderMultiUnit": True,
+        "units": [{"model": "Turbo"}, {"model": "Storm"}],
+    })
+    lead_id = r.json()["leadId"]
+    units = []
+    for i, (amt, ch, inv) in enumerate(extras, start=1):
+        units.append({
+            "model": "Turbo" if i == 1 else "Storm",
+            "chassisNumber": ch, "invoiceNumber": inv,
+            "oemExtraSupportReceived": amt,
+        })
+    await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "sameOrderMultiUnit": True,
+        "units": units,
+        "chassisNumber": extras[0][1],
+        "invoiceNumber": extras[0][2],
+        "oemExtraSupportReceived": sum(a for a, _, _ in extras),
+    }})
+    return lead_id
+
+
+@pytest.mark.asyncio
+async def test_recompute_splits_pack_extra_support_register_rows(client):
+    extras = (
+        (8000.0, "MD9PACK26G900031", "AF-999-I26287031"),
+        (5000.0, "MD9PACK26G900032", "AF-999-I26287032"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "bookingDate": "2026-09-01", "currentStatus": "Booked",
+        "customerPayable": 100000,
+    }})
+    await server.recompute_lead(lead_id)
+    rows = [c async for c in server.db.claims.find({
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "manual": {"$ne": True},
+    })]
+    snos = sorted(int(c.get("unitSno") or 0) for c in rows)
+    assert snos == [1, 2]
+    by_sno = {int(c["unitSno"]): c for c in rows}
+    assert by_sno[1]["claimAmount"] == 8000.0
+    assert by_sno[2]["claimAmount"] == 5000.0
+    assert by_sno[1]["chassisNumber"] == extras[0][1]
+    listed = (await client.get("/api/claims")).json()
+    mine = [r for r in listed if r["leadId"] == lead_id and r["componentKey"] == "oemExtraSupport"]
+    assert sorted(int(r.get("unitSno") or 0) for r in mine) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_pack_extra_support_matches_two_oem_claims_on_one_lead(client):
+    """Two units, two Coulson Extra Support notes, both settle under one lead."""
+    extras = (
+        (8000.0, "MD9PACK26G900001", "AF-999-I26287001"),
+        (5000.0, "MD9PACK26G900002", "AF-999-I26287002"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _register_row(lead_id, "oemExtraSupport", 8000.0, unit_sno=1,
+                        chassis=extras[0][1], invoice=extras[0][2])
+    await _register_row(lead_id, "oemExtraSupport", 5000.0, unit_sno=2,
+                        chassis=extras[1][1], invoice=extras[1][2])
+    await _orphan_oem("AF-999-CLPACK1", line_id="u1", claimed=8000.0,
+                      chassis=extras[0][1], invoice=extras[0][2],
+                      description="Additional Support for invoice AF-999-I26287001",
+                      claim_type="Additional Support")
+    await _orphan_oem("AF-999-CLPACK2", line_id="u2", claimed=5000.0,
+                      chassis=extras[1][1], invoice=extras[1][2],
+                      description="Additional Support for invoice AF-999-I26287002",
+                      claim_type="Additional Support")
+    r1 = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 1,
+        "claimNumber": "AF-999-CLPACK1", "lineId": "u1"})
+    assert r1.status_code == 200, r1.text
+    r2 = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 2,
+        "claimNumber": "AF-999-CLPACK2", "lineId": "u2"})
+    assert r2.status_code == 200, r2.text
+    a = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 1})
+    b = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 2})
+    assert a["manualOemClaimNumber"] == "AF-999-CLPACK1"
+    assert b["manualOemClaimNumber"] == "AF-999-CLPACK2"
+    options = (await client.get("/api/claims/match-options")).json()
+    mine = [x for x in options if x["leadId"] == lead_id]
+    assert mine == []
+
+
+@pytest.mark.asyncio
+async def test_match_options_keep_unmatched_pack_unit_after_first_match(client):
+    extras = (
+        (8000.0, "MD9PACK26G900011", "AF-999-I26287011"),
+        (5000.0, "MD9PACK26G900012", "AF-999-I26287012"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _register_row(lead_id, "oemExtraSupport", 8000.0, unit_sno=1,
+                        chassis=extras[0][1], invoice=extras[0][2])
+    await _register_row(lead_id, "oemExtraSupport", 5000.0, unit_sno=2,
+                        chassis=extras[1][1], invoice=extras[1][2])
+    await _orphan_oem("AF-999-CLPACKA", line_id="ua", claimed=8000.0,
+                      chassis=extras[0][1], invoice=extras[0][2],
+                      description="Additional Support", claim_type="Additional Support")
+    assert (await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 1,
+        "claimNumber": "AF-999-CLPACKA", "lineId": "ua"})).status_code == 200
+    rows = (await client.get("/api/claims/match-options")).json()
+    mine = [x for x in rows if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport"]
+    assert len(mine) == 1
+    assert mine[0]["unitSno"] == 2
+    assert mine[0]["claimAmount"] == 5000.0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_invoice_rebill_is_flagged_on_the_lead(client, monkeypatch):
+    lead_id = await _delivered_lead(client, chassis="MD9REBILL26G900001",
+                                    invoice="AF-999-I26288002")
+    await server.db.leads.update_one(
+        {"leadId": lead_id},
+        {"$set": {"cancelledInvoiceNumber": "AF-999-I26288001",
+                  "rebilledInvoiceNumber": "AF-999-I26288002"}})
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("rebill1", "AF-999-CLREBILL")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey",
+                        lambda t, n: journey(n, "AF-999-CLREBILL",
+                                             chassis="MD9REBILL26G900001",
+                                             invoice="AF-999-I26288001"))
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims", params={"leadId": lead_id})).json()
+    assert rows[0]["lineItems"][0]["invoiceMismatch"] is True
+    assert rows[0]["lineItems"][0]["invoiceCancelled"] is True
+    assert rows[0]["lineItems"][0]["cancelledInvoiceNumber"] == "AF-999-I26288001"
+    assert rows[0]["lineItems"][0]["newInvoiceNumber"] == "AF-999-I26288002"
+    summary = (await client.get("/api/oem-claims/summary")).json()
+    hit = next(c for c in summary["invoiceConflicts"] if c["claimNumber"] == "AF-999-CLREBILL")
+    assert hit["invoiceCancelled"] is True
+    assert "cancelled" in hit["detail"].lower()
+    assert "AF-999-I26288001" in hit["detail"]
+    assert "AF-999-I26288002" in hit["detail"]
+    assert lead_id in hit["detail"]
+
+
+@pytest.mark.asyncio
+async def test_pack_unit_chassis_is_indexed_for_claim_link(client, monkeypatch):
+    extras = (
+        (8000.0, "MD9PACK26G900021", "AF-999-I26287021"),
+        (5000.0, "MD9PACK26G900022", "AF-999-I26287022"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("u2", "AF-999-CLUNIT2")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey",
+                        lambda t, n: journey(n, "AF-999-CLUNIT2",
+                                             chassis=extras[1][1], invoice=extras[1][2]))
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims", params={"leadId": lead_id})).json()
+    assert rows and rows[0]["lineItems"][0]["matchedBy"] == "chassis"
+    assert lead_id in (rows[0].get("leadIds") or [])

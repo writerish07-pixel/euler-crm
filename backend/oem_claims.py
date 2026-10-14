@@ -789,14 +789,15 @@ async def build_lead_index(db):
     by_chassis, by_invoice = {}, {}
     async for lead in db.leads.find({
         "$or": [{"chassisNumber": {"$nin": ["", None]}},
-                {"invoiceNumber": {"$nin": ["", None]}}],
+                {"invoiceNumber": {"$nin": ["", None]}},
+                {"units.chassisNumber": {"$nin": ["", None]}},
+                {"units.invoiceNumber": {"$nin": ["", None]}}],
     }):
-        ch = oem_sync._norm_chassis(lead.get("chassisNumber"))
-        if ch:
+        for ch in oem_sync.lead_chassis_list(lead):
             by_chassis.setdefault(ch, lead)
-        inv = str(lead.get("invoiceNumber") or "").strip().lower()
-        if inv:
-            by_invoice.setdefault(inv, lead)
+        for inv in oem_sync.lead_invoice_list(lead):
+            if inv:
+                by_invoice.setdefault(inv.lower(), lead)
     return {"chassis": by_chassis, "invoice": by_invoice}
 
 
@@ -806,8 +807,11 @@ async def _lead_for_chassis(db, chassis, index=None):
         return None
     if index is not None:
         return index["chassis"].get(ch)
-    async for lead in db.leads.find({"chassisNumber": {"$nin": ["", None]}}):
-        if oem_sync._norm_chassis(lead.get("chassisNumber")) == ch:
+    async for lead in db.leads.find({
+        "$or": [{"chassisNumber": {"$nin": ["", None]}},
+                {"units.chassisNumber": {"$nin": ["", None]}}],
+    }):
+        if ch in set(oem_sync.lead_chassis_list(lead)):
             return lead
     return None
 
@@ -818,9 +822,15 @@ async def _lead_for_invoice(db, invoice, index=None):
         return None
     if index is not None:
         return index["invoice"].get(inv.lower())
-    return await db.leads.find_one({
+    hit = await db.leads.find_one({
         "invoiceNumber": {"$regex": f"^{re.escape(inv)}$", "$options": "i"},
     })
+    if hit:
+        return hit
+    async for lead in db.leads.find({"units.invoiceNumber": {"$nin": ["", None]}}):
+        if inv.lower() in {x.lower() for x in oem_sync.lead_invoice_list(lead)}:
+            return lead
+    return None
 
 
 async def link_claim_lines(db, doc, index=None):
@@ -869,15 +879,28 @@ async def link_claim_lines(db, doc, index=None):
         else:
             stamp_line_leads(line, [(auto_id, auto_name)])
             line["matchedBy"] = matched_by
-        want_inv = str(line.get("sourceInvoiceNumber") or "").strip().lower()
-        got_inv = str(lead.get("invoiceNumber") or "").strip().lower()
-        if matched_by == "chassis" and want_inv and got_inv and want_inv != got_inv:
+        want_inv = str(line.get("sourceInvoiceNumber") or "").strip()
+        got_inv = oem_sync.invoice_for_chassis(lead, line.get("chassis"))
+        if matched_by == "chassis" and want_inv and got_inv and (
+                oem_sync._norm_invoice(want_inv) != oem_sync._norm_invoice(got_inv)):
             line["invoiceMismatch"] = True
-            conflicts.append(
-                f"{line.get('chassis')}: claim says invoice {line.get('sourceInvoiceNumber')}, "
-                f"lead {auto_id} says {lead.get('invoiceNumber')}")
+            line["invoiceCancelled"] = True
+            line["cancelledInvoiceNumber"] = want_inv
+            line["newInvoiceNumber"] = got_inv
+            conflicts.append({
+                "detail": (
+                    f"{line.get('chassis')}: invoice {want_inv} cancelled; "
+                    f"new invoice {got_inv} on {auto_id}"
+                ),
+                "chassis": line.get("chassis") or "",
+                "leadId": auto_id,
+                "cancelledInvoice": want_inv,
+                "newInvoice": got_inv,
+                "invoiceCancelled": True,
+            })
         else:
             line["invoiceMismatch"] = False
+            line["invoiceCancelled"] = False
         for lid in line_lead_ids(line):
             if lid not in lead_ids:
                 lead_ids.append(lid)
@@ -1311,6 +1334,7 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
     packs = _index_packs(index)
     manual = str(manual_claim_number or "").strip()
     line_key = str(manual_line_id or "").strip()
+    ch = oem_sync._norm_chassis(chassis)
     if manual:
         hit = None
         if line_key:
@@ -1328,11 +1352,15 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
                 "filedAmount": 0.0, "hasDocument": False, "documentCount": 0,
                 "manual": True, "lineId": line_key,
                 "detail": "Manual OEM claim number is not in the last Euler sync. Sync again."}
-    entry = packs["byLead"].get(lead_id)
+    entry = None
+    # Pack Extra Support is per chassis. Lead-first would glue both units
+    # to every Extra Support debit note on the file.
+    if component_key == "oemExtraSupport" and ch:
+        entry = packs["byChassis"].get(ch)
     if not entry:
-        ch = oem_sync._norm_chassis(chassis)
-        if ch:
-            entry = packs["byChassis"].get(ch)
+        entry = packs["byLead"].get(lead_id)
+    if not entry and ch:
+        entry = packs["byChassis"].get(ch)
     if not entry:
         inv = str(invoice or "").strip().lower()
         if inv:
@@ -1480,16 +1508,17 @@ async def apply_oem_filing_to_register(db, index=None):
     if lead_ids:
         async for lead in db.leads.find(
             {"leadId": {"$in": lead_ids}},
-            {"leadId": 1, "chassisNumber": 1, "invoiceNumber": 1, "_id": 0},
+            {"leadId": 1, "chassisNumber": 1, "invoiceNumber": 1, "units": 1, "_id": 0},
         ):
             leads[lead.get("leadId")] = lead
     patched = []
     for c in claims:
         lead = leads.get(c.get("leadId")) or {}
+        chassis = c.get("chassisNumber") or lead.get("chassisNumber") or ""
+        invoice = c.get("invoiceNumber") or lead.get("invoiceNumber") or ""
         match = match_state(
             index, c.get("leadId") or "", c.get("componentKey") or "",
-            chassis=lead.get("chassisNumber") or "",
-            invoice=lead.get("invoiceNumber") or "",
+            chassis=chassis, invoice=invoice,
             manual_claim_number=c.get("manualOemClaimNumber") or "",
             manual_line_id=c.get("manualOemLineId") or "")
         row = {
@@ -1499,8 +1528,6 @@ async def apply_oem_filing_to_register(db, index=None):
             "approvedDate": c.get("approvedDate") or "",
         }
         _, patch = overlay_register_from_oem(row, match)
-        chassis = lead.get("chassisNumber") or ""
-        invoice = lead.get("invoiceNumber") or ""
         if chassis and c.get("chassisNumber") != chassis:
             patch["chassisNumber"] = chassis
         if invoice and c.get("invoiceNumber") != invoice:
@@ -1843,7 +1870,18 @@ async def claims_summary(db):
                               for li in _line_item_list(row.get("lineItems"))],
             })
         for msg in row.get("invoiceConflicts") or []:
-            conflicts.append({"claimNumber": row.get("claimNumber"), "detail": msg})
+            if isinstance(msg, dict):
+                conflicts.append({
+                    "claimNumber": row.get("claimNumber"),
+                    "detail": msg.get("detail") or "",
+                    "leadId": msg.get("leadId") or "",
+                    "chassis": msg.get("chassis") or "",
+                    "cancelledInvoice": msg.get("cancelledInvoice") or "",
+                    "newInvoice": msg.get("newInvoice") or "",
+                    "invoiceCancelled": bool(msg.get("invoiceCancelled")),
+                })
+            else:
+                conflicts.append({"claimNumber": row.get("claimNumber"), "detail": msg})
     stuck.sort(key=lambda r: -r["stageDays"])
     ordered = [buckets[s] for s in coulson_client.CLAIM_STATUSES if s in buckets]
     ordered += [b for s, b in buckets.items() if s not in coulson_client.CLAIM_STATUSES]
@@ -2132,7 +2170,37 @@ async def _detach_lead_from_oem_claim(db, *, number, lead_id, line_id=""):
     return oem
 
 
-async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line_id=""):
+async def find_register_row(db, *, lead_id, component_key, unit_sno=None):
+    """Scheme Claim Register row for this lead + component (+ pack unit)."""
+    filt = {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}}
+    rows = [c async for c in db.claims.find(filt)]
+    if not rows:
+        return None
+    want = 0
+    try:
+        want = int(unit_sno or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want:
+        hit = next((c for c in rows if int(c.get("unitSno") or 0) == want), None)
+        if hit:
+            return hit
+    no_unit = [c for c in rows if not int(c.get("unitSno") or 0)]
+    if len(rows) == 1:
+        return rows[0]
+    if no_unit and not want:
+        if len(no_unit) == 1 and len(rows) == 1:
+            return no_unit[0]
+        raise ValueError("This lead has Extra Support on more than one unit. Pick the unit.")
+    if want:
+        return None
+    if len(no_unit) == 1:
+        return no_unit[0]
+    raise ValueError("This lead has Extra Support on more than one unit. Pick the unit.")
+
+
+async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line_id="",
+                               unit_sno=None):
     """Desk-made join. Never copies Coulson amounts into db.claims.
 
     A debit note can carry several Extra Support items. Matching without a line
@@ -2146,6 +2214,9 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     Relink (cancel in OEM, refile under the right head) replaces a previous
     manualOemClaimNumber: the old debit note loses this lead, and a Cancelled
     register row reopens from the new live note.
+
+    A same-order pack can have two Extra Support rows (one per unit). unit_sno
+    picks which vehicle's claim this debit note settles.
     """
     lead_id = str(lead_id or "").strip()
     component_key = str(component_key or "").strip()
@@ -2155,8 +2226,8 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
         raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
     if _oem_note_is_dead(oem.get("status")):
         raise ValueError("That OEM claim is cancelled. Relink to the new live claim.")
-    rec = await db.claims.find_one(
-        {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}})
+    rec = await find_register_row(
+        db, lead_id=lead_id, component_key=component_key, unit_sno=unit_sno)
     if not rec:
         raise ValueError("Scheme Claim Register has no row for that lead and component.")
     lead_row = await db.leads.find_one(
@@ -2246,9 +2317,9 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     }
 
 
-async def clear_register_oem_link(db, *, lead_id, component_key):
-    rec = await db.claims.find_one(
-        {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}})
+async def clear_register_oem_link(db, *, lead_id, component_key, unit_sno=None):
+    rec = await find_register_row(
+        db, lead_id=lead_id, component_key=component_key, unit_sno=unit_sno)
     if not rec:
         raise ValueError("Scheme Claim Register has no row for that lead and component.")
     number = str(rec.get("manualOemClaimNumber") or "").strip()

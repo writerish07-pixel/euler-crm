@@ -906,6 +906,8 @@ async def test_oem_sold_cancel_delinks_auto_delivered_then_restamps(client):
     assert again["invoiceNumber"] == "CINV-NEW"
     assert again.get("oemAutoDelivered") is True
     assert again["currentStatus"] == "Delivered"
+    assert again.get("cancelledInvoiceNumber") == "CINV-OLD"
+    assert again.get("rebilledInvoiceNumber") == "CINV-NEW"
 
 
 @pytest.mark.asyncio
