@@ -2417,3 +2417,45 @@ async def test_pack_unit_chassis_is_indexed_for_claim_link(client, monkeypatch):
     rows = (await client.get("/api/oem-claims", params={"leadId": lead_id})).json()
     assert rows and rows[0]["lineItems"][0]["matchedBy"] == "chassis"
     assert lead_id in (rows[0].get("leadIds") or [])
+
+
+@pytest.mark.asyncio
+async def test_team_lead_match_options_only_show_team_leads(client):
+    """Team Leader can match OEM claims, but only against their team's files."""
+    await server.db.users.delete_many({"email": "tl.pack@euler.com"})
+    await server.db.staff.delete_many({"name": {"$in": ["Pack TL", "Pack Exec"]}})
+    assert (await client.post("/api/staff", json={"name": "Pack TL", "role": "team_lead"})).status_code in (200, 201)
+    assert (await client.post("/api/staff", json={
+        "name": "Pack Exec", "role": "executive", "reportsTo": "Pack TL"})).status_code in (200, 201)
+    created = await client.post("/api/auth/users", json={
+        "email": "tl.pack@euler.com", "password": "euler@123",
+        "name": "Pack TL", "role": "team_lead"})
+    assert created.status_code == 200, created.text
+    mine = await _delivered_lead(client, chassis="MD9TEAM26G900001",
+                                 invoice="AF-999-I26289001")
+    other = await _delivered_lead(client, chassis="MD9TEAM26G900002",
+                                  invoice="AF-999-I26289002")
+    await server.db.leads.update_one({"leadId": mine}, {"$set": {"executive": "Pack Exec"}})
+    await server.db.leads.update_one({"leadId": other}, {"$set": {"executive": "Other Exec"}})
+    await _register_row(mine, "oemExtraSupport", 5000.0)
+    await _register_row(other, "oemExtraSupport", 7000.0)
+    await _orphan_oem("AF-999-CLTEAM", line_id="t1", claimed=5000.0,
+                      chassis="MD9TEAM26G900001", invoice="AF-999-I26289001",
+                      description="Additional Support", claim_type="Additional Support")
+    tl = await _login_as("tl.pack@euler.com")
+    try:
+        assert (await tl.get("/api/oem-claims")).status_code == 200
+        rows = (await tl.get("/api/claims/match-options")).json()
+        ids = {r["leadId"] for r in rows}
+        assert mine in ids
+        assert other not in ids
+        ok = await tl.post("/api/claims/oem-match", json={
+            "leadId": mine, "componentKey": "oemExtraSupport",
+            "claimNumber": "AF-999-CLTEAM", "lineId": "t1"})
+        assert ok.status_code == 200, ok.text
+        blocked = await tl.post("/api/claims/oem-match", json={
+            "leadId": other, "componentKey": "oemExtraSupport",
+            "claimNumber": "AF-999-CLTEAM", "lineId": "t1"})
+        assert blocked.status_code == 403
+    finally:
+        await tl.aclose()

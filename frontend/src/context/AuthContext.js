@@ -153,7 +153,7 @@ export function AuthProvider({ children }) {
         || role === "executive" || role === "asm" || role === "rm",
       canExport: role === "owner" || role === "sales_gm" || role === "tl",
       // Match OEM debit notes to the scheme register. Not payments.
-      canMatchOemClaims: role === "owner" || role === "tl" || role === "accounts" || role === "sales_gm",
+      canMatchOemClaims: role === "owner" || role === "tl" || role === "team_lead" || role === "accounts" || role === "sales_gm",
       // Pull the Euler claim mirror. Accounts does not.
       canSyncOemClaims: role === "owner" || role === "tl" || role === "sales_gm",
     }}>

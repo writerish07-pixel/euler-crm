@@ -3801,6 +3801,22 @@ async def _require_lead_visible(lead, user):
         raise HTTPException(403, "This lead is not on your team.")
 
 
+async def _team_visible_lead_ids(user, lead_ids):
+    """Team Leader → only their team's ids. Everyone else keeps the full set."""
+    ids = [str(x or "").strip() for x in (lead_ids or []) if str(x or "").strip()]
+    if not ids or not authmod.is_team_lead(user):
+        return set(ids)
+    names = await team_scope.team_member_names(db, user)
+    allowed = set()
+    async for lead in db.leads.find(
+            {"leadId": {"$in": ids}}, {"leadId": 1, "executive": 1, "_id": 0}):
+        if team_scope.lead_in_names(lead, names):
+            lid = str(lead.get("leadId") or "").strip()
+            if lid:
+                allowed.add(lid)
+    return allowed
+
+
 @api.get("/leads")
 async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      month: Optional[str] = None, year: Optional[str] = None,
@@ -13837,12 +13853,14 @@ async def _scheme_register_amounts(lead, component_key):
 
 
 @api.get("/claims/match-options", dependencies=[Depends(oem_claim_desk_only)])
-async def claim_match_options():
+async def claim_match_options(user=Depends(current_user)):
     """Leads and components already on the Scheme Claim Register.
 
     The OEM match modal must not call GET /claims. That path recomputes every
     scheme share, overlays Euler, and often exceeds the 25s browser timeout —
     the Lead dropdown then stays on 'pick lead' with nothing in it.
+
+    A Team Leader only sees unmatched rows for their own team.
     """
     dead_oem = {}
     async for row in db[oem_claims.CLAIMS_COLLECTION].find(
@@ -13921,6 +13939,9 @@ async def claim_match_options():
             else:
                 r["chassisNumber"] = r["chassisNumber"] or (lead.get("chassisNumber") or "")
                 r["invoiceNumber"] = r["invoiceNumber"] or (lead.get("invoiceNumber") or "")
+    if authmod.is_team_lead(user):
+        allowed = await _team_visible_lead_ids(user, [r["leadId"] for r in rows])
+        rows = [r for r in rows if r["leadId"] in allowed]
     return rows
 
 
@@ -13948,7 +13969,8 @@ async def create_claim_from_oem(body: OemClaimMatchIn, act=Depends(actor)):
 
 
 @api.post("/claims/oem-match", dependencies=[Depends(oem_claim_desk_only)])
-async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
+async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor),
+                             user=Depends(current_user)):
     """Manually join a Scheme Claim Register row to an OEM Claim Settlements debit note.
 
     Use when chassis/wording auto-match is wrong or missing. Relink uses the
@@ -13960,6 +13982,11 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
     lead_ids = _oem_match_lead_ids(body)
     if not lead_ids:
         raise HTTPException(422, "Pick at least one existing lead.")
+    if authmod.is_team_lead(user):
+        allowed = await _team_visible_lead_ids(user, lead_ids)
+        blocked = [lid for lid in lead_ids if lid not in allowed]
+        if blocked:
+            raise HTTPException(403, "This lead is not on your team.")
     last = {}
     try:
         for i, lid in enumerate(lead_ids):
