@@ -109,12 +109,23 @@ async def team_member_names(db, user) -> set:
     return names
 
 
-def lead_in_names(lead, names) -> bool:
-    return name_allowed_for_team_lead((lead or {}).get("executive"), names)
+def _created_by_user(lead, user) -> bool:
+    uid = str((user or {}).get("userId") or "").strip()
+    if uid and str((lead or {}).get("createdByUserId") or "").strip() == uid:
+        return True
+    email = _norm_name((user or {}).get("email"))
+    created_email = _norm_name((lead or {}).get("createdByEmail"))
+    return bool(email and created_email and email == created_email)
 
 
-def leads_for_names(leads, names) -> list:
-    return [l for l in (leads or []) if lead_in_names(l, names)]
+def lead_in_names(lead, names, user=None) -> bool:
+    if name_allowed_for_team_lead((lead or {}).get("executive"), names):
+        return True
+    return _created_by_user(lead, user)
+
+
+def leads_for_names(leads, names, user=None) -> list:
+    return [l for l in (leads or []) if lead_in_names(l, names, user)]
 
 
 def name_allowed_for_team_lead(executive_name, team_names) -> bool:

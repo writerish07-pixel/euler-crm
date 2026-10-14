@@ -205,6 +205,37 @@ async def test_team_lead_sees_execs_who_report_to_showroom_admin_same_name(clien
 
 
 @pytest.mark.asyncio
+async def test_team_lead_create_appears_on_own_dashboard(client):
+    """TL can create for a reporting exec — that file must land on Team Dashboard."""
+    await server.db.users.delete_many({"email": {"$in": ["tl.create@euler.com"]}})
+    await server.db.staff.delete_many({"name": {"$in": ["Create TL", "Desk Exec"]}})
+    assert (await client.post("/api/staff", json={"name": "Create TL", "role": "team_lead"})).status_code in (200, 201)
+    assert (await client.post("/api/staff", json={
+        "name": "Desk Exec", "role": "executive", "reportsTo": "Create TL"})).status_code in (200, 201)
+    created = await client.post("/api/auth/users", json={
+        "email": "tl.create@euler.com", "password": PW, "name": "Create TL", "role": "team_lead"})
+    assert created.status_code in (200, 201), created.text
+    tl = await _login("tl.create@euler.com", PW)
+    try:
+        made = await tl.post("/api/leads", json={
+            "customerName": "Dashboard Visible", "mobile": "9811100033",
+            "executive": "Desk Exec", "interestedModel": "Turbo Max"})
+        assert made.status_code == 200, made.text
+        lid = made.json()["leadId"]
+        rows = (await tl.get("/api/leads")).json()
+        assert any(r["leadId"] == lid for r in rows)
+        dash = (await tl.get("/api/executive/dashboard")).json()
+        recent = {r["customerName"] for r in (dash.get("recentLeads") or [])}
+        assert "Dashboard Visible" in recent
+        kinds = {r["kind"] for r in (dash.get("worklist") or []) if r.get("leadId") == lid}
+        assert "New lead" in kinds
+        assert dash["scope"]["matchedLeads"] >= 1
+        assert (await tl.get(f"/api/leads/{lid}")).status_code == 200
+    finally:
+        await tl.aclose()
+
+
+@pytest.mark.asyncio
 async def test_executive_can_post_finance_receipt(client):
     await server.db.users.delete_many({"email": "ex.pay@euler.com"})
     await client.post("/api/auth/users", json={

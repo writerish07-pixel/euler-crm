@@ -2230,7 +2230,8 @@ async def _leads_for_scoped_viewer(leads, user) -> list:
     if role == "executive":
         return _leads_for_executive(leads, user)
     if authmod.is_team_lead(user):
-        return team_scope.leads_for_names(leads, await team_scope.team_member_names(db, user))
+        return team_scope.leads_for_names(
+            leads, await team_scope.team_member_names(db, user), user)
     return list(leads or [])
 
 
@@ -2847,27 +2848,53 @@ async def executive_dashboard(user=Depends(current_user)):
             })
 
     worklist = []
+    seen_work = set()
+
+    def add_work(lead, kind, date):
+        lid = str((lead or {}).get("leadId") or "")
+        if not lid or lid in seen_work:
+            return
+        seen_work.add(lid)
+        worklist.append({
+            "leadId": lid,
+            "customerName": lead.get("customerName") or "",
+            "executive": lead.get("executive") or "",
+            "kind": kind,
+            "date": date,
+            "status": lead.get("currentStatus") or "",
+            "model": lead.get("interestedModel") or "",
+        })
+
+    new_today = [
+        l for l in active
+        if is_today(l.get("createdDate"))
+        and _status_bucket(l) == "New"
+    ]
+    for l in new_today[:15]:
+        add_work(l, "New lead", str(l.get("createdDate") or "")[:10])
     for l in followup_overdue[:15]:
-        worklist.append({
-            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
-            "executive": l.get("executive") or "",
-            "kind": "Follow-up overdue", "date": followup_date(l),
-            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
-        })
+        add_work(l, "Follow-up overdue", followup_date(l))
     for l in followup_due[:10]:
-        worklist.append({
-            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
-            "executive": l.get("executive") or "",
-            "kind": "Follow-up today", "date": followup_date(l),
-            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
-        })
+        add_work(l, "Follow-up today", followup_date(l))
     for l in active_booked[:10]:
-        worklist.append({
-            "leadId": l["leadId"], "customerName": l.get("customerName") or "",
-            "executive": l.get("executive") or "",
-            "kind": "Pending delivery", "date": str(l.get("bookingDate") or "")[:10],
-            "status": l.get("currentStatus") or "", "model": l.get("interestedModel") or "",
-        })
+        add_work(l, "Pending delivery", str(l.get("bookingDate") or "")[:10])
+
+    recent_leads = []
+    if role in ("tl", "team_lead"):
+        ranked = sorted(
+            active,
+            key=lambda l: str(l.get("leadId") or ""),
+            reverse=True,
+        )
+        for l in ranked[:25]:
+            recent_leads.append({
+                "leadId": l.get("leadId") or "",
+                "customerName": l.get("customerName") or "",
+                "executive": l.get("executive") or "",
+                "status": l.get("currentStatus") or "New",
+                "model": l.get("interestedModel") or "",
+                "createdDate": str(l.get("createdDate") or "")[:10],
+            })
 
     plan = await _load_exec_incentive_plan_for(user.get("name") or "")
     incentive = None
@@ -2915,6 +2942,7 @@ async def executive_dashboard(user=Depends(current_user)):
         "sourceMix": [{"source": k, "count": v} for k, v in sorted(sources.items(), key=lambda x: -x[1])],
         "modelMix": sorted(models.values(), key=lambda x: -x["leads"]),
         "worklist": worklist[:25],
+        "recentLeads": recent_leads,
         "updateQueue": update_queue[:40],
         "incentive": incentive,
         "lastUpdated": now_iso(),
@@ -3797,7 +3825,7 @@ async def _require_lead_visible(lead, user):
     if not authmod.is_team_lead(user):
         return
     names = await team_scope.team_member_names(db, user)
-    if not team_scope.lead_in_names(lead, names):
+    if not team_scope.lead_in_names(lead, names, user):
         raise HTTPException(403, "This lead is not on your team.")
 
 
@@ -3809,8 +3837,9 @@ async def _team_visible_lead_ids(user, lead_ids):
     names = await team_scope.team_member_names(db, user)
     allowed = set()
     async for lead in db.leads.find(
-            {"leadId": {"$in": ids}}, {"leadId": 1, "executive": 1, "_id": 0}):
-        if team_scope.lead_in_names(lead, names):
+            {"leadId": {"$in": ids}},
+            {"leadId": 1, "executive": 1, "createdByUserId": 1, "createdByEmail": 1, "_id": 0}):
+        if team_scope.lead_in_names(lead, names, user):
             lid = str(lead.get("leadId") or "").strip()
             if lid:
                 allowed.add(lid)
@@ -3855,6 +3884,7 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         "deliveryStatus": 1, "insurance": 1, "insurerName": 1,
         "insuranceAgentId": 1, "insuranceArrangedBy": 1,
         "registration": 1, "invoice": 1, "pdi": 1,
+        "createdByUserId": 1, "createdByEmail": 1,
     }).sort("leadId", -1).to_list(cap)
     # An executive works their own leads only. A team lead sees their team.
     # Owner, Sales GM, Showroom Admin and Accounts see all.
@@ -4245,6 +4275,9 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
         "units": pack_units if same_order and len(pack_units) > 1 else [],
         "vehicleCount": max(len(pack_units), 1) if same_order and pack_units else 1,
         "anotherVehicle": bool(another),
+        "createdByUserId": str((viewer or {}).get("userId") or "").strip(),
+        "createdByName": str((viewer or {}).get("name") or "").strip(),
+        "createdByEmail": str((viewer or {}).get("email") or "").strip(),
     }
     await db.leads.insert_one(doc)
     _act_doc = {
