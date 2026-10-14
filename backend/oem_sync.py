@@ -773,6 +773,74 @@ def lead_invoice_list(lead):
     return out
 
 
+def invoice_for_chassis(lead, chassis):
+    """The live invoice on the vehicle that holds this chassis."""
+    ch = _norm_chassis(chassis)
+    if ch:
+        for u in ((lead or {}).get("units") or []):
+            if not isinstance(u, dict):
+                continue
+            if _norm_chassis(u.get("chassisNumber")) == ch:
+                return str(u.get("invoiceNumber") or lead.get("invoiceNumber") or "").strip()
+    return str((lead or {}).get("invoiceNumber") or "").strip()
+
+
+def cancelled_invoices_for_lead(lead):
+    """Old tax invoices kept when Coulson cancelled and rebilled the same chassis."""
+    out = []
+    seen = set()
+
+    def take(raw):
+        inv = _norm_invoice(raw)
+        if inv and inv not in seen:
+            seen.add(inv)
+            out.append(str(raw or "").strip())
+
+    take((lead or {}).get("cancelledInvoiceNumber"))
+    for row in ((lead or {}).get("cancelledInvoices") or []):
+        if isinstance(row, dict):
+            take(row.get("invoiceNumber"))
+        else:
+            take(row)
+    for u in ((lead or {}).get("units") or []):
+        if not isinstance(u, dict):
+            continue
+        take(u.get("cancelledInvoiceNumber"))
+        for row in (u.get("cancelledInvoices") or []):
+            if isinstance(row, dict):
+                take(row.get("invoiceNumber"))
+            else:
+                take(row)
+    return out
+
+
+def _cancelled_invoice_entry(old_invoice, new_invoice="", chassis=""):
+    return {
+        "invoiceNumber": str(old_invoice or "").strip(),
+        "replacedBy": str(new_invoice or "").strip(),
+        "chassis": _norm_chassis(chassis),
+        "cancelledAt": now_iso(),
+    }
+
+
+def record_cancelled_invoice(target, old_invoice, new_invoice="", chassis=""):
+    """Stamp the cancelled bill on a lead or unit so claims can flag the rebill."""
+    old = str(old_invoice or "").strip()
+    new = str(new_invoice or "").strip()
+    if not old or (new and _norm_invoice(old) == _norm_invoice(new)):
+        return target
+    target = dict(target or {})
+    target["cancelledInvoiceNumber"] = old
+    if new:
+        target["rebilledInvoiceNumber"] = new
+    hist = [dict(x) for x in (target.get("cancelledInvoices") or []) if isinstance(x, dict)]
+    key = _norm_invoice(old)
+    hist = [x for x in hist if _norm_invoice(x.get("invoiceNumber")) != key]
+    hist.append(_cancelled_invoice_entry(old, new, chassis))
+    target["cancelledInvoices"] = hist[-8:]
+    return target
+
+
 def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date=""):
     """Write chassis / invoice / plate / billed date onto the matching or next empty unit line."""
     units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
@@ -782,6 +850,11 @@ def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date=""):
     date = str(sold_date or "").strip()[:10]
 
     def _apply(u):
+        old_inv = str(u.get("invoiceNumber") or "").strip()
+        if invoice and old_inv and _norm_invoice(old_inv) != _norm_invoice(invoice):
+            updated = record_cancelled_invoice(u, old_inv, invoice, ch)
+            u.clear()
+            u.update(updated)
         if invoice:
             u["invoiceNumber"] = invoice
         if plate:
@@ -1257,6 +1330,19 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
                 patch["chassisNumber"] = chassis
         if invoice and _norm_invoice(lead.get("invoiceNumber")) != _norm_invoice(invoice):
             if not is_same_order_pack(lead) or not lead_invoice_list(lead):
+                old_inv = str(lead.get("invoiceNumber") or "").strip()
+                prior = str(lead.get("cancelledInvoiceNumber") or "").strip()
+                if old_inv:
+                    hist = record_cancelled_invoice(lead, old_inv, invoice, chassis)
+                    patch["cancelledInvoiceNumber"] = hist.get("cancelledInvoiceNumber")
+                    patch["rebilledInvoiceNumber"] = hist.get("rebilledInvoiceNumber")
+                    patch["cancelledInvoices"] = hist.get("cancelledInvoices")
+                elif prior and _norm_invoice(prior) != _norm_invoice(invoice):
+                    patch["rebilledInvoiceNumber"] = invoice
+                    hist = list(lead.get("cancelledInvoices") or [])
+                    if hist and isinstance(hist[-1], dict) and not hist[-1].get("replacedBy"):
+                        hist[-1] = {**hist[-1], "replacedBy": invoice}
+                        patch["cancelledInvoices"] = hist
                 patch["invoiceNumber"] = invoice
         if plate and _norm_invoice(lead.get("numberPlate")) != _norm_invoice(plate):
             if not is_same_order_pack(lead) or not str(lead.get("numberPlate") or "").strip():
@@ -1351,6 +1437,11 @@ def clear_gone_sold_chassis(lead, sold_chassis):
     for u in units:
         if _norm_chassis(u.get("chassisNumber")) not in gone_set:
             continue
+        old_inv = str(u.get("invoiceNumber") or "").strip()
+        if old_inv:
+            updated = record_cancelled_invoice(u, old_inv, "", u.get("chassisNumber"))
+            u.clear()
+            u.update(updated)
         u["chassisNumber"] = ""
         u["invoiceNumber"] = ""
         u["numberPlate"] = ""
@@ -1373,6 +1464,11 @@ def clear_gone_sold_chassis(lead, sold_chassis):
             patch["invoiceNumber"] = (first or {}).get("invoiceNumber") or ""
             patch["numberPlate"] = (first or {}).get("numberPlate") or ""
         else:
+            old_inv = str((lead or {}).get("invoiceNumber") or "").strip()
+            if old_inv:
+                hist = record_cancelled_invoice(lead, old_inv, "", lead.get("chassisNumber"))
+                patch["cancelledInvoiceNumber"] = hist.get("cancelledInvoiceNumber")
+                patch["cancelledInvoices"] = hist.get("cancelledInvoices")
             patch["chassisNumber"] = ""
             patch["invoiceNumber"] = ""
             patch["numberPlate"] = ""

@@ -36,6 +36,20 @@ async def client():
         yield c
 
 
+def test_extra_support_unit_rows_split_a_pack():
+    assert ce.extra_support_unit_rows({"oemExtraSupportReceived": 8000}) == []
+    rows = ce.extra_support_unit_rows({
+        "sameOrderMultiUnit": True,
+        "oemExtraSupportReceived": 13000,
+        "units": [
+            {"oemExtraSupportReceived": 8000, "chassisNumber": "A", "invoiceNumber": "I1"},
+            {"oemExtraSupportReceived": 5000, "chassisNumber": "B", "invoiceNumber": "I2"},
+        ],
+    })
+    assert [(r["unitSno"], r["oemExtraSupportReceived"]) for r in rows] == [(1, 8000.0), (2, 5000.0)]
+    assert rows[1]["chassisNumber"] == "B"
+
+
 def test_vehicle_count_reads_units():
     assert oem_sync.vehicle_count({"interestedModel": "Turbo Max"}) == 1
     assert oem_sync.vehicle_count({

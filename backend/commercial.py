@@ -489,6 +489,30 @@ SCHEME_COMPONENT_LABELS = {
 OEM_EXTRA_SUPPORT_KEY = "oemExtraSupport"
 
 
+def extra_support_unit_rows(lead):
+    """Per-vehicle Extra Support on a same-order pack.
+
+    Empty when the file is a single unit (or Extra Support lives only on the
+    lead). Two units with ₹8,000 and ₹5,000 become two claim rows so each
+    Coulson debit note can settle under the same lead.
+    """
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    if len(units) <= 1:
+        return []
+    rows = []
+    for i, u in enumerate(units):
+        recv = round2(max(0.0, num(u.get("oemExtraSupportReceived"))))
+        if recv <= 0:
+            continue
+        rows.append({
+            "unitSno": i + 1,
+            "oemExtraSupportReceived": recv,
+            "chassisNumber": str(u.get("chassisNumber") or "").strip(),
+            "invoiceNumber": str(u.get("invoiceNumber") or "").strip(),
+        })
+    return rows
+
+
 def compute_oem_extra_support(s):
     """OEM Extra Support — staff-typed side ledger (NOT a Scheme Master component).
 

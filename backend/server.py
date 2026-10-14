@@ -1408,12 +1408,16 @@ async def recompute_lead(lead_id):
             "referralBonus", "dsaDiscount", "additionalDiscount",
             "rtoBenefit", "rtoInsuranceBenefit",
         ]
+        extra_units = ce.extra_support_unit_rows(merged)
         for _key, _amt in shares["displayByComponent"].items():
             if _amt <= 0:
+                continue
+            if _key == ce.OEM_EXTRA_SUPPORT_KEY and extra_units:
                 continue
             _ex = await db.claims.find_one({
                 "leadId": lead_id, "componentKey": _key, "manual": {"$ne": True},
                 "claimStatus": {"$nin": ["Cancelled"]},
+                "$or": [{"unitSno": {"$in": [None, 0]}}, {"unitSno": {"$exists": False}}],
             })
             if _ex and str(_ex.get("claimStatus") or "") == "Dropped":
                 continue
@@ -1479,9 +1483,15 @@ async def recompute_lead(lead_id):
             else:
                 await db.claims.insert_one(dict(_claim_row))
             await sheet_sync("claims", _claim_row)
+        if extra_units:
+            await _upsert_pack_extra_support_claims(
+                lead_id, merged, extra_units, shares, _claim_amount_fields)
         await _prune_inactive_scheme_claims(
             lead_id,
             {k for k, amt in shares["displayByComponent"].items() if ce.num(amt) > 0})
+        if extra_units:
+            await _prune_pack_extra_unit_claims(
+                lead_id, {u["unitSno"] for u in extra_units})
         # OEM Extra Support Register — Received is the claim; Retained = full Received.
         if oem_extra_recv > 0:
             _bk = await _live_booking(lead_id) or {}
@@ -3789,6 +3799,22 @@ async def _require_lead_visible(lead, user):
     names = await team_scope.team_member_names(db, user)
     if not team_scope.lead_in_names(lead, names):
         raise HTTPException(403, "This lead is not on your team.")
+
+
+async def _team_visible_lead_ids(user, lead_ids):
+    """Team Leader → only their team's ids. Everyone else keeps the full set."""
+    ids = [str(x or "").strip() for x in (lead_ids or []) if str(x or "").strip()]
+    if not ids or not authmod.is_team_lead(user):
+        return set(ids)
+    names = await team_scope.team_member_names(db, user)
+    allowed = set()
+    async for lead in db.leads.find(
+            {"leadId": {"$in": ids}}, {"leadId": 1, "executive": 1, "_id": 0}):
+        if team_scope.lead_in_names(lead, names):
+            lid = str(lead.get("leadId") or "").strip()
+            if lid:
+                allowed.add(lid)
+    return allowed
 
 
 @api.get("/leads")
@@ -13454,8 +13480,95 @@ async def _prune_inactive_scheme_claims(lead_id, live_keys):
         await db.claims.delete_one({"_id": c["_id"]})
 
 
+async def _prune_pack_extra_unit_claims(lead_id, live_snos):
+    """Drop leftover lead-level Extra Support once per-unit rows exist."""
+    live_snos = {int(x) for x in (live_snos or set())}
+    async for c in db.claims.find({
+        "leadId": lead_id, "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+        "manual": {"$ne": True},
+    }):
+        sno = int(c.get("unitSno") or 0)
+        if sno in live_snos:
+            continue
+        if _scheme_claim_is_dropped(c) or _scheme_claim_has_money_lifecycle(c):
+            continue
+        await db.claims.delete_one({"_id": c["_id"]})
+
+
+async def _upsert_pack_extra_support_claims(lead_id, merged, extra_units, shares,
+                                           claim_amount_fields):
+    """One Scheme Claim Register row per pack unit that has Extra Support."""
+    _bk = await _live_booking(lead_id) or {}
+    for unit in extra_units or []:
+        sno = int(unit.get("unitSno") or 0)
+        amt = ce.round2(ce.num(unit.get("oemExtraSupportReceived")))
+        if sno < 1 or amt <= 0:
+            continue
+        _ex = await db.claims.find_one({
+            "leadId": lead_id, "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+            "unitSno": sno, "manual": {"$ne": True},
+            "claimStatus": {"$nin": ["Cancelled"]},
+        })
+        if _ex and str(_ex.get("claimStatus") or "") == "Dropped":
+            continue
+        if _ex:
+            claim_id = _ex.get("claimId") or f"CLM-{lead_id}-{ce.OEM_EXTRA_SUPPORT_KEY}-u{sno}"
+        else:
+            claim_id = f"CLM-{lead_id}-{ce.OEM_EXTRA_SUPPORT_KEY}-u{sno}"
+        chassis = unit.get("chassisNumber") or merged.get("chassisNumber") or ""
+        invoice = unit.get("invoiceNumber") or merged.get("invoiceNumber") or ""
+        _comp_cols = {f: 0.0 for f in claim_amount_fields}
+        row = {
+            "claimId": claim_id,
+            "leadId": lead_id, "customer": merged.get("customerName"),
+            "model": merged.get("interestedModel"), "variant": merged.get("variant"),
+            "bookingDate": merged.get("bookingDate", ""),
+            "component": ce.SCHEME_COMPONENT_LABELS.get(
+                ce.OEM_EXTRA_SUPPORT_KEY, ce.OEM_EXTRA_SUPPORT_KEY),
+            "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+            "unitSno": sno,
+            "eligibleClaim": amt,
+            "claimAmount": amt,
+            "receivedAmount": (_ex or {}).get("receivedAmount", 0),
+            "claimStatus": (_ex or {}).get("claimStatus", "Pending"),
+            "claimReference": (_ex or {}).get("claimReference", ""),
+            "bookingId": _bk.get("bookingId", ""),
+            "schemeMonth": ce.scheme_month_from_date(_scheme_as_of(merged)),
+            "executive": merged.get("executive", ""),
+            **_comp_cols,
+            "totalDiscount": amt,
+            "dealerDiscount": 0.0,
+            "oemDiscount": amt,
+            "claimRequired": "Yes",
+            "ageingDays": _claim_ageing_days(
+                (_ex or {}).get("submittedDate") or merged.get("deliveryDate", ""),
+                (_ex or {}).get("claimStatus", "Pending")),
+            "source": "OEM Extra Support",
+            "dsaApproval": "",
+            "claimReceivedDate": (_ex or {}).get("claimReceivedDate", ""),
+            "claimRemarks": (_ex or {}).get("claimRemarks", ""),
+            "chassisNumber": chassis or (_ex or {}).get("chassisNumber", ""),
+            "invoiceNumber": invoice or (_ex or {}).get("invoiceNumber", ""),
+            "submittedDate": (_ex or {}).get("submittedDate", ""),
+            "approvedDate": (_ex or {}).get("approvedDate", ""),
+            "oemMatchState": (_ex or {}).get("oemMatchState", ""),
+            "oemStatus": (_ex or {}).get("oemStatus", ""),
+            "oemStageLabel": (_ex or {}).get("oemStageLabel", ""),
+            "manual": False,
+        }
+        if _ex:
+            await db.claims.update_one({"_id": _ex["_id"]}, {"$set": row})
+        else:
+            await db.claims.insert_one(dict(row))
+        await sheet_sync("claims", row)
+
+
 def _claim_pair_key(doc):
-    return (str((doc or {}).get("leadId") or ""), str((doc or {}).get("componentKey") or ""))
+    return (
+        str((doc or {}).get("leadId") or ""),
+        str((doc or {}).get("componentKey") or ""),
+        int((doc or {}).get("unitSno") or 0),
+    )
 
 
 async def _claims_by_pair():
@@ -13524,11 +13637,14 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
         shares = ce.compute_scheme_claim_shares(snap, scheme_rows)
         display = shares["displayByComponent"]
         eligible = shares["eligibleByComponent"]
+        extra_units = ce.extra_support_unit_rows(l)
         live_by_lead[l["leadId"]] = {k for k, amt in display.items() if ce.num(amt) > 0}
         for key, company_share in display.items():
             if company_share <= 0:
                 continue
-            existing = by_pair.get((l["leadId"], key))
+            if key == ce.OEM_EXTRA_SUPPORT_KEY and extra_units:
+                continue
+            existing = by_pair.get((l["leadId"], key, 0))
             if existing and _scheme_claim_is_dropped(existing):
                 continue
             elig = ce.round2(eligible.get(key, 0))
@@ -13553,6 +13669,40 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
                 "manualOemClaimNumber": (existing or {}).get("manualOemClaimNumber") or "",
                 "manualOemLineId": (existing or {}).get("manualOemLineId") or "",
                 "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
+            })
+        for unit in extra_units:
+            sno = int(unit.get("unitSno") or 0)
+            amt = ce.round2(ce.num(unit.get("oemExtraSupportReceived")))
+            existing = by_pair.get((l["leadId"], ce.OEM_EXTRA_SUPPORT_KEY, sno))
+            if existing and _scheme_claim_is_dropped(existing):
+                continue
+            submitted = (existing or {}).get("submittedDate", "")
+            approved = (existing or {}).get("approvedDate", "")
+            claim_status = (existing or {}).get("claimStatus", "Pending")
+            ageing = _claim_ageing_days(submitted, claim_status, approved)
+            claim_id = (existing or {}).get(
+                "claimId", f"CLM-{l['leadId']}-{ce.OEM_EXTRA_SUPPORT_KEY}-u{sno}")
+            seen_ids.add(claim_id)
+            result.append({
+                "claimId": claim_id,
+                "leadId": l["leadId"], "customer": l.get("customerName"),
+                "model": l.get("interestedModel"), "variant": l.get("variant"),
+                "bookingDate": l.get("bookingDate"),
+                "component": ce.SCHEME_COMPONENT_LABELS.get(
+                    ce.OEM_EXTRA_SUPPORT_KEY, ce.OEM_EXTRA_SUPPORT_KEY),
+                "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
+                "unitSno": sno,
+                "claimAmount": amt,
+                "eligibleClaim": amt,
+                "approvalStatus": "Approved",
+                "claimStatus": claim_status,
+                "receivedAmount": (existing or {}).get("receivedAmount", 0),
+                "claimReference": (existing or {}).get("claimReference", ""),
+                "manualOemClaimNumber": (existing or {}).get("manualOemClaimNumber") or "",
+                "manualOemLineId": (existing or {}).get("manualOemLineId") or "",
+                "submittedDate": submitted, "approvedDate": approved, "ageingDays": ageing,
+                "chassisNumber": unit.get("chassisNumber") or "",
+                "invoiceNumber": unit.get("invoiceNumber") or "",
             })
     # Manual claims (OEM incentives / executive incentives) — merged into the register
     for m in manuals:
@@ -13614,6 +13764,7 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
             "bookingDate": c.get("bookingDate") or lead.get("bookingDate", ""),
             "component": c.get("component") or ce.SCHEME_COMPONENT_LABELS.get(key, key),
             "componentKey": key,
+            "unitSno": int(c.get("unitSno") or 0) or None,
             "claimAmount": ce.round2(ce.num(c.get("claimAmount") if c.get("claimAmount") is not None else elig)),
             "eligibleClaim": elig,
             "approvalStatus": c.get("approvalStatus") or status or "Pending",
@@ -13629,12 +13780,20 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
         })
         seen_ids.add(claim_id)
 
-    # Chassis and invoice live on the lead. Copy them BEFORE matching so a debit
-    # note that was never stamped with leadId still joins this row on the vehicle.
+    # Chassis and invoice live on the lead (or the pack unit). Copy them BEFORE
+    # matching so a debit note that was never stamped with leadId still joins.
     for row in result:
         lead = lead_by_id.get(row.get("leadId") or "") or {}
-        row["chassisNumber"] = lead.get("chassisNumber") or row.get("chassisNumber") or ""
-        row["invoiceNumber"] = lead.get("invoiceNumber") or row.get("invoiceNumber") or ""
+        if int(row.get("unitSno") or 0):
+            row["chassisNumber"] = row.get("chassisNumber") or lead.get("chassisNumber") or ""
+            row["invoiceNumber"] = (
+                row.get("invoiceNumber")
+                or oem_sync.invoice_for_chassis(lead, row.get("chassisNumber"))
+                or lead.get("invoiceNumber")
+                or "")
+        else:
+            row["chassisNumber"] = lead.get("chassisNumber") or row.get("chassisNumber") or ""
+            row["invoiceNumber"] = lead.get("invoiceNumber") or row.get("invoiceNumber") or ""
 
     # Cross-check every register row against what Euler actually holds. Filing
     # status/dates/reference follow the OEM note; money on the register is not
@@ -13667,6 +13826,7 @@ class OemClaimMatchIn(BaseModel):
     componentKey: str = ""
     claimNumber: str = ""
     lineId: str = ""
+    unitSno: Optional[int] = None
 
 
 def _oem_match_lead_ids(body: "OemClaimMatchIn"):
@@ -13693,12 +13853,14 @@ async def _scheme_register_amounts(lead, component_key):
 
 
 @api.get("/claims/match-options", dependencies=[Depends(oem_claim_desk_only)])
-async def claim_match_options():
+async def claim_match_options(user=Depends(current_user)):
     """Leads and components already on the Scheme Claim Register.
 
     The OEM match modal must not call GET /claims. That path recomputes every
     scheme share, overlays Euler, and often exceeds the 25s browser timeout —
     the Lead dropdown then stays on 'pick lead' with nothing in it.
+
+    A Team Leader only sees unmatched rows for their own team.
     """
     dead_oem = {}
     async for row in db[oem_claims.CLAIMS_COLLECTION].find(
@@ -13719,7 +13881,9 @@ async def claim_match_options():
     async for c in db.claims.find(
             {"manual": {"$ne": True}},
             {"leadId": 1, "customer": 1, "componentKey": 1, "component": 1,
-             "claimStatus": 1, "manualOemClaimNumber": 1, "_id": 0}):
+             "claimStatus": 1, "manualOemClaimNumber": 1, "unitSno": 1,
+             "chassisNumber": 1, "invoiceNumber": 1, "claimAmount": 1,
+             "_id": 0}):
         lid = str(c.get("leadId") or "").strip()
         key = str(c.get("componentKey") or "").strip()
         if not lid or not key or lid in blocked_leads:
@@ -13743,19 +13907,41 @@ async def claim_match_options():
             "componentKey": key,
             "component": c.get("component") or ce.SCHEME_COMPONENT_LABELS.get(key, key),
             "claimStatus": status or "Pending",
+            "unitSno": int(c.get("unitSno") or 0) or None,
+            "chassisNumber": c.get("chassisNumber") or "",
+            "invoiceNumber": c.get("invoiceNumber") or "",
+            "claimAmount": ce.round2(ce.num(c.get("claimAmount"))),
             "relinkable": relinkable,
             "linkedOemClaimNumber": manual if relinkable else "",
             "linkedOemStatus": linked_status if relinkable else "",
         })
     if lead_ids:
         names = {}
+        extra = {}
         async for lead in db.leads.find(
                 {"leadId": {"$in": list(lead_ids)}},
-                {"leadId": 1, "customerName": 1, "_id": 0}):
+                {"leadId": 1, "customerName": 1, "units": 1,
+                 "chassisNumber": 1, "invoiceNumber": 1, "_id": 0}):
             names[lead.get("leadId")] = lead.get("customerName") or ""
+            extra[lead.get("leadId")] = lead
         for r in rows:
             if not r["customer"]:
                 r["customer"] = names.get(r["leadId"], "")
+            lead = extra.get(r["leadId"]) or {}
+            sno = int(r.get("unitSno") or 0)
+            if sno:
+                units = [u for u in (lead.get("units") or []) if isinstance(u, dict)]
+                unit = units[sno - 1] if 0 < sno <= len(units) else {}
+                r["chassisNumber"] = r["chassisNumber"] or (unit.get("chassisNumber") or "")
+                r["invoiceNumber"] = r["invoiceNumber"] or (unit.get("invoiceNumber") or "")
+                if not r.get("claimAmount"):
+                    r["claimAmount"] = ce.round2(ce.num(unit.get("oemExtraSupportReceived")))
+            else:
+                r["chassisNumber"] = r["chassisNumber"] or (lead.get("chassisNumber") or "")
+                r["invoiceNumber"] = r["invoiceNumber"] or (lead.get("invoiceNumber") or "")
+    if authmod.is_team_lead(user):
+        allowed = await _team_visible_lead_ids(user, [r["leadId"] for r in rows])
+        rows = [r for r in rows if r["leadId"] in allowed]
     return rows
 
 
@@ -13783,7 +13969,8 @@ async def create_claim_from_oem(body: OemClaimMatchIn, act=Depends(actor)):
 
 
 @api.post("/claims/oem-match", dependencies=[Depends(oem_claim_desk_only)])
-async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
+async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor),
+                             user=Depends(current_user)):
     """Manually join a Scheme Claim Register row to an OEM Claim Settlements debit note.
 
     Use when chassis/wording auto-match is wrong or missing. Relink uses the
@@ -13795,12 +13982,18 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
     lead_ids = _oem_match_lead_ids(body)
     if not lead_ids:
         raise HTTPException(422, "Pick at least one existing lead.")
+    if authmod.is_team_lead(user):
+        allowed = await _team_visible_lead_ids(user, lead_ids)
+        blocked = [lid for lid in lead_ids if lid not in allowed]
+        if blocked:
+            raise HTTPException(403, "This lead is not on your team.")
     last = {}
     try:
-        for lid in lead_ids:
+        for i, lid in enumerate(lead_ids):
             last = await oem_claims.link_register_to_oem(
                 db, lead_id=lid, component_key=body.componentKey,
-                claim_number=body.claimNumber, line_id=body.lineId)
+                claim_number=body.claimNumber, line_id=body.lineId,
+                unit_sno=body.unitSno if i == 0 else None)
     except ValueError as e:
         raise HTTPException(422, str(e))
     await oem_claims.apply_oem_filing_to_register(db)
@@ -13816,7 +14009,8 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor)):
 async def clear_claim_oem_match(body: OemClaimMatchIn, act=Depends(actor)):
     try:
         rec = await oem_claims.clear_register_oem_link(
-            db, lead_id=body.leadId, component_key=body.componentKey)
+            db, lead_id=body.leadId, component_key=body.componentKey,
+            unit_sno=body.unitSno)
     except ValueError as e:
         raise HTTPException(422, str(e))
     await oem_claims.apply_oem_filing_to_register(db)
@@ -13910,11 +14104,15 @@ class ClaimSettleIn(BaseModel):
     claimReference: str = ""
     submittedDate: str = ""
     approvedDate: str = ""
+    unitSno: Optional[int] = None
 
 
 @api.post("/claims/settle")
 async def settle_claim(body: ClaimSettleIn, act=Depends(actor), _money=Depends(money_desk_only)):
-    existing = await db.claims.find_one({"leadId": body.leadId, "componentKey": body.componentKey}) or {}
+    filt = {"leadId": body.leadId, "componentKey": body.componentKey}
+    if body.unitSno:
+        filt["unitSno"] = body.unitSno
+    existing = await db.claims.find_one(filt) or {}
     payload = body.model_dump()
     # default lifecycle dates
     if not payload.get("submittedDate"):
@@ -13924,10 +14122,11 @@ async def settle_claim(body: ClaimSettleIn, act=Depends(actor), _money=Depends(m
     doc = {"claimId": existing.get("claimId") or f"CLM-{body.leadId}-{body.componentKey}", **payload}
     if existing.get("manual"):
         doc["manual"] = True
-    await db.claims.update_one(
-        {"leadId": body.leadId, "componentKey": body.componentKey},
-        {"$set": doc}, upsert=True,
-    )
+    filt = {"leadId": body.leadId, "componentKey": body.componentKey}
+    if body.unitSno:
+        filt["unitSno"] = body.unitSno
+        doc["unitSno"] = body.unitSno
+    await db.claims.update_one(filt, {"$set": doc}, upsert=True)
     lead = await db.leads.find_one({"leadId": body.leadId}) or {}
     await sheet_sync("claims", {**doc, "customer": existing.get("customer") or lead.get("customerName", ""),
                                     "model": existing.get("model") or lead.get("interestedModel", ""), "claimAmount": body.receivedAmount})
@@ -13944,6 +14143,7 @@ class ClaimReceiptIn(BaseModel):
     amount: float
     date: str = ""
     reference: str = ""
+    unitSno: Optional[int] = None
 
 
 @api.post("/claims/receipt")
@@ -13952,7 +14152,10 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
     accrues receivedAmount + keeps a receipt history."""
     if body.amount <= 0:
         raise HTTPException(422, "Enter a valid receipt amount")
-    existing = await db.claims.find_one({"leadId": body.leadId, "componentKey": body.componentKey}) or {}
+    filt = {"leadId": body.leadId, "componentKey": body.componentKey}
+    if body.unitSno:
+        filt["unitSno"] = body.unitSno
+    existing = await db.claims.find_one(filt) or {}
     if existing.get("manual"):
         # Manual claim: eligible is the stored claim amount; no scheme recompute / lead lookup
         eligible = ce.round2(ce.num(existing.get("eligibleClaim") if existing.get("eligibleClaim") is not None else existing.get("claimAmount")))
@@ -13963,6 +14166,13 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
         scheme_rows = await get_scheme_rows()
         shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
         eligible = ce.round2(ce.num(shares["eligibleByComponent"].get(body.componentKey)))
+        if body.componentKey == ce.OEM_EXTRA_SUPPORT_KEY and body.unitSno:
+            for unit in ce.extra_support_unit_rows(lead):
+                if int(unit.get("unitSno") or 0) == int(body.unitSno):
+                    eligible = ce.round2(ce.num(unit.get("oemExtraSupportReceived")))
+                    break
+            else:
+                eligible = ce.round2(ce.num(existing.get("eligibleClaim") or existing.get("claimAmount") or eligible))
         customer, model = lead.get("customerName", ""), lead.get("interestedModel", "")
     received = ce.round2(ce.num(existing.get("receivedAmount")) + body.amount)
     status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
@@ -13973,6 +14183,7 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
                "reference": body.reference, "recordedAt": now_iso()}
     setdoc = {"claimId": claim_id, "leadId": body.leadId,
               "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
+              **({"unitSno": body.unitSno} if body.unitSno else {}),
               "claimReference": body.reference or existing.get("claimReference", ""),
               "eligibleClaim": eligible, "submittedDate": submitted, "approvedDate": approved,
               # Claim Register has a "Claim Received Date" column; the date of the money
@@ -13982,8 +14193,11 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
               "lastUpdated": now_iso()}
     if existing.get("manual"):
         setdoc["manual"] = True
+    filt = {"leadId": body.leadId, "componentKey": body.componentKey}
+    if body.unitSno:
+        filt["unitSno"] = body.unitSno
     await db.claims.update_one(
-        {"leadId": body.leadId, "componentKey": body.componentKey},
+        filt,
         {"$set": setdoc, "$push": {"receipts": receipt}},
         upsert=True,
     )
@@ -14022,22 +14236,35 @@ async def drop_extra_support(body: DropExtraSupportIn, act=Depends(actor)):
         raise HTTPException(422, "Cannot drop Extra Support after claim cash has been recorded")
     lead_id = claim.get("leadId") or body.leadId
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
+    sno = int(claim.get("unitSno") or 0)
+    units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
+    unit = units[sno - 1] if sno and 0 < sno <= len(units) else {}
     amount = ce.round2(max(
-        ce.num(lead.get("oemExtraSupportReceived")),
+        ce.num((unit or lead).get("oemExtraSupportReceived") if sno else lead.get("oemExtraSupportReceived")),
         ce.num(claim.get("eligibleClaim")),
         ce.num(claim.get("claimAmount")),
     ))
     if amount <= 0:
         raise HTTPException(422, "Nothing to drop on this Extra Support line")
-    drop_id = f"DXS-{lead_id}"
+    drop_id = f"DXS-{lead_id}-u{sno}" if sno else f"DXS-{lead_id}"
     now = now_iso()
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {
-        "oemExtraSupportReceived": 0,
-        "oemExtraSupportPassed": 0,
-        "oemExtraSupportDroppedAmount": amount,
+    lead_patch = {
+        "oemExtraSupportDroppedAmount": ce.round2(
+            ce.num(lead.get("oemExtraSupportDroppedAmount")) + amount),
         "oemExtraSupportDroppedAt": now,
         "oemExtraSupportDroppedBy": act.get("email") or act.get("name") or "",
-    }})
+    }
+    if sno and unit:
+        units[sno - 1]["oemExtraSupportReceived"] = 0
+        units[sno - 1]["oemExtraSupportPassed"] = 0
+        lead_patch["units"] = units
+        lead_patch["oemExtraSupportReceived"] = ce.round2(sum(
+            ce.num(u.get("oemExtraSupportReceived")) for u in units))
+        lead_patch["oemExtraSupportPassed"] = 0
+    else:
+        lead_patch["oemExtraSupportReceived"] = 0
+        lead_patch["oemExtraSupportPassed"] = 0
+    await db.leads.update_one({"leadId": lead_id}, {"$set": lead_patch})
     await db.claims.update_one({"_id": claim["_id"]}, {"$set": {
         "claimStatus": "Dropped",
         "droppedAmount": amount,

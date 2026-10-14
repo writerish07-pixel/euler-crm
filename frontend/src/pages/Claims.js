@@ -227,7 +227,9 @@ export default function Claims() {
           { key: "model", label: "Vehicle", render: (r) => r.model || "—" },
           { key: "component", label: "Component", render: (r) => (
             <div className="flex items-center gap-1.5">
-              <Badge tone="bg-violet-50 text-violet-700 ring-violet-600/20">{r.component}</Badge>
+              <Badge tone="bg-violet-50 text-violet-700 ring-violet-600/20">
+                {r.component}{r.unitSno ? ` · Unit ${r.unitSno}` : ""}
+              </Badge>
               {r.manual && <Badge tone="bg-blue-50 text-blue-700 ring-blue-600/20">Manual</Badge>}
               {isMoneyDesk && r.componentKey === "oemExtraSupport" && r.claimStatus !== "Dropped"
                 && Number(r.receivedAmount || 0) <= 0.01 && (
@@ -415,14 +417,19 @@ function ManualClaimModal({ leads, onClose, onDone }) {
 function ClaimReceiptModal({ rows, onClose, onDone }) {
   const [key, setKey] = useState("");
   const [form, setForm] = useState({ amount: "", date: todayISO(), reference: "" });
-  const sel = rows.find((r) => `${r.leadId}|${r.componentKey}` === key);
+  const rowKey = (r) => `${r.leadId}|${r.componentKey}|${r.unitSno || 0}`;
+  const sel = rows.find((r) => rowKey(r) === key);
   const outstanding = sel ? Math.max(0, Number(sel.eligibleClaim || 0) - Number(sel.receivedAmount || 0)) : 0;
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
     if (!sel) return toast.error("Select a claim");
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     try {
-      await post("/claims/receipt", { leadId: sel.leadId, componentKey: sel.componentKey, amount: +form.amount, date: form.date, reference: form.reference });
+      await post("/claims/receipt", {
+        leadId: sel.leadId, componentKey: sel.componentKey,
+        amount: +form.amount, date: form.date, reference: form.reference,
+        ...(sel.unitSno ? { unitSno: sel.unitSno } : {}),
+      });
       toast.success("Claim receipt recorded");
       onDone();
     } catch (e) { toast.error(apiErrorMessage(e, "Failed")); }
@@ -435,7 +442,7 @@ function ClaimReceiptModal({ rows, onClose, onDone }) {
         <Field label="Claim (lead · component · outstanding)">
           <Select data-testid="claim-receipt-select" value={key} onChange={(e) => setKey(e.target.value)}>
             <option value="">— Select —</option>
-            {rows.map((r) => <option key={`${r.leadId}|${r.componentKey}`} value={`${r.leadId}|${r.componentKey}`}>{r.leadId} · {r.customer} · {r.component} · {inr(Math.max(0, Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0)))}</option>)}
+            {rows.map((r) => <option key={rowKey(r)} value={rowKey(r)}>{r.leadId} · {r.customer} · {r.component}{r.unitSno ? ` · Unit ${r.unitSno}` : ""} · {inr(Math.max(0, Number(r.eligibleClaim || 0) - Number(r.receivedAmount || 0)))}</option>)}
           </Select>
         </Field>
         {sel && (
@@ -459,7 +466,13 @@ function SettleModal({ claim, onClose, onDone }) {
   const [form, setForm] = useState({ claimStatus: claim.claimStatus || "Submitted", receivedAmount: claim.receivedAmount || claim.eligibleClaim || 0, claimReference: claim.claimReference || "", submittedDate: claim.submittedDate || todayISO(), approvedDate: claim.approvedDate || todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
-    await post("/claims/settle", { leadId: claim.leadId, componentKey: claim.componentKey, claimStatus: form.claimStatus, receivedAmount: +form.receivedAmount, claimReference: form.claimReference, submittedDate: form.submittedDate, approvedDate: form.approvedDate });
+    await post("/claims/settle", {
+      leadId: claim.leadId, componentKey: claim.componentKey,
+      claimStatus: form.claimStatus, receivedAmount: +form.receivedAmount,
+      claimReference: form.claimReference, submittedDate: form.submittedDate,
+      approvedDate: form.approvedDate,
+      ...(claim.unitSno ? { unitSno: claim.unitSno } : {}),
+    });
     toast.success("Claim updated");
     onDone();
   };
@@ -467,7 +480,7 @@ function SettleModal({ claim, onClose, onDone }) {
     <Modal onClose={onClose} width="max-w-lg">
       <div className="overflow-y-auto overscroll-contain p-6">
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Settle Claim</h3>
-        <p className="text-xs text-ink-soft mb-4">{claim.customer} · {claim.component} · {inr(claim.claimAmount)}</p>
+        <p className="text-xs text-ink-soft mb-4">{claim.customer} · {claim.component}{claim.unitSno ? ` · Unit ${claim.unitSno}` : ""} · {inr(claim.claimAmount)}</p>
         {(claim.chassisNumber || claim.invoiceNumber) && (
           <p className="text-xs text-ink-faint mb-3 font-mono">
             {claim.chassisNumber ? `Chassis ${claim.chassisNumber}` : ""}

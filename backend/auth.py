@@ -364,10 +364,11 @@ def build_router(db):
         return user
 
     async def oem_claim_desk_only(user=Depends(current_user)):
-        """Owner / TL / Accounts / Sales GM — view and match OEM claims.
+        """Owner / Showroom Admin / Team Leader / Accounts / Sales GM.
 
         Matching a debit note to the scheme register is a filing join, not a
-        money movement. Sales GM needs it for multi-item Extra Support claims.
+        money movement. A Team Leader only sees their team's leads in the
+        match dropdown. Sales GM needs it for multi-item Extra Support claims.
         """
         if user.get("role") not in OEM_CLAIM_ROLES:
             raise HTTPException(

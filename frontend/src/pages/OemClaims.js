@@ -290,9 +290,18 @@ export default function OemClaims({ missingVehicleOnly = false }) {
           <div className="flex items-center gap-2 mb-2 text-amber-800 font-semibold text-sm">
             <AlertTriangle size={16} /> Invoice disagreements
           </div>
+          <p className="text-xs text-ink-faint mb-2">
+            Chassis still matches the lead. The OEM claim was filed on the cancelled
+            invoice; the new tax invoice is on the lead.
+          </p>
           <ul className="text-xs text-ink-soft space-y-1">
             {invoiceConflicts.map((c, i) => (
-              <li key={i}><span className="font-mono">{c.claimNumber}</span> — {c.detail}</li>
+              <li key={i}>
+                <span className="font-mono">{c.claimNumber}</span>
+                {c.invoiceCancelled || (c.cancelledInvoice && c.newInvoice)
+                  ? <> — {c.chassis || "chassis"}: invoice <span className="font-mono">{c.cancelledInvoice}</span> cancelled; new invoice <span className="font-mono">{c.newInvoice}</span>{c.leadId ? <> on <span className="font-mono">{c.leadId}</span></> : null}</>
+                  : <> — {c.detail}</>}
+              </li>
             ))}
           </ul>
         </Card>
@@ -413,6 +422,13 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                   {li.sourceInvoiceNumber
                     ? <div className="font-mono text-ink-faint">{li.sourceInvoiceNumber}</div>
                     : null}
+                  {li.invoiceCancelled || li.invoiceMismatch ? (
+                    <div className="text-[10px] text-amber-800">
+                      Invoice cancelled
+                      {li.cancelledInvoiceNumber ? ` ${li.cancelledInvoiceNumber}` : ""}
+                      {li.newInvoiceNumber ? ` · new ${li.newInvoiceNumber}` : ""}
+                    </div>
+                  ) : null}
                   {li.totalAmount ? (
                     <div className="font-mono text-ink-soft">{inr(li.totalAmount)}</div>
                   ) : null}
@@ -544,6 +560,19 @@ function RelinkButton({ row, line, onClick }) {
   );
 }
 
+function optionId(r) {
+  return `${r.leadId}::${r.unitSno || 0}`;
+}
+
+function optionLabel(r) {
+  const bits = [r.leadId, r.customer || r.customerName || ""];
+  if (r.unitSno) bits.push(`Unit ${r.unitSno}`);
+  if (r.chassisNumber) bits.push(r.chassisNumber);
+  if (Number(r.claimAmount) > 0) bits.push(inr(r.claimAmount));
+  if (r.relinkable && r.linkedOemClaimNumber) bits.push(`was ${r.linkedOemClaimNumber}`);
+  return bits.filter(Boolean).join(" · ");
+}
+
 function MatchRegisterModal({ row, onClose, onDone }) {
   const relink = !!row.relink;
   const line = row.matchLine || {};
@@ -552,6 +581,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const [register, setRegister] = useState([]);
   const [loading, setLoading] = useState(true);
   const [leadId, setLeadId] = useState(already[0] || rowLeadIds(row)[0] || "");
+  const [unitSno, setUnitSno] = useState(null);
   const [extraLeadIds, setExtraLeadIds] = useState(already.slice(1));
   const [addId, setAddId] = useState("");
   const [componentKey, setComponentKey] = useState(relatedKey);
@@ -572,24 +602,26 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const poolRows = relink
     ? register.filter(isRelinkableRegisterRow)
     : register.filter(isOpenRegisterRow);
-  const relatedRows = relatedKey
+  // Only leads that still have this scheme component unmatched. Never fall
+  // back to the whole register (that listed every early lead).
+  const leadSource = relatedKey
     ? poolRows.filter((r) => r.componentKey === relatedKey)
-    : [];
-  // Prefer the related component, but never leave the Lead list empty after load.
-  const leadSource = relatedRows.length ? relatedRows : (poolRows.length ? poolRows : register);
-  const leads = [...new Map(leadSource.map((r) => [r.leadId, r])).values()];
+    : poolRows;
+  const leads = [...new Map(leadSource.map((r) => [optionId(r), r])).values()];
   for (const id of picked) {
     if (id && !leads.some((r) => r.leadId === id)) {
-      const hit = register.find((r) => r.leadId === id);
+      const hit = poolRows.find((r) => r.leadId === id);
       if (hit) leads.unshift(hit);
     }
   }
-  const leadRows = leadId ? register.filter((r) => r.leadId === leadId) : [];
+  const leadRows = leadId
+    ? register.filter((r) => r.leadId === leadId && (!unitSno || (r.unitSno || 0) === unitSno))
+    : [];
   const scopedLeadRows = leadRows.filter(relink ? isRelinkableRegisterRow : isOpenRegisterRow);
   let options = relatedKey
     ? scopedLeadRows.filter((r) => r.componentKey === relatedKey)
     : scopedLeadRows;
-  if (!options.length) options = scopedLeadRows.length ? scopedLeadRows : leadRows;
+  if (!options.length) options = scopedLeadRows;
   const extraCandidates = leads.filter((r) => r.leadId && !picked.includes(r.leadId)
     && (!componentKey || register.some((c) => c.leadId === r.leadId && c.componentKey === componentKey
       && (relink ? isRelinkableRegisterRow(c) : isOpenRegisterRow(c)))));
@@ -601,6 +633,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
       await post("/claims/oem-match", {
         leadId, leadIds: picked, componentKey,
         claimNumber: row.claimNumber, lineId: line.lineId || "",
+        ...(unitSno ? { unitSno } : {}),
       });
       toast.success(relink
         ? (picked.length > 1
@@ -619,7 +652,9 @@ function MatchRegisterModal({ row, onClose, onDone }) {
     if (!leadId || !componentKey) return toast.error("Pick the register row to unlink");
     setBusy(true);
     try {
-      await post("/claims/oem-match/clear", { leadId, componentKey });
+      await post("/claims/oem-match/clear", {
+        leadId, componentKey, ...(unitSno ? { unitSno } : {}),
+      });
       toast.success("Manual match cleared");
       onDone();
     } catch (e) {
@@ -650,17 +685,18 @@ function MatchRegisterModal({ row, onClose, onDone }) {
           </p>
         ) : null}
         <Field label="Lead">
-          <Select data-testid="oem-match-lead" disabled={loading} value={leadId}
+          <Select data-testid="oem-match-lead" disabled={loading} value={leadId ? `${leadId}::${unitSno || 0}` : ""}
             onChange={(e) => {
-              setLeadId(e.target.value);
+              const [id, sno] = String(e.target.value || "").split("::");
+              setLeadId(id || "");
+              setUnitSno(Number(sno) || null);
               setExtraLeadIds([]);
               setComponentKey(relatedKey);
             }}>
             <option value="">{loading ? "Loading register…" : "— pick lead —"}</option>
             {leads.map((r) => (
-              <option key={r.leadId} value={r.leadId}>
-                {r.leadId} · {r.customer || r.customerName || lineLeadLabel(line, r.leadId)}
-                {r.relinkable && r.linkedOemClaimNumber ? ` · was ${r.linkedOemClaimNumber}` : ""}
+              <option key={optionId(r)} value={optionId(r)}>
+                {optionLabel(r) || `${r.leadId} · ${lineLeadLabel(line, r.leadId)}`}
               </option>
             ))}
           </Select>
