@@ -9,7 +9,8 @@ import CallLink from "./CallLink";
 import { useAuth } from "../context/AuthContext";
 
 export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
-  const { canSeeOwnerCommercials, isExecutive } = useAuth();
+  const { canSeeOwnerCommercials, isExecutive, isTeamLead } = useAuth();
+  const hideScheme = isExecutive || isTeamLead;
   const [budget, setBudget] = useState(Number(row.budget || row.dealAmount || 0) || "");
   const [model, setModel] = useState(row.interestedModel || "");
   const [variant, setVariant] = useState(row.variant || "");
@@ -51,7 +52,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
     }
     let alive = true;
     setDealLoading(true);
-    const passOnKeys = isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(",");
+    const passOnKeys = hideScheme ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(",");
     get("/commercial/deal-preview", {
       model, variant, cxDemand: Number(budget) || 0,
       passOnKeys: passOnKeys || undefined,
@@ -59,7 +60,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
       .catch(() => { if (alive) setDeal(row.dealFormat || null); })
       .finally(() => { if (alive) setDealLoading(false); });
     return () => { alive = false; };
-  }, [model, variant, row.dealFormat, budget, passOn]);
+  }, [model, variant, row.dealFormat, budget, passOn, hideScheme]);
 
   const save = async () => {
     if (!model || !variant) return toast.error("Select model and variant");
@@ -78,7 +79,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         budget: Number(budget), gstin, interestedModel: model, variant,
         oemExtraSupportReceived: Number(oemExtra) || 0,
         mobile: digitsLast10(mobile),
-        ...(isExecutive ? {} : { schemePassOn: passOn }),
+        ...(hideScheme ? {} : { schemePassOn: passOn }),
       });
       await uploadKycFiles(`/lead-requests/${row.requestId}/documents`, { ...kyc, ...extraProof, ...dealSheet });
       toast.success("Sent for approval");
@@ -105,7 +106,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         budget: Number(budget),
         executive: row.executive || row.submittedByName || "",
         createdDate: String(row.createdAt || "").slice(0, 10),
-        passOnKeys: isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(","),
+        passOnKeys: hideScheme ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(","),
       });
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
@@ -168,11 +169,11 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
           loading={dealLoading}
           missingPrice={!model || !variant}
           showOwnerPnl={!!canSeeOwnerCommercials}
-          hideScheme={isExecutive}
-          passOn={isExecutive ? {} : passOn}
+          hideScheme={hideScheme}
+          passOn={hideScheme ? {} : passOn}
           onPrint={printDealSheet}
           printBusy={busy}
-          onPassOn={isExecutive ? undefined : (key, yes, available) => {
+          onPassOn={hideScheme ? undefined : (key, yes, available) => {
             setPassOn((p) => ({ ...p, [key]: yes }));
             setBudget((cur) => {
               const n = Number(cur) || Number(deal?.netToCx) || 0;

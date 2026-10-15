@@ -35,7 +35,8 @@ function kindsPresent(docs, kinds) {
 
 /** Convert to Booking: fill model / deal / KYC, then book or send for approval. */
 export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
-  const { canSeeOwnerCommercials, isExecutive } = useAuth();
+  const { canSeeOwnerCommercials, isExecutive, isTeamLead } = useAuth();
+  const hideScheme = isExecutive || isTeamLead;
   const [masters, setMasters] = useState(null);
   const [variants, setVariants] = useState([]);
   const [model, setModel] = useState(lead.interestedModel || "");
@@ -88,7 +89,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
     }
     let alive = true;
     setDealLoading(true);
-    const passOnKeys = isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(",");
+    const passOnKeys = hideScheme ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(",");
     get("/commercial/deal-preview", {
       model, variant, cxDemand: Number(budget) || 0,
       passOnKeys: passOnKeys || undefined,
@@ -96,7 +97,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
       .catch(() => { if (alive) setDeal(null); })
       .finally(() => { if (alive) setDealLoading(false); });
     return () => { alive = false; };
-  }, [model, variant, budget, passOn, isExecutive]);
+  }, [model, variant, budget, passOn, hideScheme]);
 
   const models = masters?.models || [];
   const priceFound = Boolean(deal && (deal.priceFound !== false) && Number(deal.exShowroom || deal.priceTotal) > 0);
@@ -133,7 +134,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
         budget: Number(budget) || 0,
         oemExtraSupportReceived: Number(oemExtra) || 0,
         customerType,
-        ...(isExecutive ? {} : { schemePassOn: passOn }),
+        ...(hideScheme ? {} : { schemePassOn: passOn }),
       });
       setResult({ booking: res, lead: res.lead || {} });
       toast.success("Booking confirmed");
@@ -165,7 +166,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
         budget: Number(budget) || 0,
         executive: lead.executive || "",
         createdDate: String(lead.createdDate || "").slice(0, 10),
-        passOnKeys: isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(","),
+        passOnKeys: hideScheme ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(","),
       });
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
@@ -245,11 +246,11 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
           loading={dealLoading}
           missingPrice={!model || !variant}
           showOwnerPnl={!!canSeeOwnerCommercials}
-          hideScheme={isExecutive}
-          passOn={isExecutive ? {} : passOn}
+          hideScheme={hideScheme}
+          passOn={hideScheme ? {} : passOn}
           onPrint={printDealSheet}
           printBusy={busy}
-          onPassOn={isExecutive ? undefined : (key, yes, available) => {
+          onPassOn={hideScheme ? undefined : (key, yes, available) => {
             setPassOn((p) => ({ ...p, [key]: yes }));
             setBudget((cur) => {
               const n = Number(cur) || Number(deal?.netToCx) || 0;

@@ -4,6 +4,13 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 
+const mockAuth = {
+  canSeeOwnerCommercials: false,
+  isOwner: false,
+  isExecutive: true,
+  isTeamLead: false,
+};
+
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
 jest.mock("../lib/api", () => ({
   get: (url) => {
@@ -30,11 +37,16 @@ jest.mock("./LeadDocuments", () => ({
   uploadKycFiles: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({
-  useAuth: () => ({ canSeeOwnerCommercials: false, isOwner: false, isExecutive: true }),
+  useAuth: () => mockAuth,
 }));
 
 import { put } from "../lib/api";
 import CompleteFormatDrawer from "./CompleteFormatDrawer";
+
+beforeEach(() => {
+  mockAuth.isExecutive = true;
+  mockAuth.isTeamLead = false;
+});
 
 test("approval drawer has model and variant selects above Deal format", async () => {
   const host = document.createElement("div");
@@ -99,6 +111,43 @@ test("approval drawer prefills OEM extra support and saves it on the request", a
     mobile: "9636959028",
   }));
   expect(put.mock.calls[0][1].schemePassOn).toBeUndefined();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("team leader approval drawer hides OEM scheme offers and pass-on radios", async () => {
+  mockAuth.isExecutive = false;
+  mockAuth.isTeamLead = true;
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <CompleteFormatDrawer
+        row={{
+          requestId: "LR1", customerName: "Jitendra", existingLeadId: "LD1",
+          mobile: "9636959028", interestedModel: "Turbo Max", variant: "Maxx (PV)",
+          budget: 185000,
+          dealFormat: {
+            exShowroom: 785000, rto: 5500, insurance: 19000, priceTotal: 809500,
+            netToCx: 809500,
+            schemeMonth: "2026-10",
+            schemeOffers: [
+              { key: "loyaltyBonus", label: "Loyalty Bonus", schemeAvailable: 10000 },
+            ],
+          },
+        }}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
+    );
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  const drawer = document.querySelector('[data-testid="drawer-root"]');
+  expect(drawer.querySelector('[data-testid="deal-format-card"]')).toBeTruthy();
+  expect(drawer.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
+  expect(drawer.textContent).not.toMatch(/Loyalty Bonus/i);
+  expect(drawer.textContent).not.toMatch(/OEM scheme/i);
   await act(async () => { root.unmount(); });
   host.remove();
 });
