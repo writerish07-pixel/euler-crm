@@ -1629,6 +1629,13 @@ class BookingIn(BaseModel):
     # UTR / cheque / transaction number for the booking advance.
     paymentReference: str = ""
     gstin: str = ""
+    # Walk-in enquiry books later: model / deal / extra may be blank until this step.
+    interestedModel: Optional[str] = None
+    variant: Optional[str] = None
+    budget: Optional[float] = None
+    oemExtraSupportReceived: Optional[float] = None
+    customerType: Optional[str] = None
+    schemePassOn: Optional[Dict[str, bool]] = None
 
 
 class PriceStructureIn(BaseModel):
@@ -6992,14 +6999,51 @@ async def set_lead_gstin(lead_id: str, body: GstinIn, act=Depends(actor),
     return clean(updated)
 
 
+async def _apply_book_enquiry(lead, body, act):
+    """Executives cannot PUT a lead. Book is when they fill model / deal / extra."""
+    patch = {}
+    if body.interestedModel is not None:
+        patch["interestedModel"] = str(body.interestedModel or "").strip()
+    if body.variant is not None:
+        patch["variant"] = str(body.variant or "").strip()
+    if body.customerType is not None:
+        patch["customerType"] = str(body.customerType or "Individual").strip() or "Individual"
+    if body.oemExtraSupportReceived is not None:
+        patch["oemExtraSupportReceived"] = max(0.0, ce.num(body.oemExtraSupportReceived))
+    if body.budget is not None:
+        cx = ce.round2(max(0.0, ce.num(body.budget)))
+        patch["budget"] = cx
+        patch["cxDemand"] = cx
+        patch["useDealPrice"] = cx > 0
+    role = str((act or {}).get("role") or "").strip().lower()
+    if body.schemePassOn is not None and role != "executive":
+        patch["schemePassOn"] = body.schemePassOn
+    if not patch:
+        return lead
+    patch["lastUpdated"] = now_iso()
+    patch["lastUpdatedBy"] = (act or {}).get("email") or ""
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    await recompute_lead(lead["leadId"])
+    return await db.leads.find_one({"leadId": lead["leadId"]})
+
+
 @api.post("/leads/{lead_id}/convert-booking")
 async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
     _require_action(lead, "canBook", "conversion to booking", act)
+    lead = await _apply_book_enquiry(lead, body, act)
     gstin = str(body.gstin or "").strip().upper()
     if gstin and gstin != str(lead.get("gstin") or "").strip().upper():
         await db.leads.update_one({"leadId": lead_id}, {"$set": {"gstin": gstin, "lastUpdated": now_iso()}})
         lead = await db.leads.find_one({"leadId": lead_id})
+    model = str(lead.get("interestedModel") or "").strip()
+    variant = str(lead.get("variant") or "").strip()
+    if not model or not variant:
+        raise HTTPException(
+            422,
+            "Select a model and variant, attach KYC, then book. "
+            "Walk-in enquiries are created with name and mobile only.",
+        )
     await _require_related_docs(lead, act)
     # A booking is only valid once its commercial structure is resolved. If the lead
     # has no price structure yet, load it from the authoritative Price Master. If the
@@ -8992,7 +9036,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
     return clean(doc)
 
 
-@api.get("/payments")
+@api.get("/payments", dependencies=[Depends(money_desk_only)])
 async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = None,
                         year: Optional[str] = None, q: Optional[str] = None):
     filt = {"leadId": lead_id} if lead_id else {}
@@ -12129,7 +12173,7 @@ async def delete_insurance_agent(agent_id: str, act=Depends(actor)):
     return {"ok": True}
 
 
-@api.get("/insurance")
+@api.get("/insurance", dependencies=[Depends(money_desk_only)])
 async def list_insurance(lead_id: Optional[str] = None, view: str = "all",
                          agent_id: Optional[str] = None, month: Optional[str] = None,
                          year: Optional[str] = None, act=Depends(actor)):
@@ -13660,7 +13704,7 @@ async def _leads_for_claim_register(commercial, stored):
     return by_id
 
 
-@api.get("/claims")
+@api.get("/claims", dependencies=[Depends(oem_claim_desk_only)])
 async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     """Derive per-component OEM claims (COMPANY share from Scheme Master) from booked leads.
 

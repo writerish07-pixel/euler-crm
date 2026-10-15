@@ -382,10 +382,13 @@ def test_the_role_constants_say_what_changed():
     assert "tl" in authmod.ALLOWED_ROLES
     assert "executive" in authmod.SALES_ROLES        # still feeds leads
     assert "executive" not in authmod.MONEY_ROLES    # no longer moves money
-    assert authmod.MONEY_ROLES == ("owner", "tl", "team_lead", "accounts")
+    assert authmod.MONEY_ROLES == ("owner", "tl", "accounts")
     assert "team_lead" in authmod.ALLOWED_ROLES
     assert "team_lead" in authmod.DEAL_DESK_ROLES
     assert "team_lead" not in authmod.SHOWROOM_DESK_ROLES
+    assert "team_lead" not in authmod.MONEY_ROLES
+    assert "team_lead" not in authmod.OEM_CLAIM_ROLES
+    assert "team_lead" in authmod.FINANCE_VIEW_ROLES
     # ...but an executive can still READ the finance register to answer a customer.
     assert "executive" in authmod.FINANCE_VIEW_ROLES
 

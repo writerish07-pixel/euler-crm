@@ -137,7 +137,7 @@ export function AuthProvider({ children }) {
       isShowroomAdmin: role === "tl",
       isTeamLead: role === "team_lead",
       isSalesStaff: role === "owner" || role === "sales_gm" || role === "tl" || role === "team_lead" || role === "executive",
-      isMoneyDesk: role === "owner" || role === "tl" || role === "team_lead" || role === "accounts",
+      isMoneyDesk: role === "owner" || role === "tl" || role === "accounts",
       // Price, scheme, delivery, close and cancel — the steps an executive hands
       // over. Customer payments after booking stay with the executive.
       // Mirrors DEAL_DESK_ROLES on the API.
@@ -153,7 +153,7 @@ export function AuthProvider({ children }) {
         || role === "executive" || role === "asm" || role === "rm",
       canExport: role === "owner" || role === "sales_gm" || role === "tl",
       // Match OEM debit notes to the scheme register. Not payments.
-      canMatchOemClaims: role === "owner" || role === "tl" || role === "team_lead" || role === "accounts" || role === "sales_gm",
+      canMatchOemClaims: role === "owner" || role === "tl" || role === "accounts" || role === "sales_gm",
       // Pull the Euler claim mirror. Accounts does not.
       canSyncOemClaims: role === "owner" || role === "tl" || role === "sales_gm",
     }}>

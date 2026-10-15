@@ -23,13 +23,14 @@ ALLOWED_ROLES = (
     "owner", "sales_gm", "tl", "team_lead", "executive", "accounts", "asm", "rm", "oem_finance",
 )
 # `tl` is Showroom Admin — the old full-desk Team Leader (whole showroom).
-# `team_lead` is a working TL: executive + deal/money desk, scoped to their team.
+# `team_lead` is a working TL: same sidebar as an executive, deal steps on the
+# lead (price / scheme / deliver), scoped to their team. Not money or OEM claims.
 # Executives feed the funnel. Showroom Admin / team_lead finish the deal.
 # Sales GM runs the whole showroom: same funnel as an executive, same close-the-deal
 # steps as a TL, all leads (not self-scoped). They do not post money or edit Price Master.
 SALES_ROLES = ("owner", "sales_gm", "tl", "team_lead", "executive")
 LEAD_INTAKE_ROLES = ("owner", "sales_gm", "tl", "team_lead", "executive")
-MONEY_ROLES = ("owner", "tl", "team_lead", "accounts")
+MONEY_ROLES = ("owner", "tl", "accounts")
 # Closing the deal: price, scheme, extra income, delivery, close, cancel, revive.
 # The commercial decisions an executive does not make.
 DEAL_DESK_ROLES = ("owner", "sales_gm", "tl", "team_lead")
@@ -43,7 +44,7 @@ OEM_CLAIM_ROLES = (*MONEY_ROLES, "sales_gm")
 OEM_CLAIM_SYNC_ROLES = ("owner", "tl", "sales_gm")
 FIELD_ROLES = ("asm", "rm")
 # Money desk can write; ASM/RM / Sales GM may view Finance Register (disbursed vs remaining).
-FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", "sales_gm", *FIELD_ROLES)
+FINANCE_VIEW_ROLES = (*MONEY_ROLES, "executive", "sales_gm", "team_lead", *FIELD_ROLES)
 
 
 def is_showroom_admin(user) -> bool:
@@ -337,11 +338,11 @@ def build_router(db):
         return user
 
     async def money_desk_only(user=Depends(current_user)):
-        """Owner / TL / Accounts — record payments, finance, claims, insurance."""
+        """Owner / Showroom Admin / Accounts — record payments, finance, claims, insurance."""
         if user.get("role") not in MONEY_ROLES:
             raise HTTPException(
                 403,
-                "Only the Owner, Showroom Admin, a Team Leader or Accounts can record money movements.",
+                "Only the Owner, Showroom Admin or Accounts can record money movements.",
             )
         return user
 
@@ -364,16 +365,16 @@ def build_router(db):
         return user
 
     async def oem_claim_desk_only(user=Depends(current_user)):
-        """Owner / Showroom Admin / Team Leader / Accounts / Sales GM.
+        """Owner / Showroom Admin / Accounts / Sales GM.
 
         Matching a debit note to the scheme register is a filing join, not a
-        money movement. A Team Leader only sees their team's leads in the
-        match dropdown. Sales GM needs it for multi-item Extra Support claims.
+        money movement. Working Team Leaders use the same sidebar as executives
+        and do not open OEM claim registers. Sales GM needs it for Extra Support.
         """
         if user.get("role") not in OEM_CLAIM_ROLES:
             raise HTTPException(
                 403,
-                "OEM claims are for the Owner, Sales GM, a Team Leader or Accounts.",
+                "OEM claims are for the Owner, Sales GM, Showroom Admin or Accounts.",
             )
         return user
 

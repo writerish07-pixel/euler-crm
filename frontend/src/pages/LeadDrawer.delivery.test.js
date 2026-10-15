@@ -24,6 +24,9 @@ jest.mock("../components/LeadDocuments", () => ({
   kycKinds: [],
 }));
 jest.mock("../components/TallyPackCheck", () => () => null);
+jest.mock("./BookEnquiryDrawer", () => () => null);
+jest.mock("./NewLeadDrawer", () => () => null);
+jest.mock("../components/CompleteFormatDrawer", () => () => null);
 
 import { DeliveryTab } from "./LeadDrawer";
 
