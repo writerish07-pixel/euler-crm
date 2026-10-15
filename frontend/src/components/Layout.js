@@ -30,6 +30,7 @@ const NAV = [
     { to: "/bookings", label: "Bookings", icon: ClipboardList },
     { to: "/quotations", label: "Quotations", icon: FileText, salesOnly: true },
     { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
+    { to: "/edit-log", label: "Edit Log", icon: ScrollText, salesOnly: true },
     { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle, salesOnly: true },
     { to: "/cancellations", label: "Cancellations", icon: Ban },
     { to: "/allocation", label: "Lead Allocation", icon: UserCheck, showroomDesk: true },

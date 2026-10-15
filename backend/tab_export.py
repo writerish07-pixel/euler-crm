@@ -469,6 +469,33 @@ _register(Tab(
 ))
 
 _register(Tab(
+    key="edit_log", label="Edit Log", collection="audit_log",
+    paths=("/edit-log",),
+    extra_filter={
+        "action": {"$in": ["update", "amend", "allocate"]},
+        "module": {"$in": [
+            "lead", "lead-field", "lead-unit", "price-structure", "scheme",
+            "scheme-allocation", "extra-income", "gstin", "unit-billed-date",
+            "lead-cancellation", "activity",
+        ]},
+        "role": {"$in": ["sales_gm", "tl", "team_lead", "executive"]},
+    },
+    date_fields=("timestamp",),
+    status_field="role",
+    statuses=("sales_gm", "tl", "team_lead", "executive"),
+    search_fields=("leadId", "user", "name", "module", "action"),
+    sort=("timestamp", -1),
+    columns=(
+        _col("timestamp", "When", default=True),
+        _col("name", "Who", default=True),
+        _col("role", "Role", default=True),
+        _col("action", "Action", default=True),
+        _col("module", "What", default=True),
+        _col("leadId", "Lead ID", default=True),
+    ),
+))
+
+_register(Tab(
     key="audit_log", label="Audit Trail", collection="audit_log",
     paths=("/audit-log", "/erp-audit"),
     date_fields=("timestamp",),

@@ -133,6 +133,7 @@ async def test_the_role_exists_and_can_sign_in(oem):
     "/api/price-list",
     "/api/staff",
     "/api/audit-log",
+    "/api/edit-log",
     "/api/whatsapp/threads",
     "/api/reports/cancellations",
     "/api/reports/daily/manager",
