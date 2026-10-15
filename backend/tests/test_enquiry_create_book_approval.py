@@ -162,6 +162,35 @@ async def test_discounted_book_waits_for_owner_then_books(exec_client, client):
 
 
 @pytest.mark.asyncio
+async def test_book_fills_model_from_body_then_needs_kyc(exec_client):
+    r = await exec_client.post("/api/leads", json={
+        "customerName": "No Vehicle Yet", "mobile": next_mobile(),
+        "executive": "Executive", "leadSource": "Walk-in", "budget": 0,
+    })
+    assert r.status_code == 200, r.text
+    lid = r.json()["leadId"]
+    denied = await exec_client.post(
+        f"/api/leads/{lid}/convert-booking",
+        json={
+            "bookingAmount": 0, "executive": "Executive", "bookingDate": "2026-10-10",
+            "interestedModel": "Storm", "variant": "Enquiry LR",
+        })
+    assert denied.status_code == 422, denied.text
+    assert "Attach" in denied.text or "document" in denied.text.lower() or "KYC" in denied.text or "Aadhaar" in denied.text
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert live["interestedModel"] == "Storm"
+    assert live["variant"] == "Enquiry LR"
+    await attach_lead_kyc(exec_client, lid)
+    ok = await exec_client.post(
+        f"/api/leads/{lid}/convert-booking",
+        json={
+            "bookingAmount": 0, "executive": "Executive", "bookingDate": "2026-10-10",
+            "interestedModel": "Storm", "variant": "Enquiry LR",
+        })
+    assert ok.status_code == 200, ok.text
+
+
+@pytest.mark.asyncio
 async def test_owner_books_discount_without_queue(client):
     r = await client.post("/api/leads", json=_walkin(
         "Owner Disc", executive="Amit", budget=790000))

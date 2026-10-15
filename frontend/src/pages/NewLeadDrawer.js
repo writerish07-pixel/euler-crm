@@ -13,7 +13,8 @@ function sameExecName(a, b) {
 
 /** Create a live enquiry. KYC and GM/Owner deal approval run at Book. */
 export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {} }) {
-  const { isExecutive, isTl, isTeamLead, user, canSeeOwnerCommercials } = useAuth();
+  const { isExecutive, isTl, isTeamLead, isSalesGm, user, canSeeOwnerCommercials } = useAuth();
+  const enquiryOnly = isExecutive || isTl || isTeamLead || isSalesGm;
   const [form, setForm] = useState({
     customerName: initial.customerName || "",
     mobile: initial.mobile || "",
@@ -169,8 +170,8 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const otherExecLock = isExecutive && otherExecHold;
   const saveLabel = "Create Lead";
   const drawerTitle = "New Lead";
-  const drawerSubtitle = isExecutive || isTl || isTeamLead
-    ? "Walk-in enquiry goes live now. WhatsApp follow-up starts. KYC and deal approval at booking."
+  const drawerSubtitle = enquiryOnly
+    ? "Name, mobile, and vehicle if you have it. WhatsApp follow-up starts. KYC and deal approval at booking."
     : "Capture a fresh enquiry";
 
   const saveLead = async (extra = {}) => {
@@ -218,8 +219,8 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const submit = async () => {
     if (!form.customerName) return toast.error("Customer name is required");
     if (!form.createdDate) return toast.error("Lead date is required");
-    if ((isTl || isTeamLead) && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
-    if (isExecutive && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required");
+    if ((isTl || isTeamLead || isSalesGm) && !String(form.executive || "").trim()) return toast.error("Pick the executive this lead belongs to");
+    if ((isExecutive || enquiryOnly) && !digitsLast10(form.mobile)) return toast.error("A 10-digit mobile is required");
     if (anotherVehicle && !digitsLast10(form.mobile)) {
       return toast.error("Enter the 10-digit mobile this extra unit belongs to");
     }
@@ -260,7 +261,12 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
 
   if (!masters) return null;
   const execOptions = [...(masters.executives || [])];
-  if (isExecutive && user?.name && !execOptions.includes(user.name)) execOptions.unshift(user.name);
+  const selfName = String(user?.name || "").trim();
+  if ((isExecutive || isTl || isTeamLead || isSalesGm) && selfName
+      && !execOptions.some((n) => String(n).trim().toLowerCase() === selfName.toLowerCase())) {
+    execOptions.unshift(selfName);
+  }
+  const showAnother = !!(initial.anotherVehicle || (matches && ((matches.existing || []).length || (matches.pending || []).length)));
   const sources = masters.leadSources || [];
   const models = masters.models || [];
   const priorities = masters.priorities || ["Low", "Normal", "High", "Urgent"];
@@ -271,26 +277,35 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-lead-btn" onClick={submit} disabled={busy}>{busy ? "Saving…" : saveLabel}</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="lead-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
-        <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
-        <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
-        <Field label={isExecutive ? "Mobile *" : "Mobile"}><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} inputMode="numeric" placeholder="10-digit mobile" /></Field>
-        <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>
-        <Field label="Customer type">
-          <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>
-            <option>Individual</option>
-            <option value="B2B">B2B</option>
-          </Select>
-        </Field>
-        <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{sources.map((s) => <option key={s}>{s}</option>)}</Select></Field>
-        <Field label={isTl || isTeamLead ? "Executive *" : "Executive"}>
-          <Select data-testid="lead-executive" value={form.executive} onChange={set("executive")}>
-            <option value="">—</option>
-            {execOptions.map((s) => <option key={s}>{s}</option>)}
-          </Select>
-        </Field>
+        {!enquiryOnly && (
+          <>
+            <Field label="Lead Date"><Input data-testid="lead-date" type="date" value={form.createdDate} onChange={set("createdDate")} /></Field>
+            <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
+          </>
+        )}
+        <Field label="Mobile *"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} inputMode="numeric" placeholder="10-digit mobile" /></Field>
+        {!enquiryOnly && <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>}
+        {!enquiryOnly && (
+          <Field label="Customer type">
+            <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>
+              <option>Individual</option>
+              <option value="B2B">B2B</option>
+            </Select>
+          </Field>
+        )}
+        {!enquiryOnly && <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{sources.map((s) => <option key={s}>{s}</option>)}</Select></Field>}
+        {!isExecutive && (
+          <Field label={isTl || isTeamLead || isSalesGm ? "Executive *" : "Executive"}>
+            <Select data-testid="lead-executive" value={form.executive} onChange={set("executive")}>
+              <option value="">—</option>
+              {execOptions.map((s) => <option key={s}>{s}</option>)}
+            </Select>
+          </Field>
+        )}
         <Field label="Interested Model"><Select data-testid="lead-model" value={form.interestedModel} onChange={set("interestedModel")}><option value="">—</option>{models.map((s) => <option key={s}>{s}</option>)}</Select></Field>
         <Field label="Variant"><Select data-testid="lead-variant" value={form.variant} onChange={set("variant")}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
-        <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>
+        {!enquiryOnly && <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{priorities.map((s) => <option key={s}>{s}</option>)}</Select></Field>}
+        {(showAnother || !enquiryOnly) && (
         <div className="sm:col-span-2 rounded-lg ring-1 ring-inset ring-line bg-zinc-50/70 p-3 space-y-2" data-testid="another-vehicle-block">
           <div className="text-xs font-semibold text-ink">Multi-unit buyer</div>
           <p className="text-[11px] text-ink-soft">
@@ -334,22 +349,24 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             />
             <span>This is another vehicle / additional unit on this mobile</span>
           </label>
-          <label className="flex items-start gap-2 text-sm text-ink" data-testid="same-order-check">
-            <input
-              type="checkbox"
-              className="mt-0.5"
-              checked={sameOrder && !anotherVehicle}
-              disabled={anotherVehicle}
-              onChange={(e) => {
-                setSameOrder(e.target.checked);
-                if (e.target.checked) {
-                  setAnotherVehicle(false);
-                  setExtraUnits((rows) => (rows.length ? rows : [{ model: "", variant: "" }]));
-                }
-              }}
-            />
-            <span>Same-order multi-unit — one file, one payment, one Bank DO</span>
-          </label>
+          {!enquiryOnly && (
+            <label className="flex items-start gap-2 text-sm text-ink" data-testid="same-order-check">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={sameOrder && !anotherVehicle}
+                disabled={anotherVehicle}
+                onChange={(e) => {
+                  setSameOrder(e.target.checked);
+                  if (e.target.checked) {
+                    setAnotherVehicle(false);
+                    setExtraUnits((rows) => (rows.length ? rows : [{ model: "", variant: "" }]));
+                  }
+                }}
+              />
+              <span>Same-order multi-unit — one file, one payment, one Bank DO</span>
+            </label>
+          )}
           {sameOrder && (
             <div className="space-y-2" data-testid="same-order-units">
               <p className="text-[11px] text-ink-soft">
@@ -411,6 +428,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             </p>
           )}
         </div>
+        )}
+        {!enquiryOnly && (
+          <>
         <div className="sm:col-span-2">
           <DealFormatCard
             snapshot={deal}
@@ -439,6 +459,8 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
         />
         <div className="sm:col-span-2"><Field label="Remarks"><Input value={form.remarks} onChange={set("remarks")} /></Field></div>
         <LocalKycBlock customerType={form.customerType} files={kyc} setFiles={setKyc} gstin={form.gstin} onGstin={(v) => setForm((f) => ({ ...f, gstin: v }))} copyFromSibling={copyDocsFromSibling} />
+          </>
+        )}
       </div>
     </Drawer>
     <MobileClashDialog

@@ -13,6 +13,7 @@ import TallyPackCheck from "../components/TallyPackCheck";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
+import BookEnquiryDrawer from "./BookEnquiryDrawer";
 import SchemeCircularPic from "../components/SchemeCircularPic";
 
 const CHARGE_FIELDS = [
@@ -39,14 +40,6 @@ function packUnitList(lead) {
 function unitBilledDate(u, lead) {
   const d = String((u && (u.soldDate || u.schemeAsOf)) || (lead && lead.bookingDate) || "").slice(0, 10);
   return d.length === 10 ? d : "";
-}
-
-function earliestPackBilledDate(lead) {
-  const dates = (lead?.units || [])
-    .map((u) => String(u?.soldDate || "").slice(0, 10))
-    .filter((d) => d.length === 10)
-    .sort();
-  return dates[0] || lead?.bookingDate || "";
 }
 
 function unitSource(lead, unit, index) {
@@ -561,7 +554,7 @@ function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
         }}><RotateCcw size={15} /> Revive Lead</Button>
       )}
       <div className="w-full sm:w-auto sm:ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
-      {modal === "book" && <BookingModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); (onBooked || refresh)(); }} />}
+      {modal === "book" && <BookEnquiryDrawer lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); (onBooked || refresh)(); }} />}
       {modal === "close" && <CloseModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); onClose(); }} />}
       {modal === "cancel" && <CancelModal lead={lead} actions={actions} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); }} />}
       {modal === "amend" && <CancelModal lead={lead} actions={actions} amend onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); }} />}
@@ -2642,144 +2635,6 @@ function paymentRefRequired(mode, amount) {
   const m = String(mode || "").toLowerCase();
   if (m === "cash" || m === "finance" || !m) return false;
   return Number(amount) > 0;
-}
-
-function BookingModal({ lead, onClose, onDone }) {
-  const [form, setForm] = useState({ bookingAmount: 0, paymentMode: "UPI", paymentReference: "", financeRequired: lead.financeRequired || "No", exchangeRequired: lead.exchangeRequired || "No", bookingDate: lead.bookingDate || earliestPackBilledDate(lead) || todayISO(), gstin: lead.gstin || "" });
-  // Commercial gate: a booking may only be confirmed once the backend has resolved
-  // the vehicle against Price Master. All figures below come from the API — nothing
-  // is calculated or defaulted in React, so there is no path to a silent zero.
-  const [preview, setPreview] = useState(undefined); // undefined = loading
-  const [previewError, setPreviewError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-
-  useEffect(() => {
-    let alive = true;
-    get(`/leads/${lead.leadId}/price-preview`)
-      .then((d) => { if (alive) setPreview(d); })
-      .catch((e) => { if (alive) { setPreview(null); setPreviewError(apiErrorMessage(e, "Could not reach the pricing service.")); } });
-    return () => { alive = false; };
-  }, [lead.leadId]);
-
-  // STRICT PRODUCTION BOOKING MODE: a saved price structure is never sufficient on
-  // its own. Every booking requires a fresh Price Master hit for the lead's CURRENT
-  // model/variant, matching the backend's own revalidation.
-  const canBook = Boolean(preview && preview.found === true && Number(preview.priceStructure?.exShowroom) > 0);
-  const loading = preview === undefined;
-  const ps = (preview && preview.priceStructure) || {};
-  const charges = ["rto", "insuranceAmount", "accessoriesAmount", "handlingCharges", "trc", "fastag", "extendedWarranty", "otherCharges"];
-  const gvc = Number(ps.exShowroom || 0) + charges.reduce((t, k) => t + Number(ps[k] || 0), 0);
-
-  const submit = async () => {
-    if (!canBook || busy) return;
-    setBusy(true);
-    try {
-      if (!form.bookingDate) { toast.error("Booking date is required"); setBusy(false); return; }
-      if (paymentRefRequired(form.paymentMode, form.bookingAmount) && !String(form.paymentReference || "").trim()) {
-        toast.error(`Enter the ${paymentRefLabel(form.paymentMode).toLowerCase()}`);
-        setBusy(false);
-        return;
-      }
-      const res = await post(`/leads/${lead.leadId}/convert-booking`, {
-        bookingAmount: +form.bookingAmount, paymentMode: form.paymentMode, executive: lead.executive,
-        financeRequired: form.financeRequired, exchangeRequired: form.exchangeRequired,
-        bookingDate: form.bookingDate, paymentReference: String(form.paymentReference || "").trim(),
-        gstin: String(form.gstin || "").trim(),
-      });
-      // Report the ACTUAL backend sync state, never an assumption from a 200.
-      let sync = "Pending";
-      try {
-        const log = await get("/integrations/gsheets/sync-log", { status: "PENDING" });
-        sync = Number(log?.pending) === 0 ? "Synced" : "Pending";
-      } catch { sync = "Unknown"; }
-      setResult({ booking: res, lead: res.lead || {}, sync });
-      toast.success("Booking confirmed");
-    } catch (e) {
-      toast.error(apiErrorMessage(e, "Booking failed"));
-      setBusy(false);
-    }
-  };
-
-  if (result) {
-    const l = result.lead || {};
-    const rows = [
-      ["Price Loaded", Number(l.exShowroom) > 0],
-      ["Customer Payable Calculated", Number(l.customerPayable) > 0],
-      ["Booking Created", Boolean(result.booking?.bookingId)],
-    ];
-    return (
-      <MiniModal title="Booking Confirmed" onClose={onDone} onSubmit={onDone} submitLabel="Done" testid="booking-done-btn">
-        <div className="space-y-1.5 text-sm" data-testid="booking-summary">
-          {rows.map(([label, ok]) => (
-            <div key={label} className="flex justify-between"><span className="text-ink-soft">{label}</span><span>{ok ? "✓" : "—"}</span></div>
-          ))}
-          <div className="flex justify-between"><span className="text-ink-soft">Google Sheet Sync</span><span data-testid="booking-sync-status">{result.sync}</span></div>
-          <div className="border-t border-line mt-2 pt-2 flex justify-between font-semibold">
-            <span>Customer Payable</span><span>{inr(l.customerPayable)}</span>
-          </div>
-          <div className="flex justify-between"><span className="text-ink-soft">Booking ID</span><span>{result.booking?.bookingId || "—"}</span></div>
-        </div>
-      </MiniModal>
-    );
-  }
-
-  return (
-    <MiniModal title="Convert to Booking" onClose={onClose} onSubmit={submit} submitLabel={busy ? "Booking…" : "Confirm Booking"} testid="confirm-booking-btn" submitDisabled={!canBook || loading || busy}>
-      {loading && <p className="text-xs text-ink-soft mb-3" data-testid="price-loading">Loading price from Price Master…</p>}
-
-      {!loading && preview && preview.found === false && (
-        <div className="mb-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" data-testid="price-error">
-          {preview.message || `Price Master entry not found for ${lead.interestedModel || "—"} / ${lead.variant || "—"}.`}
-          {" "}Please select a valid vehicle or update Price Master.
-        </div>
-      )}
-      {!loading && preview === null && (
-        <div className="mb-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700" data-testid="price-error">{previewError}</div>
-      )}
-
-      {!loading && preview && preview.found && (
-        <div className="mb-3 rounded-lg border border-line bg-paper px-3 py-2 text-sm" data-testid="price-preview">
-          <div className="font-semibold text-ink mb-1">{lead.interestedModel} · {lead.variant}</div>
-          <div className="flex justify-between"><span className="text-ink-soft">Ex-Showroom</span><span>{inr(ps.exShowroom)}</span></div>
-          <div className="flex justify-between"><span className="text-ink-soft">RTO</span><span>{inr(ps.rto)}</span></div>
-          <div className="flex justify-between"><span className="text-ink-soft">Insurance</span><span>{inr(ps.insuranceAmount)}</span></div>
-          <div className="flex justify-between"><span className="text-ink-soft">Other Charges</span><span>{inr(gvc - Number(ps.exShowroom || 0) - Number(ps.rto || 0) - Number(ps.insuranceAmount || 0))}</span></div>
-          <div className="border-t border-line mt-1 pt-1 flex justify-between font-semibold"><span>Gross Vehicle Cost</span><span data-testid="preview-gvc">{inr(gvc)}</span></div>
-          <p className="text-xs text-ink-faint mt-1">Scheme benefits and final Customer Payable are computed by the backend on booking.</p>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <Field label="Booking Date"><Input data-testid="booking-date" type="date" value={form.bookingDate} onChange={set("bookingDate")} /></Field>
-        <Field label="Booking advance (₹)">
-          <Input data-testid="booking-amount" type="number" min="0" value={form.bookingAmount} onChange={set("bookingAmount")} />
-        </Field>
-        <p className="sm:col-span-2 text-xs text-ink-soft -mt-1">
-          Use 0 when the customer pays the full amount with no separate booking advance (default is 0, not ₹5,000).
-          {Number(lead.totalReceived || 0) > 0
-            ? ` ${inr(lead.totalReceived)} is already on this lead — leave 0 unless they are paying extra now, or you will not create a second receipt.`
-            : ""}
-        </p>
-        <Field label="Payment Mode"><Select data-testid="booking-payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{["Cash","UPI","Cheque","NEFT","Card"].map((m) => <option key={m}>{m}</option>)}</Select></Field>
-        <Field label={paymentRefLabel(form.paymentMode)}>
-          <Input data-testid="booking-payment-ref" value={form.paymentReference} onChange={set("paymentReference")}
-            placeholder={form.paymentMode === "Cheque" ? "Cheque number" : "UTR / transaction number"} />
-        </Field>
-        {(lead.customerType || "Individual") === "B2B" && (
-          <div className="sm:col-span-2">
-            <Field label="GSTIN">
-              <Input data-testid="booking-gstin" value={form.gstin} onChange={set("gstin")}
-                placeholder="Optional if GST certificate is attached" />
-            </Field>
-          </div>
-        )}
-        <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
-        <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
-      </div>
-    </MiniModal>
-  );
 }
 
 function CloseModal({ lead, onClose, onDone }) {

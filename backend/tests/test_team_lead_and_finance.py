@@ -236,6 +236,27 @@ async def test_team_lead_create_appears_on_own_dashboard(client):
 
 
 @pytest.mark.asyncio
+async def test_team_lead_cannot_open_owner_money_or_oem_pages(client):
+    """Working TL sidebar matches Executive: no payment ledger, no OEM claim desk."""
+    await server.db.users.delete_many({"email": "tl.nav@euler.com"})
+    created = await client.post("/api/auth/users", json={
+        "email": "tl.nav@euler.com", "password": PW, "name": "Nav TL", "role": "team_lead"})
+    assert created.status_code in (200, 201), created.text
+    tl = await _login("tl.nav@euler.com", PW)
+    try:
+        assert (await tl.get("/api/payments")).status_code == 403
+        assert (await tl.get("/api/insurance")).status_code == 403
+        assert (await tl.get("/api/oem-billing")).status_code == 403
+        assert (await tl.get("/api/claims")).status_code == 403
+        assert (await tl.get("/api/oem-claims")).status_code == 403
+        assert (await tl.get("/api/oem-extra-support")).status_code == 403
+        assert (await tl.get("/api/finance")).status_code == 200
+        assert (await tl.get("/api/leads")).status_code == 200
+    finally:
+        await tl.aclose()
+
+
+@pytest.mark.asyncio
 async def test_executive_can_post_finance_receipt(client):
     await server.db.users.delete_many({"email": "ex.pay@euler.com"})
     await client.post("/api/auth/users", json={

@@ -8,6 +8,7 @@ const mockAuth = {
   isExecutive: true,
   isTl: false,
   isTeamLead: false,
+  isSalesGm: false,
   user: { name: "Executive" },
   canSeeOwnerCommercials: false,
 };
@@ -112,6 +113,7 @@ afterEach(() => {
   mockAuth.isExecutive = true;
   mockAuth.isTl = false;
   mockAuth.isTeamLead = false;
+  mockAuth.isSalesGm = false;
   mockAuth.user = { name: "Executive" };
   post.mockClear();
 });
@@ -135,32 +137,28 @@ test("executive can create a walk-in enquiry without Cx Demand", async () => {
   await act(async () => { root.unmount(); });
 });
 
-test("executive create form shows OEM extra support and another-vehicle checkbox", async () => {
+test("executive create form is name, mobile, model — no deal or KYC", async () => {
   const { root } = await renderDrawer();
-  expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="another-vehicle-block"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="another-vehicle-check"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="same-order-check"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="another-vehicle-block"]').textContent).toMatch(/another vehicle/i);
-  expect(document.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
-  expect(document.querySelector('[data-testid="deal-additional"]')).toBeFalsy();
-  expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/OEM scheme/i);
-  expect(document.querySelector('[data-testid="deal-format-card"]').textContent).not.toMatch(/Scheme Master/i);
-  expect(document.querySelector('[data-testid="print-deal-sheet-btn"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="lead-name"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="lead-mobile"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="lead-model"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="deal-format-card"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="kyc-block"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="same-order-check"]')).toBeFalsy();
   await act(async () => { root.unmount(); });
 });
 
-test("TL create form has the same extra-support and multi-unit controls", async () => {
+test("TL create form includes own name on the executive dropdown", async () => {
   mockAuth.isExecutive = false;
-  mockAuth.isTl = true;
-  mockAuth.user = { name: "Team Leader" };
+  mockAuth.isTeamLead = true;
+  mockAuth.user = { name: "Create TL" };
   const { root } = await renderDrawer();
-  expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="another-vehicle-check"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="lead-executive"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="deal-additional"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="deal-format-card"]')).toBeFalsy();
+  const exec = document.querySelector('[data-testid="lead-executive"]');
+  expect(exec).toBeTruthy();
+  expect(exec.textContent).toMatch(/Create TL/);
   await act(async () => { root.unmount(); });
 });
 
@@ -169,7 +167,6 @@ test("typing a known mobile lists existing units and save sends anotherVehicle",
   await act(async () => {
     setInput(document.querySelector('[data-testid="lead-name"]'), "Ramesh");
     setInput(document.querySelector('[data-testid="lead-mobile"]'), "9876543210");
-    setInput(document.querySelector('[data-testid="lead-budget"]'), "185000");
   });
   await act(async () => { await new Promise((r) => setTimeout(r, 350)); });
   expect(document.querySelector('[data-testid="mobile-unit-list"]').textContent).toMatch(/LD26000001/);
@@ -189,22 +186,20 @@ test("typing a known mobile lists existing units and save sends anotherVehicle",
   await act(async () => { root.unmount(); });
 });
 
-test("another vehicle with extra support amount saves without a new proof file", async () => {
+test("another vehicle on a known mobile still creates without deal or KYC", async () => {
   const { root } = await renderDrawer({
     initial: { anotherVehicle: true, siblingLeadId: "LD26000001", customerName: "Ramesh", mobile: "9876543210" },
   });
-  await act(async () => {
-    setInput(document.querySelector('[data-testid="lead-budget"]'), "185000");
-    setInput(document.querySelector('[data-testid="lead-oem-extra"]'), "7000");
-  });
   await act(async () => { await new Promise((r) => setTimeout(r, 350)); });
+  expect(document.querySelector('[data-testid="another-vehicle-block"]')).toBeTruthy();
   await act(async () => {
     document.querySelector('[data-testid="save-lead-btn"]').click();
   });
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
   expect(post).toHaveBeenCalledWith("/leads", expect.objectContaining({
     anotherVehicle: true,
-    oemExtraSupportReceived: 7000,
+    customerName: "Ramesh",
+    mobile: "9876543210",
   }));
   await act(async () => { root.unmount(); });
 });

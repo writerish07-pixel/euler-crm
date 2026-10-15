@@ -30,6 +30,7 @@ jest.mock("../components/LeadDocuments", () => ({
 }));
 jest.mock("../components/CallLink", () => () => null);
 jest.mock("../components/CompleteFormatDrawer", () => () => null);
+jest.mock("./BookEnquiryDrawer", () => () => null);
 
 import { PaymentsTab, receiptPaymentModes } from "./LeadDrawer";
 
