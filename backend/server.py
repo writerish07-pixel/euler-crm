@@ -380,7 +380,13 @@ async def actor(request: Request, user=Depends(current_user)):
         ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "")
     except Exception:
         ip = ""
-    return {"email": (user or {}).get("email") or "system", "role": (user or {}).get("role") or "", "ip": ip}
+    return {
+        "email": (user or {}).get("email") or "system",
+        "name": (user or {}).get("name") or "",
+        "userId": (user or {}).get("userId") or "",
+        "role": (user or {}).get("role") or "",
+        "ip": ip,
+    }
 
 
 async def write_audit(act, action, module, *, leadId="", paymentId="", claimId="",
@@ -391,6 +397,8 @@ async def write_audit(act, action, module, *, leadId="", paymentId="", claimId="
         "auditId": f"AUD{uuid.uuid4().hex[:14]}",
         "timestamp": now_iso(),
         "user": act.get("email") or "system",
+        "name": act.get("name") or "",
+        "userId": act.get("userId") or "",
         "role": act.get("role") or "",
         "ip": act.get("ip") or "",
         "action": action, "module": module,
@@ -11708,10 +11716,25 @@ async def add_activity(lead_id: str, body: ActivityIn, act=Depends(actor), _sale
     # Lead Register "Last Activity" summarises the most recent activity on the lead.
     # It is derived from the activity just logged, not separately entered.
     summary = " · ".join(x for x in (body.activityType, (body.discussion or "").strip()) if x)
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+    lead_set = {
         "lastActivity": summary[:200], "lastUpdated": now_iso(),
-    }})
+        "lastUpdatedBy": act.get("email") or "",
+    }
+    follow = str(payload.get("nextFollowup") or "").strip()
+    old_follow = str(lead.get("nextFollowupDate") or lead.get("nextFollowup") or "")[:10]
+    if follow:
+        lead_set["nextFollowupDate"] = follow
+    await db.leads.update_one({"leadId": lead_id}, {"$set": lead_set})
     await recompute_lead(lead_id)
+    audit_new = {
+        "activityType": body.activityType,
+        "discussion": (body.discussion or "").strip()[:200],
+    }
+    audit_old = {}
+    if follow:
+        audit_new["nextFollowupDate"] = follow
+        audit_old["nextFollowupDate"] = old_follow
+    await write_audit(act, "update", "activity", leadId=lead_id, old=audit_old, new=audit_new)
     return clean(doc)
 
 
@@ -13109,6 +13132,7 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/integrations/gsheets"), ("GET", "/api/export"), ("GET", "/api/export/catalog"),
     ("GET", "/api/share/dashboard"),
     ("PUT", "/api/leads/{lead_id}/extra-income"), ("GET", "/api/audit-log"),
+    ("GET", "/api/edit-log"),
 ]
 OWNER_ONLY_ENDPOINTS = [
     "/api/dealer-earnings", "/api/reports/owner-commercial", "/api/reports/oem-claim-dashboard",
@@ -14425,6 +14449,174 @@ async def list_oem_extra_support(month: Optional[str] = None, year: Optional[str
         for r in rows:
             r.pop("oemExtraSupportRetained", None)
     return rows
+
+
+# ---------------------------------------------------------------- edit log register — desk edits (GM / Showroom Admin / TL / Executive)
+EDIT_LOG_MODULES = (
+    "lead", "lead-field", "lead-unit", "price-structure", "scheme",
+    "scheme-allocation", "extra-income", "gstin", "unit-billed-date",
+    "lead-cancellation", "activity",
+)
+EDIT_LOG_ACTIONS = ("update", "amend", "allocate")
+EDIT_LOG_EDITOR_ROLES = ("sales_gm", "tl", "team_lead", "executive")
+EDIT_LOG_VIEWERS = ("owner", "sales_gm", "tl", "team_lead", "executive")
+EDIT_LOG_ROLE_LABEL = {
+    "sales_gm": "Sales GM",
+    "tl": "Showroom Admin",
+    "team_lead": "Team Leader",
+    "executive": "Executive",
+    "owner": "Owner",
+}
+_EDIT_FIELD_LABELS = {
+    "customerName": "Customer", "mobile": "Mobile", "altMobile": "Alt mobile",
+    "village": "Village", "city": "City", "leadSource": "Source",
+    "interestedModel": "Model", "variant": "Variant", "executive": "Executive",
+    "currentStatus": "Status", "priority": "Priority", "budget": "Cx demand",
+    "cxDemand": "Cx demand", "remarks": "Remarks", "nextFollowupDate": "Follow-up",
+    "bookingDate": "Booking date", "bookingAmount": "Booking amount",
+    "customerType": "Customer type", "gstin": "GSTIN",
+    "exShowroom": "Ex-showroom", "rto": "RTO", "insuranceAmount": "Insurance",
+    "oemExtraSupportReceived": "OEM extra received",
+    "oemExtraSupportPassed": "OEM extra passed",
+    "additionalDiscount": "Additional discount",
+    "consumerDiscount": "Consumer discount", "activityType": "Activity",
+    "discussion": "Note",
+}
+
+
+def _edit_value_text(value) -> str:
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, dict):
+        return json.dumps(value, default=str)[:80]
+    if isinstance(value, list):
+        return json.dumps(value, default=str)[:80]
+    return str(value)
+
+
+def _edit_field_summary(old, new, *, action="", module="") -> str:
+    """Human line for the Edit Log Register: field: old → new."""
+    old = old if isinstance(old, dict) else {}
+    new = new if isinstance(new, dict) else {}
+    skip = {"lastUpdated", "lastUpdatedBy", "createdByUserId", "createdByEmail", "createdByName"}
+    keys = []
+    for k in list(new.keys()) + [k for k in old.keys() if k not in new]:
+        if k in skip or k in keys:
+            continue
+        keys.append(k)
+    parts = []
+    for k in keys:
+        ov, nv = old.get(k), new.get(k)
+        if ov == nv:
+            continue
+        label = _EDIT_FIELD_LABELS.get(k, k)
+        parts.append(f"{label}: {_edit_value_text(ov)} → {_edit_value_text(nv)}")
+    if parts:
+        return "; ".join(parts)[:400]
+    verb = action or "updated"
+    return f"{verb} {module}".strip()
+
+
+def _edit_log_row(entry, lead=None) -> dict:
+    role = str((entry or {}).get("role") or "").strip().lower()
+    return {
+        "editId": (entry or {}).get("auditId") or "",
+        "timestamp": (entry or {}).get("timestamp") or "",
+        "name": (entry or {}).get("name") or "",
+        "user": (entry or {}).get("user") or "",
+        "role": role,
+        "roleLabel": EDIT_LOG_ROLE_LABEL.get(role, role or "—"),
+        "action": (entry or {}).get("action") or "",
+        "module": (entry or {}).get("module") or "",
+        "leadId": (entry or {}).get("leadId") or "",
+        "customerName": (lead or {}).get("customerName") or "",
+        "executive": (lead or {}).get("executive") or "",
+        "summary": _edit_field_summary(
+            (entry or {}).get("oldValue"), (entry or {}).get("newValue"),
+            action=(entry or {}).get("action") or "",
+            module=(entry or {}).get("module") or "",
+        ),
+    }
+
+
+@api.get("/edit-log")
+async def list_edit_log(module: Optional[str] = None, leadId: Optional[str] = None,
+                        role: Optional[str] = None, q: Optional[str] = None,
+                        month: Optional[str] = None, year: Optional[str] = None,
+                        limit: int = 500, user=Depends(current_user)):
+    """Register of desk edits: Sales GM, Showroom Admin, Team Leader, Executive.
+
+    Owner / GM / Showroom Admin see the full register. Team Leader sees their
+    team's files. An executive sees only their own edits (follow-up / activity
+    and any other step they are allowed to change).
+    """
+    viewer = str((user or {}).get("role") or "").strip().lower()
+    if viewer not in EDIT_LOG_VIEWERS:
+        raise HTTPException(
+            403,
+            "Edit Log is for Owner, Sales GM, Showroom Admin, Team Leader and Executive.",
+        )
+    query = {
+        "action": {"$in": list(EDIT_LOG_ACTIONS)},
+        "module": {"$in": list(EDIT_LOG_MODULES)},
+        "role": {"$in": list(EDIT_LOG_EDITOR_ROLES)},
+    }
+    want_module = str(module or "").strip()
+    if want_module:
+        if want_module not in EDIT_LOG_MODULES:
+            raise HTTPException(422, "Unknown edit-log module.")
+        query["module"] = want_module
+    want_lead = str(leadId or "").strip()
+    if want_lead:
+        query["leadId"] = want_lead
+    want_role = str(role or "").strip().lower()
+    if want_role:
+        if want_role not in EDIT_LOG_EDITOR_ROLES:
+            raise HTTPException(422, "Unknown editor role.")
+        query["role"] = want_role
+    cap = max(1, min(int(limit or 500), 2000))
+    rows = await db.audit_log.find(query).sort("timestamp", -1).to_list(cap)
+    lids = [str(r.get("leadId") or "").strip() for r in rows if str(r.get("leadId") or "").strip()]
+    leads = {}
+    if lids:
+        async for lead in db.leads.find(
+                {"leadId": {"$in": lids}},
+                {"leadId": 1, "customerName": 1, "executive": 1,
+                 "createdByUserId": 1, "createdByEmail": 1, "_id": 0}):
+            leads[lead.get("leadId")] = lead
+
+    email = str((user or {}).get("email") or "").strip().lower()
+    uid = str((user or {}).get("userId") or "").strip()
+
+    def is_own_edit(row) -> bool:
+        if uid and str(row.get("userId") or "").strip() == uid:
+            return True
+        return str(row.get("user") or "").strip().lower() == email
+
+    if viewer == "executive":
+        rows = [r for r in rows if is_own_edit(r)]
+    elif authmod.is_team_lead(user):
+        names = await team_scope.team_member_names(db, user)
+        kept = []
+        for r in rows:
+            if is_own_edit(r):
+                kept.append(r)
+                continue
+            lead = leads.get(str(r.get("leadId") or "").strip()) or {}
+            if team_scope.lead_in_names(lead, names, user):
+                kept.append(r)
+        rows = kept
+
+    out = [_edit_log_row(r, leads.get(str(r.get("leadId") or "").strip())) for r in rows]
+    term = str(q or "").strip().lower()
+    if term:
+        out = [r for r in out if term in " ".join(
+            str(r.get(k) or "") for k in
+            ("leadId", "customerName", "name", "user", "summary", "executive", "module")
+        ).lower()]
+    period = _parse_period(month, year)
+    out = _rows_in_period(out, period, lambda r: r.get("timestamp"))
+    return out
 
 
 # ---------------------------------------------------------------- audit log (H4) — owner-only viewer
