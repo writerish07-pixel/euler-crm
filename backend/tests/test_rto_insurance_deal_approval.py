@@ -202,10 +202,14 @@ async def test_exec_submit_stores_additional(exec_client, client):
         "executive": "Executive", "budget": 790000,
     })
     assert r.status_code == 200, r.text
-    lead = await server.db.leads.find_one({"leadId": r.json()["leadId"]})
-    assert ce.num(lead["additionalDiscount"]) == 19500
-    assert ce.num(lead["customerPayable"]) == 790000
-    assert not r.json().get("pending")
+    body = r.json()
+    assert body.get("pending") is True
+    assert not body.get("leadId")
+    req = await server.db.lead_requests.find_one({"requestId": body["requestId"]})
+    assert ce.num((req.get("dealFormat") or {}).get("additionalDiscount")) == 19500
+    assert ce.num(req.get("cxDemand") or req.get("dealAmount")) == 790000
+    listed = (await client.get("/api/leads")).json()
+    assert not any(l.get("customerName") == "Low Deal" for l in listed)
 
 
 @pytest.mark.asyncio
@@ -214,7 +218,7 @@ async def test_gm_forbidden_when_deal_differs(exec_client, gm_client, client):
     r = await exec_client.post("/api/leads", json={
         "customerName": "GM Blocked", "mobile": next_mobile(),
         "interestedModel": "Storm", "variant": "Deal Gate LR",
-        "executive": "Executive", "budget": 790000,
+        "executive": "Executive", "budget": 0,
     })
     lid = r.json()["leadId"]
     for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
@@ -226,7 +230,10 @@ async def test_gm_forbidden_when_deal_differs(exec_client, gm_client, client):
         assert up.status_code == 200, up.text
     wait = await exec_client.post(
         f"/api/leads/{lid}/convert-booking",
-        json={"bookingAmount": 0, "executive": "Executive", "bookingDate": "2026-10-10"})
+        json={
+            "bookingAmount": 0, "executive": "Executive", "bookingDate": "2026-10-10",
+            "budget": 790000,
+        })
     assert wait.status_code == 409, wait.text
     req = await server.db.lead_requests.find_one(
         {"existingLeadId": lid, "requestKind": "booking_deal", "status": "pending"})
@@ -276,9 +283,10 @@ async def test_tl_discount_waits_for_owner_gm(client):
             "executive": "Amit", "budget": 790000,
         })
         assert r.status_code == 200, r.text
-        assert r.json().get("leadId")
-        assert not r.json().get("pending")
-        assert await server.db.leads.count_documents({"customerName": "TL Discount"}) == 1
+        assert r.json().get("pending") is True
+        assert r.json().get("requestId")
+        assert not r.json().get("leadId")
+        assert await server.db.leads.count_documents({"customerName": "TL Discount"}) == 0
         exact = await tl.post("/api/leads", json={
             "customerName": "TL Exact", "mobile": next_mobile(),
             "interestedModel": "Storm", "variant": "Deal Gate LR",
@@ -326,8 +334,8 @@ async def test_exec_exact_blocked_when_pending_same_mobile(exec_client):
         "executive": "Executive", "budget": 790000,
     })
     assert first.status_code == 200, first.text
-    assert first.json().get("leadId")
-    assert not first.json().get("pending")
+    assert first.json().get("pending") is True
+    assert first.json().get("requestId")
     blocked = await exec_client.post("/api/leads", json={
         "customerName": "Pending Disc", "mobile": mobile,
         "interestedModel": "Storm", "variant": "Deal Gate LR",
@@ -356,9 +364,10 @@ async def test_exec_partial_pack_waits_for_approval(exec_client):
         "units": [{"model": "No Price Van", "variant": "X"}],
     })
     assert r.status_code == 200, r.text
-    assert r.json().get("leadId")
-    assert not r.json().get("pending")
-    assert await server.db.leads.count_documents({"customerName": "Partial Pack"}) == 1
+    assert r.json().get("pending") is True
+    assert r.json().get("requestId")
+    assert not r.json().get("leadId")
+    assert await server.db.leads.count_documents({"customerName": "Partial Pack"}) == 0
 
 
 def test_quoted_deal_needs_approval_only_for_discount():

@@ -206,7 +206,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
       <div className="space-y-4" data-testid="book-enquiry-drawer">
         <p className="text-sm text-ink-soft">
           Walk-in files start with name and mobile. Fill the vehicle, deal, KYC and papers here, then book.
-          A dealer discount waits on GM / Owner Approvals.
+          A dealer discount leaves this file and waits on GM / Owner Approvals — it is not on the Lead Register until approved.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Model *">

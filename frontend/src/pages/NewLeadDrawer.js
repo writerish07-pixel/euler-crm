@@ -11,7 +11,7 @@ function sameExecName(a, b) {
   return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
 }
 
-/** Create a live enquiry. KYC and GM/Owner deal approval run at Book. */
+/** Walk-in name+mobile is live. A dealer discount waits on Approvals, not the register. */
 export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {} }) {
   const { isExecutive, isTl, isTeamLead, isSalesGm, user, canSeeOwnerCommercials } = useAuth();
   const enquiryOnly = isExecutive || isTl || isTeamLead || isSalesGm;
@@ -171,7 +171,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const saveLabel = "Create Lead";
   const drawerTitle = "New Lead";
   const drawerSubtitle = enquiryOnly
-    ? "Name, mobile, and vehicle if you have it. WhatsApp follow-up starts. KYC and deal approval at booking."
+    ? "Name, mobile, and vehicle if you have it. WhatsApp follow-up starts until Cx Demand is filled. A dealer discount waits on Approvals — not the Lead Register."
     : "Capture a fresh enquiry";
 
   const saveLead = async (extra = {}) => {
