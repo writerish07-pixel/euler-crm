@@ -416,6 +416,11 @@ async def run_seed(db, force=False):
         if docs:
             await db[coll].insert_many(docs)
         result[coll] = len(docs)
+    # "seeded" means we just inserted sample leads that still need a commercial
+    # recompute. Returning True on every boot (including skip-existing) made
+    # production recompute thousands of live files after every Railway deploy,
+    # and the desk showed empty lists until that finished.
+    leads_inserted = isinstance(result.get("leads"), int) and result["leads"] > 0
     # counters for ID generation
     if force or await db["counters"].count_documents({}) == 0:
         await db["counters"].delete_many({})
@@ -459,7 +464,7 @@ async def run_seed(db, force=False):
         result["oct_2026_schemes"] = await ensure_oct_2026_schemes(db)
     except Exception as exc:
         result["oct_2026_schemes"] = f"error ({type(exc).__name__})"
-    return {"seeded": True, "result": result}
+    return {"seeded": leads_inserted, "result": result}
 
 
 # Master lists a user may add/delete from Settings → synced to a "Masters" tab

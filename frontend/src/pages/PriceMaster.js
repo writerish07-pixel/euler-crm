@@ -13,7 +13,10 @@ export default function PriceMaster() {
   const [models, setModels] = useState([]);
   const [edit, setEdit] = useState(null);
 
-  const load = useCallback(() => get("/price-master", model !== "all" ? { model } : undefined).then(setRows), [model]);
+  const load = useCallback(() => get("/price-master", model !== "all" ? { model } : undefined).then(setRows).catch(() => {
+    setRows([]);
+    toast.error("Could not load price master");
+  }), [model]);
   useEffect(() => { get("/masters").then((m) => setModels(m.models)); }, []);
   useEffect(() => { load(); }, [load]);
 
