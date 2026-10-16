@@ -284,6 +284,27 @@ async def test_duplicate_pending_mobile_is_blocked(exec_client):
 
 
 @pytest.mark.asyncio
+async def test_rejected_request_frees_mobile_for_recreate(exec_client, client):
+    """Owner reject means that enquiry is out of the CRM — same mobile is a new create."""
+    mobile = next_mobile()
+    first = await exec_client.post("/api/leads", json=_enquiry("Rejected Then Back", mobile=mobile))
+    assert first.status_code == 200, first.text
+    assert first.json().get("pending") is True
+    rid = first.json()["requestId"]
+    rej = await client.post(f"/api/lead-requests/{rid}/reject", json={"reason": "not this deal"})
+    assert rej.status_code == 200, rej.text
+    matches = await exec_client.get("/api/leads/mobile-matches", params={"mobile": mobile})
+    assert matches.status_code == 200, matches.text
+    assert matches.json()["pending"] == []
+    assert matches.json()["existing"] == []
+    again = await exec_client.post("/api/leads", json=_enquiry("Rejected Then Back", mobile=mobile))
+    assert again.status_code == 200, again.text
+    assert again.json().get("pending") is True
+    assert again.json()["requestId"] != rid
+    assert await server.db.leads.count_documents({"mobile": mobile}) == 0
+
+
+@pytest.mark.asyncio
 async def test_owner_and_gm_still_create_live_leads(client, gm_client):
     owner = await client.post("/api/leads", json=_enquiry("Owner Direct", executive="Amit"))
     assert owner.status_code == 200, owner.text

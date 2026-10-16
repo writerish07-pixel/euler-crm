@@ -329,6 +329,31 @@ async def test_import_another_vehicle_blocked_when_other_executive_holds_mobile(
 
 
 @pytest.mark.asyncio
+async def test_import_recreates_on_cancelled_mobile(client):
+    """A Lost / cancelled file is out of the CRM — import may use the same mobile."""
+    await client.post("/api/leads/import/commit",
+                      files={"file": ("a.csv", _csv([_row("Old Lost", "9800000081")]), "text/csv")})
+    old = await server.db.leads.find_one({"mobile": "9800000081"})
+    await server.db.leads.update_one(
+        {"leadId": old["leadId"]},
+        {"$set": {
+            "currentStatus": "Lost", "accountStatus": "Cancelled", "dealCancelled": True,
+        }},
+    )
+    rows = [_row("Back Again", "9800000081")]
+    body = await _preview(client, rows)
+    assert body["alreadyCount"] == 0, body
+    assert body["validCount"] == 1, body
+    commit = await client.post(
+        "/api/leads/import/commit",
+        files={"file": ("leads.csv", _csv(rows), "text/csv")},
+    )
+    assert commit.status_code == 200, commit.text
+    assert commit.json()["created"] == 1
+    assert await server.db.leads.count_documents({"mobile": "9800000081"}) == 2
+
+
+@pytest.mark.asyncio
 async def test_dates_accept_indian_format_and_reject_junk(client):
     rows = [_row("DMY Date", "9800000051", **{"Lead Date": "10-08-2026"}),
             _row("Junk Date", "9800000052", **{"Lead Date": "next monday"})]
