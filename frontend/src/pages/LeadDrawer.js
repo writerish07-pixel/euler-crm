@@ -39,7 +39,9 @@ function packUnitList(lead) {
 }
 
 function unitBilledDate(u, lead) {
-  const d = String((u && (u.soldDate || u.schemeAsOf)) || (lead && lead.bookingDate) || "").slice(0, 10);
+  const billed = String((u && u.soldDate) || "").slice(0, 10);
+  if (billed.length === 10) return billed;
+  const d = String((u && u.schemeAsOf) || (lead && (lead.schemeAsOf || lead.bookingDate)) || "").slice(0, 10);
   return d.length === 10 ? d : "";
 }
 
@@ -1256,6 +1258,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
   const locked = inactive || staffLocked;
   const [rules, setRules] = useState(null);
   const [schemeDate, setSchemeDate] = useState(unitBilledDate(src, lead) || todayISO());
+  const [extraUnits, setExtraUnits] = useState(() => (units ? [unitSno] : []));
   const [form, setForm] = useState(() => ({
     oemExtraSupportReceived: src.oemExtraSupportReceived || 0,
     oemExtraSupportPassed: src.oemExtraSupportPassed || 0,
@@ -1280,9 +1283,14 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     return inferred;
   });
 
+  const unitSoldDate = String((units && units[unitIdx] && units[unitIdx].soldDate) || src.soldDate || "").slice(0, 10);
   useEffect(() => {
     const next = unitSource(lead, units ? units[unitIdx] : null, unitIdx);
     setSchemeDate(unitBilledDate(next, lead) || todayISO());
+    const already = (units || [])
+      .map((u, i) => (Number(u?.oemExtraSupportReceived) > 0 ? i + 1 : 0))
+      .filter(Boolean);
+    setExtraUnits(units ? Array.from(new Set([unitSno, ...already])) : []);
     setForm({
       oemExtraSupportReceived: next.oemExtraSupportReceived || 0,
       oemExtraSupportPassed: next.oemExtraSupportPassed || 0,
@@ -1301,13 +1309,13 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       inferred[k] = Number(v) > 0;
     });
     setUsedMap(inferred);
-  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate]); // scheme form reset is keyed to the selected pack unit
+  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate, unitSoldDate]); // billed date drives scheme month per pack unit
   useEffect(() => {
     if (!lead.leadId || !schemeDate) return;
     get(`/leads/${lead.leadId}/scheme-rules`, { on: schemeDate, ...(units ? { unit: unitSno } : {}) })
       .then(setRules)
       .catch(() => setRules({ rules: {} }));
-  }, [lead.leadId, schemeDate, unitSno]);
+  }, [lead.leadId, schemeDate, unitSno, unitSoldDate]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const r = rules?.rules || {};
@@ -1386,6 +1394,9 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
     if (!schemeDate) return toast.error("Scheme date is required");
     const extraErr = extraSupportReady(form.oemExtraSupportReceived, {}, documents);
     if (extraErr) return toast.error(extraErr);
+    if (units && Number(form.oemExtraSupportReceived) > 0 && !extraUnits.length) {
+      return toast.error("Select which pack units this Extra Support claim applies to");
+    }
     try {
       // Only rewrite bookingDate after a real booking — never invent a booking via date alone.
       // Pack units keep their own billed / scheme date; do not collapse the order onto one date.
@@ -1394,7 +1405,9 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       if (!units && alreadyBooked && schemeDate !== (lead.bookingDate || "")) {
         await put(`/leads/${lead.leadId}`, { bookingDate: schemeDate });
       }
-      await put(`/leads/${lead.leadId}/scheme`, units ? { ...payload, unitSno } : payload);
+      await put(`/leads/${lead.leadId}/scheme`, units
+        ? { ...payload, unitSno, extraApplyUnitSnos: extraUnits }
+        : payload);
       toast.success(units
         ? `Unit ${unitSno} scheme saved`
         : "Scheme updated — continue with Payments");
@@ -1454,10 +1467,12 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
       <SchemeCircularPic circular={rules?.circular} />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-2">
-        <Field label="Scheme Date">
-          <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked} />
+        <Field label={unitSoldDate ? "Billed date" : "Scheme Date"}>
+          <Input data-testid="scheme-date" type="date" value={schemeDate} onChange={(e) => setSchemeDate(e.target.value)} disabled={locked || !!unitSoldDate} />
           <p className="text-[11px] text-ink-faint mt-1">
-            Defaults to this unit’s billed date so Sept and Oct units load different Scheme Master months.
+            {unitSoldDate
+              ? "This unit’s OEM billed date picks the Scheme Master month. Oct Turbo has no circular — Loyalty does not apply."
+              : "Defaults to this unit’s billed date so Sept and Oct units load different Scheme Master months."}
           </p>
         </Field>
         <Field label="OEM Extra Support Received">
@@ -1486,6 +1501,31 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
             : "Additional (Dealer) is the customer discount. OEM Extra Received is a claim only — it is not passed to the customer."}
         </div>
       </div>
+      {units && Number(form.oemExtraSupportReceived) > 0 && (
+        <div className="mb-4 p-3 rounded-md border border-amber-200 bg-amber-50/60" data-testid="scheme-extra-units">
+          <div className="text-xs font-semibold text-ink mb-1">Apply this Extra Support claim to units</div>
+          <p className="text-[11px] text-ink-faint mb-2">
+            The OEM debit note is a total against a number of vehicles. Tick only those units — it will not attach to the whole pack.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            {units.map((u, i) => {
+              const sno = i + 1;
+              const checked = extraUnits.includes(sno);
+              const ch = String(u?.chassisNumber || "").trim();
+              return (
+                <label key={sno} className="flex items-center gap-1.5 text-sm">
+                  <input type="checkbox" data-testid={`scheme-extra-unit-${sno}`}
+                    checked={checked} disabled={locked}
+                    onChange={() => setExtraUnits((cur) => (
+                      checked ? cur.filter((n) => n !== sno) : [...cur, sno].sort((a, b) => a - b)
+                    ))} />
+                  Unit {sno}{u?.model ? ` · ${u.model}` : ""}{ch ? ` · ${ch}` : ""}
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
       {hiddenFields.length > 0 && (
         <div className="text-[11px] text-ink-faint mb-3" data-testid="scheme-unavailable-note">
           Not available for this model/variant: {hiddenFields.map(([, l]) => l).join(", ")}

@@ -1487,14 +1487,15 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
                 "manual": True, "lineId": line_key,
                 "detail": "Manual OEM claim number is not in the last Euler sync. Sync again."}
     entry = None
-    # Pack Extra Support is per chassis. Lead-first would glue both units
-    # to every Extra Support debit note on the file.
-    if component_key == "oemExtraSupport" and ch:
+    # Pack Extra Support is per chassis. Lead-first would glue every Extra
+    # Support debit note on the file onto every unit of the pack.
+    extra_chassis = component_key == "oemExtraSupport" and bool(ch)
+    if extra_chassis:
         entry = packs["byChassis"].get(ch)
-    if not entry:
+    else:
         entry = packs["byLead"].get(lead_id)
-    if not entry and ch:
-        entry = packs["byChassis"].get(ch)
+        if not entry and ch:
+            entry = packs["byChassis"].get(ch)
     if not entry:
         inv = str(invoice or "").strip().lower()
         if inv:
@@ -2166,6 +2167,17 @@ def extra_support_from_lead(lead, unit_sno=None):
         sno = int(unit_sno or 0)
     except (TypeError, ValueError):
         sno = 0
+    pack = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    if sno and len(pack) > 1:
+        # This vehicle only — never the lead roll-up (that glued a pack total
+        # onto a sibling that was not selected for this claim).
+        unit = pack[sno - 1] if 0 < sno <= len(pack) else {}
+        return (
+            round2(ce.num((unit or {}).get("oemExtraSupportReceived"))),
+            str((unit or {}).get("chassisNumber") or "").strip(),
+            str((unit or {}).get("invoiceNumber") or "").strip(),
+            sno,
+        )
     units = ce.extra_support_unit_rows(lead or {})
     if sno and units:
         unit = next((u for u in units if int(u.get("unitSno") or 0) == sno), {}) or {}
@@ -2445,6 +2457,9 @@ async def find_register_row(db, *, lead_id, component_key, unit_sno=None):
         hit = next((c for c in rows if int(c.get("unitSno") or 0) == want), None)
         if hit:
             return hit
+        # Do not reuse another unit's row — that glued one Extra Support
+        # debit note onto every vehicle on the pack.
+        return None
     no_unit = [c for c in rows if not int(c.get("unitSno") or 0)]
     if len(rows) == 1:
         return rows[0]
@@ -2452,8 +2467,6 @@ async def find_register_row(db, *, lead_id, component_key, unit_sno=None):
         if len(no_unit) == 1 and len(rows) == 1:
             return no_unit[0]
         raise ValueError("This lead has Extra Support on more than one unit. Pick the unit.")
-    if want:
-        return None
     if len(no_unit) == 1:
         return no_unit[0]
     raise ValueError("This lead has Extra Support on more than one unit. Pick the unit.")

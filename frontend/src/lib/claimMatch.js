@@ -79,6 +79,15 @@ export function lineLeadLabel(li, leadId) {
 }
 
 /** Extra Support prose like `5000+5000=10000` + two names joined by &. */
+export function lineChassisList(li) {
+  if (!li || typeof li !== "object") return [];
+  if (Array.isArray(li.chassisList) && li.chassisList.length) {
+    return li.chassisList.map((c) => String(c || "").trim()).filter(Boolean);
+  }
+  const one = String(li.chassis || "").trim();
+  return one ? [one] : [];
+}
+
 export function looksCombinedSupport(li) {
   const blob = `${li?.description || ""} ${li?.customerName || ""}`;
   return /\d+\s*\+\s*\d+\s*=/.test(blob) || /&|\band\b/i.test(blob);

@@ -258,15 +258,17 @@ def _rows_in_period(rows, period, getter):
 def _scheme_as_of(lead=None, on=None, unit=None):
     """Date used to pick Scheme Master month for a lead or pack unit.
 
-    Order: explicit `on` / schemeDate > unit.schemeAsOf > unit billed/sold date >
-    lead.schemeAsOf > bookingDate > today. Two units billed on different OEM
-    dates keep their own month. Changing Scheme Date on an unbooked lead must
-    not invent a bookingDate.
+    A pack unit's billed (OEM sold) date is the scheme month for that vehicle.
+    Sept-billed Turbo keeps Loyalty; Oct-billed Turbo on the same file does not
+    — October 2026 has no Turbo circular. Explicit `on` still wins on a file
+    with no billed date (single unit / scheme-date picker before billing).
     """
+    billed = str((unit or {}).get("soldDate") or "").strip()[:10]
+    if len(billed) == 10 and billed[4] == "-" and billed[7] == "-":
+        return billed
     for raw in (
         on,
         (unit or {}).get("schemeAsOf"),
-        (unit or {}).get("soldDate"),
         (lead or {}).get("schemeAsOf"),
         (lead or {}).get("bookingDate"),
     ):
@@ -1795,6 +1797,9 @@ class SchemeIn(BaseModel):
     schemeDate: Optional[str] = None
     # Same-order pack: 1-based unit. Omitted / 1 writes the lead + unit 1.
     unitSno: Optional[int] = None
+    # Extra Support claim total vs N units: write Received only onto these pack
+    # units. Omitted = this unit only — never every sibling on the order.
+    extraApplyUnitSnos: Optional[List[int]] = None
 
 
 class PaymentIn(BaseModel):
@@ -7003,13 +7008,14 @@ def _unit_addl_open(unit):
 
 
 def _fill_same_sku_pack_scheme(lead, units):
-    """Same-SKU pack: write unit-1 OEM extra + additional onto empty siblings.
+    """Same-SKU pack: split a pack-total Extra Support; copy per-unit Additional.
 
     OEM extra on the lead is a roll-up. If unit 1 still holds that pack total
-    (₹2,40,000 on a 5-unit order), split it. If unit 1 already holds the
-    per-unit figure (₹48,000), copy that. Additional (dealer-funded) is copied
-    from unit 1 only when it looks like a per-unit discount — never a leftover
-    pack figure on the lead (₹1,15,000).
+    (₹2,40,000 on a 5-unit order), split it. A per-unit figure (₹48,000) stays
+    on the units staff selected — one Extra Support debit note must not invent
+    claims on every sibling. Additional (dealer-funded) is copied from unit 1
+    only when it looks like a per-unit discount — never a leftover pack figure
+    on the lead (₹1,15,000).
     """
     rows = [dict(u or {}) for u in (units or [])]
     if not _pack_units_same_sku(lead, rows):
@@ -7031,15 +7037,10 @@ def _fill_same_sku_pack_scheme(lead, units):
     all_siblings_open = len(extra_open) == n - 1
 
     if extra_open:
-        if u1_recv > 0 and lead_recv > u1_recv + 0.005 and abs(lead_recv - u1_recv * n) < 1:
-            per_recv = u1_recv
-            if abs(lead_pass - lead_recv) < 1 and lead_pass > 0:
-                per_pass = per_recv
-            elif u1_pass > 0 and abs(u1_pass * n - lead_pass) < 1:
-                per_pass = u1_pass
-            else:
-                per_pass = u1_pass
-        elif all_siblings_open and u1_recv > 0 and _looks_like_pack_oem_total(u1_recv, n, gvc):
+        # Only split a pack-total dumped on unit 1 / the lead. A per-unit figure
+        # (₹48,000) stays on the units staff selected — matching one OEM Extra
+        # Support debit note must not invent claims on every sibling.
+        if all_siblings_open and u1_recv > 0 and _looks_like_pack_oem_total(u1_recv, n, gvc):
             per_recv = _evenly_split_amount(u1_recv, n)
             if u1_pass > 0 and (abs(u1_pass - u1_recv) < 1 or _looks_like_pack_oem_total(u1_pass, n, gvc)):
                 per_pass = per_recv if abs(u1_pass - u1_recv) < 1 else _evenly_split_amount(u1_pass, n)
@@ -7048,17 +7049,12 @@ def _fill_same_sku_pack_scheme(lead, units):
             else:
                 per_pass = 0.0
             split_unit1 = per_recv > 0
-        elif u1_recv > 0 and not _looks_like_pack_oem_total(u1_recv, n, gvc):
-            per_recv = u1_recv
-            per_pass = u1_pass
-        elif all_siblings_open and lead_recv > 0 and _looks_like_pack_oem_total(lead_recv, n, gvc):
+        elif (all_siblings_open and lead_recv > 0 and _looks_like_pack_oem_total(lead_recv, n, gvc)
+              and (u1_recv <= 0 or _looks_like_pack_oem_total(u1_recv, n, gvc))):
             per_recv = _evenly_split_amount(lead_recv, n)
             if lead_pass > 0 and (abs(lead_pass - lead_recv) < 1 or _looks_like_pack_oem_total(lead_pass, n, gvc)):
                 per_pass = per_recv if abs(lead_pass - lead_recv) < 1 else _evenly_split_amount(lead_pass, n)
             split_unit1 = per_recv > 0
-        elif lead_recv > 0 and not _looks_like_pack_oem_total(lead_recv, n, gvc) and u1_recv <= 0:
-            per_recv = lead_recv
-            per_pass = lead_pass
 
         if per_recv > 0:
             per_pass = ce.round2(min(per_pass, per_recv))
@@ -8132,6 +8128,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         lead, act,
         extra_received=payload.get("oemExtraSupportReceived", lead.get("oemExtraSupportReceived")))
     unit_sno = payload.pop("unitSno", None)
+    extra_apply_raw = payload.pop("extraApplyUnitSnos", None) or []
     idx, units = _resolve_unit_index(lead, unit_sno)
     chosen = units[idx] if units else {}
     _require_owner_reedit(act, _unit_has_scheme(lead, chosen, idx), "Scheme")
@@ -8257,9 +8254,38 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
         rec[k] = v
     rec["sno"] = idx + 1
     units[idx] = rec
+    extra_apply = []
+    for x in extra_apply_raw:
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in extra_apply:
+            extra_apply.append(n)
+    extra_recv = ce.round2(ce.num(payload.get("oemExtraSupportReceived")))
+    if extra_apply and extra_recv > 0 and len(units) > 1:
+        for sno in extra_apply:
+            i = sno - 1
+            if i < 0 or i >= len(units):
+                continue
+            row = dict(units[i])
+            row["oemExtraSupportReceived"] = extra_recv
+            row["oemExtraSupportPassed"] = 0
+            row["sno"] = sno
+            units[i] = row
+        if (idx + 1) not in extra_apply:
+            row = dict(units[idx])
+            row["oemExtraSupportReceived"] = 0
+            row["oemExtraSupportPassed"] = 0
+            units[idx] = row
+            payload["oemExtraSupportReceived"] = extra_recv if 1 in extra_apply else 0
+            payload["oemExtraSupportPassed"] = 0
     patch = {"units": units, "lastUpdated": now_iso()}
     if idx == 0:
         patch.update(payload)
+    elif extra_apply and 1 in extra_apply and extra_recv > 0:
+        patch["oemExtraSupportReceived"] = extra_recv
+        patch["oemExtraSupportPassed"] = 0
     old = {k: (chosen.get(k) if idx > 0 else lead.get(k)) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
     await recompute_lead(lead_id)
@@ -14671,6 +14697,9 @@ class OemClaimMatchIn(BaseModel):
     claimNumber: str = ""
     lineId: str = ""
     unitSno: Optional[int] = None
+    # Pack Extra Support: which vehicles this debit note covers. Never every
+    # unit on the order unless staff ticks them.
+    unitSnos: List[int] = Field(default_factory=list)
 
 
 def _oem_match_lead_ids(body: "OemClaimMatchIn"):
@@ -14680,6 +14709,78 @@ def _oem_match_lead_ids(body: "OemClaimMatchIn"):
         if x and x not in ids:
             ids.append(x)
     return ids
+
+
+def _oem_match_unit_snos(body: "OemClaimMatchIn"):
+    snos = []
+    for x in list(body.unitSnos or []) + ([body.unitSno] if body.unitSno else []):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n > 0 and n not in snos:
+            snos.append(n)
+    return snos
+
+
+def _extra_per_unit_for_selected(lead, snos):
+    """Per-unit Extra Support for the vehicles this debit note covers."""
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    existing = []
+    for s in snos or []:
+        if 0 < s <= len(units):
+            amt = ce.round2(ce.num(units[s - 1].get("oemExtraSupportReceived")))
+            if amt > 0:
+                existing.append(amt)
+    if existing:
+        return existing[0]
+    if not units:
+        n = max(1, len(snos or []))
+        lead_recv = ce.round2(ce.num((lead or {}).get("oemExtraSupportReceived")))
+        return _evenly_split_amount(lead_recv, n) if n > 1 and lead_recv > 0 else lead_recv
+    u1 = ce.round2(ce.num(units[0].get("oemExtraSupportReceived")))
+    lead_recv = ce.round2(ce.num((lead or {}).get("oemExtraSupportReceived")))
+    n = max(1, len(snos or []))
+    gvc = ce.num(units[0].get("exShowroom") or (lead or {}).get("exShowroom"))
+    if u1 > 0 and _looks_like_pack_oem_total(u1, n, gvc):
+        return _evenly_split_amount(u1, n)
+    if lead_recv > 0 and _looks_like_pack_oem_total(lead_recv, n, gvc):
+        return _evenly_split_amount(lead_recv, n)
+    if u1 > 0:
+        return u1
+    if lead_recv > 0:
+        return _evenly_split_amount(lead_recv, n) if n > 1 else lead_recv
+    return 0.0
+
+
+async def _stamp_extra_on_selected_units(lead, snos):
+    """Put Extra Support Received on the pack units this OEM claim applies to."""
+    snos = [int(s) for s in (snos or []) if int(s) > 0]
+    if not lead or not snos:
+        return lead
+    units = _ensure_lead_units(lead)
+    per = _extra_per_unit_for_selected(lead, snos)
+    if per <= 0:
+        return lead
+    changed = False
+    for s in snos:
+        if s < 1 or s > len(units):
+            continue
+        rec = dict(units[s - 1])
+        if ce.round2(ce.num(rec.get("oemExtraSupportReceived"))) > 0:
+            continue
+        rec["oemExtraSupportReceived"] = per
+        rec["oemExtraSupportPassed"] = 0
+        rec["sno"] = s
+        units[s - 1] = rec
+        changed = True
+    if not changed:
+        return lead
+    await db.leads.update_one(
+        {"leadId": lead.get("leadId")},
+        {"$set": {"units": units, "lastUpdated": now_iso()}})
+    await recompute_lead(lead.get("leadId"))
+    return await db.leads.find_one({"leadId": lead.get("leadId")}) or lead
 
 
 async def _scheme_register_amounts(lead, component_key):
@@ -14782,7 +14883,20 @@ async def claim_match_options(user=Depends(current_user)):
         if not lid or lid in blocked_leads or oem_claims._lead_blocks_claim_relink(lead):
             continue
         extra_units = ce.extra_support_unit_rows(lead)
-        if extra_units:
+        pack_units = [u for u in (lead.get("units") or []) if isinstance(u, dict)]
+        has_extra = bool(extra_units) or ce.round2(ce.num(lead.get("oemExtraSupportReceived"))) > 0
+        if len(pack_units) > 1 and has_extra:
+            # List every vehicle so Match can tick the units this debit note
+            # covers — Extra Support on unit 1 must not hide siblings.
+            candidates = []
+            for i, u in enumerate(pack_units):
+                candidates.append({
+                    "unitSno": i + 1,
+                    "oemExtraSupportReceived": ce.round2(ce.num(u.get("oemExtraSupportReceived"))),
+                    "chassisNumber": str(u.get("chassisNumber") or "").strip(),
+                    "invoiceNumber": str(u.get("invoiceNumber") or "").strip(),
+                })
+        elif extra_units:
             candidates = extra_units
         else:
             amt = ce.round2(ce.num(lead.get("oemExtraSupportReceived")))
@@ -14886,13 +15000,20 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor),
         blocked = [lid for lid in lead_ids if lid not in allowed]
         if blocked:
             raise HTTPException(403, "This lead is not on your team.")
+    unit_snos = _oem_match_unit_snos(body)
+    if (body.componentKey == ce.OEM_EXTRA_SUPPORT_KEY and unit_snos):
+        first = await db.leads.find_one({"leadId": lead_ids[0]}) or {}
+        if first.get("leadId"):
+            await _stamp_extra_on_selected_units(first, unit_snos)
     last = {}
     try:
         for i, lid in enumerate(lead_ids):
-            last = await oem_claims.link_register_to_oem(
-                db, lead_id=lid, component_key=body.componentKey,
-                claim_number=body.claimNumber, line_id=body.lineId,
-                unit_sno=body.unitSno if i == 0 else None)
+            snos = unit_snos if i == 0 and unit_snos else [None]
+            for sno in snos:
+                last = await oem_claims.link_register_to_oem(
+                    db, lead_id=lid, component_key=body.componentKey,
+                    claim_number=body.claimNumber, line_id=body.lineId,
+                    unit_sno=sno)
     except ValueError as e:
         raise HTTPException(422, str(e))
     await oem_claims.apply_oem_filing_to_register(db)

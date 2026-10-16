@@ -2634,6 +2634,91 @@ async def test_match_options_keep_unmatched_pack_unit_after_first_match(client):
     assert mine[0]["claimAmount"] == 5000.0
 
 
+def test_extra_support_match_state_does_not_glue_pack_via_lead():
+    """Chassis-known Extra Support must not inherit every debit note on the lead."""
+    packs = {
+        "byLead": {
+            "LD-PACK": {
+                "byComponent": {"oemExtraSupport": [{
+                    "claimNumber": "AF-ALL-UNITS", "oemStatus": "RM Approval Pending",
+                    "amount": 48000.0, "stageLabel": "RM Approval", "stageDays": 1,
+                    "createdAt": "", "needsResubmission": False, "resubmittedBy": "",
+                    "description": "Additional Support",
+                }]},
+                "unmapped": [], "claimNumbers": ["AF-ALL-UNITS"],
+                "filedTotal": 48000.0, "acceptedTotal": 0.0, "rejectedOpen": [],
+                "hasAnyClaim": True,
+            }
+        },
+        "byChassis": {},
+        "byInvoice": {},
+    }
+    got = oem_claims.match_state(
+        packs, "LD-PACK", "oemExtraSupport",
+        chassis="MD9PACK26G900099", invoice="")
+    assert got["state"] == "not_filed"
+    assert got["claimNumbers"] == []
+
+
+@pytest.mark.asyncio
+async def test_match_extra_unit_snos_does_not_link_the_whole_pack(client):
+    extras = (
+        (8000.0, "MD9PACK26G900041", "AF-999-I26287041"),
+        (0.0, "MD9PACK26G900042", "AF-999-I26287042"),
+        (0.0, "MD9PACK26G900043", "AF-999-I26287043"),
+    )
+    r = await client.post("/api/leads", json={
+        "customerName": "Pack Extra Select", "mobile": next_mobile(),
+        "interestedModel": "Turbo", "variant": "Range Maxx", "executive": "Amit",
+        "sameOrderMultiUnit": True,
+        "units": [{"model": "Turbo"}, {"model": "Turbo"}, {"model": "Storm"}],
+    })
+    lead_id = r.json()["leadId"]
+    units = []
+    for i, (amt, ch, inv) in enumerate(extras, start=1):
+        units.append({
+            "model": "Turbo" if i < 3 else "Storm",
+            "chassisNumber": ch, "invoiceNumber": inv,
+            "oemExtraSupportReceived": amt,
+        })
+    await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "sameOrderMultiUnit": True,
+        "units": units,
+        "chassisNumber": extras[0][1],
+        "invoiceNumber": extras[0][2],
+        "oemExtraSupportReceived": 8000.0,
+    }})
+    options = (await client.get("/api/claims/match-options")).json()
+    mine = [x for x in options if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport"]
+    assert sorted(int(x.get("unitSno") or 0) for x in mine) == [1, 2, 3]
+    await _orphan_oem("AF-999-CLPACKSEL", line_id="sel-1", claimed=16000.0,
+                      chassis=extras[0][1], invoice=extras[0][2],
+                      description="Additional Support", claim_type="Additional Support")
+    matched = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLPACKSEL", "lineId": "sel-1",
+        "unitSnos": [1, 3],
+    })
+    assert matched.status_code == 200, matched.text
+    lead = await server.db.leads.find_one({"leadId": lead_id})
+    packed = lead.get("units") or []
+    assert float(packed[0].get("oemExtraSupportReceived") or 0) == 8000
+    assert float(packed[1].get("oemExtraSupportReceived") or 0) == 0
+    assert float(packed[2].get("oemExtraSupportReceived") or 0) == 8000
+    a = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 1})
+    b = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 2})
+    c = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 3})
+    assert a["manualOemClaimNumber"] == "AF-999-CLPACKSEL"
+    assert c["manualOemClaimNumber"] == "AF-999-CLPACKSEL"
+    assert not b or not b.get("manualOemClaimNumber")
+    leftover = (await client.get("/api/claims/match-options")).json()
+    still = [x for x in leftover if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport"]
+    assert [int(x["unitSno"]) for x in still] == [2]
+
+
 @pytest.mark.asyncio
 async def test_cancelled_invoice_rebill_is_flagged_on_the_lead(client, monkeypatch):
     lead_id = await _delivered_lead(client, chassis="MD9REBILL26G900001",

@@ -125,6 +125,42 @@ async def test_scheme_rules_circular_follows_unit_billed_date(client):
 
 
 @pytest.mark.asyncio
+async def test_oct_turbo_billed_date_has_no_loyalty(client):
+    """Sept-booked pack, one Turbo billed in Oct — no Turbo circular, no Loyalty."""
+    await sept.ensure_sept_2026_schemes(server.db)
+    await octs.ensure_oct_2026_schemes(server.db)
+    lid = "LD-OCT-TURBO-BILL"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Oct Turbo", "mobile": "9813302027",
+        "interestedModel": "Turbo", "variant": "Maxx",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-12", "schemeAsOf": "2026-09-12",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo", "variant": "Maxx",
+             "soldDate": "2026-09-30", "schemeAsOf": "2026-09-12"},
+            {"sno": 2, "model": "Turbo", "variant": "Maxx",
+             "soldDate": "2026-10-12", "schemeAsOf": "2026-09-12"},
+        ],
+    })
+    sept_u = (await client.get(
+        f"/api/leads/{lid}/scheme-rules",
+        params={"unit": 1, "on": "2026-09-12"})).json()
+    oct_u = (await client.get(
+        f"/api/leads/{lid}/scheme-rules",
+        params={"unit": 2, "on": "2026-09-12"})).json()
+    assert sept_u["asOf"][:7] == "2026-09"
+    sept_loy = (sept_u.get("rules") or {}).get("loyaltyBonus") or {}
+    assert sept_loy.get("allowed") is True
+    assert sept_loy.get("maxAmount") == 10000
+    assert oct_u["asOf"][:7] == "2026-10"
+    oct_loy = (oct_u.get("rules") or {}).get("loyaltyBonus") or {}
+    assert oct_loy.get("allowed") is False
+    assert not oct_loy.get("maxAmount")
+
+
+@pytest.mark.asyncio
 async def test_boot_maintenance_upserts_oct_circular(db):
     await octs.ensure_oct_2026_schemes(db)
     before = await db.scheme_master.count_documents({"schemeMonth": "2026-10"})

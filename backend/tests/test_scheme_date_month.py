@@ -74,6 +74,15 @@ def test_scheme_as_of_prefers_explicit_then_saved_then_booking():
     assert server._scheme_as_of(None, "not-a-date") == server.today()
 
 
+def test_scheme_as_of_pack_unit_billed_date_beats_on():
+    """Oct-billed Turbo on a Sept-booked pack must not keep Loyalty from `on`."""
+    lead = {"schemeAsOf": "2026-09-12", "bookingDate": "2026-09-12"}
+    unit = {"soldDate": "2026-10-12", "schemeAsOf": "2026-09-12"}
+    assert server._scheme_as_of(lead, "2026-09-12", unit=unit) == "2026-10-12"
+    sept = {"soldDate": "2026-09-30"}
+    assert server._scheme_as_of(lead, "2026-10-12", unit=sept) == "2026-09-30"
+
+
 def test_normalize_scheme_row_derives_month_from_valid_to():
     out = server._normalize_scheme_row({
         "model": MODEL, "effectiveTo": "2026-10-31", "schemeMonth": None,

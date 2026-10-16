@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, looksCombinedSupport, rowLeadIds, rowLineItems } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, lineChassisList, looksCombinedSupport, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
@@ -418,9 +418,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                       || li.sourceInvoiceNumber
                       || ""}
                   </div>
-                  {(li.chassisList && li.chassisList.length
-                    ? li.chassisList
-                    : (li.chassis ? [li.chassis] : [])).map((ch) => (
+                  {lineChassisList(li).map((ch) => (
                     <div key={ch} className="font-mono text-ink-faint">{ch}</div>
                   ))}
                   {li.sourceInvoiceNumber
@@ -586,6 +584,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const [loading, setLoading] = useState(true);
   const [leadId, setLeadId] = useState(already[0] || rowLeadIds(row)[0] || "");
   const [unitSno, setUnitSno] = useState(null);
+  const [unitSnos, setUnitSnos] = useState([]);
   const [extraLeadIds, setExtraLeadIds] = useState(already.slice(1));
   const [addId, setAddId] = useState("");
   const [componentKey, setComponentKey] = useState(relatedKey);
@@ -601,6 +600,24 @@ function MatchRegisterModal({ row, onClose, onDone }) {
       })
       .finally(() => setLoading(false));
   }, []);
+
+  const lineChassisKey = lineChassisList(line).join("|");
+  useEffect(() => {
+    if (!leadId || loading) return;
+    const siblings = register.filter((r) => r.leadId === leadId
+      && r.componentKey === "oemExtraSupport" && Number(r.unitSno) > 0);
+    if (siblings.length < 2) return;
+    const chassis = lineChassisKey.split("|").filter(Boolean).map((c) => c.toUpperCase());
+    const chassisHit = siblings
+      .filter((r) => chassis.includes(String(r.chassisNumber || "").toUpperCase()))
+      .map((r) => Number(r.unitSno));
+    setUnitSnos((cur) => {
+      if (cur.length) return cur;
+      if (chassisHit.length) return chassisHit;
+      if (unitSno) return [unitSno];
+      return siblings[0]?.unitSno ? [Number(siblings[0].unitSno)] : [];
+    });
+  }, [leadId, loading, register, lineChassisKey, unitSno]);
 
   const picked = [leadId, ...extraLeadIds].filter(Boolean);
   const poolRows = relink
@@ -629,15 +646,30 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const extraCandidates = leads.filter((r) => r.leadId && !picked.includes(r.leadId)
     && (!componentKey || register.some((c) => c.leadId === r.leadId && c.componentKey === componentKey
       && (relink ? isRelinkableRegisterRow(c) : isOpenRegisterRow(c)))));
+  const packUnits = (componentKey === "oemExtraSupport" && leadId)
+    ? [...new Map(register
+      .filter((r) => r.leadId === leadId && r.componentKey === "oemExtraSupport"
+        && (relink ? isRelinkableRegisterRow(r) : isOpenRegisterRow(r)))
+      .map((r) => [r.unitSno || 0, r])).values()]
+      .filter((r) => Number(r.unitSno) > 0)
+    : [];
+  const lineChassis = lineChassisList(line).map((c) => c.toUpperCase());
 
   const save = async () => {
     if (!leadId || !componentKey) return toast.error("Pick a lead and a scheme component");
+    if (packUnits.length > 1 && !unitSnos.length) {
+      return toast.error("Select which pack units this Extra Support claim applies to");
+    }
     setBusy(true);
     try {
+      const selectedUnits = packUnits.length > 1
+        ? unitSnos
+        : (unitSno ? [unitSno] : []);
       await post("/claims/oem-match", {
         leadId, leadIds: picked, componentKey,
         claimNumber: row.claimNumber, lineId: line.lineId || "",
-        ...(unitSno ? { unitSno } : {}),
+        ...(selectedUnits[0] ? { unitSno: selectedUnits[0] } : {}),
+        ...(selectedUnits.length ? { unitSnos: selectedUnits } : {}),
       });
       toast.success(relink
         ? (picked.length > 1
@@ -692,10 +724,18 @@ function MatchRegisterModal({ row, onClose, onDone }) {
           <Select data-testid="oem-match-lead" disabled={loading} value={leadId ? `${leadId}::${unitSno || 0}` : ""}
             onChange={(e) => {
               const [id, sno] = String(e.target.value || "").split("::");
-              setLeadId(id || "");
-              setUnitSno(Number(sno) || null);
+              const nextId = id || "";
+              const nextSno = Number(sno) || null;
+              setLeadId(nextId);
+              setUnitSno(nextSno);
               setExtraLeadIds([]);
               setComponentKey(relatedKey);
+              const siblings = register.filter((r) => r.leadId === nextId
+                && r.componentKey === "oemExtraSupport" && Number(r.unitSno) > 0);
+              const chassisHit = siblings
+                .filter((r) => lineChassis.includes(String(r.chassisNumber || "").toUpperCase()))
+                .map((r) => Number(r.unitSno));
+              setUnitSnos(chassisHit.length ? chassisHit : (nextSno ? [nextSno] : []));
             }}>
             <option value="">{loading ? "Loading register…" : "— pick lead —"}</option>
             {leads.map((r) => (
@@ -714,6 +754,29 @@ function MatchRegisterModal({ row, onClose, onDone }) {
             </p>
           ) : null}
         </Field>
+        {packUnits.length > 1 ? (
+          <Field label="Units this Extra Support claim covers">
+            <p className="text-[11px] text-ink-faint mb-1.5">
+              Tick only the vehicles on this debit note. Matching will not attach every unit on the pack.
+            </p>
+            <div className="space-y-1" data-testid="oem-match-units">
+              {packUnits.map((r) => {
+                const sno = Number(r.unitSno);
+                const checked = unitSnos.includes(sno);
+                return (
+                  <label key={optionId(r)} className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" data-testid={`oem-match-unit-${sno}`}
+                      checked={checked}
+                      onChange={() => setUnitSnos((cur) => (
+                        checked ? cur.filter((n) => n !== sno) : [...cur, sno].sort((a, b) => a - b)
+                      ))} />
+                    <span>{optionLabel(r)}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </Field>
+        ) : null}
         <Field label="Scheme component">
           <Select disabled={loading} value={componentKey} onChange={(e) => setComponentKey(e.target.value)}>
             <option value="">{loading ? "Loading…" : "— pick component —"}</option>
