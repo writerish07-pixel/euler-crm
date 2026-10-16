@@ -17,10 +17,17 @@ import { useAuth } from "../context/AuthContext";
 export default function AccountsDashboard() {
   const { isOwner, isAccounts } = useAuth();
   const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
   const [summary, setSummary] = useState(null);
   const [refundRow, setRefundRow] = useState(null);
 
-  const load = () => get("/accounts/dashboard").then(setD).catch(() => toast.error("Could not load accounts dashboard"));
+  const load = () => {
+    setErr("");
+    get("/accounts/dashboard").then(setD).catch((e) => {
+      setErr(apiErrorMessage(e, "Could not load accounts dashboard"));
+      toast.error(apiErrorMessage(e, "Could not load accounts dashboard"));
+    });
+  };
   useEffect(() => { load(); }, []);
 
   const openSummary = async (leadId) => {
@@ -53,7 +60,9 @@ export default function AccountsDashboard() {
       <div data-testid="accounts-dashboard">
         <PageHeader title="Accounts Dashboard" subtitle="Tally cross-check"
           actions={<ReportActions onRefresh={load} />} />
-        <div className="text-ink-faint text-sm">Loading accounts dashboard…</div>
+        <div className={`text-sm ${err ? "text-red-700" : "text-ink-faint"}`}>
+          {err || "Loading accounts dashboard…"}
+        </div>
       </div>
     );
   }

@@ -2577,6 +2577,9 @@ async def dashboard():
     booked = [l for l in leads if _is_booked_lead(l)]
     delivered = [l for l in leads if _is_delivered_lead(l)]
     active_booked = [l for l in booked if not _is_delivered_lead(l)]
+    booked_ids = {l.get("leadId") for l in booked if l.get("leadId")}
+    delivered_ids = {l.get("leadId") for l in delivered if l.get("leadId")}
+    leads_by_id = {l.get("leadId"): l for l in leads if l.get("leadId")}
 
     pay_by_mode = {"Cash": 0.0, "UPI": 0.0, "Finance": 0.0, "Other": 0.0}
     month_payments = [p for p in payments if in_month(p.get("date"))]
@@ -2610,15 +2613,16 @@ async def dashboard():
     followup_overdue = len([l for l in active_leads
                             if _followup_date(l) and _followup_date(l) < td])
 
-    # model performance
+    # model performance — never `l in booked` (full-dict compare on every lead).
     models = {}
     for l in leads:
         m = l.get("interestedModel") or "Unknown"
         row = models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0, "customerOs": 0.0, "revenue": 0.0})
         row["leads"] += 1
-        if l in booked:
+        lid = l.get("leadId")
+        if lid in booked_ids:
             row["bookings"] += 1
-        if l in delivered:
+        if lid in delivered_ids:
             row["deliveries"] += 1
         row["customerOs"] += ce.num(l.get("customerOutstanding"))
     for l in active_booked:
@@ -2626,7 +2630,7 @@ async def dashboard():
         if m in models:
             models[m]["pending"] += 1
     for p in payments:
-        lead = next((x for x in leads if x.get("leadId") == p.get("leadId")), None)
+        lead = leads_by_id.get(p.get("leadId"))
         if lead:
             m = lead.get("interestedModel") or "Unknown"
             if m in models:
@@ -2709,21 +2713,30 @@ async def accounts_dashboard():
             insurance_open += 1
     insurance_due = ce.round2(insurance_due)
 
-    # Delivered leads for Tally — prefer stored billing summaries, else live build.
+    # Delivered leads for Tally — stored summaries only. Never rebuild on GET:
+    # writing 40 billing rows on every Accounts Dashboard load timed the desk out.
     delivered = [l for l in leads if _is_delivered_lead(l)]
     delivered.sort(key=lambda l: str(l.get("deliveryDate") or ""), reverse=True)
+    tally_slice = delivered[:40]
+    stored_by = {}
+    tally_ids = [l.get("leadId") for l in tally_slice if l.get("leadId")]
+    if tally_ids:
+        async for stored in db.billing_summaries.find({"leadId": {"$in": tally_ids}}):
+            lid = stored.get("leadId")
+            if lid:
+                stored_by[lid] = stored
     tally_rows = []
     do_not_post_total_retained = 0.0
     do_not_post_claims = company_os
-    for l in delivered[:40]:
-        stored = await db.billing_summaries.find_one({"leadId": l["leadId"]})
+    for l in tally_slice:
+        stored = stored_by.get(l.get("leadId"))
         if stored and _billing_summary_has_vehicle_tally(stored):
             summary = clean(stored)
         else:
             try:
-                summary = clean(await _upsert_delivery_billing_summary(l["leadId"]) or {})
-            except Exception:
                 summary = ce.build_delivery_billing_summary(l)
+            except Exception:
+                summary = {}
         t = summary.get("totals") or {}
         for item in summary.get("doNotPostInTally") or []:
             label = (item.get("label") or "").lower()
@@ -3462,7 +3475,7 @@ def _lead_earnings_total(lead):
     return ce.round2(margin + scheme + oem["oemExtraSupportRetained"] + ins + extra - funded)
 
 
-def _period_metrics_from(src, period):
+def _period_metrics_from(src, period, *, cancel_events=None):
     leads = src["leads"]
     leads_by_id = {str(l.get("leadId") or ""): l for l in leads if l.get("leadId")}
     m = _empty_period_metrics()
@@ -3525,7 +3538,7 @@ def _period_metrics_from(src, period):
         m["insurance"]["received"] += ce.num(e.get("receivedPayout"))
         m["insurance"]["pending"] += ce.num(e.get("payoutOutstanding"))
 
-    events = _cancel_events(leads)
+    events = cancel_events if cancel_events is not None else _cancel_events(leads)
     m["cancellations"]["count"] = sum(
         1 for ev in events if periodmod.in_period(ev.get("date"), period))
     return _round_period_metrics(m)
@@ -3595,15 +3608,17 @@ def _executive_scoreboard(leads, period) -> list:
 async def _monthly_payload(period, *, oem=False, src=None, staff=False):
     src = src if src is not None else await _period_source()
     focus = periodmod.focus_year(period)
-    selected = _period_metrics_from(src, period)
+    events = _cancel_events(src["leads"])
+    selected = _period_metrics_from(src, period, cancel_events=events)
     mtd_p = periodmod.this_month_period()
     ytd_p = periodmod.ytd_period(focus)
-    mtd = _period_metrics_from(src, mtd_p)
-    ytd = _period_metrics_from(src, ytd_p)
+    mtd = _period_metrics_from(src, mtd_p, cancel_events=events)
+    ytd = _period_metrics_from(src, ytd_p, cancel_events=events)
     by_month = []
     wrap = _oem_period_metrics if oem else (_staff_period_metrics if staff else (lambda x: x))
     for ym in periodmod.year_months(focus):
-        row = _period_metrics_from(src, periodmod.parse_period(month=ym))
+        row = _period_metrics_from(
+            src, periodmod.parse_period(month=ym), cancel_events=events)
         packed = wrap(row)
         packed["month"] = ym
         by_month.append(packed)
@@ -9599,17 +9614,30 @@ async def _enrich_finance_with_delivery(files):
     """Port of enrichFinanceFilesWithDelivery_: overdue = days since delivery > SLA
     (files with no known delivery date are never overdue — SLA clock hasn't started)."""
     sla = FINANCE_RECEIPT_SLA_DAYS
-    today_d = today()
+    ids = []
+    for f in files:
+        lid = str(f.get("leadId") or "").strip()
+        if lid:
+            ids.append(lid)
+    uniq = list(dict.fromkeys(ids))
+    delivery_by = {}
+    if uniq:
+        async for d in db.deliveries.find(
+                {"leadId": {"$in": uniq}}, {"leadId": 1, "deliveryDate": 1, "_id": 0}):
+            lid = str(d.get("leadId") or "").strip()
+            if lid and not delivery_by.get(lid):
+                delivery_by[lid] = str(d.get("deliveryDate") or "")[:10]
+        missing = [i for i in uniq if not delivery_by.get(i)]
+        if missing:
+            async for lead in db.leads.find(
+                    {"leadId": {"$in": missing}}, {"leadId": 1, "deliveryDate": 1, "_id": 0}):
+                lid = str(lead.get("leadId") or "").strip()
+                if lid and not delivery_by.get(lid):
+                    delivery_by[lid] = str(lead.get("deliveryDate") or "")[:10]
     out = []
     for f in files:
         lead_id = str(f.get("leadId") or "").strip()
-        delivery_date = ""
-        if lead_id:
-            d = await db.deliveries.find_one({"leadId": lead_id}) or {}
-            delivery_date = str(d.get("deliveryDate") or "")[:10]
-            if not delivery_date:
-                lead = await db.leads.find_one({"leadId": lead_id}) or {}
-                delivery_date = str(lead.get("deliveryDate") or "")[:10]
+        delivery_date = delivery_by.get(lead_id) or ""
         row = dict(f)
         if re.match(r"^\d{4}-\d{2}-\d{2}$", delivery_date):
             days = _claim_ageing_days(delivery_date, "Pending")  # days since delivery, running

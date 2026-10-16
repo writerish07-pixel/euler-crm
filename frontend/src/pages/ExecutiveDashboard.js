@@ -23,13 +23,18 @@ export default function ExecutiveDashboard({ teamView = false }) {
   const team = teamView || isTl || isTeamLead;
   const navigate = useNavigate();
   const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
   const [masters, setMasters] = useState(null);
   const [showNew, setShowNew] = useState(false);
   const [month, setMonth] = useState(thisMonth());
   const [year, setYear] = useState(thisYear());
   const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
-    get("/executive/dashboard").then(setD).catch(() => toast.error("Could not load executive dashboard"));
+    setErr("");
+    get("/executive/dashboard").then(setD).catch(() => {
+      setErr("Could not load executive dashboard");
+      toast.error("Could not load executive dashboard");
+    });
   }, []);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters).catch(() => {}); }, []);
@@ -52,7 +57,9 @@ export default function ExecutiveDashboard({ teamView = false }) {
         </div>}
       />
 
-      {!d ? (
+      {err ? (
+        <div className="text-sm text-red-700">{err}</div>
+      ) : !d ? (
         <div className="text-ink-faint text-sm">Loading executive dashboard…</div>
       ) : (
       <>

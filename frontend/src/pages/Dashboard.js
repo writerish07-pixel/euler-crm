@@ -5,8 +5,7 @@ import {
   AlertCircle, Landmark, CalendarDays,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
-import { get } from "../lib/api";
-import { toast } from "sonner";
+import { loadBoard } from "../lib/loadBoard";
 import { inr, compactInr, num, ytdCount, ytdMoney, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
@@ -18,9 +17,11 @@ import { useAuth } from "../context/AuthContext";
 export default function Dashboard() {
   const { isOwner } = useAuth();
   const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
 
   const load = useCallback(() => {
-    get("/dashboard").then(setD).catch(() => toast.error("Could not load dashboard"));
+    setErr("");
+    loadBoard("/dashboard", setD, setErr, "Could not load dashboard");
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -64,7 +65,8 @@ export default function Dashboard() {
         <YardStockCard />
       </div>
 
-      {!d ? <div className="text-ink-faint text-sm mt-6">Loading dashboard…</div> : (
+      {err ? <div className="text-sm text-red-700 mt-6" data-testid="ops-dashboard-error">{err}</div>
+        : !d ? <div className="text-ink-faint text-sm mt-6">Loading dashboard…</div> : (
       <>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
         <Card className="p-5 lg:col-span-2">
