@@ -131,6 +131,14 @@ export function isSlowOemBillingPath(url) {
   return p === "/oem-billing" || p.indexOf("/oem-billing/") === 0;
 }
 
+/** Pack Extra Support match links several register rows then overlays Euler. */
+export function isSlowOemMatchPath(url) {
+  const p = String(url || "").split("?")[0];
+  return p === "/claims/oem-match"
+    || p === "/claims/oem-match/clear"
+    || p === "/claims/oem-create";
+}
+
 /** GET /leads/{id}/360 used to scan every Sold row + scheme master. */
 export function isSlowLead360Path(url) {
   const p = String(url || "").split("?")[0];
@@ -173,6 +181,9 @@ function mutationOpts(url, opts = {}) {
   }
   if (timeout === undefined && isSlowIntegrationPath(url)) {
     timeout = 45000;
+  }
+  if (timeout === undefined && isSlowOemMatchPath(url)) {
+    timeout = BULK_TIMEOUT_MS;
   }
   if (timeout === undefined && docUpload) {
     timeout = DOC_UPLOAD_TIMEOUT_MS;
@@ -254,6 +265,7 @@ function getTimeout(url, opts = {}) {
   if (isSlowOemBillingPath(url)) return OEM_SYNC_TIMEOUT_MS;
   if (isSlowLead360Path(url)) return 60000;
   if (isSlowIntegrationPath(url)) return 45000;
+  if (isSlowOemMatchPath(url)) return BULK_TIMEOUT_MS;
   return undefined;
 }
 

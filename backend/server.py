@@ -15050,9 +15050,12 @@ async def claim_match_options(user=Depends(current_user)):
         lid = str(lead.get("leadId") or "").strip()
         if lid:
             blocked_leads.add(lid)
+    extra_key = ce.OEM_EXTRA_SUPPORT_KEY
+    extra_label = ce.SCHEME_COMPONENT_LABELS.get(extra_key, extra_key)
     rows = []
     lead_ids = set()
     seen_pairs = set()
+    extra_lead_relink = {}
     async for c in db.claims.find(
             {"manual": {"$ne": True}},
             {"leadId": 1, "customer": 1, "componentKey": 1, "component": 1,
@@ -15078,6 +15081,11 @@ async def claim_match_options(user=Depends(current_user)):
             continue
         elif status == "Cancelled":
             relinkable = True
+        if (relinkable and key == extra_key and not sno):
+            extra_lead_relink[lid] = {
+                "linkedOemClaimNumber": manual if relinkable else "",
+                "linkedOemStatus": linked_status if relinkable else "",
+            }
         lead_ids.add(lid)
         rows.append({
             "leadId": lid,
@@ -15097,8 +15105,6 @@ async def claim_match_options(user=Depends(current_user)):
     # recompute / GET /claims upserts a db.claims row. The match modal must
     # not call GET /claims, so list those files here or the Lead dropdown
     # stays on "pick lead" with nothing in it.
-    extra_key = ce.OEM_EXTRA_SUPPORT_KEY
-    extra_label = ce.SCHEME_COMPONENT_LABELS.get(extra_key, extra_key)
     async for lead in db.leads.find(
             {"$or": [
                 {"oemExtraSupportReceived": {"$gt": 0}},
@@ -15137,6 +15143,7 @@ async def claim_match_options(user=Depends(current_user)):
                 "chassisNumber": lead.get("chassisNumber") or "",
                 "invoiceNumber": lead.get("invoiceNumber") or "",
             }]
+        inherited = extra_lead_relink.get(lid) or {}
         for unit in candidates:
             sno = int(unit.get("unitSno") or 0)
             if (lid, extra_key, sno) in seen_pairs:
@@ -15153,9 +15160,9 @@ async def claim_match_options(user=Depends(current_user)):
                 "chassisNumber": unit.get("chassisNumber") or "",
                 "invoiceNumber": unit.get("invoiceNumber") or "",
                 "claimAmount": ce.round2(ce.num(unit.get("oemExtraSupportReceived"))),
-                "relinkable": False,
-                "linkedOemClaimNumber": "",
-                "linkedOemStatus": "",
+                "relinkable": bool(inherited),
+                "linkedOemClaimNumber": inherited.get("linkedOemClaimNumber") or "",
+                "linkedOemStatus": inherited.get("linkedOemStatus") or "",
             })
     if lead_ids:
         names = {}
@@ -15245,7 +15252,11 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor),
                     unit_sno=sno)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    await oem_claims.apply_oem_filing_to_register(db)
+    except DuplicateKeyError:
+        raise HTTPException(
+            422, "That Extra Support unit is already on the register. Refresh and try again.")
+    await oem_claims.apply_oem_filing_to_register(
+        db, lead_ids=lead_ids, relink=False)
     action = "oem-relink" if last.get("relinked") else "oem-match"
     await write_audit(act, action, "claim", leadId=lead_ids[0],
                       new={"componentKey": body.componentKey, "claimNumber": body.claimNumber,
@@ -15256,13 +15267,17 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor),
 
 @api.post("/claims/oem-match/clear", dependencies=[Depends(oem_claim_desk_only)])
 async def clear_claim_oem_match(body: OemClaimMatchIn, act=Depends(actor)):
+    snos = _oem_match_unit_snos(body) or ([body.unitSno] if body.unitSno else [None])
+    rec = {}
     try:
-        rec = await oem_claims.clear_register_oem_link(
-            db, lead_id=body.leadId, component_key=body.componentKey,
-            unit_sno=body.unitSno)
+        for sno in snos:
+            rec = await oem_claims.clear_register_oem_link(
+                db, lead_id=body.leadId, component_key=body.componentKey,
+                unit_sno=sno)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    await oem_claims.apply_oem_filing_to_register(db)
+    await oem_claims.apply_oem_filing_to_register(
+        db, lead_ids=[body.leadId] if body.leadId else None, relink=False)
     await write_audit(act, "oem-match-clear", "claim", leadId=body.leadId,
                       new={"componentKey": body.componentKey})
     return {"ok": True, "register": rec}

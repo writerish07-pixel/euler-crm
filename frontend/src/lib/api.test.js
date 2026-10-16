@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowLead360Path, isDocumentUploadPath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowOemMatchPath, isSlowLead360Path, isDocumentUploadPath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -144,6 +144,10 @@ describe("bulk mutations", () => {
     expect(isSlowOemBillingPath("/leads")).toBe(false);
     expect(isSlowLead360Path("/leads/LD26000932/360")).toBe(true);
     expect(isSlowLead360Path("/leads")).toBe(false);
+    expect(isSlowOemMatchPath("/claims/oem-match")).toBe(true);
+    expect(isSlowOemMatchPath("/claims/oem-match/clear")).toBe(true);
+    expect(isSlowOemMatchPath("/claims/oem-create")).toBe(true);
+    expect(isSlowOemMatchPath("/claims")).toBe(false);
     expect(isDocumentUploadPath("/leads/LD26000926/documents")).toBe(true);
     expect(isDocumentUploadPath("/lead-requests/RQ1/documents")).toBe(true);
     expect(isDocumentUploadPath("/leads")).toBe(false);
@@ -168,6 +172,13 @@ describe("bulk mutations", () => {
     const spy = jest.spyOn(api, "get").mockResolvedValue({ data: {} });
     await get("/leads/LD26000932/360");
     expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 60000 }));
+    spy.mockRestore();
+  });
+
+  test("POST /claims/oem-match uses a 60s timeout", async () => {
+    const spy = jest.spyOn(api, "post").mockResolvedValue({ data: { ok: true } });
+    await post("/claims/oem-match", { leadId: "LD1" });
+    expect(spy.mock.calls[0][2]).toEqual({ timeout: 60000 });
     spy.mockRestore();
   });
 

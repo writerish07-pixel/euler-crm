@@ -89,8 +89,66 @@ export function lineChassisList(li) {
 }
 
 export function looksCombinedSupport(li) {
-  const blob = `${li?.description || ""} ${li?.customerName || ""}`;
-  return /\d+\s*\+\s*\d+\s*=/.test(blob) || /&|\band\b/i.test(blob);
+  const blob = `${li?.description || ""}`;
+  if (/\d+\s*\+\s*\d+\s*=/.test(blob)) return true;
+  const names = String(li?.customerName || "");
+  return /\s+&\s+/.test(names) || /\band\b/i.test(names);
+}
+
+/** OEM Additional Discount is dealer-funded and not on the scheme register.
+ *  Staff file Extra Support under that Coulson chip — Match must list Extra Support. */
+export function registerMatchKeys(relatedKey) {
+  const key = String(relatedKey || "").trim();
+  if (!key) return [];
+  if (key === "additionalDiscount") return ["oemExtraSupport"];
+  return [key];
+}
+
+/** Lead options for the OEM Match dropdown. Never hide every file because the
+ *  OEM chip mapped to a component the register does not use. */
+export function matchRegisterLeadRows(poolRows, relatedKey) {
+  const rows = Array.isArray(poolRows) ? poolRows : [];
+  const keys = registerMatchKeys(relatedKey);
+  if (!keys.length) return rows;
+  const scoped = rows.filter((r) => keys.includes(r.componentKey));
+  return scoped.length ? scoped : rows;
+}
+
+export function isOpenRegisterRow(r) {
+  return !["Received", "Dropped", "Cancelled"].includes(r?.claimStatus || "") && !r?.relinkable;
+}
+
+export function isRelinkableRegisterRow(r) {
+  return !!r?.relinkable;
+}
+
+/** Extra Support pack units that can still join this OEM claim.
+ *  Relink also lists unmatched open units so a newly created debit note can
+ *  attach the remaining vehicles of the same lead. */
+export function matchableExtraUnitRows(register, leadId, relink = false) {
+  const rows = (Array.isArray(register) ? register : []).filter((r) => (
+    r.leadId === leadId
+    && r.componentKey === "oemExtraSupport"
+    && Number(r.unitSno) > 0
+  ));
+  const picked = rows.filter((r) => (
+    relink ? (isRelinkableRegisterRow(r) || isOpenRegisterRow(r)) : isOpenRegisterRow(r)
+  ));
+  return [...new Map(picked.map((r) => [Number(r.unitSno), r])).values()]
+    .sort((a, b) => Number(a.unitSno) - Number(b.unitSno));
+}
+
+/** One dropdown option per lead — pack units are ticked separately. */
+export function extraSupportLeadOptions(rows) {
+  const out = [];
+  const seen = new Set();
+  for (const r of rows || []) {
+    const id = r.leadId;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(r);
+  }
+  return out;
 }
 
 export function lineNeedsCreate(row, li) {

@@ -20,6 +20,8 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
+from pymongo.errors import DuplicateKeyError
+
 import coulson as coulson_client
 import oem_sync
 
@@ -1180,13 +1182,19 @@ ACCEPTED_STATUSES = GENERATED_STATUSES + ("Settled",)
 # still says "Insurance Benefits Up to…" in the description, and the word
 # "insurance" used to steal the match — OEM Extra Support then read Not claimed
 # while OEM Claim Settlements said In scheme register (AF-122-CL2627077).
+#
+# "Additional Discount Claim" is dealer-funded Additional, which is not an OEM
+# claim. Staff pick that chip for Extra Support (AF-122-CL2627161 Kapoor). Treat
+# it as Extra Support so Match lists the CRM file.
 CLAIM_TYPE_KEYS = (
     ("oemExtraSupport", (
-        "additional support", "dealer incentive", "support scheme (btl)",
-        "support scheme", "oem extra support", "oem extra",
+        "additional support", "additional discount claim", "dealer incentive",
+        "support scheme (btl)", "support scheme", "oem extra support", "oem extra",
     )),
-    ("additionalDiscount", ("additional discount claim",)),
 )
+
+# "Additiniol" / "addtiniol" support documents — same Extra Support prose.
+_SUPPORT_PROSE = re.compile(r"\b(?:add\w+|extra|special)\s+support\b")
 
 
 def _fold_claim_text(value):
@@ -1204,6 +1212,8 @@ def map_claim_type_to_component(claim_type, description=""):
         if any(p in type_folded for p in phrases):
             return key
     hay = f"{_fold_claim_text(description)} {type_folded}".strip()
+    if _SUPPORT_PROSE.search(hay):
+        return "oemExtraSupport"
     for key, phrases in COMPONENT_PHRASES:
         if any(p in hay for p in phrases):
             return key
@@ -1631,13 +1641,22 @@ def overlay_register_from_oem(row, match):
     return row, patch
 
 
-async def apply_oem_filing_to_register(db, index=None):
+async def apply_oem_filing_to_register(db, index=None, *, lead_ids=None, relink=None):
     """Stamp Euler claim number / status / dates onto matching register rows.
 
     Money is untouched. Called after claim sync and Match — not on GET /claims.
+    Match passes the attached lead ids with relink=False so a five-unit pack
+    save does not rescan every Euler debit note (that missed the 25s timeout
+    and surfaced as "Could not save match").
     """
-    index = index or await register_match_index(db)
-    claims = [c async for c in db.claims.find({"manual": {"$ne": True}})]
+    if index is None:
+        index = await register_match_index(
+            db, relink=True if relink is None else bool(relink))
+    query = {"manual": {"$ne": True}}
+    lids = [str(x).strip() for x in (lead_ids or []) if str(x).strip()]
+    if lids:
+        query["leadId"] = {"$in": lids}
+    claims = [c async for c in db.claims.find(query)]
     lead_ids = list({c.get("leadId") for c in claims if c.get("leadId")})
     leads = {}
     if lead_ids:
@@ -2263,7 +2282,13 @@ async def ensure_register_row(db, lead, component_key, *, claim_amount=0.0,
     }
     if sno:
         doc["unitSno"] = sno
-    result = await db.claims.insert_one(dict(doc))
+    try:
+        result = await db.claims.insert_one(dict(doc))
+    except DuplicateKeyError:
+        rec = await db.claims.find_one({"claimId": doc["claimId"]}) or await db.claims.find_one(filt)
+        if rec:
+            return rec, False
+        raise
     doc["_id"] = result.inserted_id
     return doc, True
 
@@ -2282,38 +2307,68 @@ async def adopt_or_ensure_register_row(db, *, lead_id, lead, component_key,
     claim_number = str(claim_number or "").strip()
     line_id = str(line_id or "").strip()
     amt, chassis, invoice, sno = extra_support_from_lead(lead, unit_sno)
-    if claim_number:
-        filt = {
-            "leadId": {"$in": ["", None]},
+
+    def _attach_empty(rec):
+        patch = {
+            "leadId": lead_id,
+            "customer": (lead or {}).get("customerName") or rec.get("customer") or "",
+            "model": (lead or {}).get("interestedModel") or rec.get("model") or "",
+            "variant": (lead or {}).get("variant") or rec.get("variant") or "",
+            "bookingDate": (lead or {}).get("bookingDate") or rec.get("bookingDate") or "",
+            "executive": (lead or {}).get("executive") or "",
+            "chassisNumber": chassis or rec.get("chassisNumber") or "",
+            "invoiceNumber": invoice or rec.get("invoiceNumber") or "",
+            "oemUnmatched": False,
             "componentKey": key,
+            "component": ce.SCHEME_COMPONENT_LABELS.get(key, rec.get("component") or key),
+        }
+        if sno:
+            patch["unitSno"] = sno
+        if amt > 0:
+            patch["eligibleClaim"] = amt
+            patch["claimAmount"] = amt
+            if key == ce.OEM_EXTRA_SUPPORT_KEY:
+                patch["source"] = "OEM Extra Support"
+        return patch
+
+    if claim_number:
+        empty_filt = {
+            "leadId": {"$in": ["", None]},
             "manualOemClaimNumber": claim_number,
             "manual": {"$ne": True},
         }
         if line_id:
-            filt["manualOemLineId"] = line_id
-        rec = await db.claims.find_one(filt)
+            empty_filt["manualOemLineId"] = line_id
+        rec = await db.claims.find_one({**empty_filt, "componentKey": key})
+        if not rec and key == ce.OEM_EXTRA_SUPPORT_KEY:
+            # Create stored Additional Discount / generic OEM chip; Match is Extra Support.
+            rec = await db.claims.find_one(empty_filt)
         if rec:
-            patch = {
-                "leadId": lead_id,
-                "customer": (lead or {}).get("customerName") or rec.get("customer") or "",
-                "model": (lead or {}).get("interestedModel") or rec.get("model") or "",
-                "variant": (lead or {}).get("variant") or rec.get("variant") or "",
-                "bookingDate": (lead or {}).get("bookingDate") or rec.get("bookingDate") or "",
-                "executive": (lead or {}).get("executive") or "",
-                "chassisNumber": chassis or rec.get("chassisNumber") or "",
-                "invoiceNumber": invoice or rec.get("invoiceNumber") or "",
-                "oemUnmatched": False,
-            }
-            if sno:
-                patch["unitSno"] = sno
-            if amt > 0:
-                patch["eligibleClaim"] = amt
-                patch["claimAmount"] = amt
-                if key == ce.OEM_EXTRA_SUPPORT_KEY:
-                    patch["source"] = "OEM Extra Support"
+            patch = _attach_empty(rec)
             await db.claims.update_one({"_id": rec["_id"]}, {"$set": patch})
             rec.update(patch)
             return rec
+    if sno and key == ce.OEM_EXTRA_SUPPORT_KEY:
+        leftover = await db.claims.find_one({
+            "leadId": lead_id,
+            "componentKey": key,
+            "manual": {"$ne": True},
+            "$or": [{"unitSno": {"$in": [None, 0]}}, {"unitSno": {"$exists": False}}],
+        })
+        if leftover:
+            prev = str(leftover.get("manualOemClaimNumber") or "").strip()
+            if not prev or (claim_number and prev.upper() == claim_number.upper()):
+                patch = {"unitSno": sno}
+                if chassis:
+                    patch["chassisNumber"] = chassis
+                if invoice:
+                    patch["invoiceNumber"] = invoice
+                if amt > 0:
+                    patch["eligibleClaim"] = amt
+                    patch["claimAmount"] = amt
+                await db.claims.update_one({"_id": leftover["_id"]}, {"$set": patch})
+                leftover.update(patch)
+                return leftover
     rec, _created = await ensure_register_row(
         db, lead, key, claim_amount=amt, eligible_claim=amt, unit_sno=sno)
     return rec
