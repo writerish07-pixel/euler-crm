@@ -386,6 +386,31 @@ async def test_run_jobs_queues_existing_booked(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_auto_calls_queues_historical_booked(client, monkeypatch):
+    """Scheduler / cron enqueue every unverified booked file, then place."""
+    placed = []
+
+    async def capture(lead_id, *, force=False):
+        placed.append(lead_id)
+        return {"ok": True, "leadId": lead_id, "callSid": f"sid-{lead_id}"}
+
+    monkeypatch.setattr(exo, "place_verify_call", capture)
+    await server.db.leads.insert_one({
+        "leadId": "LD26HIST", "customerName": "Old Booked Auto", "mobile": "9876500099",
+        "currentStatus": "Booked", "bookingDate": "2026-02-01",
+        "accountStatus": "Active",
+    })
+    skipped = await exo.run_due_calls(limit=25, force=True)
+    assert "LD26HIST" not in placed
+    assert skipped.get("ok") is True
+    res = await exo.run_auto_calls(limit=25, force=True)
+    assert res.get("queued") == 1
+    assert "LD26HIST" in placed
+    lead = await server.db.leads.find_one({"leadId": "LD26HIST"})
+    assert lead["dealVerifyStatus"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_recompute_refreshes_mismatch(client):
     await server.db.leads.insert_one({
         "leadId": "LD26EXO5", "customerName": "Later Receipt", "mobile": "9876500055",
