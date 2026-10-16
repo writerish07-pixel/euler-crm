@@ -163,6 +163,13 @@ async def test_monthly_scoreboard_splits_executives_by_month(client):
     assert board2["Scoreboard Amit"]["bookings"] == 1
     assert board2["Scoreboard Amit"]["deliveries"] == 1
     assert "Scoreboard Rahul" not in board2
+    light = (await client.get("/api/reports/scoreboard", params={"month": "2026-09"})).json()
+    assert "selected" not in light
+    assert "byMonth" not in light
+    light_board = {r["executive"]: r for r in light["byExecutive"]}
+    assert light_board["Scoreboard Amit"]["leads"] == 1
+    assert light_board["Scoreboard Amit"]["bookings"] == 1
+    assert light_board["Scoreboard Rahul"]["leads"] == 1
 
 
 @pytest.mark.asyncio
@@ -177,6 +184,8 @@ async def test_executive_opens_monthly_own_leads_not_export(exec_client, client)
     assert after_exec["selected"]["leads"]["count"] == before_exec["selected"]["leads"]["count"] + 1
     assert after_owner["selected"]["leads"]["count"] == before_owner["selected"]["leads"]["count"] + 2
     assert after_exec["scope"]["kind"] == "own"
+    board = (await exec_client.get("/api/reports/scoreboard", params={"month": ym})).json()
+    assert board["scope"]["kind"] == "own"
     assert "payments" in after_exec["selected"]
     assert "earnings" not in after_exec["selected"]
     assert "scheme" not in after_exec["selected"]
@@ -234,6 +243,7 @@ async def test_oem_monthly_is_allowlisted_and_has_no_contacts(client, oem):
     assert "deliveries" in d["selected"]
     assert "finance" in d["selected"]
     assert (await oem.get("/api/reports/monthly")).status_code == 403
+    assert (await oem.get("/api/reports/scoreboard")).status_code == 403
     assert (await oem.get("/api/leads")).status_code == 403
 
 

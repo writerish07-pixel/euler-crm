@@ -203,7 +203,11 @@ async def test_owner_dashboard_stays_fast_with_many_leads(client):
 
 @pytest.mark.asyncio
 async def test_monthly_and_gm_dashboards_stay_fast_with_many_leads(client):
-    fat = {"units": [{"sno": 1, "model": "Storm", **{f"f{j}": j for j in range(12)}}]}
+    fat = {
+        "units": [{"sno": 1, "model": "Storm", **{f"f{j}": j for j in range(12)}}],
+        "schemeAllocationSummary": {"components": [{"k": i, "v": i} for i in range(20)]},
+        "kycDocuments": [{"name": f"doc{i}", "b64": "x" * 80} for i in range(8)],
+    }
     await server.db.leads.delete_many({})
     await server.db.leads.insert_many([
         {
@@ -214,6 +218,7 @@ async def test_monthly_and_gm_dashboards_stay_fast_with_many_leads(client):
             "interestedModel": "Storm", "cancelHistory": [
                 {"date": "2026-09-01", "reason": "Price", "executive": "Amit"},
             ],
+            "dealerTotalEarnings": 1200 if i % 2 == 0 else 0,
             **fat,
         }
         for i in range(220)
@@ -223,6 +228,12 @@ async def test_monthly_and_gm_dashboards_stay_fast_with_many_leads(client):
     monthly_s = time.monotonic() - t0
     assert monthly.status_code == 200, monthly.text
     assert monthly_s < 6, f"monthly register hung ({monthly_s:.2f}s)"
+    t_sb = time.monotonic()
+    scoreboard = await client.get("/api/reports/scoreboard", params={"month": "2026-10"})
+    sb_s = time.monotonic() - t_sb
+    assert scoreboard.status_code == 200, scoreboard.text
+    assert sb_s < 2, f"scoreboard hung ({sb_s:.2f}s)"
+    assert "selected" not in scoreboard.json()
     tok = await _token("salesgm@euler.com")
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -232,3 +243,15 @@ async def test_monthly_and_gm_dashboards_stay_fast_with_many_leads(client):
         gm_s = time.monotonic() - t1
     assert gm.status_code == 200, gm.text
     assert gm_s < 6, f"sales GM dashboard hung ({gm_s:.2f}s)"
+
+
+def test_lead_earnings_total_uses_stored_not_recompute():
+    assert server._lead_earnings_total({"dealerTotalEarnings": 2500}) == 2500
+    assert server._lead_earnings_total({
+        "dealerMarginNetExGst": 1000,
+        "dealerSchemeRetained": 200,
+        "oemExtraSupportReceived": 50,
+        "dealerInsuranceIncome": 10,
+        "extraDealerIncomeTotal": 5,
+        "dealerFundedBenefit": 15,
+    }) == 1250

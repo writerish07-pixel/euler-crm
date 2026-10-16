@@ -62,9 +62,11 @@ export function isRetryableNetworkError(err) {
   if (!err) return false;
   const code = err.code || err.cause?.code;
   if (code === "ERR_BAD_PAYLOAD") return true;
-  if (code === "ECONNABORTED" || code === "ERR_NETWORK" || code === "ERR_CANCELED") {
-    return err.code !== "ERR_CANCELED";
-  }
+  // A 25s timeout already burned the desk. Retrying it on Railway then origin
+  // stacked 50–75s of “timeout of 25000ms exceeded” after monthly register
+  // started loading on every staff dashboard.
+  if (code === "ECONNABORTED" || code === "ERR_CANCELED") return false;
+  if (code === "ERR_NETWORK") return true;
   if (!err.response) return true;
   return [502, 503, 504].includes(err.response.status);
 }
@@ -191,6 +193,7 @@ async function withFallback(run) {
         return data;
       } catch (err) {
         last = err;
+        if (err?.code === "ECONNABORTED" || err?.code === "ERR_CANCELED") throw err;
         if (err?.response && !isRetryableNetworkError(err)) throw err;
         if (attempt === 0 && isRetryableNetworkError(err)) {
           await new Promise((r) => setTimeout(r, 350));

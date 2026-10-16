@@ -140,6 +140,7 @@ async def test_the_role_exists_and_can_sign_in(oem):
     "/api/dealer-earnings",
     "/api/export",
     "/api/reports/monthly",
+    "/api/reports/scoreboard",
 ])
 @pytest.mark.asyncio
 async def test_every_other_endpoint_is_denied(oem, path):

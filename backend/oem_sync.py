@@ -750,8 +750,14 @@ def vehicle_count(lead):
     units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
     if len(units) > 1:
         return len(units)
+    try:
+        stored = int((lead or {}).get("vehicleCount") or 0)
+    except (TypeError, ValueError):
+        stored = 0
+    if stored > 1:
+        return stored
     if (lead or {}).get("sameOrderMultiUnit"):
-        return max(len(units), 1)
+        return max(len(units), stored, 1)
     return 1
 
 

@@ -7,7 +7,7 @@ export function useMonthlyScoreboard(month, year) {
   const [rows, setRows] = useState([]);
   useEffect(() => {
     let alive = true;
-    get("/reports/monthly", periodParams({ month, year }))
+    get("/reports/scoreboard", periodParams({ month, year }))
       .then((d) => { if (alive) setRows(Array.isArray(d.byExecutive) ? d.byExecutive : []); })
       .catch(() => { if (alive) setRows([]); });
     return () => { alive = false; };
