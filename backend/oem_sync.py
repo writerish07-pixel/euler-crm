@@ -258,8 +258,9 @@ async def _record_sync(db, ok, error="", extra=None):
 
 def _inventory_doc(vehicle, sku, price):
     return {
-        "chassis": vehicle.get("chassis") or "",
-        "emch": vehicle.get("emch") or vehicle.get("registration_number") or "",
+        "chassis": vehicle_chassis(vehicle) or vehicle.get("chassis") or "",
+        "emch": vehicle.get("emch") or vehicle.get("registration_number")
+                or vehicle.get("registration_no") or vehicle.get("registrationNo") or "",
         "colour": vehicle.get("colour") or "",
         "model": sku.crm_model if sku else (vehicle.get("model") or ""),
         "variant": sku.crm_variant if sku else (vehicle.get("variant") or ""),
@@ -329,12 +330,15 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
     oem_models = await asyncio.to_thread(coulson_client.fetch_sap_models, token)
     vehicles = await asyncio.to_thread(coulson_client.fetch_present_inventory, token)
     sold_vehicles = []
+    sold_error = ""
     try:
         sold_vehicles = await asyncio.to_thread(coulson_client.fetch_sold_inventory, token) or []
     except coulson_client.CoulsonError as e:
-        log.warning("Coulson sold inventory skipped: %s", e)
-    except Exception:
-        log.exception("Coulson sold inventory failed")
+        sold_error = str(e)
+        log.warning("Coulson sold / invoice inventory skipped: %s", e)
+    except Exception as e:
+        sold_error = str(e)
+        log.exception("Coulson sold / invoice inventory failed")
     transit_vehicles = []
     try:
         transit_vehicles = await asyncio.to_thread(coulson_client.fetch_transit_inventory, token) or []
@@ -413,7 +417,9 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         await db.oem_inventory.insert_many(inv_docs)
     dropped = await drop_delivered_from_inventory(db)
     yard_count = await db.oem_inventory.count_documents({})
-    sold_count = await replace_sold_inventory(db, sold_vehicles, oem_by_id, by_key)
+    sold_count = await replace_sold_inventory(
+        db, sold_vehicles, oem_by_id, by_key,
+        complete=getattr(sold_vehicles, "complete", True))
     transit_docs = []
     for v in transit_vehicles:
         sku = None
@@ -453,7 +459,9 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         "changedPriceIds": list(dict.fromkeys(
             (catalog_result.get("changedPriceIds") or []) + changed_ids)),
     }
-    await _record_sync(db, True, "", extra)
+    if sold_error:
+        extra["soldError"] = sold_error
+    await _record_sync(db, True, sold_error, extra)
     return {"ok": True, "catalog": catalog_result, **extra}
 
 
@@ -516,7 +524,8 @@ _INVOICE_KEYS = (
     "retail_invoice_number",
 )
 _PLATE_KEYS = (
-    "registration_number", "emch", "number_plate", "numberPlate",
+    "registration_number", "registration_no", "registrationNo", "regNo",
+    "emch", "number_plate", "numberPlate",
     "vehicle_number", "reg_no",
 )
 _CHASSIS_KEYS = ("chassis", "chassis_number", "chassisNumber", "vin")
@@ -600,8 +609,15 @@ def vehicle_customer_name(row, *, nested=False):
 _SOLD_DATE_KEYS = (
     "invoice_date", "invoiceDate", "billed_at", "billedAt",
     "sold_date", "soldDate", "billing_date", "billingDate",
-    "retail_date", "retailDate", "created_at", "createdAt",
+    "retail_date", "retailDate", "date", "Date", "_created_at",
+    "created_at", "createdAt",
 )
+_MONTH_NAME = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
 
 
 def _iso_date(raw):
@@ -616,17 +632,25 @@ def _iso_date(raw):
     s = str(raw).strip()
     if not s:
         return ""
+    s = re.sub(r"\bSept\b", "Sep", s)
     if len(s) >= 10 and s[4] == "-" and s[7] == "-":
         return s[:10]
     m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", s)
-    if not m:
-        return ""
-    a, b, y = int(m.group(1)), int(m.group(2)), m.group(3)
-    if a > 12:
+    if m:
+        a, b, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        if a > 12:
+            return f"{y}-{b:02d}-{a:02d}"
+        if b > 12:
+            return f"{y}-{a:02d}-{b:02d}"
         return f"{y}-{b:02d}-{a:02d}"
-    if b > 12:
-        return f"{y}-{a:02d}-{b:02d}"
-    return f"{y}-{b:02d}-{a:02d}"
+    # Vehicle Invoices SPA: "16 Oct 2026" / "2 Sep 2026 13:34:38"
+    named = re.match(
+        r"^(\d{1,2})\s+([A-Za-z]+)\.?\s+(\d{4})", s)
+    if named:
+        month = _MONTH_NAME.get(named.group(2).lower())
+        if month:
+            return f"{named.group(3)}-{month:02d}-{int(named.group(1)):02d}"
+    return ""
 
 
 def vehicle_sold_date(row):
@@ -662,8 +686,14 @@ def _sold_doc(vehicle, sku, price):
     }
 
 
-async def replace_sold_inventory(db, vehicles, oem_by_id, by_key):
-    """Replace oem_sold with the latest Coulson Sold/Billed list."""
+async def replace_sold_inventory(db, vehicles, oem_by_id, by_key, *, complete=True):
+    """Write Coulson Sold / Vehicle Invoices into oem_sold.
+
+    An empty pull must not wipe chassis already synced — that is how today's
+    billed list vanished after a Coulson timeout. A short pull (Vehicle
+    Invoices page, or a partial Sold page) upserts by chassis so older Sold
+    rows stay put and today's billed chassis still land.
+    """
     docs = []
     seen = set()
     for v in vehicles or []:
@@ -691,14 +721,20 @@ async def replace_sold_inventory(db, vehicles, oem_by_id, by_key):
             continue
         seen.add(ch)
         docs.append(doc)
+    existing = await db.oem_sold.count_documents({})
+    if not docs:
+        return existing
+    if not complete and existing:
+        for doc in docs:
+            await db.oem_sold.update_one({"chassis": doc["chassis"]}, {"$set": doc}, upsert=True)
+        return await db.oem_sold.count_documents({})
     await db.oem_sold.delete_many({})
-    if docs:
-        await db.oem_sold.insert_many(docs)
+    await db.oem_sold.insert_many(docs)
     return len(docs)
 
 
 async def refresh_sold_inventory(db):
-    """Live Sold-tab pull without rewriting yard PRESENT stock."""
+    """Live Sold + Vehicle Invoices pull without rewriting yard PRESENT stock."""
     token, _src = await _access_token(db)
     if not token:
         return 0
@@ -716,7 +752,9 @@ async def refresh_sold_inventory(db):
         sku = cat.sku_for_oem_row(oem)
         if sku:
             by_key[sku.key].append(oem)
-    return await replace_sold_inventory(db, sold_vehicles, oem_by_id, by_key)
+    return await replace_sold_inventory(
+        db, sold_vehicles, oem_by_id, by_key,
+        complete=getattr(sold_vehicles, "complete", True))
 
 
 def sold_match_score(row, lead):

@@ -101,6 +101,7 @@ export const api = axios.create({ timeout: 25000 });
 /** Mutations that can touch dozens/hundreds of rows. Never auto-retry: the
  *  first request may still be running on the server. */
 export const BULK_TIMEOUT_MS = 60000;
+export const OEM_SYNC_TIMEOUT_MS = 180000;
 
 export function isBulkMutationPath(url) {
   const p = String(url || "").split("?")[0];
@@ -149,14 +150,15 @@ function mutationOpts(url, opts = {}) {
   let timeout = opts.timeout;
   if (timeout === undefined && bulk) {
     const p = String(url || "").split("?")[0];
-    timeout = p.indexOf("/leads/import/") === 0 || p.indexOf("/integrations/gsheets/backfill") === 0
-      ? 180000
-      : isSlowOemBillingPath(url)
-        ? 120000
-        : BULK_TIMEOUT_MS;
+    timeout = p.indexOf("/leads/import/") === 0
+      || p.indexOf("/integrations/gsheets/backfill") === 0
+      || p.indexOf("/integrations/coulson/sync") === 0
+      || isSlowOemBillingPath(url)
+      ? OEM_SYNC_TIMEOUT_MS
+      : BULK_TIMEOUT_MS;
   }
   if (timeout === undefined && isSlowOemBillingPath(url)) {
-    timeout = 120000;
+    timeout = OEM_SYNC_TIMEOUT_MS;
   }
   if (timeout === undefined && isSlowIntegrationPath(url)) {
     timeout = 45000;
@@ -235,6 +237,8 @@ async function withFallback(run) {
 
 export const get = (url, params, opts = {}) => withFallback(() => api.get(url, {
   params,
+  ...(opts.timeout || isSlowIntegrationPath(url) || isSlowOemBillingPath(url)
+    ? { timeout: opts.timeout || (isSlowOemBillingPath(url) ? OEM_SYNC_TIMEOUT_MS : 45000) }
   ...(opts.timeout || isSlowIntegrationPath(url) || isSlowOemBillingPath(url) || isSlowLead360Path(url)
     ? { timeout: opts.timeout || (isSlowOemBillingPath(url) ? 120000 : isSlowLead360Path(url) ? 60000 : 45000) }
     : {}),

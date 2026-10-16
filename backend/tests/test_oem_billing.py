@@ -22,6 +22,16 @@ import oem_sync  # noqa: E402
 import server  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_live_coulson_sold(monkeypatch):
+    """OEM Billing tests seed oem_sold themselves. Do not hit Euler."""
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "test-token")
+
+
 @pytest_asyncio.fixture
 async def client():
     await server.startup()
@@ -38,6 +48,14 @@ def test_vehicle_sold_date_reads_iso_and_nested():
     assert oem_sync.vehicle_sold_date({"created_at": "2026-08-01"}) == "2026-08-01"
     assert oem_sync.vehicle_sold_date({"billing": {"invoice_date": "05/09/2026"}}) == "2026-09-05"
     assert oem_sync.vehicle_sold_date({"chassis": "X"}) == ""
+
+
+def test_vehicle_sold_date_reads_coulson_invoice_spa_date():
+    """Vehicle Invoices `#/dealer-inventory-list` prints '16 Oct 2026'."""
+    assert oem_sync.vehicle_sold_date({"date": "16 Oct 2026"}) == "2026-10-16"
+    assert oem_sync.vehicle_sold_date({"_created_at": "2 Sep 2026 13:34:38"}) == "2026-09-02"
+    assert oem_sync._iso_date("16 Oct 2026") == "2026-10-16"
+    assert oem_sync._iso_date("05-10-2026") == "2026-10-05"
 
 
 def test_sold_doc_keeps_sold_date():
