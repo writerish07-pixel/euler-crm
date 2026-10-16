@@ -1758,3 +1758,59 @@ async def test_owner_field_sets_one_pack_unit_cx_demand(client):
     assert ce.num(units[1].get("cxDemand")) == 1190000
     assert ce.num(again.json().get("cxDemand")) == ce.round2(
         ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
+
+
+@pytest.mark.asyncio
+async def test_owner_field_sets_one_pack_unit_additional(client):
+    mobile = "9813302223"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-ADDL-A", "PM-ADDL-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-ADDL-A", "model": "Turbo Max", "variant": "Addl A",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-ADDL-B", "model": "Storm", "variant": "Addl B",
+        "exShowroom": 1200000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    created = await client.post("/api/leads", json={
+        "customerName": "Pack Edit Additional",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Addl A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"model": "Turbo Max", "variant": "Addl A", "cxDemand": 580000},
+            {"model": "Storm", "variant": "Addl B", "cxDemand": 1190000},
+        ],
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    u1_cx = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "cxDemand", "value": 580000, "unitSno": 1,
+    })
+    assert u1_cx.status_code == 200, u1_cx.text
+    u2_cx = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "cxDemand", "value": 1190000, "unitSno": 2,
+    })
+    assert u2_cx.status_code == 200, u2_cx.text
+    before = u2_cx.json().get("units") or []
+    u1_addl = ce.num(before[0].get("additionalDiscount"))
+    u1_pay = ce.num(before[0].get("customerPayable"))
+    u2_addl_before = ce.num(before[1].get("additionalDiscount"))
+    u2_pay_before = ce.num(before[1].get("customerPayable"))
+    new_addl = ce.round2(u1_addl + 15000)
+    edited = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "additionalDiscount", "value": new_addl, "unitSno": 1,
+    })
+    assert edited.status_code == 200, edited.text
+    units = edited.json().get("units") or []
+    assert ce.num(units[0].get("additionalDiscount")) == new_addl
+    assert ce.num(units[0].get("customerPayable")) == ce.round2(u1_pay - 15000)
+    assert ce.num(units[1].get("additionalDiscount")) == u2_addl_before
+    assert ce.num(units[1].get("cxDemand")) == 1190000
+    assert ce.num(units[1].get("customerPayable")) == u2_pay_before
