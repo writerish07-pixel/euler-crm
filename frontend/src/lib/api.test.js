@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, isBulkMutationPath, isCreateOncePath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -35,8 +35,16 @@ describe("isRetryableNetworkError", () => {
     expect(isRetryableNetworkError({ message: "Network Error" })).toBe(true);
   });
 
-  test("timeout is retryable", () => {
-    expect(isRetryableNetworkError({ code: "ECONNABORTED" })).toBe(true);
+  test("timeout is not retried", () => {
+    expect(isRetryableNetworkError({ code: "ECONNABORTED" })).toBe(false);
+  });
+
+  test("get does not retry a 25s timeout on another host", async () => {
+    const err = Object.assign(new Error("timeout of 25000ms exceeded"), { code: "ECONNABORTED" });
+    const spy = jest.spyOn(api, "get").mockRejectedValue(err);
+    await expect(get("/dashboard")).rejects.toBe(err);
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
   });
 
   test("401 is not retried on another host", () => {

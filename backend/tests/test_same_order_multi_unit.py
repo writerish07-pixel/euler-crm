@@ -58,6 +58,13 @@ def test_vehicle_count_reads_units():
     }) == 3
 
 
+def test_vehicle_count_uses_stored_when_units_omitted():
+    assert oem_sync.vehicle_count({"vehicleCount": 4}) == 4
+    assert oem_sync.vehicle_count({
+        "vehicleCount": 4, "units": [{"model": "Storm"}],
+    }) == 4
+
+
 def test_volume_slice_counts_vehicles_not_just_leads():
     p = periodmod.parse_period(month="2026-09")
     pack = {

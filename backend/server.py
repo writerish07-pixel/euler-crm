@@ -1928,6 +1928,45 @@ async def reseed():
 
 
 # ---------------------------------------------------------------- dashboard helpers
+# KPI boards never need scheme JSON / unit price blobs. Loading those on every
+# home GET is what pushed /dashboard past the 25s browser timeout after staff
+# monthly register started hitting the same Mongo documents at the same time.
+BOARD_LEAD_PROJ = {
+    "_id": 0,
+    "leadId": 1, "createdDate": 1, "bookingDate": 1, "deliveryDate": 1, "closedDate": 1,
+    "currentStatus": 1, "accountStatus": 1, "deliveryStatus": 1, "bookingId": 1,
+    "interestedModel": 1, "variant": 1, "customerOutstanding": 1, "companyOutstanding": 1,
+    "customerPayable": 1, "totalReceived": 1, "invoiceNumber": 1,
+    "nextFollowupDate": 1, "nextFollowup": 1, "executive": 1, "customerName": 1,
+    "mobile": 1, "chassisNumber": 1, "numberPlate": 1,
+    "vehicleCount": 1, "sameOrderMultiUnit": 1, "dealApprovalPending": 1,
+    "dealCancelled": 1, "cancelHistory": 1, "leadSource": 1, "excessReceived": 1,
+    "lastCancelDate": 1, "lastCancelReason": 1, "refundedAmount": 1,
+    "schemeUse": 1, "schemeApplied": 1, "totalSchemeBenefit": 1, "schemeBenefit": 1,
+}
+PAYMENT_BOARD_PROJ = {"_id": 0, "leadId": 1, "amount": 1, "date": 1, "paymentMode": 1}
+FINANCE_BOARD_PROJ = {
+    "_id": 0, "leadId": 1, "fileOutstanding": 1, "status": 1,
+    "sanctionedAmount": 1, "receivedAgainstFile": 1, "deliveryDate": 1, "financer": 1,
+}
+CLAIM_BOARD_PROJ = {"_id": 0, "leadId": 1, "eligibleClaim": 1, "claimAmount": 1, "receivedAmount": 1, "bookingDate": 1}
+INS_BOARD_PROJ = {
+    "_id": 0, "leadId": 1, "payoutOutstanding": 1, "policyDate": 1, "deliveryDate": 1,
+    "expectedPayout": 1, "receivedPayout": 1,
+}
+PERIOD_LEAD_PROJ = {
+    **BOARD_LEAD_PROJ,
+    "bookingAmount": 1,
+    "extraDealerIncomeTotal": 1, "dealerMarginNetExGst": 1, "dealerSchemeRetained": 1,
+    "dealerInsuranceIncome": 1, "oemExtraSupportRetained": 1, "oemExtraSupportReceived": 1,
+    "dealerFundedBenefit": 1, "dealerTotalEarnings": 1,
+}
+
+
+async def _load_board_leads():
+    return _exclude_parked_deals(await db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000))
+
+
 def _is_close_won(lead) -> bool:
     return "close won" in (lead.get("currentStatus") or "").strip().lower()
 
@@ -2562,8 +2601,12 @@ def _volume_period_kpis(leads, payments=None, cancel_events=None, *, include_mon
 # ---------------------------------------------------------------- dashboard
 @api.get("/dashboard")
 async def dashboard():
-    leads = _exclude_parked_deals(await db.leads.find().to_list(5000))
-    payments = await db.payments.find().to_list(5000)
+    leads_raw, payments, finance_rows = await asyncio.gather(
+        db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000),
+        db.payments.find({}, PAYMENT_BOARD_PROJ).to_list(5000),
+        db.finance.find({}, FINANCE_BOARD_PROJ).to_list(5000),
+    )
+    leads = _exclude_parked_deals(leads_raw)
     ym = this_month()
     td = today()
     vol = _volume_period_kpis(leads, payments)
@@ -2594,7 +2637,7 @@ async def dashboard():
     # Finance total outstanding (H1) — sum of open finance file balances
     finance_os = 0.0
     finance_pending_files = []
-    for f in await db.finance.find().to_list(5000):
+    for f in finance_rows:
         os_amt = ce.num(f.get("fileOutstanding"))
         finance_os += os_amt
         if os_amt > 0 and f.get("status") != "Received":
@@ -2678,15 +2721,21 @@ async def dashboard():
 @api.get("/accounts/dashboard")
 async def accounts_dashboard():
     """Money desk home — Tally cross-check KPIs (Accounts / Owner / Executive)."""
-    leads = await db.leads.find().to_list(5000)
-    payments = await db.payments.find().to_list(5000)
+    leads_raw, payments, finance_rows, claim_rows, ins_rows = await asyncio.gather(
+        db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000),
+        db.payments.find({}, PAYMENT_BOARD_PROJ).to_list(5000),
+        db.finance.find({}, FINANCE_BOARD_PROJ).to_list(5000),
+        db.claims.find({}, CLAIM_BOARD_PROJ).to_list(5000),
+        db.insurance.find({}, INS_BOARD_PROJ).to_list(5000),
+    )
+    leads = _exclude_parked_deals(leads_raw)
     vol = _volume_period_kpis(leads, payments)
     cust_os = ce.round2(sum(ce.num(l.get("customerOutstanding")) for l in leads))
     company_os = ce.round2(sum(ce.num(l.get("companyOutstanding")) for l in leads))
 
     finance_os = 0.0
     finance_pending = 0
-    for f in await db.finance.find().to_list(5000):
+    for f in finance_rows:
         os_amt = ce.num(f.get("fileOutstanding"))
         finance_os += os_amt
         if os_amt > 0.01 and f.get("status") != "Received":
@@ -2695,7 +2744,7 @@ async def accounts_dashboard():
 
     oem_claim_open = 0.0
     oem_claim_count = 0
-    for c in await db.claims.find().to_list(5000):
+    for c in claim_rows:
         elig = ce.num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount"))
         recv = ce.num(c.get("receivedAmount"))
         due = ce.round2(max(0.0, elig - recv))
@@ -2706,7 +2755,7 @@ async def accounts_dashboard():
 
     insurance_due = 0.0
     insurance_open = 0
-    for e in await db.insurance.find().to_list(5000):
+    for e in ins_rows:
         due = ce.num(e.get("payoutOutstanding"))
         if due > 0.01:
             insurance_due += due
@@ -2819,7 +2868,7 @@ async def executive_dashboard(user=Depends(current_user)):
     role = user.get("role")
     if role not in ("executive", "owner", "tl", "team_lead"):
         raise HTTPException(403, "Executive dashboard is for Executive, Team Leader, Showroom Admin, and Owner.")
-    leads_all = await db.leads.find().to_list(5000)
+    leads_all = await db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000)
     mine = await _leads_for_scoped_viewer(leads_all, user) if _is_scoped_sales(user) else leads_all
     mine = _exclude_parked_deals(mine)
     ym = this_month()
@@ -2856,7 +2905,7 @@ async def executive_dashboard(user=Depends(current_user)):
     # Finance stuck on my booked deals
     my_ids = {l["leadId"] for l in mine}
     finance_stuck = 0
-    for f in await db.finance.find().to_list(5000):
+    for f in await db.finance.find({}, FINANCE_BOARD_PROJ).to_list(5000):
         if f.get("leadId") not in my_ids:
             continue
         if ce.num(f.get("fileOutstanding")) > 0.01 and f.get("status") != "Received":
@@ -3466,16 +3515,19 @@ def _oem_period_metrics(m):
 
 
 def _lead_earnings_total(lead):
-    oem = ce.compute_oem_extra_support(lead)
+    """Stored dealerTotalEarnings when present — never recompute OEM extra on a board GET."""
+    if lead.get("dealerTotalEarnings") is not None:
+        return ce.round2(ce.num(lead.get("dealerTotalEarnings")))
     margin = ce.num(lead.get("dealerMarginNetExGst"))
     scheme = ce.num(lead.get("dealerSchemeRetained"))
     ins = ce.num(lead.get("dealerInsuranceIncome"))
     extra = ce.num(lead.get("extraDealerIncomeTotal"))
     funded = ce.num(lead.get("dealerFundedBenefit"))
-    return ce.round2(margin + scheme + oem["oemExtraSupportRetained"] + ins + extra - funded)
+    oem = ce.num(lead.get("oemExtraSupportRetained") or lead.get("oemExtraSupportReceived"))
+    return ce.round2(margin + scheme + oem + ins + extra - funded)
 
 
-def _period_metrics_from(src, period, *, cancel_events=None):
+def _period_metrics_from(src, period, *, cancel_events=None, include_pnl=True):
     leads = src["leads"]
     leads_by_id = {str(l.get("leadId") or ""): l for l in leads if l.get("leadId")}
     m = _empty_period_metrics()
@@ -3512,31 +3564,32 @@ def _period_metrics_from(src, period, *, cancel_events=None):
         m["finance"]["received"] += ce.num(f.get("receivedAgainstFile"))
         m["finance"]["pending"] += ce.num(f.get("fileOutstanding"))
 
-    for l in booked:
-        m["scheme"]["eligible"] += ce.num(
-            l.get("totalSchemeBenefit") or l.get("schemeBenefit"))
-        m["extraIncome"]["total"] += ce.num(l.get("extraDealerIncomeTotal"))
-        m["earnings"]["total"] += _lead_earnings_total(l)
+    if include_pnl:
+        for l in booked:
+            m["scheme"]["eligible"] += ce.num(
+                l.get("totalSchemeBenefit") or l.get("schemeBenefit"))
+            m["extraIncome"]["total"] += ce.num(l.get("extraDealerIncomeTotal"))
+            m["earnings"]["total"] += _lead_earnings_total(l)
 
-    for c in src["claims"]:
-        d = str(c.get("bookingDate") or "")[:10]
-        if not d:
-            lead = leads_by_id.get(str(c.get("leadId") or "")) or {}
-            d = str(lead.get("bookingDate") or "")[:10]
-        if not periodmod.in_period(d, period):
-            continue
-        m["scheme"]["rows"] += 1
-        m["scheme"]["received"] += ce.num(c.get("receivedAmount"))
-    m["scheme"]["pending"] = max(0.0, m["scheme"]["eligible"] - m["scheme"]["received"])
+        for c in src["claims"]:
+            d = str(c.get("bookingDate") or "")[:10]
+            if not d:
+                lead = leads_by_id.get(str(c.get("leadId") or "")) or {}
+                d = str(lead.get("bookingDate") or "")[:10]
+            if not periodmod.in_period(d, period):
+                continue
+            m["scheme"]["rows"] += 1
+            m["scheme"]["received"] += ce.num(c.get("receivedAmount"))
+        m["scheme"]["pending"] = max(0.0, m["scheme"]["eligible"] - m["scheme"]["received"])
 
-    for e in src["insurance"]:
-        d = str(e.get("policyDate") or e.get("deliveryDate") or "")[:10]
-        if not periodmod.in_period(d, period):
-            continue
-        m["insurance"]["rows"] += 1
-        m["insurance"]["expected"] += ce.num(e.get("expectedPayout"))
-        m["insurance"]["received"] += ce.num(e.get("receivedPayout"))
-        m["insurance"]["pending"] += ce.num(e.get("payoutOutstanding"))
+        for e in src["insurance"]:
+            d = str(e.get("policyDate") or e.get("deliveryDate") or "")[:10]
+            if not periodmod.in_period(d, period):
+                continue
+            m["insurance"]["rows"] += 1
+            m["insurance"]["expected"] += ce.num(e.get("expectedPayout"))
+            m["insurance"]["received"] += ce.num(e.get("receivedPayout"))
+            m["insurance"]["pending"] += ce.num(e.get("payoutOutstanding"))
 
     events = cancel_events if cancel_events is not None else _cancel_events(leads)
     m["cancellations"]["count"] = sum(
@@ -3545,12 +3598,19 @@ def _period_metrics_from(src, period, *, cancel_events=None):
 
 
 async def _period_source():
+    leads, payments, finance, insurance, claims = await asyncio.gather(
+        db.leads.find({}, PERIOD_LEAD_PROJ).to_list(5000),
+        db.payments.find({}, PAYMENT_BOARD_PROJ).to_list(5000),
+        db.finance.find({}, FINANCE_BOARD_PROJ).to_list(5000),
+        db.insurance.find({}, INS_BOARD_PROJ).to_list(5000),
+        db.claims.find({}, CLAIM_BOARD_PROJ).to_list(5000),
+    )
     return {
-        "leads": await db.leads.find().to_list(5000),
-        "payments": await db.payments.find().to_list(5000),
-        "finance": await db.finance.find().to_list(5000),
-        "insurance": await db.insurance.find().to_list(5000),
-        "claims": await db.claims.find().to_list(5000),
+        "leads": leads,
+        "payments": payments,
+        "finance": finance,
+        "insurance": insurance,
+        "claims": claims,
     }
 
 
@@ -3609,16 +3669,21 @@ async def _monthly_payload(period, *, oem=False, src=None, staff=False):
     src = src if src is not None else await _period_source()
     focus = periodmod.focus_year(period)
     events = _cancel_events(src["leads"])
-    selected = _period_metrics_from(src, period, cancel_events=events)
+    include_pnl = not oem and not staff
+    selected = _period_metrics_from(
+        src, period, cancel_events=events, include_pnl=include_pnl)
     mtd_p = periodmod.this_month_period()
     ytd_p = periodmod.ytd_period(focus)
-    mtd = _period_metrics_from(src, mtd_p, cancel_events=events)
-    ytd = _period_metrics_from(src, ytd_p, cancel_events=events)
+    mtd = _period_metrics_from(
+        src, mtd_p, cancel_events=events, include_pnl=include_pnl)
+    ytd = _period_metrics_from(
+        src, ytd_p, cancel_events=events, include_pnl=include_pnl)
     by_month = []
     wrap = _oem_period_metrics if oem else (_staff_period_metrics if staff else (lambda x: x))
     for ym in periodmod.year_months(focus):
         row = _period_metrics_from(
-            src, periodmod.parse_period(month=ym), cancel_events=events)
+            src, periodmod.parse_period(month=ym), cancel_events=events,
+            include_pnl=include_pnl)
         packed = wrap(row)
         packed["month"] = ym
         by_month.append(packed)
@@ -3671,6 +3736,35 @@ async def monthly_register(month: str = "", year: str = "", user=Depends(current
     return body
 
 
+@api.get("/reports/scoreboard")
+async def monthly_scoreboard(month: str = "", year: str = "", user=Depends(current_user)):
+    """Per-executive volume for the picked month. Not the full monthly register.
+
+    Executive / Sales GM / Field home used to GET /reports/monthly on every
+    load, which stacked five full-document scans on top of the dashboard GET
+    and timed the 25s browser client out.
+    """
+    role = (user or {}).get("role")
+    if role not in MONTHLY_REGISTER_ROLES:
+        raise HTTPException(403, "Monthly register is for dealership staff.")
+    period = _parse_period(month, year)
+    leads = await db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000)
+    if _is_scoped_sales(user):
+        leads = await _leads_for_scoped_viewer(leads, user)
+    body = {
+        "period": periodmod.as_dict(period),
+        "generatedAt": now_iso(),
+        "byExecutive": _executive_scoreboard(leads, period),
+    }
+    if role == "executive":
+        body["scope"] = {"kind": "own"}
+    elif authmod.is_team_lead(user):
+        body["scope"] = {"kind": "team"}
+    else:
+        body["scope"] = {"kind": "dealership"}
+    return body
+
+
 @api.get("/reports/oem-monthly")
 async def oem_monthly_register(month: str = "", year: str = "", user=Depends(current_user)):
     """Read-only retail volume + finance totals for the OEM finance desk.
@@ -3685,7 +3779,12 @@ async def oem_monthly_register(month: str = "", year: str = "", user=Depends(cur
 
 async def _ops_pipeline_dashboard():
     """Showroom-wide retail snapshot shared by ASM/RM field board and Sales GM."""
-    leads = _exclude_parked_deals(await db.leads.find().to_list(5000))
+    leads_raw, finance_rows, claim_rows = await asyncio.gather(
+        db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000),
+        db.finance.find({}, FINANCE_BOARD_PROJ).to_list(5000),
+        db.claims.find({}, CLAIM_BOARD_PROJ).to_list(5000),
+    )
+    leads = _exclude_parked_deals(leads_raw)
     ym = this_month()
     td = today()
     vol = _volume_period_kpis(leads, include_money=False)
@@ -3719,7 +3818,6 @@ async def _ops_pipeline_dashboard():
 
     finance_pending = 0
     finance_overdue_amt = 0.0
-    finance_rows = await db.finance.find().to_list(5000)
     finance_pending_files = []
     for f in finance_rows:
         os_amt = ce.num(f.get("fileOutstanding"))
@@ -3742,7 +3840,7 @@ async def _ops_pipeline_dashboard():
 
     oem_claim_open = 0.0
     oem_claim_count = 0
-    for c in await db.claims.find().to_list(5000):
+    for c in claim_rows:
         elig = ce.num(c.get("eligibleClaim") if c.get("eligibleClaim") is not None else c.get("claimAmount"))
         recv = ce.num(c.get("receivedAmount"))
         due = ce.round2(max(0.0, elig - recv))
@@ -9662,7 +9760,9 @@ async def list_finance(view: str = "all", month: Optional[str] = None, year: Opt
     period = _parse_period(month, year)
     if not period.is_all:
         leads_by = {str(l.get("leadId") or ""): l
-                    for l in await db.leads.find().to_list(5000) if l.get("leadId")}
+                    for l in await db.leads.find(
+                        {}, {"leadId": 1, "deliveryDate": 1, "closedDate": 1, "_id": 0}
+                    ).to_list(5000) if l.get("leadId")}
 
         def _fdate(f):
             d = str(f.get("deliveryDate") or "")[:10]
@@ -9812,13 +9912,20 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
 async def list_deliveries(month: Optional[str] = None, year: Optional[str] = None,
                           user=Depends(current_user)):
     # Open bookings still in fulfilment, plus Delivered / Close Won retails.
-    leads = await db.leads.find().to_list(5000)
+    leads = await db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000)
     leads = [l for l in leads if _is_open_booking_lead(l) or _is_delivered_lead(l)]
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
+    lids = [l["leadId"] for l in leads if l.get("leadId")]
+    del_by = {}
+    if lids:
+        async for d in db.deliveries.find({"leadId": {"$in": lids}}):
+            lid = d.get("leadId")
+            if lid and lid not in del_by:
+                del_by[lid] = d
     result = []
     for l in leads:
-        d = await db.deliveries.find_one({"leadId": l["leadId"]}) or {}
+        d = del_by.get(l["leadId"]) or {}
         done = _is_delivered_lead(l)
         result.append({
             "leadId": l["leadId"], "customerName": l.get("customerName"), "mobile": l.get("mobile"),
@@ -11860,7 +11967,7 @@ async def save_exec_incentive_plan(body: ExecIncentivePlanIn, act=Depends(actor)
 
 async def _exec_incentive_board():
     ym = this_month()
-    leads = await db.leads.find().to_list(8000)
+    leads = await db.leads.find({}, BOARD_LEAD_PROJ).to_list(8000)
     units_by_key = {}
     display = {}
 
@@ -11922,7 +12029,7 @@ async def list_bookings(month: Optional[str] = None, year: Optional[str] = None,
     lead_ids = [b.get("leadId") for b in rows if b.get("leadId")]
     leads = {}
     if lead_ids:
-        async for l in db.leads.find({"leadId": {"$in": lead_ids}}):
+        async for l in db.leads.find({"leadId": {"$in": lead_ids}}, BOARD_LEAD_PROJ):
             leads[l["leadId"]] = l
     open_rows = []
     for b in rows:
