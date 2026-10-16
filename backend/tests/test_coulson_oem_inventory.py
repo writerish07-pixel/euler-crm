@@ -959,6 +959,38 @@ def test_sold_inventory_merges_vehicle_invoices(monkeypatch):
     assert oem_sync.vehicle_mobile(today) == "9352347959"
 
 
+def test_invoice_model_filled_from_chassis_transfer(monkeypatch):
+    """Vehicle Invoices omit model; transfer still has it after billing."""
+    def fake_get_json(token, path, params=None):
+        params = params or {}
+        if path == "vehicle-inventory/transfer":
+            if str(params.get("chassis") or "") == "MD9EVDAD26K217428":
+                return {"success": True, "data": [{
+                    "chassis": "MD9EVDAD26K217428",
+                    "model": "Turbo", "variant": "Range Maxx",
+                    "sap_vehicle_model_id": "oem-maxx-pv",
+                    "sap_product_name": "TURBO RANGEMAXX PV",
+                }]}
+            return {"success": True, "data": [], "extras": {"total_count": 0}}
+        if path == "dealer/invoice/vehicle":
+            return {"success": True, "data": [{
+                "chassis": "MD9EVDAD26K217428",
+                "customer_name": "RADHE RADHE PLASTIC",
+                "customer_phone": "9352347959",
+                "invoice_creation_ts": "2026-10-16T13:34:38.000Z",
+                "invoice_number": "AF-TODAY-1",
+                "status": "CREATED",
+            }], "extras": {"total_count": 1}}
+        raise coulson_client.CoulsonError("not found", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok", limit=200)
+    hit = next(r for r in rows if r["chassis"] == "MD9EVDAD26K217428")
+    assert hit["model"] == "Turbo"
+    assert hit["variant"] == "Range Maxx"
+    assert hit["sap_product_name"] == "TURBO RANGEMAXX PV"
+
+
 def test_sold_inventory_reraises_when_every_source_fails(monkeypatch):
     def boom(token, path, params=None):
         raise coulson_client.CoulsonError("Coulson timed out after 90s")
@@ -1076,4 +1108,24 @@ async def test_short_invoice_pull_upserts_today_without_wiping(client):
     assert today["invoiceNumber"] == "AF-TODAY-1"
     kept = await server.db.oem_sold.find_one({"chassis": "MD9EVDAD26J17964"})
     assert kept["invoiceNumber"] == "AF-OLD"
+
+
+@pytest.mark.asyncio
+async def test_replace_sold_keeps_yard_model_on_invoice_row(client):
+    chassis = "MD9YARDMODEL01"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_inventory.delete_many({"chassis": chassis})
+    await server.db.oem_inventory.insert_one({
+        "chassis": chassis, "model": "Turbo Max", "variant": "Maxx (PV)",
+        "oemSkuKey": "turbo.maxx.pv",
+    })
+    await oem_sync.replace_sold_inventory(server.db, [{
+        "chassis": chassis, "customer_name": "Yard Keep",
+        "invoice_number": "AF-YARD-1", "_coulsonStatus": "INVOICED",
+    }], {}, {}, complete=True)
+    row = await server.db.oem_sold.find_one({"chassis": chassis})
+    assert row["model"] == "Turbo Max"
+    assert row["variant"] == "Maxx (PV)"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_inventory.delete_many({"chassis": chassis})
 

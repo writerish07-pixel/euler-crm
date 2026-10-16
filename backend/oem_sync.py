@@ -262,12 +262,12 @@ def _inventory_doc(vehicle, sku, price):
         "emch": vehicle.get("emch") or vehicle.get("registration_number")
                 or vehicle.get("registration_no") or vehicle.get("registrationNo") or "",
         "colour": vehicle.get("colour") or "",
-        "model": sku.crm_model if sku else (vehicle.get("model") or ""),
-        "variant": sku.crm_variant if sku else (vehicle.get("variant") or ""),
+        "model": sku.crm_model if sku else vehicle_model(vehicle),
+        "variant": sku.crm_variant if sku else vehicle_variant(vehicle),
         "bodyType": sku.body_type if sku else (vehicle.get("updated_load_body") or vehicle.get("load_body_assembly") or ""),
         "oemSkuKey": sku.key if sku else "",
         "oemModelId": vehicle.get("sap_vehicle_model_id") or "",
-        "sapProductName": vehicle.get("sap_product_name") or "",
+        "sapProductName": vehicle.get("sap_product_name") or vehicle.get("sapProductName") or "",
         "modelRegisteredName": vehicle.get("model_registered_name") or "",
         "plantStatus": vehicle.get("plant_status") or "",
         "readyForAllocation": bool(vehicle.get("ready_for_allocation")),
@@ -400,18 +400,15 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
             if sku:
                 price = cat.jaipur_price(oem_full)
         if not sku:
-            oem_stub = {
-                "model": v.get("model"),
-                "variant": v.get("variant"),
-                "load_body": v.get("updated_load_body") or v.get("load_body_assembly"),
-                "sap_product_name": v.get("sap_product_name"),
-                "model_registered_name": v.get("model_registered_name"),
-            }
+            oem_stub = oem_stub_from_vehicle(v)
             sku = cat.sku_for_oem_row(oem_stub)
             if sku and by_key.get(sku.key):
                 price = cat.jaipur_price(by_key[sku.key][0])
         inv_docs.append(_inventory_doc(v, sku, price))
 
+    # Snapshot yard/sold models before PRESENT is replaced — billed-today
+    # chassis have already left the yard pull but still sit in oem_inventory.
+    model_index = await chassis_model_index(db)
     await db.oem_inventory.delete_many({})
     if inv_docs:
         await db.oem_inventory.insert_many(inv_docs)
@@ -419,7 +416,8 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
     yard_count = await db.oem_inventory.count_documents({})
     sold_count = await replace_sold_inventory(
         db, sold_vehicles, oem_by_id, by_key,
-        complete=getattr(sold_vehicles, "complete", True))
+        complete=getattr(sold_vehicles, "complete", True),
+        model_index=model_index)
     transit_docs = []
     for v in transit_vehicles:
         sku = None
@@ -430,13 +428,7 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
             if sku:
                 price = cat.jaipur_price(oem_full)
         if not sku:
-            sku = cat.sku_for_oem_row({
-                "model": v.get("model"),
-                "variant": v.get("variant"),
-                "load_body": v.get("updated_load_body") or v.get("load_body_assembly"),
-                "sap_product_name": v.get("sap_product_name"),
-                "model_registered_name": v.get("model_registered_name"),
-            })
+            sku = cat.sku_for_oem_row(oem_stub_from_vehicle(v))
         doc = _inventory_doc(v, sku, price)
         doc["stockStatus"] = "transit"
         transit_docs.append(doc)
@@ -529,6 +521,17 @@ _PLATE_KEYS = (
     "vehicle_number", "reg_no",
 )
 _CHASSIS_KEYS = ("chassis", "chassis_number", "chassisNumber", "vin")
+_MODEL_KEYS = (
+    "model", "octopus_model", "vehicle_model", "vehicleModel",
+    "model_name", "modelName", "crm_model",
+)
+_VARIANT_KEYS = (
+    "variant", "octopus_variant", "vehicle_variant", "vehicleVariant",
+    "variant_name", "variantName", "crm_variant", "sub_variant",
+)
+_NESTED_VEHICLE_KEYS = (
+    "vehicle", "sap_vehicle_model", "sapVehicleModel", "sku", "product",
+)
 
 
 def _first_str(row, keys):
@@ -573,6 +576,61 @@ def vehicle_mobile(row):
 
 def vehicle_chassis(row):
     return _norm_chassis(_first_str(row, _CHASSIS_KEYS))
+
+
+def vehicle_model(row):
+    """CRM / OEM model name from a Sold, yard, or Vehicle Invoice row."""
+    if not isinstance(row, dict):
+        return ""
+    n = _first_str(row, _MODEL_KEYS)
+    if n:
+        return n
+    for nested_key in _NESTED_VEHICLE_KEYS:
+        sub = row.get(nested_key)
+        if isinstance(sub, dict):
+            n = vehicle_model(sub)
+            if n:
+                return n
+    return _first_str(row, (
+        "model_registered_name", "modelRegisteredName",
+        "sap_product_name", "sapProductName",
+    ))
+
+
+def vehicle_variant(row):
+    if not isinstance(row, dict):
+        return ""
+    n = _first_str(row, _VARIANT_KEYS)
+    if n:
+        return n
+    for nested_key in _NESTED_VEHICLE_KEYS:
+        sub = row.get(nested_key)
+        if isinstance(sub, dict):
+            n = vehicle_variant(sub)
+            if n:
+                return n
+    return ""
+
+
+def oem_stub_from_vehicle(vehicle):
+    nested = {}
+    if isinstance(vehicle, dict):
+        for key in _NESTED_VEHICLE_KEYS:
+            sub = vehicle.get(key)
+            if isinstance(sub, dict):
+                nested = sub
+                break
+    src = vehicle if isinstance(vehicle, dict) else {}
+    return {
+        "model": vehicle_model(src) or nested.get("model"),
+        "variant": vehicle_variant(src) or nested.get("variant"),
+        "load_body": (src.get("updated_load_body") or src.get("load_body_assembly")
+                      or src.get("load_body") or nested.get("load_body")),
+        "sap_product_name": (src.get("sap_product_name") or src.get("sapProductName")
+                             or nested.get("sap_product_name")),
+        "model_registered_name": (src.get("model_registered_name")
+                                  or nested.get("model_registered_name")),
+    }
 
 
 def vehicle_invoice(row):
@@ -701,14 +759,61 @@ def _sold_doc(vehicle, sku, price):
     }
 
 
-async def replace_sold_inventory(db, vehicles, oem_by_id, by_key, *, complete=True):
+def _fill_sold_model(doc, index):
+    """Keep model/variant when Vehicle Invoices omit them."""
+    if not isinstance(doc, dict):
+        return doc
+    if str(doc.get("model") or "").strip():
+        return doc
+    hit = (index or {}).get(_norm_chassis(doc.get("chassis"))) or {}
+    if not hit.get("model"):
+        return doc
+    doc["model"] = hit.get("model") or ""
+    if not str(doc.get("variant") or "").strip():
+        doc["variant"] = hit.get("variant") or ""
+    if not doc.get("oemSkuKey"):
+        doc["oemSkuKey"] = hit.get("oemSkuKey") or ""
+    if not doc.get("bodyType"):
+        doc["bodyType"] = hit.get("bodyType") or ""
+    if not doc.get("sapProductName"):
+        doc["sapProductName"] = hit.get("sapProductName") or ""
+    return doc
+
+
+async def chassis_model_index(db):
+    """chassis → last known model from Sold / yard / transit."""
+    idx = {}
+    for coll in ("oem_sold", "oem_inventory", "oem_inventory_transit"):
+        async for row in db[coll].find(
+                {}, {"chassis": 1, "model": 1, "variant": 1, "oemSkuKey": 1,
+                     "bodyType": 1, "sapProductName": 1}):
+            ch = _norm_chassis(row.get("chassis"))
+            if not ch or not str(row.get("model") or "").strip():
+                continue
+            idx.setdefault(ch, {
+                "model": row.get("model") or "",
+                "variant": row.get("variant") or "",
+                "oemSkuKey": row.get("oemSkuKey") or "",
+                "bodyType": row.get("bodyType") or "",
+                "sapProductName": row.get("sapProductName") or "",
+            })
+    return idx
+
+
+async def replace_sold_inventory(db, vehicles, oem_by_id, by_key, *, complete=True,
+                                 model_index=None):
     """Write Coulson Sold / Vehicle Invoices into oem_sold.
 
     An empty pull must not wipe chassis already synced — that is how today's
     billed list vanished after a Coulson timeout. A short pull (Vehicle
     Invoices page, or a partial Sold page) upserts by chassis so older Sold
     rows stay put and today's billed chassis still land.
+
+    Vehicle Invoices do not send model. Fill from yard/sold history, then
+    from a chassis lookup already copied onto the live row.
     """
+    if model_index is None:
+        model_index = await chassis_model_index(db)
     docs = []
     seen = set()
     for v in vehicles or []:
@@ -720,17 +825,12 @@ async def replace_sold_inventory(db, vehicles, oem_by_id, by_key, *, complete=Tr
             if sku:
                 price = cat.jaipur_price(oem_full)
         if not sku:
-            oem_stub = {
-                "model": v.get("model"),
-                "variant": v.get("variant"),
-                "load_body": v.get("updated_load_body") or v.get("load_body_assembly"),
-                "sap_product_name": v.get("sap_product_name"),
-                "model_registered_name": v.get("model_registered_name"),
-            }
+            oem_stub = oem_stub_from_vehicle(v)
             sku = cat.sku_for_oem_row(oem_stub)
             if sku and by_key.get(sku.key):
                 price = cat.jaipur_price(by_key[sku.key][0])
         doc = _sold_doc(v, sku, price)
+        _fill_sold_model(doc, model_index)
         ch = _norm_chassis(doc.get("chassis"))
         if not ch or ch in seen:
             continue
@@ -1728,17 +1828,43 @@ def _bucket_for_matched_lead(lead):
     return BUCKET_PENDING
 
 
+def _lead_model_variant(lead, chassis=""):
+    """Model/variant on the matched CRM file, preferring the unit with this chassis."""
+    if not lead:
+        return "", ""
+    ch = _norm_chassis(chassis)
+    if ch:
+        for unit in (lead.get("units") or []):
+            if not isinstance(unit, dict):
+                continue
+            if _norm_chassis(unit.get("chassisNumber")) != ch:
+                continue
+            model = str(unit.get("model") or unit.get("interestedModel") or "").strip()
+            variant = str(unit.get("variant") or "").strip()
+            if model:
+                return model, variant
+    model = str(lead.get("interestedModel") or lead.get("model") or "").strip()
+    variant = str(lead.get("variant") or "").strip()
+    return model, variant
+
+
 def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None):
     sold_date = str((sold or {}).get("soldDate") or "").strip()[:10]
     holders = [_pair_summary(l) for l in (holder_leads or []) if l]
     keeper = resolve_chassis_holders(holder_leads or [])
+    chassis = _norm_chassis((sold or {}).get("chassis"))
+    model = str((sold or {}).get("model") or "").strip()
+    variant = str((sold or {}).get("variant") or "").strip()
+    if not model:
+        lead_model, lead_variant = _lead_model_variant(lead, chassis)
+        model, variant = lead_model, lead_variant or variant
     return {
-        "chassis": _norm_chassis((sold or {}).get("chassis")),
+        "chassis": chassis,
         "invoiceNumber": str((sold or {}).get("invoiceNumber") or "").strip(),
         "mobile": _digits10((sold or {}).get("mobile")),
         "customerName": str((sold or {}).get("customerName") or "").strip(),
-        "model": (sold or {}).get("model") or "",
-        "variant": (sold or {}).get("variant") or "",
+        "model": model,
+        "variant": variant,
         "soldDate": sold_date,
         "undated": not sold_date,
         "bucket": bucket,

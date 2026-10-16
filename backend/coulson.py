@@ -641,6 +641,79 @@ class _SoldPull(list):
     complete = True
 
 
+_MODEL_COPY_KEYS = (
+    "model", "variant", "sap_vehicle_model_id", "sap_product_name",
+    "model_registered_name", "updated_load_body", "load_body_assembly",
+    "octopus_model", "octopus_variant", "load_body",
+)
+
+
+def fetch_vehicle_by_chassis(token: str, chassis: str):
+    """One vehicle-inventory/transfer row for a chassis, any status.
+
+    Vehicle Invoices (`dealer/invoice/vehicle`) do not send model/variant.
+    The Sold / Present transfer row still has them after billing.
+    """
+    ch = str(chassis or "").strip()
+    if not ch:
+        return None
+    want = ch.replace(" ", "").upper()
+    attempts = (
+        {"view_type": "table", "chassis": ch, "limit": "5", "offset": "0"},
+        {"view_type": "table", "vehicle_status": "SOLD", "chassis": ch,
+         "limit": "5", "offset": "0"},
+        {"view_type": "table", "vehicle_status": "PRESENT", "chassis": ch,
+         "limit": "5", "offset": "0"},
+    )
+    for params in attempts:
+        try:
+            payload = get_json(token, "vehicle-inventory/transfer", params)
+        except CoulsonError:
+            continue
+        data = payload.get("data") or []
+        if not isinstance(data, list):
+            continue
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            got = str(row.get("chassis") or row.get("chassis_number")
+                      or row.get("chassisNumber") or "").replace(" ", "").upper()
+            if got == want:
+                return row
+    return None
+
+
+def _copy_model_fields(dst, src):
+    if not isinstance(dst, dict) or not isinstance(src, dict):
+        return
+    for key in _MODEL_COPY_KEYS:
+        if src.get(key) not in (None, "") and dst.get(key) in (None, ""):
+            dst[key] = src.get(key)
+    for nested_key in ("vehicle", "sap_vehicle_model", "sapVehicleModel"):
+        nested = src.get(nested_key)
+        if isinstance(nested, dict):
+            _copy_model_fields(dst, nested)
+
+
+def fill_missing_sold_models(token: str, rows, *, limit=40):
+    """Copy model/variant onto Vehicle Invoice rows that arrived without them."""
+    filled = 0
+    for row in rows or []:
+        if filled >= limit:
+            break
+        if not isinstance(row, dict):
+            continue
+        if row.get("model") or row.get("sap_vehicle_model_id") or row.get("sap_product_name"):
+            continue
+        extra = fetch_vehicle_by_chassis(
+            token, row.get("chassis") or row.get("chassis_number") or "")
+        if not extra:
+            continue
+        _copy_model_fields(row, extra)
+        filled += 1
+    return filled
+
+
 def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
     """Vehicles billed / sold — Sold tab PLUS Vehicle Invoices."""
     rows = _SoldPull()
@@ -663,6 +736,12 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
     except CoulsonError as e:
         log.info("Coulson vehicle invoices skipped: %s", e)
         errors.append(e)
+    try:
+        fill_missing_sold_models(token, rows)
+    except CoulsonError as e:
+        log.info("Coulson chassis model fill skipped: %s", e)
+    except Exception:
+        log.exception("Coulson chassis model fill failed")
     if not rows and errors:
         raise errors[0]
     rows.complete = complete
