@@ -1341,6 +1341,9 @@ async def recompute_lead(lead_id):
             updates["packUnitsFilled"] = pack_filled
             updates["packUnitsPending"] = pack_pending
             updates["packUnitsTotal"] = len(pack_units)
+            u0 = pack_units[0] or {}
+            if u0.get("useDealPrice") and "additionalDiscount" in u0:
+                updates["additionalDiscount"] = u0["additionalDiscount"]
         if pack_total is not None:
             updates["customerPayable"] = pack_total
             updates["cxDemand"] = pack_total
@@ -6999,11 +7002,31 @@ def _refresh_unit_payables(lead, scheme_rows=None):
             units[i] = u
             continue
         pack = oem_sync.is_same_order_pack(lead)
+        overlay = _lead_overlay_unit(lead, u, i)
+        snap = lead_to_snapshot(overlay)
+        totals = ce.compute_commercial_totals(snap, scheme_rows)
         if (not pack) and u.get("useDealPrice") and ce.num(u.get("cxDemand")) > 0:
             pay = ce.round2(ce.num(u.get("cxDemand")))
+        elif pack:
+            lock = ce.pack_unit_locked_cx_demand(snap, u)
+            if lock > 0:
+                alloc = ce.compute_scheme_allocation(snap, scheme_rows) if scheme_rows is not None else {}
+                scheme_passed = ce.scheme_customer_benefit_ex_additional(alloc)
+                derived = ce.derive_deal_customer_pass(
+                    totals.get("grossVehicleCost"), lock, scheme_passed,
+                    overlay.get("oemExtraSupportReceived"))
+                if derived.get("applied"):
+                    u["additionalDiscount"] = derived["additionalDiscount"]
+                    u["oemExtraSupportPassed"] = derived["oemExtraSupportPassed"]
+                    u["extraIncomeFromCustomer"] = derived["extraFromCustomer"]
+                    u["cxDemand"] = lock
+                    u["useDealPrice"] = True
+                    pay = lock
+                else:
+                    pay = ce.round2(ce.num(totals.get("customerPayable")))
+            else:
+                pay = ce.round2(ce.num(totals.get("customerPayable")))
         else:
-            snap = lead_to_snapshot(_lead_overlay_unit(lead, u, i))
-            totals = ce.compute_commercial_totals(snap, scheme_rows)
             pay = ce.round2(ce.num(totals.get("customerPayable")))
         u["customerPayable"] = pay
         units[i] = u
