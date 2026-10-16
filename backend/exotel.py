@@ -37,36 +37,31 @@ SLACK_RUPEES = 100
 AUDIO_DIR = Path(__file__).parent / "static" / "exotel"
 AUDIO_CLIPS = ("intro", "prompt", "speak", "thanks")
 
-# Village Hindi for less-literate customers. Same words as the MP3s.
-# No English (hash, number, keypad, type, booking) and no formal Hindi (rashi, bhugtan).
+# Same words as the first-upload MP3s (do not regenerate those clips).
 SPOKEN = {
     "intro": (
-        "Namaste. Main Akar Euler se bol rahi hoon. "
-        "Aapne hamari gaadi li hai. Bas ye batana hai — "
-        "gaadi ke liye aapne kitne paise diye."
+        "Namaste. Akar Euler se baat ho rahi hai. "
+        "Aapki booking ke baare mein ek chhoti si pushti hai."
     ),
     "prompt": (
-        "Gaadi ke liye aapne jitne paise diye, wo mobile par ek ek karke dabate jayein. "
-        "Jab dabana khatam ho jaye, to mobile ke neeche dayi taraf dekhein. "
-        "Wahan ek chhoti si jagah hai, us par do chhoti lakeerein bani hain. Wo daba den."
+        "Aapne showroom mein jitna bhugtan kiya hai, woh rashi keypad par type karke hash dabaiye. "
+        "Type nahi kar sakte to rashi bolkar bata dijiye."
     ),
-    "speak": "Agar daba nahi sakte, to ab munh se bol den. Aapne kitne paise diye.",
+    "speak": "Kripya ab rashi bol kar bataiye.",
     "thanks": "Dhanyavaad. Akar Euler.",
 }
 
-# Devanagari used when rebuilding the MP3s (clearer TTS than roman Hindi).
+# Devanagari used only if the original clips are rebuilt.
 SPOKEN_HI = {
     "intro": (
-        "नमस्ते। मैं आकर यूलर से बोल रही हूँ। "
-        "आपने हमारी गाड़ी ली है। बस ये बताना है — "
-        "गाड़ी के लिए आपने कितने पैसे दिए।"
+        "नमस्ते। आकर यूलर से बात हो रही है। "
+        "आपकी बुकिंग के बारे में एक छोटी सी पुष्टि है।"
     ),
     "prompt": (
-        "गाड़ी के लिए आपने जितने पैसे दिए, वो मोबाइल पर एक एक करके दबाते जाएं। "
-        "जब दबाना खत्म हो जाए, तो मोबाइल के नीचे दाईं तरफ़ देखें। "
-        "वहाँ एक छोटी सी जगह है, उस पर दो छोटी लकीरें बनी हैं। वो दबा दें।"
+        "आपने शोरूम में जितना भुगतान किया है, वो राशि कीपैड पर टाइप करके हैश दबाइये। "
+        "टाइप नहीं कर सकते तो राशि बोलकर बता दीजिये।"
     ),
-    "speak": "अगर दबा नहीं सकते, तो अब मुँह से बोल दें। आपने कितने पैसे दिए।",
+    "speak": "कृपया अब राशि बोल कर बताइये।",
     "thanks": "धन्यवाद। आकर यूलर।",
 }
 
