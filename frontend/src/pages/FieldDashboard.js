@@ -4,8 +4,7 @@ import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
   ReceiptText, Percent, Map, Warehouse, CalendarDays,
 } from "lucide-react";
-import { toast } from "sonner";
-import { get } from "../lib/api";
+import { loadBoard } from "../lib/loadBoard";
 import { compactInr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
@@ -17,11 +16,13 @@ import { thisMonth, thisYear } from "../lib/period";
 /** Shared home for company ASM and RM — retail + pipeline hygiene. */
 export default function FieldDashboard() {
   const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
   const [month, setMonth] = useState(thisMonth());
   const [year, setYear] = useState(thisYear());
   const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
-    get("/field/dashboard").then(setD).catch(() => toast.error("Could not load field dashboard"));
+    setErr("");
+    loadBoard("/field/dashboard", setD, setErr, "Could not load field dashboard");
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -30,7 +31,9 @@ export default function FieldDashboard() {
       <div data-testid="field-dashboard">
         <PageHeader title="Field Dashboard" subtitle="ASM / RM · company retail"
           actions={<ReportActions onRefresh={load} />} />
-        <div className="text-ink-faint text-sm">Loading field dashboard…</div>
+        <div className={`text-sm ${err ? "text-red-700" : "text-ink-faint"}`}>
+          {err || "Loading field dashboard…"}
+        </div>
       </div>
     );
   }

@@ -1,6 +1,7 @@
 """MTD hero + YTD subtitle on every dealership dashboard."""
 import os
 import sys
+import time
 
 import pytest
 import pytest_asyncio
@@ -149,3 +150,85 @@ async def test_field_and_gm_share_period_without_collected(client):
         assert k["cancellationsYtd"] >= k["cancellationsMtd"]
         assert "collected" not in d["period"]["mtd"]
         assert "collected" not in k
+
+
+@pytest.mark.asyncio
+async def test_owner_dashboard_stays_fast_with_many_leads(client):
+    """`l in booked` compared whole lead dicts and timed the live desk out."""
+    fat = {
+        "schemeAllocationSummary": {"components": [{"k": i, "v": i} for i in range(12)]},
+        "units": [{"sno": 1, "model": "Storm", **{f"f{j}": j for j in range(15)}}],
+    }
+    leads, payments, finance = [], [], []
+    for i in range(280):
+        lid = f"LD-LOAD-{i:04d}"
+        booked = i % 2 == 0
+        leads.append({
+            "leadId": lid, "customerName": f"Cust {i}", "executive": "Amit",
+            "currentStatus": "Booked" if booked else "New",
+            "accountStatus": "Active",
+            "createdDate": "2026-10-01",
+            "bookingDate": "2026-10-02" if booked else "",
+            "interestedModel": "Storm",
+            "customerOutstanding": 50,
+            "companyOutstanding": 0,
+            **fat,
+        })
+        payments.append({
+            "paymentId": f"PAY{i}", "leadId": lid, "amount": 10,
+            "date": "2026-10-03", "paymentMode": "Cash",
+        })
+        if i < 90:
+            finance.append({
+                "financeFileNumber": f"FF{i}", "leadId": lid,
+                "fileOutstanding": 1000, "status": "Pending",
+            })
+    await server.db.leads.delete_many({})
+    await server.db.payments.delete_many({})
+    await server.db.finance.delete_many({})
+    await server.db.leads.insert_many(leads)
+    await server.db.payments.insert_many(payments)
+    await server.db.finance.insert_many(finance)
+    t0 = time.monotonic()
+    r = await client.get("/api/dashboard")
+    elapsed = time.monotonic() - t0
+    assert r.status_code == 200, r.text
+    assert elapsed < 6, f"owner dashboard hung ({elapsed:.2f}s)"
+    d = r.json()
+    assert d["kpis"]["totalLeads"] == 280
+    storm = next(m for m in d["modelPerformance"] if m["model"] == "Storm")
+    assert storm["revenue"] == 2800
+    assert storm["bookings"] == 140
+
+
+@pytest.mark.asyncio
+async def test_monthly_and_gm_dashboards_stay_fast_with_many_leads(client):
+    fat = {"units": [{"sno": 1, "model": "Storm", **{f"f{j}": j for j in range(12)}}]}
+    await server.db.leads.delete_many({})
+    await server.db.leads.insert_many([
+        {
+            "leadId": f"LD-M{i:04d}", "customerName": f"Cust {i}", "executive": "Amit",
+            "currentStatus": "Booked" if i % 2 == 0 else "New",
+            "accountStatus": "Active", "createdDate": "2026-10-01",
+            "bookingDate": "2026-10-02" if i % 2 == 0 else "",
+            "interestedModel": "Storm", "cancelHistory": [
+                {"date": "2026-09-01", "reason": "Price", "executive": "Amit"},
+            ],
+            **fat,
+        }
+        for i in range(220)
+    ])
+    t0 = time.monotonic()
+    monthly = await client.get("/api/reports/monthly", params={"month": "2026-10"})
+    monthly_s = time.monotonic() - t0
+    assert monthly.status_code == 200, monthly.text
+    assert monthly_s < 6, f"monthly register hung ({monthly_s:.2f}s)"
+    tok = await _token("salesgm@euler.com")
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        c.headers.update({"Authorization": f"Bearer {tok}"})
+        t1 = time.monotonic()
+        gm = await c.get("/api/sales-gm/dashboard")
+        gm_s = time.monotonic() - t1
+    assert gm.status_code == 200, gm.text
+    assert gm_s < 6, f"sales GM dashboard hung ({gm_s:.2f}s)"

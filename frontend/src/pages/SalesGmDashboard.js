@@ -4,8 +4,7 @@ import {
   Users, ClipboardCheck, Truck, TrendingUp, AlertCircle, Landmark,
   Ban, IndianRupee, Percent, ClipboardList, Warehouse, Trophy, CalendarDays,
 } from "lucide-react";
-import { toast } from "sonner";
-import { get } from "../lib/api";
+import { loadBoard } from "../lib/loadBoard";
 import { compactInr, inr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
@@ -17,11 +16,13 @@ import { thisMonth, thisYear } from "../lib/period";
 /** Showroom-wide sales board — all executives, deal desk, no money posting. */
 export default function SalesGmDashboard() {
   const [d, setD] = useState(null);
+  const [err, setErr] = useState("");
   const [month, setMonth] = useState(thisMonth());
   const [year, setYear] = useState(thisYear());
   const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
-    get("/sales-gm/dashboard").then(setD).catch(() => toast.error("Could not load Sales GM dashboard"));
+    setErr("");
+    loadBoard("/sales-gm/dashboard", setD, setErr, "Could not load Sales GM dashboard");
   }, []);
   useEffect(() => { load(); }, [load]);
 
@@ -30,7 +31,9 @@ export default function SalesGmDashboard() {
       <div data-testid="sales-gm-dashboard">
         <PageHeader title="Sales GM Dashboard" subtitle="Showroom-wide sales"
           actions={<ReportActions onRefresh={load} />} />
-        <div className="text-ink-faint text-sm">Loading Sales GM dashboard…</div>
+        <div className={`text-sm ${err ? "text-red-700" : "text-ink-faint"}`}>
+          {err || "Loading Sales GM dashboard…"}
+        </div>
       </div>
     );
   }
