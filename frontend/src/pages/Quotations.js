@@ -6,6 +6,7 @@ import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Button, Drawer, Field, Input, Select, Card } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
+import { usePeriodState } from "../lib/period";
 import { useAuth } from "../context/AuthContext";
 
 const CHARGES = [["exShowroom","Ex-Showroom"],["registrationRto","RTO"],["insurance","Insurance"],["accessories","Accessories"],["handlingCharges","Handling"],["fastag","Fastag"],["trc","TRC"],["extendedWarranty","Ext. Warranty"],["otherCharges","Other"]];
@@ -16,7 +17,10 @@ export default function Quotations() {
   const [show, setShow] = useState(false);
   const [masters, setMasters] = useState(null);
   const period = usePeriodState();
-  const load = useCallback(() => get("/quotations", period.params).then(setRows), [period.params]);
+  const load = useCallback(() => get("/quotations", period.params).then(setRows).catch(() => {
+    setRows([]);
+    toast.error("Could not load quotations");
+  }), [period.params]);
   useEffect(() => { load(); get("/masters").then(setMasters); }, [load]);
 
   return (

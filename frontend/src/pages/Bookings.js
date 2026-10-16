@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { get } from "../lib/api";
+import { loadList } from "../lib/loadList";
 import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -11,7 +11,7 @@ export default function Bookings() {
   const { isField } = useAuth();
   const [rows, setRows] = useState([]);
   const period = usePeriodState();
-  const load = useCallback(() => get("/bookings", period.params).then(setRows), [period.params]);
+  const load = useCallback(() => loadList("/bookings", setRows, period.params, "Could not load bookings"), [period.params]);
   useEffect(() => { load(); }, [load]);
   return (
     <div>

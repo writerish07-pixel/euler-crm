@@ -47,7 +47,10 @@ export default function Finance() {
   });
   const [receipt, setReceipt] = useState(false);
   const period = usePeriodState();
-  const load = useCallback(() => get("/finance", { view, ...period.params }).then(setRows), [view, period.params]);
+  const load = useCallback(() => get("/finance", { view, ...period.params }).then(setRows).catch(() => {
+    setRows([]);
+    toast.error("Could not load finance files");
+  }), [view, period.params]);
   useEffect(() => { load(); }, [load]);
   const views = [["all", "All Files"], ["pending", "Pending"], ["overdue", "Overdue"]];
   const [allFiles, setAllFiles] = useState([]);

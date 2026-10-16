@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Coins } from "lucide-react";
+import { toast } from "sonner";
 import { get } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, StatCard } from "../components/ui";
@@ -10,7 +11,9 @@ import { usePeriodState } from "../lib/period";
 export default function DealerEarnings() {
   const [data, setData] = useState({ rows: [], total: 0 });
   const period = usePeriodState();
-  const load = useCallback(() => get("/dealer-earnings", period.params).then(setData), [period.params]);
+  const load = useCallback(() => get("/dealer-earnings", period.params).then(setData).catch(() => {
+    toast.error("Could not load dealer earnings");
+  }), [period.params]);
   useEffect(() => { load(); }, [load]);
   const { rows, total } = data;
   const margin = rows.reduce((s, r) => s + Number(r.dealerMarginNetExGst || 0), 0);

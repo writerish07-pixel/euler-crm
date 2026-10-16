@@ -91,4 +91,54 @@ def test_boot_maintenance_is_scheduled_not_inlined_in_production_source():
     assert "await _backfill_close_won_status()" not in src
     maint = inspect.getsource(server._run_boot_maintenance)
     assert "await _backfill_close_won_status()" in maint
-    assert "await _oem_catalog_boot()" in maint
+    assert "_oem_catalog_boot()" in maint
+    assert "_retry_dup_repair_done = True" in maint
+    assert "_retry_dup_last_clean_at = time.monotonic()" in maint
+
+
+@pytest.mark.asyncio
+async def test_health_reports_mongo(client):
+    body = (await client.get("/health")).json()
+    assert body["mongo"] in ("ok", "error")
+    assert "maintenance" in body
+
+
+@pytest.mark.asyncio
+async def test_second_seed_does_not_mark_live_leads_for_recompute(client):
+    import seed as seeder
+    second = await seeder.run_seed(server.db)
+    assert second["seeded"] is False
+
+
+@pytest.mark.asyncio
+async def test_boot_step_times_out_instead_of_hanging():
+    async def never():
+        await asyncio.sleep(30)
+
+    t0 = time.monotonic()
+    out = await server._boot_step("hang", never(), timeout=0.2)
+    assert out is None
+    assert time.monotonic() - t0 < 3
+
+
+@pytest.mark.asyncio
+async def test_list_leads_returns_during_boot_maintenance(client, monkeypatch):
+    server._boot_state["maintenance"] = "running"
+    called = {"n": 0}
+
+    async def boom():
+        called["n"] += 1
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(server, "_ensure_retry_dups_repaired", boom)
+    login = await client.post(
+        "/api/auth/login", json={"email": "owner@euler.com", "password": "euler@123"})
+    assert login.status_code == 200, login.text
+    token = login.json()["token"]
+    t0 = time.monotonic()
+    leads = await client.get("/api/leads", headers={"Authorization": f"Bearer {token}"})
+    assert leads.status_code == 200, leads.text
+    assert isinstance(leads.json(), list)
+    assert called["n"] == 0
+    assert time.monotonic() - t0 < 8
+    server._boot_state["maintenance"] = "done"

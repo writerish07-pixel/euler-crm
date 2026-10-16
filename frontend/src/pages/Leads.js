@@ -4,6 +4,7 @@ import { Plus, ChevronRight, Upload } from "lucide-react";
 import ReportActions from "../components/ReportActions";
 import { toast } from "sonner";
 import { get, apiErrorMessage } from "../lib/api";
+import { loadList } from "../lib/loadList";
 import { inr } from "../lib/format";
 import { PageHeader, Button, Table, Badge, Input } from "../components/ui";
 import LeadDrawer from "./LeadDrawer";
@@ -32,7 +33,7 @@ export default function Leads() {
   const period = usePeriodState();
 
   const load = useCallback(() => {
-    get("/leads", { status, q: q || undefined, ...period.params }).then(setLeads);
+    loadList("/leads", setLeads, { status, q: q || undefined, ...period.params }, "Could not load leads");
   }, [status, q, period.params]);
 
   useEffect(() => { load(); }, [load]);

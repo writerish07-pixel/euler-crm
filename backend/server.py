@@ -76,7 +76,17 @@ def _is_test_env():
 @app.get("/")
 async def health():
     """Unauthenticated liveness for Railway. Always 200 once the process is listening."""
-    return {"ok": True, "status": "up", "maintenance": _boot_state.get("maintenance", "idle")}
+    mongo = "ok"
+    try:
+        await asyncio.wait_for(db.leads.find_one({}, {"_id": 1}), timeout=2.0)
+    except Exception:
+        mongo = "error"
+    return {
+        "ok": True,
+        "status": "up",
+        "mongo": mongo,
+        "maintenance": _boot_state.get("maintenance", "idle"),
+    }
 
 auth_router = authmod.build_router(db)
 current_user = auth_router.current_user
@@ -3912,7 +3922,10 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      month: Optional[str] = None, year: Optional[str] = None,
                      limit: Optional[int] = None,
                      user=Depends(current_user)):
-    await _ensure_retry_dups_repaired()
+    # Boot already scans for retry-dups. Waiting on that lock (or repeating the
+    # 15k-row pass) after every deploy made GET /leads time out — empty register.
+    if _boot_state.get("maintenance") != "running":
+        await _ensure_retry_dups_repaired()
     await _ensure_pending_deals_parked()
     query = {"dealApprovalPending": {"$ne": True}}
     if status and status != "all":
@@ -16661,6 +16674,24 @@ async def _oem_catalog_boot():
         logging.exception("COULSON_SYNC_LOOP_START_ERROR")
 
 
+async def _boot_step(name, aw, timeout=90):
+    """Run one boot heal with a hard cap so a hung OEM/sheet call cannot empty the desk."""
+    try:
+        return await asyncio.wait_for(aw, timeout=timeout)
+    except asyncio.TimeoutError:
+        logging.error("BOOT_MAINTENANCE_TIMEOUT: %s after %ss", name, timeout)
+    except Exception:
+        logging.exception("BOOT_MAINTENANCE_ERROR: %s", name)
+    return None
+
+
+async def _recompute_seeded_leads():
+    for l in await db.leads.find().to_list(3000):
+        lid = (l or {}).get("leadId")
+        if lid:
+            await recompute_lead(lid)
+
+
 async def _run_boot_maintenance():
     """Idempotent heal + OEM catalog. Safe to run after PORT is bound.
 
@@ -16673,11 +16704,7 @@ async def _run_boot_maintenance():
     logging.info("BOOT_MAINTENANCE: starting (process is already listening)")
     try:
         if _boot_state.get("recomputeSeeded"):
-            try:
-                for l in await db.leads.find().to_list(3000):
-                    await recompute_lead(l["leadId"])
-            except Exception:
-                logging.exception("BOOT_SEEDED_RECOMPUTE_ERROR")
+            await _boot_step("recompute_seeded", _recompute_seeded_leads(), timeout=120)
         try:
             await _ensure_finance_unique_indexes()
         except Exception as e:
@@ -16715,11 +16742,9 @@ async def _run_boot_maintenance():
             await _backfill_booking_advances()
         except Exception:
             pass
-        try:
-            if not _is_test_env():
-                await _apply_turbo_sept_uplift_to_open_leads()
-        except Exception:
-            logging.exception("TURBO_SEPT_UPLIFT_ERROR")
+        if not _is_test_env():
+            await _boot_step(
+                "turbo_sept_uplift", _apply_turbo_sept_uplift_to_open_leads(), timeout=45)
         try:
             await _repair_duplicate_finance_receipts()
         except Exception:
@@ -16729,10 +16754,10 @@ async def _run_boot_maintenance():
                 repaired = await _repair_retry_duplicate_leads()
                 if repaired:
                     logging.info("RETRY_DUP_LEADS_REPAIRED: %s", len(repaired))
-                # Always let the first Lead Register load scan again — boot used
-                # to mark done after 0 rows and leave live triples on the desk.
-                _retry_dup_repair_done = False
-                _retry_dup_last_clean_at = 0.0
+            # Do not force GET /leads to scan 15k rows again. That second pass
+            # sat behind the same lock as boot and timed the register out.
+            _retry_dup_repair_done = True
+            _retry_dup_last_clean_at = time.monotonic()
         except Exception:
             logging.exception("RETRY_DUP_LEADS_REPAIR_ERROR")
             _retry_dup_repair_done = False
@@ -16741,12 +16766,10 @@ async def _run_boot_maintenance():
             await _repair_mis_only_received()
         except Exception:
             logging.exception("MIS_RECEIVED_REPAIR_ERROR")
+        await _boot_step("oem_catalog", _oem_catalog_boot(), timeout=45)
         try:
-            await _oem_catalog_boot()
-        except Exception:
-            logging.exception("OEM_CATALOG_BOOT_ERROR")
-        try:
-            sold_stats = await _apply_sold_vehicle_ids()
+            sold_stats = await _boot_step(
+                "sold_vehicle_ids", _apply_sold_vehicle_ids(), timeout=45) or {}
             missing = await oem_sync.delivered_missing_vehicle_ids(db)
             logging.info(
                 "OEM_SOLD_LEAD_IDS: updated=%s remainingDeliveredMissing=%s",
@@ -16765,17 +16788,16 @@ async def _run_boot_maintenance():
             await oct_2026_schemes.ensure_oct_2026_schemes(db)
         except Exception:
             logging.exception("OCT_2026_SCHEME_BOOT_ERROR")
-        try:
-            folded = await _fold_oem_extra_passed_into_additional_leads()
+        folded = await _boot_step(
+            "oem_extra_fold", _fold_oem_extra_passed_into_additional_leads(), timeout=45)
+        if folded:
             logging.info("OEM_EXTRA_PASSED_FOLD_BOOT: %s", folded)
-        except Exception:
-            logging.exception("OEM_EXTRA_PASSED_FOLD_ERROR")
-        try:
-            if not _is_test_env():
-                rebuilt = await _rebuild_all_delivery_billing_summaries()
+        if not _is_test_env():
+            rebuilt = await _boot_step(
+                "billing_summary_rebuild", _rebuild_all_delivery_billing_summaries(),
+                timeout=60)
+            if rebuilt:
                 logging.info("BILLING_SUMMARY_REBUILD_BOOT: %s", rebuilt)
-        except Exception:
-            logging.exception("BILLING_SUMMARY_REBUILD_ERROR")
         _boot_state["maintenance"] = "done"
         logging.info("BOOT_MAINTENANCE: finished")
     except Exception:

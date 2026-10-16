@@ -43,7 +43,10 @@ export default function SchemeMaster() {
   const [asOf, setAsOf] = useState(todayISO());
   const [showAll, setShowAll] = useState(false);
   const [circular, setCircular] = useState(null);
-  const load = useCallback(() => get("/scheme-master").then(setRows), []);
+  const load = useCallback(() => get("/scheme-master").then(setRows).catch(() => {
+    setRows([]);
+    toast.error("Could not load schemes");
+  }), []);
   useEffect(() => { load(); get("/masters").then((m) => setModels(m.models)); }, [load]);
   useEffect(() => {
     get("/scheme-circulars", { on: asOf }).then((r) => setCircular(r && r.imageUrl ? r : null)).catch(() => setCircular(null));

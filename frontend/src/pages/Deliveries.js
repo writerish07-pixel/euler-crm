@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { get } from "../lib/api";
+import { loadList } from "../lib/loadList";
 import { fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
@@ -15,7 +15,7 @@ const Chip = ({ ok, label }) => (
 export default function Deliveries() {
   const [rows, setRows] = useState([]);
   const period = usePeriodState();
-  const load = useCallback(() => get("/deliveries", period.params).then(setRows), [period.params]);
+  const load = useCallback(() => loadList("/deliveries", setRows, period.params, "Could not load deliveries"), [period.params]);
   useEffect(() => { load(); }, [load]);
   const isOk = (v) => ["done", "yes", "true", "completed"].includes(String(v || "").toLowerCase());
   return (

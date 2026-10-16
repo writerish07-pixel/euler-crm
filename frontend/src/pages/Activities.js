@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { get } from "../lib/api";
+import { loadList } from "../lib/loadList";
 import { fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
@@ -9,7 +9,7 @@ import { usePeriodState } from "../lib/period";
 export default function Activities() {
   const [rows, setRows] = useState([]);
   const period = usePeriodState();
-  const load = useCallback(() => get("/activities", period.params).then(setRows), [period.params]);
+  const load = useCallback(() => loadList("/activities", setRows, period.params, "Could not load activities"), [period.params]);
   useEffect(() => { load(); }, [load]);
   return (
     <div>

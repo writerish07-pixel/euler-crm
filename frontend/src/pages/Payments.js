@@ -26,7 +26,10 @@ export default function Payments() {
       ...period.params,
       ...(leadId ? { lead_id: leadId } : {}),
       ...(needle ? { q: needle } : {}),
-    }).then(setRows);
+    }).then(setRows).catch(() => {
+      setRows([]);
+      toast.error("Could not load payments");
+    });
   }, [period.params, leadId, q]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters).catch(() => setMasters(null)); }, []);
