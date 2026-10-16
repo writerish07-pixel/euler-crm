@@ -63,14 +63,15 @@ def test_quiet_hours_and_next_slot():
     assert stored <= later
 
 
-def test_spoken_scripts_are_plain_hindi():
+def test_spoken_scripts_match_first_upload():
     intro = exo.SPOKEN["intro"].lower()
-    assert "kitne paise" in intro
-    assert "gaadi" in intro
-    assert "booking" not in intro
+    assert "akar euler" in intro
+    assert "booking" in intro
+    assert "pushti" in intro
     prompt = exo.SPOKEN["prompt"].lower()
     assert "hash" in prompt
     assert "bhugtan" in prompt
+    assert "rashi" in exo.SPOKEN["speak"].lower()
     for name in exo.AUDIO_CLIPS:
         assert exo.audio_path(name), name
 

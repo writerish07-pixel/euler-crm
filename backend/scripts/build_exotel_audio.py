@@ -1,6 +1,7 @@
-"""Rebuild Akar Euler verify MP3s — conversational Hindi for phone IVR.
+"""Keep the first-upload Akar Euler verify MP3s.
 
-Needs: pip install edge-tts, ffmpeg on PATH.
+Needs: pip install edge-tts, ffmpeg on PATH. Regeneration is skipped so
+App Bazaar stays on the original clips.
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ async def _synth(text: str, dest: Path):
 
 async def main():
     exo.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    keep = {"prompt"}  # original amount-ask clip
+    keep = set(exo.AUDIO_CLIPS)  # first-upload clips
     for name, text in exo.SPOKEN_HI.items():
         dest = exo.AUDIO_DIR / f"{name}.mp3"
         if name in keep:
