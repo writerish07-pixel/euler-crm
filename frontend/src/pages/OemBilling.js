@@ -40,19 +40,30 @@ export default function OemBilling() {
   const period = usePeriodState(thisMonth(), thisYear());
   const [tab, setTab] = useState("pending_delivery");
   const [payload, setPayload] = useState({ rows: [], counts: {}, soldCount: 0, repair: {} });
+  const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
   const [creating, setCreating] = useState("");
 
   const load = useCallback(() => {
+    setLoadError("");
     get("/oem-billing", period.params)
-      .then((r) => setPayload(r && typeof r === "object" ? r : { rows: [], counts: {}, soldCount: 0, repair: {} }))
-      .catch(() => setPayload({ rows: [], counts: {}, soldCount: 0, repair: {} }));
+      .then((r) => {
+        setPayload(r && typeof r === "object" ? r : { rows: [], counts: {}, soldCount: 0, repair: {} });
+      })
+      .catch((e) => {
+        const msg = apiErrorMessage(e, "Could not load OEM billing");
+        setLoadError(msg);
+        toast.error(msg);
+      });
   }, [period.params]);
   useEffect(() => { load(); }, [load]);
   const { openLead, drawer } = useLeadDrawer(load);
 
   const applyPayload = (r) => {
-    if (r && typeof r === "object") setPayload(r);
+    if (r && typeof r === "object") {
+      setPayload(r);
+      setLoadError("");
+    }
   };
 
   const sync = async () => {
@@ -130,6 +141,7 @@ export default function OemBilling() {
     (repair.pairs || []).filter((p) => p?.stub?.leadId).map((p) => [p.stub.leadId, p]),
   );
   const rows = (payload.rows || []).filter((r) => !tab || r.bucket === tab);
+  const emptyBecauseError = Boolean(loadError) && !(payload.soldCount || (payload.rows || []).length);
 
   return (
     <div data-testid="oem-billing">
@@ -279,11 +291,18 @@ export default function OemBilling() {
             </div>
           ) },
         ]}
-        rows={rows}
-        empty={tab === "pending_delivery"
-          ? "No OEM-billed files waiting to be marked delivered"
-          : "No OEM billed rows in this period"}
+        rows={emptyBecauseError ? [] : rows}
+        empty={emptyBecauseError
+          ? loadError
+          : tab === "pending_delivery"
+            ? "No OEM-billed files waiting to be marked delivered"
+            : "No OEM billed rows in this period"}
       />
+      {loadError ? (
+        <p className="text-[12px] text-rose-700 mt-3" data-testid="oem-billing-load-error">
+          {loadError}
+        </p>
+      ) : null}
       {tab === "created_from_oem" && (repair.stubCount || 0) > 0 && (
         <p className="text-[12px] text-ink-faint mt-3" data-testid="oem-billing-repair-hint">
           These IDs are empty copies. Payments and scheme stay on the original file
