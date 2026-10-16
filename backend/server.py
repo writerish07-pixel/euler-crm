@@ -6512,6 +6512,94 @@ OWNER_SCHEME_FIELDS = {
 }
 
 
+def _unit_is_deal_locked(lead, unit, idx=0):
+    """True when Additional is derived from Cx Demand and would be overwritten."""
+    u = unit or {}
+    if oem_sync.is_same_order_pack(lead or {}):
+        overlay = _lead_overlay_unit(lead, u, idx)
+        snap = lead_to_snapshot(overlay)
+        cx = ce.num(u.get("cxDemand") or u.get("budget"))
+        if cx > 0 and not ce.pack_unit_cx_is_pack_rollup(cx, snap, u):
+            return True
+        return ce.pack_unit_locked_cx_demand(snap, u) > 0
+    return bool((lead or {}).get("useDealPrice")) and ce.num(
+        (lead or {}).get("cxDemand") or (lead or {}).get("budget")) > 0
+
+
+def _apply_additional_to_unit(lead, unit, idx, additional, scheme_rows, force_recut=False):
+    """Stamp Additional (Dealer). Recut Cx Demand when the deal would overwrite it."""
+    u = dict(unit or {})
+    addl = ce.round2(max(0.0, ce.num(additional)))
+    overlay = _lead_overlay_unit(lead, {**u, "additionalDiscount": addl}, idx)
+    snap = lead_to_snapshot(overlay)
+    locked = force_recut or _unit_is_deal_locked(lead, u, idx)
+    u["additionalDiscount"] = addl
+    if not locked:
+        return u, False
+    totals = ce.compute_commercial_totals(snap, scheme_rows)
+    alloc = ce.compute_scheme_allocation(snap, scheme_rows)
+    gvc = ce.round2(ce.num(totals.get("grossVehicleCost")) or ce._gvc_from_charges(snap))
+    scheme_passed = ce.scheme_customer_benefit_ex_additional(alloc)
+    recut = ce.recut_cx_demand_for_additional(gvc, scheme_passed, addl)
+    u["additionalDiscount"] = recut["additionalDiscount"]
+    u["cxDemand"] = recut["cxDemand"]
+    u["budget"] = recut["cxDemand"]
+    u["useDealPrice"] = recut["useDealPrice"]
+    return u, True
+
+
+async def _set_owner_additional(lead_id, additional, unit_sno, act):
+    """Owner Additional (Dealer). Recut Cx Demand so recompute keeps the discount."""
+    lead = await get_lead_or_404(lead_id)
+    additional = ce.round2(max(0.0, ce.num(additional)))
+    scheme_rows = await get_scheme_rows()
+    pack = oem_sync.is_same_order_pack(lead)
+    scheme_set = {
+        "lastUpdated": now_iso(),
+        "lastUpdatedBy": act.get("email", ""),
+    }
+    if pack:
+        idx, units = _resolve_unit_index(lead, unit_sno)
+        old_u = dict(units[idx] or {})
+        old = {"unitSno": idx + 1, "additionalDiscount": old_u.get("additionalDiscount")}
+        rec, recut = _apply_additional_to_unit(lead, old_u, idx, additional, scheme_rows)
+        rec["sno"] = idx + 1
+        units[idx] = rec
+        scheme_set["units"] = units
+        if idx == 0:
+            scheme_set["additionalDiscount"] = rec.get("additionalDiscount")
+        new_audit = {"unitSno": idx + 1, "additionalDiscount": rec.get("additionalDiscount")}
+        if recut:
+            new_audit["cxDemand"] = rec.get("cxDemand")
+    else:
+        old = {"additionalDiscount": lead.get("additionalDiscount")}
+        rec, recut = _apply_additional_to_unit(lead, lead, 0, additional, scheme_rows)
+        scheme_set["additionalDiscount"] = rec.get("additionalDiscount")
+        if recut:
+            scheme_set["cxDemand"] = rec.get("cxDemand")
+            scheme_set["budget"] = rec.get("cxDemand")
+            scheme_set["useDealPrice"] = rec.get("useDealPrice")
+        units = list(lead.get("units") or [])
+        if len(units) == 1 and isinstance(units[0], dict):
+            u0 = dict(units[0])
+            u0["additionalDiscount"] = rec.get("additionalDiscount")
+            if recut:
+                u0["cxDemand"] = rec.get("cxDemand")
+                u0["budget"] = rec.get("cxDemand")
+                u0["useDealPrice"] = rec.get("useDealPrice")
+            units[0] = u0
+            scheme_set["units"] = units
+        new_audit = {"additionalDiscount": rec.get("additionalDiscount")}
+        if recut:
+            new_audit["cxDemand"] = rec.get("cxDemand")
+    await db.leads.update_one({"leadId": lead_id}, {"$set": scheme_set})
+    await recompute_lead(lead_id)
+    await write_audit(act, "update", "lead-field", leadId=lead_id, old=old, new=new_audit)
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    return _lead_for_viewer(clean(updated), act)
+
+
 async def _set_pack_unit_cx_demand(lead_id, unit_sno, value, act):
     """Write Cx Demand onto one pack unit. Pack total is the sum after recompute."""
     lead = await get_lead_or_404(lead_id)
@@ -6552,10 +6640,12 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
     lead = await get_lead_or_404(lead_id)
     _require_mutable_lead(lead, "lead edits", act)
     value = body.value
-    if field in ("budget", "bookingAmount") and value is not None:
+    if field in ("budget", "bookingAmount", "additionalDiscount") and value is not None:
         value = ce.round2(max(0.0, ce.num(value)))
     if field == "budget" and body.unitSno:
         return await _set_pack_unit_cx_demand(lead_id, body.unitSno, value, act)
+    if field == "additionalDiscount":
+        return await _set_owner_additional(lead_id, value, body.unitSno, act)
     if field in OWNER_IDENTITY_FIELDS:
         return await update_lead(lead_id, LeadUpdateIn(**{field: value}), act, None)
     if field in OWNER_PRICE_FIELDS:
@@ -8382,6 +8472,27 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     for k, v in payload.items():
         rec[k] = v
     rec["sno"] = idx + 1
+    if "additionalDiscount" in (chosen or {}):
+        stored_addl = ce.num(chosen.get("additionalDiscount"))
+    elif idx == 0:
+        stored_addl = ce.num(lead.get("additionalDiscount"))
+    else:
+        stored_addl = 0.0
+    incoming_addl = ce.num(rec.get("additionalDiscount"))
+    owner_addl_edit = (
+        _is_owner_user(act)
+        and abs(incoming_addl - stored_addl) >= ce.DEAL_AMOUNT_EQUAL_RUPEES
+        and _unit_is_deal_locked(lead, chosen, idx)
+    )
+    if owner_addl_edit:
+        rec, _recut = _apply_additional_to_unit(
+            lead, rec, idx, incoming_addl, scheme_rows, force_recut=True)
+        rec["sno"] = idx + 1
+        payload["additionalDiscount"] = rec.get("additionalDiscount")
+        if idx == 0 and not oem_sync.is_same_order_pack(lead):
+            payload["cxDemand"] = rec.get("cxDemand")
+            payload["budget"] = rec.get("cxDemand")
+            payload["useDealPrice"] = rec.get("useDealPrice")
     units[idx] = rec
     extra_apply = []
     for x in extra_apply_raw:

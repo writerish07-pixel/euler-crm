@@ -260,6 +260,26 @@ def derive_deal_customer_pass(price_total, deal, scheme_passed, extra_received):
     }
 
 
+def recut_cx_demand_for_additional(price_total, scheme_passed, additional):
+    """Cx Demand that makes derive_deal_customer_pass reproduce Additional.
+
+    leftover = GVC − deal − scheme_passed. When leftover > 0, Additional is
+    leftover, so deal = GVC − scheme_passed − Additional. Additional cannot
+    exceed GVC − scheme_passed (deal floors at 0).
+    """
+    price_total = round2(max(0.0, num(price_total)))
+    scheme_passed = round2(max(0.0, num(scheme_passed)))
+    additional = round2(max(0.0, num(additional)))
+    max_addl = round2(max(0.0, price_total - scheme_passed))
+    additional = min(additional, max_addl)
+    cx = round2(max(0.0, price_total - scheme_passed - additional))
+    return {
+        "cxDemand": cx,
+        "additionalDiscount": additional,
+        "useDealPrice": cx > 0,
+    }
+
+
 def apply_deal_additional(deal, cx_demand=None, scheme_passed=None):
     """Additional (Dealer) = max(0, Ex+RTO+Insurance − Cx Demand − OEM scheme passed).
 

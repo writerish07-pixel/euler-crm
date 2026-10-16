@@ -169,6 +169,37 @@ function PackDeliveryDateGroup({ lead, units, canEdit, onSaved }) {
   );
 }
 
+function PackAdditionalGroup({ lead, units, onSaved }) {
+  if (!units || !units.length) return null;
+  const packAddl = units.reduce((s, u) => s + Number(u.additionalDiscount || 0), 0);
+  return (
+    <div className="rounded-md border border-line bg-zinc-50/70 px-2 py-1.5 mb-1" data-testid="pack-additional-discount-group">
+      <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Additional (Dealer) · each unit</div>
+      {units.map((u, i) => {
+        const sno = u.sno || i + 1;
+        const amt = Number(u.additionalDiscount || 0);
+        return (
+          <OwnerKV
+            key={`addl-${sno}`}
+            label={`Unit ${sno} Additional`}
+            field="additionalDiscount"
+            unitSno={sno}
+            value={amt}
+            display={inr(amt)}
+            numeric
+            leadId={lead.leadId}
+            onSaved={onSaved}
+          />
+        );
+      })}
+      <div className="flex items-center justify-between pt-1 text-sm">
+        <span className="text-ink-soft">Pack Additional</span>
+        <span className="font-mono font-semibold">{inr(packAddl)}</span>
+      </div>
+    </div>
+  );
+}
+
 function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved, canEditBilledDate }) {
   return (
     <div className="space-y-3" data-testid="pack-units-tab">
@@ -200,6 +231,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
           <span className="font-mono font-semibold">{inr(lead.cxDemand || lead.budget || lead.customerPayable)}</span>
         </div>
       </div>
+      <PackAdditionalGroup lead={lead} units={units} onSaved={onSaved} />
       <PackDeliveryDateGroup
         lead={lead}
         units={units}
@@ -918,7 +950,7 @@ export function OverviewUnits({
   );
 }
 
-function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
+export function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
   onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate }) {
   const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, canSeeOwnerCommercials, canManageShowroom } = useAuth();
   const booked = !!actions.isBooked;
@@ -957,6 +989,13 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
         ) : (
           <OwnerKV label="Cx Demand" field="cxDemand" value={lead.cxDemand || lead.budget || 0}
             display={inr(lead.cxDemand || lead.budget || 0)} numeric leadId={lid} onSaved={onSaved} />
+        )}
+        {packUnits ? (
+          <PackAdditionalGroup lead={lead} units={packUnits} onSaved={onSaved} />
+        ) : (
+          <OwnerKV label="Additional (Dealer)" field="additionalDiscount"
+            value={lead.additionalDiscount || 0}
+            display={inr(lead.additionalDiscount || 0)} numeric leadId={lid} onSaved={onSaved} />
         )}
         <p className="text-[11px] text-ink-faint -mt-1 mb-1">
           Payable and outstanding are the deal (Cx Demand). Extra vs GVC goes to dealer margin — not a cheaper customer price.
@@ -1338,7 +1377,7 @@ function Prev({ label, v, highlight }) {
 }
 
 /* -------------------------------------------------- Scheme */
-function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, onRefresh, unitSno: unitSnoProp, onUnitSno, documents = [] }) {
+export function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, onRefresh, unitSno: unitSnoProp, onUnitSno, documents = [] }) {
   const units = packUnitList(lead);
   const [unitSnoLocal, setUnitSnoLocal] = useState(unitSnoProp || 1);
   const unitSno = unitSnoProp || unitSnoLocal;
@@ -1576,7 +1615,9 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
         </Field>
         <Field label="Additional (Dealer)">
           <Input data-testid="scheme-additionalDiscount" type="number" value={form.additionalDiscount}
-            onChange={set("additionalDiscount")} disabled={locked || dealLocked} readOnly={dealLocked} />
+            onChange={set("additionalDiscount")}
+            disabled={locked || (!isOwner && dealLocked)}
+            readOnly={!isOwner && dealLocked} />
         </Field>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4 text-sm" data-testid="oem-extra-support-preview">
@@ -1591,8 +1632,10 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           </div>
         )}
         <div className="text-[11px] text-ink-faint self-end">
-          {dealLocked
+          {dealLocked && !isOwner
             ? "Additional is set so payable matches Cx Demand. Scheme dealer share is unchanged. Extra Received is a claim only."
+            : dealLocked && isOwner
+            ? "Owner can set Additional (Dealer). Cx Demand / payable recuts so the discount sticks. Extra Received is a claim only."
             : "Additional (Dealer) is the customer discount. OEM Extra Received is a claim only — it is not passed to the customer."}
         </div>
       </div>
