@@ -40,6 +40,7 @@ import ClaimExceptions from "./pages/ClaimExceptions";
 import ERPProductionAudit from "./pages/ERPProductionAudit";
 import AuditLog from "./pages/AuditLog";
 import EditLog from "./pages/EditLog";
+import DealVerify from "./pages/DealVerify";
 import OemFinance from "./pages/OemFinance";
 import OemClaims from "./pages/OemClaims";
 import ClaimReconciliation from "./pages/ClaimReconciliation";
@@ -189,6 +190,7 @@ function AppRoutes() {
       <Route path="/erp-audit" element={P(<ERPProductionAudit />, { ownerOnly: true })} />
       <Route path="/audit-log" element={P(<AuditLog />, { ownerOnly: true })} />
       <Route path="/edit-log" element={P(<EditLog />, { salesOnly: true })} />
+      <Route path="/deal-verify" element={P(<DealVerify />, { showroomDesk: true })} />
       <Route path="/price-list" element={P(<PriceList />, { salesOnly: true, fieldOk: true })} />
       <Route path="/inventory" element={P(<Inventory />)} />
       <Route path="/price-master" element={P(<PriceMaster />, { ownerOnly: true })} />

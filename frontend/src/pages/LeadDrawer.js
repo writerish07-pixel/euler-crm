@@ -14,6 +14,7 @@ import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
 import BookEnquiryDrawer from "./BookEnquiryDrawer";
+import { DealVerifyCard } from "./DealVerify";
 import SchemeCircularPic from "../components/SchemeCircularPic";
 
 const CHARGE_FIELDS = [
@@ -758,7 +759,7 @@ export function OverviewUnits({
 
 function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
   onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate }) {
-  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, canSeeOwnerCommercials } = useAuth();
+  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, canSeeOwnerCommercials, canManageShowroom } = useAuth();
   const booked = !!actions.isBooked;
   const kycDocKinds = kycKinds(lead.customerType);
   const canUploadKyc = isOwner || isSalesGm || isTl || isTeamLead || isExecutive;
@@ -871,6 +872,7 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
             )}
         </Card>
       )}
+      <DealVerifyCard lead={lead} booked={booked} canManage={!!canManageShowroom} onSaved={onSaved} />
       <Card className="p-4 sm:col-span-2">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6">
