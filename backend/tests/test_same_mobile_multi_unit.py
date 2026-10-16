@@ -174,8 +174,9 @@ async def test_exec_needs_flag_then_gm_can_approve(exec_client, client):
         "/api/leads", json=_enquiry(
             "Second Unit", mobile=mobile, executive="Executive", anotherVehicle=True))
     assert second.status_code == 200, second.text
-    assert second.json().get("leadId")
-    assert second.json()["leadId"] != live.json()["leadId"]
+    assert second.json().get("pending") is True
+    assert second.json().get("requestId")
+    assert not second.json().get("leadId")
 
 
 @pytest.mark.asyncio
@@ -233,12 +234,14 @@ async def test_pending_same_mobile_blocked_without_flag(exec_client):
     mobile = next_mobile()
     first = await exec_client.post("/api/leads", json=_enquiry("P1", mobile=mobile))
     assert first.status_code == 200
+    assert first.json().get("pending") is True
     second = await exec_client.post("/api/leads", json=_enquiry("P2", mobile=mobile))
     assert second.status_code == 409
     ok = await exec_client.post(
         "/api/leads", json=_enquiry("P2", mobile=mobile, anotherVehicle=True))
     assert ok.status_code == 200, ok.text
-    assert ok.json()["leadId"] != first.json()["leadId"]
+    assert ok.json().get("pending") is True
+    assert ok.json()["requestId"] != first.json()["requestId"]
 
 
 @pytest.mark.asyncio

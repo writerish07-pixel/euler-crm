@@ -2236,12 +2236,22 @@ def _executive_name_matches(user, executive) -> bool:
     return False
 
 
+def _on_staff_register(lead) -> bool:
+    """Discounted deals waiting on Approvals are not a Lead Register file yet."""
+    return not bool((lead or {}).get("dealApprovalPending"))
+
+
+def _exclude_parked_deals(leads) -> list:
+    return [l for l in (leads or []) if _on_staff_register(l)]
+
+
 def _leads_for_executive(leads, user) -> list:
     """Match lead.executive to the logged-in executive's name (or email local-part).
 
     Split-assigned imported leads stay on the Lead Register under the executive
     name (including `assignmentPending`). They work them after tapping Proceed
     and GM / Owner Approve — they are not hidden from the register.
+    Discounted Convert to Booking files are hidden via `dealApprovalPending`.
     """
     return [l for l in leads if _executive_name_matches(user, (l or {}).get("executive"))]
 
@@ -2542,7 +2552,7 @@ def _volume_period_kpis(leads, payments=None, cancel_events=None, *, include_mon
 # ---------------------------------------------------------------- dashboard
 @api.get("/dashboard")
 async def dashboard():
-    leads = await db.leads.find().to_list(5000)
+    leads = _exclude_parked_deals(await db.leads.find().to_list(5000))
     payments = await db.payments.find().to_list(5000)
     ym = this_month()
     td = today()
@@ -2788,6 +2798,7 @@ async def executive_dashboard(user=Depends(current_user)):
         raise HTTPException(403, "Executive dashboard is for Executive, Team Leader, Showroom Admin, and Owner.")
     leads_all = await db.leads.find().to_list(5000)
     mine = await _leads_for_scoped_viewer(leads_all, user) if _is_scoped_sales(user) else leads_all
+    mine = _exclude_parked_deals(mine)
     ym = this_month()
     td = today()
     vol = _volume_period_kpis(mine, include_money=False)
@@ -3620,7 +3631,7 @@ async def oem_monthly_register(month: str = "", year: str = "", user=Depends(cur
 
 async def _ops_pipeline_dashboard():
     """Showroom-wide retail snapshot shared by ASM/RM field board and Sales GM."""
-    leads = await db.leads.find().to_list(5000)
+    leads = _exclude_parked_deals(await db.leads.find().to_list(5000))
     ym = this_month()
     td = today()
     vol = _volume_period_kpis(leads, include_money=False)
@@ -3873,7 +3884,8 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      limit: Optional[int] = None,
                      user=Depends(current_user)):
     await _ensure_retry_dups_repaired()
-    query = {}
+    await _ensure_pending_deals_parked()
+    query = {"dealApprovalPending": {"$ne": True}}
     if status and status != "all":
         query["currentStatus"] = status
     if q:
@@ -3896,7 +3908,7 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         "customerPayable": 1, "customerOutstanding": 1,
         "excessReceived": 1, "refundedAmount": 1,
         "vehicleCount": 1, "units": 1, "sameOrderMultiUnit": 1,
-        "assignmentPending": 1, "cancelCount": 1,
+        "assignmentPending": 1, "dealApprovalPending": 1, "cancelCount": 1,
         "lastCancelReason": 1, "lastCancelDate": 1,
         "createdDate": 1, "bookingDate": 1, "deliveryDate": 1,
         "customerType": 1, "gstin": 1, "oemExtraSupportReceived": 1,
@@ -3913,6 +3925,7 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     # Owner, Sales GM, Showroom Admin and Accounts see all.
     if _is_scoped_sales(user):
         leads = await _leads_for_scoped_viewer(leads, user)
+    leads = _exclude_parked_deals(leads)
     period = _parse_period(month, year)
     leads = _rows_in_period(
         leads, period, lambda l: periodmod.lead_register_date(l, status or ""))
@@ -4392,7 +4405,7 @@ def _quoted_deal_needs_approval(deal, cx_demand) -> bool:
 
     Budget 0 is an enquiry — create live. Exact list and extra-margin create
     live. A Cx Demand with no Price Master row cannot be proven discount-free,
-    so it waits.
+    so it waits. While it waits it is Approvals-only — not the staff register.
     """
     if ce.num(cx_demand) <= 0:
         return False
@@ -4405,6 +4418,76 @@ def _quoted_deal_needs_approval(deal, cx_demand) -> bool:
 
 def _close_rupee(a, b) -> bool:
     return abs(ce.round2(ce.num(a)) - ce.round2(ce.num(b))) <= 1.00
+
+
+async def _park_lead_for_deal_approval(lead_id: str):
+    """Keep the live row for KYC, but drop it from the staff Lead Register."""
+    lid = str(lead_id or "").strip()
+    if not lid:
+        return
+    await db.leads.update_one({"leadId": lid}, {"$set": {
+        "dealApprovalPending": True,
+        "lastUpdated": now_iso(),
+    }})
+
+
+async def _restore_open_enquiry_after_reject(lead_id: str):
+    """Reject of a booking deal returns an open enquiry (WhatsApp can resume)."""
+    lid = str(lead_id or "").strip()
+    if not lid:
+        return
+    live = await db.leads.find_one({"leadId": lid})
+    if not live or _is_booked_lead(live) or _is_delivered_lead(live):
+        return
+    await db.leads.update_one({"leadId": lid}, {"$set": {
+        "dealApprovalPending": False,
+        "budget": 0,
+        "cxDemand": 0,
+        "useDealPrice": False,
+        "additionalDiscount": 0,
+        "bookingDealApprovedAt": "",
+        "bookingDealCxDemand": 0,
+        "bookingDealAdditional": 0,
+        "lastUpdated": now_iso(),
+    }})
+    await recompute_lead(lid)
+
+
+_park_pending_deals_done = False
+_park_pending_deals_lock = asyncio.Lock()
+
+
+async def _park_pending_booking_deal_leads() -> int:
+    ids = []
+    async for r in db.lead_requests.find(
+            {"requestKind": "booking_deal", "status": {"$in": ["pending", "approving"]}},
+            {"existingLeadId": 1}):
+        lid = str(r.get("existingLeadId") or "").strip()
+        if lid:
+            ids.append(lid)
+    if not ids:
+        return 0
+    res = await db.leads.update_many(
+        {"leadId": {"$in": ids}, "dealApprovalPending": {"$ne": True}},
+        {"$set": {"dealApprovalPending": True}},
+    )
+    return int(getattr(res, "modified_count", 0) or 0)
+
+
+async def _ensure_pending_deals_parked():
+    global _park_pending_deals_done
+    if _park_pending_deals_done:
+        return
+    async with _park_pending_deals_lock:
+        if _park_pending_deals_done:
+            return
+        try:
+            n = await _park_pending_booking_deal_leads()
+            if n:
+                logging.info("PARK_PENDING_DEAL_LEADS: %s", n)
+            _park_pending_deals_done = True
+        except Exception:
+            logging.exception("PARK_PENDING_DEAL_LEADS_ERROR")
 
 
 async def _require_booking_deal_approval(lead, user):
@@ -4433,10 +4516,11 @@ async def _require_booking_deal_approval(lead, user):
         "existingLeadId": lid, "requestKind": "booking_deal", "status": "pending",
     })
     if pending:
+        await _park_lead_for_deal_approval(lid)
         raise HTTPException(
             409,
             "This deal has a dealer discount and is waiting on Approvals. "
-            "Book after GM / Owner approve.",
+            "It is not on the Lead Register until GM / Owner approve.",
         )
     payload = {
         "customerName": lead.get("customerName") or "",
@@ -4480,10 +4564,11 @@ async def _require_booking_deal_approval(lead, user):
         )
     except Exception:
         logger.exception("booking-deal push notify failed")
+    await _park_lead_for_deal_approval(lid)
     raise HTTPException(
         409,
         "This deal has a dealer discount — sent to GM / Owner on Approvals. "
-        "Book after they approve.",
+        "It is not on the Lead Register until they approve.",
     )
 
 
@@ -4531,7 +4616,7 @@ async def _create_pending_lead_request(body: LeadIn, user, *, deal_format, deal_
 
 @api.post("/leads")
 async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
-    """Create a live enquiry. KYC and GM/Owner deal approval run at Book."""
+    """Walk-in name+mobile is live. A dealer discount waits on Approvals, not the register."""
     role = str(user.get("role") or "")
     if role in ("tl", "team_lead") and not str(body.executive or "").strip():
         raise HTTPException(422, "Pick the executive this lead belongs to.")
@@ -4554,6 +4639,35 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
             body.mobile, incoming_name=body.customerName,
             incoming_executive=str(body.executive or user.get("name") or ""),
             allow=bool(body.anotherVehicle), check_pending=True)
+    if role in ("executive", "tl", "team_lead"):
+        payload = body.model_dump()
+        another = bool(payload.pop("anotherVehicle", False))
+        scheme_pass_on = _parse_scheme_pass_on(payload.pop("schemePassOn", None))
+        deal_amount = ce.round2(ce.num(body.budget))
+        same_order = bool(payload.get("sameOrderMultiUnit"))
+        specs = _unit_specs_from(
+            payload.get("interestedModel"), payload.get("variant"), payload.get("units"))
+        if same_order and len(specs) > 1:
+            deal_format = await _deal_format_for_pack(
+                specs, deal_amount, payload.get("createdDate"), scheme_pass_on)
+        else:
+            deal_format = await _deal_format_for(
+                payload.get("interestedModel"), payload.get("variant"), deal_amount,
+                payload.get("createdDate"), scheme_pass_on)
+        if _quoted_deal_needs_approval(deal_format, deal_amount):
+            mobile_digits = re.sub(r"\D", "", str(body.mobile or ""))
+            if len(mobile_digits) < 10:
+                raise HTTPException(
+                    422, "A 10-digit mobile is required before sending for approval.")
+            payload["customerType"] = lead_docs.normalize_customer_type(payload.get("customerType"))
+            payload["gstin"] = str(payload.get("gstin") or "").strip().upper()
+            if payload["customerType"] != "B2B":
+                payload["gstin"] = ""
+            if not str(payload.get("executive") or "").strip():
+                payload["executive"] = user.get("name") or ""
+            return await _create_pending_lead_request(
+                body, user, deal_format=deal_format, deal_amount=deal_amount,
+                scheme_pass_on=scheme_pass_on, payload=payload, another=another)
     return await _insert_live_lead(body, viewer=user)
 
 
@@ -4990,6 +5104,7 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             exec_name = str(payload.get("executive") or live.get("executive") or "").strip()
             await db.leads.update_one({"leadId": existing_id}, {"$set": {
                 "assignmentPending": False,
+                "dealApprovalPending": False,
                 "executive": exec_name,
                 "lastUpdated": now_iso(),
                 "lastUpdatedBy": user.get("email") or "",
@@ -5026,7 +5141,12 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
         if existing_id:
-            await db.leads.update_one({"leadId": existing_id}, {"$set": {"assignmentPending": True}})
+            if str(claimed.get("requestKind") or "") == "booking_deal":
+                await db.leads.update_one(
+                    {"leadId": existing_id}, {"$set": {"dealApprovalPending": True}})
+            else:
+                await db.leads.update_one(
+                    {"leadId": existing_id}, {"$set": {"assignmentPending": True}})
         raise
     await lead_docs.attach_request_docs_to_lead(db, request_id, lead["leadId"])
     await db.lead_requests.update_one(
@@ -5060,7 +5180,7 @@ async def reject_lead_request(request_id: str, body: RejectRequestIn = RejectReq
     existing_id = str(req.get("existingLeadId") or "").strip()
     if existing_id:
         live = await db.leads.find_one({"leadId": existing_id}) or {}
-        if live.get("assignmentPending"):
+        if live.get("assignmentPending") and str(req.get("source") or "") == "split-assignment":
             previous = str(live.get("executive") or "").strip()
             await db.leads.update_one({"leadId": existing_id}, {
                 "$set": {
@@ -5074,6 +5194,8 @@ async def reject_lead_request(request_id: str, body: RejectRequestIn = RejectReq
                     "remarks": "Assignment rejected — returned to unassigned",
                 }},
             })
+        elif str(req.get("requestKind") or "") == "booking_deal" or live.get("dealApprovalPending"):
+            await _restore_open_enquiry_after_reject(existing_id)
     return {"ok": True, "status": "rejected"}
 
 
@@ -16540,6 +16662,12 @@ async def _run_boot_maintenance():
             await _backfill_deal_cancelled()
         except Exception:
             logging.exception("DEAL_CANCELLED_BACKFILL_ERROR")
+        try:
+            parked = await _park_pending_booking_deal_leads()
+            if parked:
+                logging.info("PARK_PENDING_DEAL_LEADS_BOOT: %s", parked)
+        except Exception:
+            logging.exception("PARK_PENDING_DEAL_LEADS_BOOT_ERROR")
         try:
             await _backfill_booking_advances()
         except Exception:

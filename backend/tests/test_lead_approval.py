@@ -166,19 +166,18 @@ async def test_executive_exact_deal_creates_live(exec_client):
 
 
 @pytest.mark.asyncio
-async def test_executive_discount_create_is_live_enquiry(exec_client, client):
+async def test_executive_discount_create_is_pending_not_live(exec_client, client):
     payload = _enquiry("Pending Cust")
     r = await exec_client.post("/api/leads", json=payload)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body.get("leadId")
-    assert not body.get("pending")
+    assert body.get("pending") is True
+    assert body.get("requestId")
+    assert not body.get("leadId")
     leads = (await client.get("/api/leads")).json()
-    assert any(l.get("customerName") == "Pending Cust" for l in leads)
-
-    seeded = await seed_pending(_enquiry("Queue Cust"))
+    assert not any(l.get("customerName") == "Pending Cust" for l in leads)
     waiting = (await exec_client.get("/api/lead-requests", params={"status": "pending"})).json()
-    assert any(x["requestId"] == seeded["requestId"] for x in waiting)
+    assert any(x["requestId"] == body["requestId"] for x in waiting)
     summary = (await client.get("/api/lead-requests/summary")).json()
     assert summary["pending"] >= 1
     assert summary["canApprove"] is True
@@ -333,8 +332,9 @@ async def test_notify_never_breaks_submit(exec_client, monkeypatch):
     monkeypatch.setattr(server.web_push, "notify_lead_approvers", boom)
     r = await exec_client.post("/api/leads", json=_enquiry("Push Fail"))
     assert r.status_code == 200, r.text
-    assert r.json().get("leadId")
-    assert await server.db.leads.count_documents({"customerName": "Push Fail"}) == 1
+    assert r.json().get("pending") is True
+    assert r.json().get("requestId")
+    assert await server.db.leads.count_documents({"customerName": "Push Fail"}) == 0
 
 
 @pytest.mark.asyncio

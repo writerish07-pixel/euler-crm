@@ -148,8 +148,20 @@ def followup_anchor(lead: dict) -> str:
 
 
 def followup_due(lead: dict, today_s: Optional[str] = None) -> bool:
-    """Day 3, 6, 9… from the follow-up anchor. Not nextFollowupDate."""
+    """Day 3, 6, 9… from the follow-up anchor. Not nextFollowupDate.
+
+    Once Cx Demand is filled the deal was already discussed, so this is not an
+    open follow-up. Discounted files waiting on Approvals are also skipped.
+    """
     if not is_unbooked_active(lead):
+        return False
+    if lead.get("dealApprovalPending"):
+        return False
+    try:
+        cx = float(lead.get("cxDemand") or lead.get("budget") or 0)
+    except (TypeError, ValueError):
+        cx = 0.0
+    if cx > 0:
         return False
     today_s = today_s or today_ist()
     if str(lead.get("whatsappFollowupLastDate") or "")[:10] == today_s:

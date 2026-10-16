@@ -41,6 +41,14 @@ def test_phone_and_followup_rules():
         "accountStatus": "Active", "currentStatus": "Booked",
         "createdDate": "2026-08-15", "bookingDate": "2026-08-16",
     }, "2026-08-18")
+    assert not wa.followup_due({
+        "accountStatus": "Active", "currentStatus": "New",
+        "createdDate": "2026-08-15", "cxDemand": 790000,
+    }, "2026-08-18")
+    assert not wa.followup_due({
+        "accountStatus": "Active", "currentStatus": "New",
+        "createdDate": "2026-08-15", "dealApprovalPending": True,
+    }, "2026-08-18")
     assert wa.inbound_is_stop("STOP")
     assert wa.inbound_is_stop("stop please")
     assert wa.lead_is_delivered({"currentStatus": "Delivered"})
