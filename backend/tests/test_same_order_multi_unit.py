@@ -568,6 +568,50 @@ async def test_pack_units_own_price_and_scheme(client):
 
 
 @pytest.mark.asyncio
+async def test_scheme_saves_additional_over_fifty_thousand(client):
+    mobile = "9813301595"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": "PM-ADDL-595"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-ADDL-595", "model": "Turbo Max", "variant": "Maxx Addl",
+        "exShowroom": 825000, "rto": 5500, "insurance": 19000, "handlingCharges": 0,
+        "status": "active",
+    })
+    created = await client.post("/api/leads", json={
+        "customerName": "messenger scs addl",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx Addl",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    added = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Turbo Max", "variant": "Maxx Addl",
+    })
+    assert added.status_code == 200, added.text
+    p1 = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 825000, "rto": 5500, "insuranceAmount": 19000, "unitSno": 1,
+    })
+    assert p1.status_code == 200, p1.text
+    s1 = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 59500,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+        "unitSno": 1,
+    })
+    assert s1.status_code == 200, s1.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    u1 = (lead.get("units") or [{}])[0]
+    assert ce.num(u1.get("additionalDiscount")) == 59500
+    unit_pay = ce.num(u1.get("customerPayable"))
+    assert unit_pay > 0
+    assert unit_pay < 1_000_000
+
+
+@pytest.mark.asyncio
 async def test_pack_360_hydrates_unit_amounts_and_sums_payable(client):
     lid = "LD-PACK-ZERO"
     mobile = "9813301444"
@@ -688,6 +732,65 @@ def test_overlay_does_not_dump_pack_extra_or_additional_on_unit1():
     }), None)["customerPayable"]
     # OEM Extra is a claim, not a discount — dumping pack extra does not cut payable.
     assert p1 == dumped
+
+
+def test_overlay_pack_unit1_does_not_inherit_pack_payable():
+    """Lead cxDemand/payable is the order total. Unit 1 must keep its own price."""
+    pack = 790000 * 8
+    unit = {
+        "sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+        "exShowroom": 825000, "rto": 5500, "insuranceAmount": 19000,
+        "additionalDiscount": 59500, "customerPayable": 790000,
+        "oemExtraSupportReceived": 48000, "oemExtraSupportPassed": 0,
+    }
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "exShowroom": 825000, "rto": 5500, "insuranceAmount": 19000,
+        "additionalDiscount": 59500 * 8,
+        "cxDemand": pack, "customerPayable": pack, "budget": pack,
+        "grossVehicleCost": pack,
+        "units": [dict(unit), {**unit, "sno": 2, "customerPayable": 790000}],
+    }
+    o1 = server._lead_overlay_unit(lead, lead["units"][0], 0)
+    assert ce.num(o1.get("cxDemand")) != pack
+    assert ce.num(o1.get("customerPayable")) == 790000
+    assert ce.num(o1.get("grossVehicleCost")) != pack
+    assert ce.num(o1.get("additionalDiscount")) == 59500
+    pay = ce.compute_commercial_totals(server.lead_to_snapshot(o1), None)["customerPayable"]
+    assert pay == 790000
+    bare = {k: v for k, v in unit.items() if k != "customerPayable"}
+    o_bare = server._lead_overlay_unit(lead, bare, 0)
+    assert ce.num(o_bare.get("customerPayable")) == 0
+    assert ce.num(o_bare.get("cxDemand")) == 0
+    pay_bare = ce.compute_commercial_totals(server.lead_to_snapshot(o_bare), None)["customerPayable"]
+    assert pay_bare == 790000
+
+
+def test_refresh_drops_pack_total_locked_onto_unit1():
+    pack = 9645210
+    unit = {
+        "model": "Turbo Max", "variant": "Maxx (DV220)",
+        "exShowroom": 825000, "rto": 5500, "insuranceAmount": 19000,
+        "additionalDiscount": 59500, "priceStructureSaved": True,
+        "schemeAllocationExplicit": True, "cxDemand": pack, "useDealPrice": True,
+        "customerPayable": pack,
+    }
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "cxDemand": pack, "customerPayable": pack, "budget": pack,
+        "useDealPrice": True,
+        "units": [{**unit, "sno": 1}, {**unit, "sno": 2, "cxDemand": 790000,
+                  "customerPayable": 790000, "useDealPrice": True}],
+    }
+    total, rows, _filled, _pending = server._refresh_unit_payables(lead)
+    u1 = rows[0]
+    assert ce.num(u1.get("customerPayable")) == 790000
+    assert ce.num(u1.get("cxDemand") or 0) != pack
+    assert ce.num(u1.get("customerPayable")) != pack
+    assert ce.num(rows[1].get("customerPayable")) == 790000
+    assert total == 1580000
 
 
 def test_pack_billing_summary_lists_each_unit_then_totals():

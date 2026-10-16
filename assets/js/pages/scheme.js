@@ -317,20 +317,18 @@
 
       if (id === 'additionalDiscount') {
         if (wrap) wrap.hidden = false;
-        var addMax = max || 50000;
         var curAdd = num(pending[id]);
         if (curAdd < 0) curAdd = 0;
-        if (curAdd > addMax) curAdd = addMax;
         if (sel) {
           sel.disabled = false;
           sel.min = '0';
-          sel.max = String(addMax);
+          sel.removeAttribute('max');
           sel.value = String(curAdd);
-          sel.title = rule.hint || ('Type any amount up to â‚¹' + fmtInr(addMax));
+          sel.title = rule.hint || 'Type any amount (no maximum)';
         }
-        if (lbl) lbl.innerHTML = '<span>' + base + ' (enter amount, max â‚¹' + fmtInr(addMax) + ')</span>';
+        if (lbl) lbl.innerHTML = '<span>' + base + ' (enter any amount)</span>';
         open++;
-        parts.push(base + ': type up to ' + fmtInr(addMax));
+        parts.push(base + ': type any amount');
         return;
       }
 
@@ -488,8 +486,6 @@
       var rule = rules[id] || {};
       if (amt < 0) lines.push('- ' + OFFER_LABELS[id] + ': cannot be negative');
       if (id === 'additionalDiscount') {
-        var addMax = num(rule.maxAmount) || 50000;
-        if (amt > addMax) lines.push('- Additional Discount: max â‚¹' + fmtInr(addMax));
         return;
       }
       if (amt <= 0) return;

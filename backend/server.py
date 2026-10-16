@@ -6573,6 +6573,11 @@ UNIT_MONEY_KEYS = (
     "budget", "grossVehicleCost",
 )
 
+# Pack lead commercials are order totals. Never treat them as unit 1's price.
+PACK_UNIT_ROLLUP_KEYS = (
+    "customerPayable", "cxDemand", "budget", "grossVehicleCost",
+)
+
 UNIT_SCHEME_KEYS = (
     "benefitPassedBreakup", "schemeComponentsUsed", "schemeAllocationExplicit",
     "schemeAllocationV2", "schemeAsOf", "benefitMode",
@@ -6974,6 +6979,8 @@ def _lead_overlay_unit(lead, unit, index=0):
             # Pack lead fields are roll-ups / leftovers. Unit 1 only keeps
             # additional and OEM extra that are stored on the unit itself.
             if pack:
+                for k in PACK_UNIT_ROLLUP_KEYS:
+                    out.pop(k, None)
                 if "additionalDiscount" not in u:
                     out["additionalDiscount"] = 0
                 if "oemExtraSupportReceived" not in u and "oemExtraSupportPassed" not in u:
@@ -7025,6 +7032,9 @@ def _refresh_unit_payables(lead, scheme_rows=None):
         if (not pack) and u.get("useDealPrice") and ce.num(u.get("cxDemand")) > 0:
             pay = ce.round2(ce.num(u.get("cxDemand")))
         elif pack:
+            if ce.pack_unit_cx_is_pack_rollup(u.get("cxDemand"), snap, u):
+                u.pop("cxDemand", None)
+                u["useDealPrice"] = False
             lock = ce.pack_unit_locked_cx_demand(snap, u)
             if lock > 0:
                 alloc = ce.compute_scheme_allocation(snap, scheme_rows) if scheme_rows is not None else {}
@@ -7096,6 +7106,8 @@ async def _hydrate_pack_unit_prices(lead):
             continue
         if i == 0 and ce.num((lead or {}).get("exShowroom")) > 0:
             _copy_unit_commercials(lead, u)
+            for k in PACK_UNIT_ROLLUP_KEYS:
+                u.pop(k, None)
             units[i] = u
             changed = True
             continue
