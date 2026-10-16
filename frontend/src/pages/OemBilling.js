@@ -213,7 +213,17 @@ export default function OemBilling() {
             </div>
           ) },
           { key: "model", label: "Vehicle", render: (r) => (
-            <div className="text-sm">{r.model || "—"}<div className="text-xs text-ink-faint">{r.variant}</div></div>
+            <div className="text-sm">
+              {r.model || "—"}
+              <div className="text-xs text-ink-faint">{r.variant}</div>
+              {r.availableBodyType && r.billedBodyType && r.availableBodyType !== r.billedBodyType ? (
+                <div className="text-[11px] text-ink-faint" data-testid={`oem-bill-body-${r.chassis}`}>
+                  billed {r.billedBodyType} · available {r.availableBodyType}
+                </div>
+              ) : (r.billedBodyType ? (
+                <div className="text-[11px] text-ink-faint">{r.billedBodyType}</div>
+              ) : null)}
+            </div>
           ) },
           { key: "chassis", label: "Chassis", mono: true },
           { key: "invoiceNumber", label: "Invoice", mono: true },

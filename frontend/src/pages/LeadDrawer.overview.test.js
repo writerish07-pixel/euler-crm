@@ -42,7 +42,9 @@ function packLead() {
     customerPayable: 1580000,
     vehicleCount: 2,
     units: [
-      { sno: 1, model: "Turbo Max", variant: "Maxx (FB)", customerPayable: 790000, soldDate: "2026-09-30" },
+      { sno: 1, model: "Turbo Max", variant: "Maxx (DV220)", customerPayable: 790000,
+        soldDate: "2026-09-30", deliveryDate: "2026-09-15",
+        oemBilledBodyType: "DV220", availableBodyType: "FB" },
       { sno: 2, model: "Turbo Max", variant: "Maxx (FB)", customerPayable: 790000, soldDate: "" },
     ],
   };
@@ -76,7 +78,10 @@ test("Details units area has add-unit, add-vehicle and billed-date edit", async 
   expect(host.querySelector('[data-testid="overview-add-another-vehicle-btn"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="unit-billed-btn-1"]')?.textContent).toMatch(/Billed/i);
   expect(host.querySelector('[data-testid="unit-billed-btn-2"]')?.textContent).toMatch(/Set billed date/i);
+  expect(host.querySelector('[data-testid="unit-delivered-btn-1"]')?.textContent).toMatch(/Delivered|delivery date/i);
   expect(host.textContent).toMatch(/billed date/i);
+  expect(host.textContent).toMatch(/delivery date/i);
+  expect(host.textContent).toMatch(/billed DV220 · available FB/);
   await act(async () => { root.unmount(); });
   host.remove();
 });

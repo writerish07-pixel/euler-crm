@@ -115,8 +115,10 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
               }`}
             >
               Unit {sno}{(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}{(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
+              {unitBodyNote(u) ? ` · ${unitBodyNote(u)}` : ""}
               {u.customerPayable ? ` · ${inr(u.customerPayable)}` : ""}
               {u.soldDate ? ` · billed ${fmtDate(u.soldDate)}` : ""}
+              {(u.deliveryDate || u.soldDate) ? ` · delivered ${fmtDate(u.deliveryDate || u.soldDate)}` : ""}
               {priced && schemed ? " ✓" : ""}
             </button>
           );
@@ -158,7 +160,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
                 <div className="font-mono font-bold text-cobalt mt-1" data-testid={`units-tab-payable-${sno}`}>
                   {inr(u.customerPayable)}
                 </div>
-                <div className="mt-1">
+                <div className="mt-1 flex flex-wrap gap-2">
                   <UnitBilledDateField
                     leadId={lead.leadId}
                     sno={sno}
@@ -166,7 +168,19 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
                     canEdit={!!canEditBilledDate}
                     onSaved={onSaved}
                   />
+                  <UnitDeliveryDateField
+                    leadId={lead.leadId}
+                    sno={sno}
+                    value={u.deliveryDate || u.soldDate || ""}
+                    canEdit={!!canEditBilledDate}
+                    onSaved={onSaved}
+                  />
                 </div>
+                {unitBodyNote(u) ? (
+                  <div className="text-[11px] text-ink-faint mt-1" data-testid={`units-tab-body-${sno}`}>
+                    {unitBodyNote(u)}
+                  </div>
+                ) : null}
                 {u.chassisNumber ? <div className="text-xs text-ink-soft mt-1">Chassis {u.chassisNumber}</div> : null}
                 {u.numberPlate ? <div className="text-xs text-ink-soft">Plate {u.numberPlate}</div> : null}
               </div>
@@ -644,6 +658,15 @@ function OwnerKV({ label, field, value, display, type = "text", options, leadId,
   );
 }
 
+function unitBodyNote(u) {
+  const billed = String(u?.oemBilledBodyType || u?.bodyType || "").trim();
+  const avail = String(u?.availableBodyType || "").trim();
+  if (avail && billed && avail !== billed) return `billed ${billed} · available ${avail}`;
+  if (avail && billed && avail === billed) return "";
+  if (avail) return `available ${avail}`;
+  return "";
+}
+
 function UnitBilledDateField({ leadId, sno, value, canEdit, onSaved }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value || "");
@@ -690,6 +713,52 @@ function UnitBilledDateField({ leadId, sno, value, canEdit, onSaved }) {
   );
 }
 
+function UnitDeliveryDateField({ leadId, sno, value, canEdit, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setDraft(value || ""); }, [value]);
+  const save = async () => {
+    if (!draft) return toast.error("Pick a delivery date");
+    setBusy(true);
+    try {
+      await put(`/leads/${leadId}/units/${sno}/delivery-date`, { deliveryDate: draft });
+      toast.success(`Unit ${sno} delivery date saved — monthly deliveries use that date`);
+      setEditing(false);
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not save delivery date"));
+    } finally { setBusy(false); }
+  };
+  if (!canEdit) {
+    return (
+      <span className="text-xs text-ink-soft" data-testid={`unit-delivered-${sno}`}>
+        {value ? `Delivered ${fmtDate(value)}` : "No delivery date"}
+      </span>
+    );
+  }
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1" data-testid={`unit-delivered-edit-${sno}`}>
+        <input className="rounded-md ring-1 ring-inset ring-line text-xs py-0.5 px-1.5 font-mono"
+          type="date" value={draft} onChange={(e) => setDraft(e.target.value)}
+          data-testid={`unit-delivered-input-${sno}`} />
+        <Button className="!py-0.5 !px-1.5 text-[11px]" onClick={save} disabled={busy}
+          data-testid={`unit-delivered-save-${sno}`}>Save</Button>
+        <Button variant="ghost" className="!py-0.5 !px-1.5 text-[11px]"
+          onClick={() => { setDraft(value || ""); setEditing(false); }}>Cancel</Button>
+      </span>
+    );
+  }
+  return (
+    <button type="button" className="inline-flex items-center gap-1 text-xs text-cobalt"
+      data-testid={`unit-delivered-btn-${sno}`} onClick={() => setEditing(true)}>
+      <span>{value ? `Delivered ${fmtDate(value)}` : "Set delivery date"}</span>
+      <Pencil size={11} className="text-ink-faint" />
+    </button>
+  );
+}
+
 export function OverviewUnits({
   lead, onOpenUnit, onSaved, onAddPackUnit, onAddAnotherVehicle,
   canAddPackUnit, canAddAnotherVehicle, canEditBilledDate, hideExecScheme,
@@ -723,7 +792,7 @@ export function OverviewUnits({
         )}
       </div>
       <p className="text-[11px] text-ink-faint mb-2">
-        Each unit has its own billed date. That date loads that month’s scheme (Sept vs Oct can differ).
+        Each unit has its own billed date (scheme month) and delivery date (monthly delivery count).
       </p>
       <ul className="space-y-2">
         {units.map((u, i) => {
@@ -738,12 +807,20 @@ export function OverviewUnits({
                 {(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}
                 {(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
                 {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
+                {unitBodyNote(u) ? ` · ${unitBodyNote(u)}` : ""}
                 {priced && schemed ? " · filled" : (hideExecScheme ? "" : " · Price / Scheme open")}
               </span>
               <UnitBilledDateField
                 leadId={lead.leadId}
                 sno={sno}
                 value={u.soldDate || ""}
+                canEdit={!!canEditBilledDate}
+                onSaved={onSaved}
+              />
+              <UnitDeliveryDateField
+                leadId={lead.leadId}
+                sno={sno}
+                value={u.deliveryDate || u.soldDate || ""}
                 canEdit={!!canEditBilledDate}
                 onSaved={onSaved}
               />
@@ -1960,6 +2037,10 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         chassisNumber: u.chassisNumber || "",
         invoiceNumber: u.invoiceNumber || "",
         numberPlate: u.numberPlate || "",
+        soldDate: u.soldDate || "",
+        deliveryDate: u.deliveryDate || u.soldDate || "",
+        availableBodyType: u.availableBodyType || "",
+        oemBilledBodyType: u.oemBilledBodyType || u.bodyType || "",
       }))
       : []
   ));
@@ -2141,9 +2222,11 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                 <th className="py-1 pr-2">S.No.</th>
                 <th className="py-1 pr-2">Model</th>
                 <th className="py-1 pr-2">Variant</th>
+                <th className="py-1 pr-2">Body</th>
                 <th className="py-1 pr-2">Chassis</th>
                 <th className="py-1 pr-2">Invoice</th>
-                <th className="py-1">Number Plate</th>
+                <th className="py-1 pr-2">Number Plate</th>
+                <th className="py-1">Delivery date</th>
               </tr>
             </thead>
             <tbody>
@@ -2152,6 +2235,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                   <td className="py-1 pr-2 font-mono">{u.sno || i + 1}</td>
                   <td className="py-1 pr-2">{u.model || "—"}</td>
                   <td className="py-1 pr-2">{u.variant || "—"}</td>
+                  <td className="py-1 pr-2 text-ink-soft">{unitBodyNote(u) || "—"}</td>
                   <td className="py-1 pr-2">
                     <Input data-testid={`delivery-unit-chassis-${i + 1}`}
                       value={u.chassisNumber || ""} disabled={oemIdsLocked} placeholder="From OEM Sold"
@@ -2170,13 +2254,22 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                         if (i === 0) setForm((f) => ({ ...f, invoiceNumber: v }));
                       }} />
                   </td>
-                  <td className="py-1">
+                  <td className="py-1 pr-2">
                     <Input data-testid={`delivery-unit-plate-${i + 1}`}
                       value={u.numberPlate || ""} disabled={locked} placeholder="This unit’s plate"
                       onChange={(e) => {
                         const v = e.target.value;
                         setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, numberPlate: v } : row)));
                         if (i === 0) setForm((f) => ({ ...f, numberPlate: v }));
+                      }} />
+                  </td>
+                  <td className="py-1">
+                    <Input data-testid={`delivery-unit-date-${i + 1}`} type="date"
+                      value={u.deliveryDate || ""} disabled={locked}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, deliveryDate: v } : row)));
+                        if (i === 0) setForm((f) => ({ ...f, deliveryDate: v || f.deliveryDate }));
                       }} />
                   </td>
                 </tr>
@@ -2210,7 +2303,9 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
               .map((a) => <option key={a.agentId} value={a.agentId}>{a.agentName}</option>)}
           </Select>
         </Field>
-        <Field label="Delivery Date"><Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} disabled={locked} /></Field>
+        <Field label={packUnits.length > 1 ? "File delivery date (latest unit)" : "Delivery Date"}>
+          <Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} disabled={locked} />
+        </Field>
         <Field label="Mark Delivered?">
           <Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")} disabled={locked || alreadyDelivered || !canMarkDelivered}>
             <option value="">Not yet</option><option value="Yes">Yes — Delivered</option>

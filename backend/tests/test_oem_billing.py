@@ -133,6 +133,8 @@ def test_billing_row_prefers_converted_dv_on_single_file():
     rows = oem_sync.classify_oem_billing(sold, leads)
     assert rows[0]["model"] == "Turbo Max"
     assert rows[0]["variant"] == "Maxx (DV220)"
+    assert rows[0]["billedBodyType"] == "DV220"
+    assert rows[0]["availableBodyType"] == "FB"
 
 
 def test_billing_row_prefers_pack_dv_over_sold_fb():
