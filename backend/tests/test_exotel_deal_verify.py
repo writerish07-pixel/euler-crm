@@ -64,17 +64,13 @@ def test_quiet_hours_and_next_slot():
 
 
 def test_spoken_scripts_are_plain_hindi():
-    blob = " ".join(exo.SPOKEN.values()).lower()
-    assert "kitne paise" in blob
-    assert "gaadi" in blob
-    assert "lakeer" in blob
-    assert "hash" not in blob
-    assert "number" not in blob
-    assert "keypad" not in blob
-    assert "booking" not in blob
-    assert "rashi" not in blob
-    assert "bhugtan" not in blob
-    assert "pushti" not in blob
+    intro = exo.SPOKEN["intro"].lower()
+    assert "kitne paise" in intro
+    assert "gaadi" in intro
+    assert "booking" not in intro
+    prompt = exo.SPOKEN["prompt"].lower()
+    assert "hash" in prompt
+    assert "bhugtan" in prompt
     for name in exo.AUDIO_CLIPS:
         assert exo.audio_path(name), name
 

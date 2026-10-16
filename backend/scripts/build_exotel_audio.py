@@ -34,8 +34,12 @@ async def _synth(text: str, dest: Path):
 
 async def main():
     exo.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    keep = {"prompt"}  # original amount-ask clip
     for name, text in exo.SPOKEN_HI.items():
         dest = exo.AUDIO_DIR / f"{name}.mp3"
+        if name in keep:
+            print(f"keeping {dest.name}")
+            continue
         print(f"building {dest.name} …")
         await _synth(text, dest)
         print(f"  {dest.stat().st_size} bytes")

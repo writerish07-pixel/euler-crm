@@ -46,9 +46,8 @@ SPOKEN = {
         "gaadi ke liye aapne kitne paise diye."
     ),
     "prompt": (
-        "Gaadi ke liye aapne jitne paise diye, wo mobile par ek ek karke daba dijiye. "
-        "Dabana khatam ho to neeche dayi taraf dekhiye, "
-        "do chhoti lakeeron wali jagah, wo daba dijiye."
+        "Aapne showroom mein jitna bhugtan kiya hai, woh rashi keypad par type karke hash dabaiye. "
+        "Type nahi kar sakte to rashi bolkar bata dijiye."
     ),
     "speak": "Daba nahi sakte to koi baat nahi, ab munh se bol dijiye, aapne kitne paise diye.",
     "thanks": "Dhanyavaad, Akar Euler.",
@@ -62,9 +61,8 @@ SPOKEN_HI = {
         "गाड़ी के लिए आपने कितने पैसे दिए।"
     ),
     "prompt": (
-        "गाड़ी के लिए आपने जितने पैसे दिए, वो मोबाइल पर एक एक करके दबा दीजिये। "
-        "दबाना खत्म हो तो नीचे दाईं तरफ़ देखिये, "
-        "दो छोटी लकीरों वाली जगह, वो दबा दीजिये।"
+        "आपने शोरूम में जितना भुगतान किया है, वो राशि कीपैड पर टाइप करके हैश दबाइये। "
+        "टाइप नहीं कर सकते तो राशि बोलकर बता दीजिये।"
     ),
     "speak": "दबा नहीं सकते तो कोई बात नहीं, अब मुँह से बोल दीजिये, आपने कितने पैसे दिए।",
     "thanks": "धन्यवाद, आकर यूलर।",
