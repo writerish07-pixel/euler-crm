@@ -43,21 +43,32 @@ function unitBilledDate(u, lead) {
   return d.length === 10 ? d : "";
 }
 
-function unitSource(lead, unit, index) {
+export function unitSource(lead, unit, index) {
   const u = unit || {};
-  if (!index) {
-    return {
-      ...lead,
-      ...u,
-      interestedModel: u.model || lead.interestedModel,
-      variant: u.variant || lead.variant,
-    };
-  }
-  return {
+  const pack = !!(lead?.sameOrderMultiUnit || (Array.isArray(lead?.units) && lead.units.length > 1));
+  const base = {
     ...lead,
     ...u,
-    interestedModel: u.model || lead.interestedModel,
+    interestedModel: u.model || u.interestedModel || lead.interestedModel,
     variant: u.variant || lead.variant,
+  };
+  if (pack) {
+    // Pack payable / Cx Demand / GVC live on the lead. Unit 1 must keep its own price.
+    if (!Object.prototype.hasOwnProperty.call(u, "customerPayable")) base.customerPayable = 0;
+    else base.customerPayable = u.customerPayable;
+    if (!Object.prototype.hasOwnProperty.call(u, "cxDemand")) {
+      delete base.cxDemand;
+      if (!Object.prototype.hasOwnProperty.call(u, "budget")) delete base.budget;
+    } else {
+      base.cxDemand = u.cxDemand;
+    }
+    if (!Object.prototype.hasOwnProperty.call(u, "grossVehicleCost")) delete base.grossVehicleCost;
+    if (!Object.prototype.hasOwnProperty.call(u, "useDealPrice")) delete base.useDealPrice;
+  }
+  if (!index && !pack) return base;
+  if (!index) return base;
+  return {
+    ...base,
     consumerDiscount: u.consumerDiscount || 0,
     exchangeBonus: u.exchangeBonus || 0,
     loyaltyBonus: u.loyaltyBonus || 0,
@@ -554,7 +565,10 @@ function DrawerActions({ lead, actions, refresh, onClose, onBooked }) {
           } catch (e) { toast.error(apiErrorMessage(e, "Could not revive")); }
         }}><RotateCcw size={15} /> Revive Lead</Button>
       )}
-      <div className="w-full sm:w-auto sm:ml-auto text-sm text-ink-soft">Payable <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span></div>
+      <div className="w-full sm:w-auto sm:ml-auto text-sm text-ink-soft" data-testid="drawer-payable">
+        {lead.sameOrderMultiUnit || (Array.isArray(lead.units) && lead.units.length > 1) ? "Pack payable" : "Payable"}{" "}
+        <span className="font-mono font-semibold text-ink">{inr(lead.customerPayable)}</span>
+      </div>
       {modal === "book" && <BookEnquiryDrawer lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); (onBooked || refresh)(); }} />}
       {modal === "close" && <CloseModal lead={lead} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); onClose(); }} />}
       {modal === "cancel" && <CancelModal lead={lead} actions={actions} onClose={() => setModal(null)} onDone={() => { setModal(null); refresh(); }} />}
@@ -1075,6 +1089,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
           Price Structure · Unit {unitSno}
           {src.interestedModel ? ` · ${src.interestedModel}` : ""}
           {src.variant ? ` ${src.variant}` : ""}
+          {Number(src.customerPayable) > 0 ? ` · ${inr(src.customerPayable)}` : ""}
         </p>
       )}
       {inactive && <StepLock text="This lead is not Active — price structure is read-only." />}
@@ -1334,7 +1349,8 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
   // OEM Extra Support: Received = full OEM claim. Customer discount lives only
   // in Additional (Dealer). Retained = full Received → earnings.
   const oemRecv = Math.max(0, +form.oemExtraSupportReceived || 0);
-  const dealLocked = Number(lead.cxDemand || lead.budget) > 0 && !!lead.useDealPrice;
+  const dealLocked = Number(src.cxDemand || src.budget) > 0 && !!src.useDealPrice;
+  const unitPayable = Number(src.customerPayable) || 0;
   const oemRetained = oemRecv;
   const previewOemTotal = previewOem + oemRecv;
 
@@ -1345,6 +1361,7 @@ function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onSaved, o
           Scheme · Unit {unitSno}
           {src.interestedModel ? ` · ${src.interestedModel}` : ""}
           {src.variant ? ` ${src.variant}` : ""}
+          {unitPayable > 0 ? ` · ${inr(unitPayable)}` : ""}
         </p>
       )}
       <OemClaimStrip leadId={lead.leadId} />

@@ -148,6 +148,28 @@ def _gvc_from_charges(s):
     ))
 
 
+def pack_unit_cx_is_pack_rollup(cx, snap, unit=None):
+    """True when cxDemand is the order total, not this unit's deal.
+
+    recompute_lead stores pack payable on the lead. Overlay used to copy that
+    onto unit 1, so Unit 1 locked to the sum of every unit.
+    """
+    cx = round2(num(cx))
+    if cx <= 0:
+        return False
+    snap = snap or {}
+    unit = unit or {}
+    gvc = _gvc_from_charges(snap)
+    if gvc <= 0:
+        gvc = _gvc_from_charges(unit)
+    if gvc > 0 and cx > gvc + DEAL_AMOUNT_EQUAL_RUPEES:
+        return True
+    ex = round2(num(snap.get("exShowroom") or unit.get("exShowroom")))
+    if ex > 0 and cx > ex * 1.5 + DEAL_AMOUNT_EQUAL_RUPEES:
+        return True
+    return False
+
+
 def pack_unit_locked_cx_demand(snap, unit=None):
     """Agreed per-unit payable that Additional must protect.
 
@@ -155,10 +177,14 @@ def pack_unit_locked_cx_demand(snap, unit=None):
     skipped that lock, so a cheaper RTO/insurance line dropped customer
     payable instead of dealer Additional. Recover the deal from list
     RTO/insurance minus Additional when the unit has no cxDemand yet.
+
+    Never fall back to lead/overlay cxDemand — that field is the pack total.
     """
     unit = unit or {}
     snap = snap or {}
-    cx = round2(num(unit.get("cxDemand") or snap.get("cxDemand")))
+    cx = round2(num(unit.get("cxDemand")))
+    if pack_unit_cx_is_pack_rollup(cx, snap, unit):
+        cx = 0.0
     if cx > 0:
         return cx
     addl = round2(max(0.0, num(
@@ -1514,8 +1540,8 @@ def get_scheme_offer_rules_for_vehicle(model, variant, booking_date, scheme_rows
         if key == "additionalDiscount":
             add_choices = additional_discount_choices()
             rules[key] = {"key": key, "label": label, "allowed": True,
-                          "maxAmount": add_choices[-1], "choices": add_choices,
-                          "hint": f"Dealer-funded — type any amount (max \u20b9{add_choices[-1]})"}
+                          "maxAmount": None, "choices": add_choices,
+                          "hint": "Dealer-funded — type any amount (no maximum)"}
             continue
         m = master.get(key)
         if not m:
@@ -1712,8 +1738,6 @@ def validate_scheme_offers(model, variant, booking_date, offers, scheme_rows):
             lines.append(f"\u2022 {rule['label']}: amount cannot be negative")
             continue
         if key == "additionalDiscount":
-            if rule.get("maxAmount") is not None and amt > num(rule["maxAmount"]) + 0.01:
-                lines.append(f"\u2022 {rule['label']}: \u20b9{amt} exceeds maximum \u20b9{rule['maxAmount']}")
             continue
         if amt <= 0:
             continue

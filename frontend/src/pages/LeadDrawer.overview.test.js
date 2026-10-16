@@ -34,7 +34,7 @@ jest.mock("../components/CallLink", () => () => null);
 jest.mock("../components/CompleteFormatDrawer", () => () => null);
 jest.mock("./BookEnquiryDrawer", () => () => null);
 
-import { OverviewUnits } from "./LeadDrawer";
+import { OverviewUnits, unitSource } from "./LeadDrawer";
 
 function packLead() {
   return {
@@ -79,4 +79,30 @@ test("Details units area has add-unit, add-vehicle and billed-date edit", async 
   expect(host.textContent).toMatch(/billed date/i);
   await act(async () => { root.unmount(); });
   host.remove();
+});
+
+test("pack unit 1 source keeps own payable not the pack total", () => {
+  const lead = {
+    sameOrderMultiUnit: true,
+    customerPayable: 9645210,
+    cxDemand: 9645210,
+    budget: 9645210,
+    grossVehicleCost: 9645210,
+    useDealPrice: true,
+    additionalDiscount: 476000,
+    units: [
+      { sno: 1, model: "Turbo Max", variant: "Maxx (DV220)", additionalDiscount: 59500,
+        customerPayable: 790000, exShowroom: 825000 },
+      { sno: 2, model: "Turbo Max", variant: "Maxx (DV220)", additionalDiscount: 59500,
+        customerPayable: 790000, exShowroom: 825000 },
+    ],
+  };
+  const u1 = unitSource(lead, lead.units[0], 0);
+  expect(u1.customerPayable).toBe(790000);
+  expect(u1.cxDemand).toBeUndefined();
+  expect(u1.useDealPrice).toBeUndefined();
+  expect(u1.additionalDiscount).toBe(59500);
+  const missing = unitSource(lead, { sno: 1, model: "Turbo Max", additionalDiscount: 59500 }, 0);
+  expect(missing.customerPayable).toBe(0);
+  expect(missing.cxDemand).toBeUndefined();
 });

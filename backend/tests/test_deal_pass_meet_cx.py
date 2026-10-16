@@ -162,6 +162,35 @@ def test_pack_unit_lock_recovers_deal_when_rto_insurance_cut():
     assert derived["oemExtraSupportPassed"] == 0
 
 
+def test_pack_unit_lock_ignores_pack_total_cx_on_unit():
+    snap = {
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+        "exShowroom": 825000, "registrationRto": 5500, "insurance": 19000,
+        "accessories": 0, "fastag": 0, "handlingCharges": 0, "trc": 0,
+        "extendedWarranty": 0, "rsaAmc": 0, "otherCharges": 0,
+        "additionalDiscount": 59500, "cxDemand": 9645210,
+    }
+    unit = {"additionalDiscount": 59500, "cxDemand": 9645210, "exShowroom": 825000}
+    assert ce.pack_unit_cx_is_pack_rollup(9645210, snap, unit) is True
+    assert ce.pack_unit_locked_cx_demand(snap, unit) == 0
+    own = {"additionalDiscount": 59500, "cxDemand": 790000, "exShowroom": 825000}
+    assert ce.pack_unit_locked_cx_demand(snap, own) == 790000
+
+
+def test_additional_discount_has_no_maximum():
+    rules = ce.get_scheme_offer_rules_for_vehicle("Turbo Max", "Maxx (PV)", "2026-09-15", [])
+    add = (rules.get("rules") or {}).get("additionalDiscount") or {}
+    assert add.get("allowed") is True
+    assert add.get("maxAmount") in (None, 0)
+    assert ce.validate_scheme_offers(
+        "Turbo Max", "Maxx (PV)", "2026-09-15", {"additionalDiscount": 59500}, []) == []
+    assert ce.validate_scheme_offers(
+        "Turbo Max", "Maxx (PV)", "2026-09-15", {"additionalDiscount": 200000}, []) == []
+    neg = ce.validate_scheme_offers(
+        "Turbo Max", "Maxx (PV)", "2026-09-15", {"additionalDiscount": -1}, [])
+    assert neg
+
+
 def test_pack_unit_lock_skips_when_additional_is_smaller_than_the_charge_cut():
     """Per-unit pack test: RTO 10,000 / insurance 0 / Additional 5,000 must stay."""
     snap = {
