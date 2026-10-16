@@ -49,13 +49,17 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const [sameOrder, setSameOrder] = useState(!!initial.sameOrderMultiUnit);
   const [extraUnits, setExtraUnits] = useState(() => (
     Array.isArray(initial.units)
-      ? initial.units.map((u) => ({ model: u.model || "", variant: u.variant || "" }))
+      ? initial.units.map((u) => ({
+        model: u.model || "", variant: u.variant || "",
+        cxDemand: u.cxDemand || "",
+      }))
       : []
   ));
   const [unitVariants, setUnitVariants] = useState({});
   const [matches, setMatches] = useState(null);
   const [siblingDocs, setSiblingDocs] = useState([]);
   const cxTouched = useRef(false);
+  const extraCxTouched = useRef([]);
   const set = (k) => (e) => {
     if (k === "budget") cxTouched.current = true;
     setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -77,7 +81,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   }, [extraUnits.map((u) => u.model).join("|")]);
 
   const passOnKeys = Object.keys(passOn).filter((k) => passOn[k]).join(",");
-  const packUnitKey = extraUnits.map((u) => `${u.model}|${u.variant}`).join(";");
+  const packUnitKey = extraUnits.map((u) => `${u.model}|${u.variant}|${u.cxDemand || ""}`).join(";");
 
   useEffect(() => {
     const extras = extraUnits.filter((u) => u.model);
@@ -88,20 +92,41 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     }
     let alive = true;
     setDealLoading(true);
+    const unit1Cx = Number(form.budget) || 0;
     const units = pack
-      ? [{ model: form.interestedModel, variant: form.variant }, ...extras]
+      ? [
+        {
+          model: form.interestedModel, variant: form.variant,
+          ...(unit1Cx > 0 ? { cxDemand: unit1Cx } : {}),
+        },
+        ...extras.map((u) => ({
+          model: u.model, variant: u.variant,
+          ...(Number(u.cxDemand) > 0 ? { cxDemand: Number(u.cxDemand) } : {}),
+        })),
+      ]
       : undefined;
+    const packCx = pack
+      ? units.reduce((s, u) => s + (Number(u.cxDemand) || 0), 0)
+      : unit1Cx;
     get("/commercial/deal-preview", {
-      model: form.interestedModel, variant: form.variant, cxDemand: Number(form.budget) || 0,
+      model: form.interestedModel, variant: form.variant, cxDemand: packCx,
       passOnKeys: isExecutive ? undefined : (passOnKeys || undefined),
       units: units ? JSON.stringify(units) : undefined,
     }).then((d) => {
       if (!alive) return;
       setDeal(d);
-      const suggested = Number(d?.suggestedCxDemand || d?.netToCx || 0);
-      if (pack && !cxTouched.current && suggested > 0) {
-        setForm((f) => (Number(f.budget) === suggested ? f : { ...f, budget: suggested }));
+      if (!pack) return;
+      const lines = Array.isArray(d?.units) ? d.units : [];
+      const u0 = Number(lines[0]?.suggestedCxDemand || lines[0]?.netToCx || 0);
+      if (!cxTouched.current && u0 > 0) {
+        setForm((f) => (Number(f.budget) === u0 ? f : { ...f, budget: u0 }));
       }
+      setExtraUnits((rows) => rows.map((row, i) => {
+        if (extraCxTouched.current[i]) return row;
+        const suggested = Number(lines[i + 1]?.suggestedCxDemand || lines[i + 1]?.netToCx || 0);
+        if (!(suggested > 0) || Number(row.cxDemand) === suggested) return row;
+        return { ...row, cxDemand: suggested };
+      }));
     })
       .catch(() => { if (alive) setDeal(null); })
       .finally(() => { if (alive) setDealLoading(false); });
@@ -172,7 +197,21 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   // Executives cannot open a second file on another executive's mobile.
   // TL / owner / GM can add another unit when assigning to the same executive.
   const otherExecLock = isExecutive && otherExecHold;
-  const quotedCx = Number(form.budget) || 0;
+  const packUnitPayload = sameOrder
+    ? [
+      {
+        model: form.interestedModel, variant: form.variant,
+        cxDemand: Number(form.budget) || 0,
+      },
+      ...extraUnits.filter((u) => u.model || u.variant).map((u) => ({
+        model: u.model, variant: u.variant,
+        cxDemand: Number(u.cxDemand) || 0,
+      })),
+    ]
+    : [];
+  const quotedCx = sameOrder
+    ? packUnitPayload.reduce((s, u) => s + (Number(u.cxDemand) || 0), 0)
+    : (Number(form.budget) || 0);
   const priced = deal?.priceFound === true
     || (deal != null && deal.priceFound == null
       && (Number(deal.exShowroom) > 0 || Number(deal.priceTotal) > 0));
@@ -192,14 +231,12 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
     try {
       const lead = await post("/leads", {
         ...form,
-        budget: Number(form.budget),
+        budget: sameOrder ? quotedCx : Number(form.budget),
         oemExtraSupportReceived: Number(form.oemExtraSupportReceived) || 0,
         ...(isExecutive ? {} : { schemePassOn: passOn }),
         anotherVehicle: !!(extra.anotherVehicle || anotherVehicle) && !sameOrder,
         sameOrderMultiUnit: !!(extra.sameOrderMultiUnit || sameOrder),
-        units: (extra.sameOrderMultiUnit || sameOrder)
-          ? extraUnits.filter((u) => u.model || u.variant)
-          : undefined,
+        units: (extra.sameOrderMultiUnit || sameOrder) ? packUnitPayload : undefined,
         ...extra,
       });
       setClash(null);
@@ -259,10 +296,9 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const printDealSheet = async () => {
     if (!form.customerName) return toast.error("Enter the customer name");
     if (!form.interestedModel || !form.variant) return toast.error("Select a vehicle");
-    if (!(Number(form.budget) > 0)) return toast.error("Enter Cx Demand");
+    if (!(quotedCx > 0)) return toast.error("Enter Cx Demand");
     setBusy(true);
     try {
-      const extras = extraUnits.filter((u) => u.model || u.variant);
       await downloadPost("/commercial/deal-sheet.pdf", `deal-sheet-${form.customerName}.pdf`, {
         customerName: form.customerName,
         mobile: form.mobile,
@@ -271,11 +307,11 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
         gstin: form.gstin,
         interestedModel: form.interestedModel,
         variant: form.variant,
-        budget: Number(form.budget),
+        budget: quotedCx,
         executive: form.executive,
         createdDate: form.createdDate,
         passOnKeys: isExecutive ? "" : Object.keys(passOn).filter((k) => passOn[k]).join(","),
-        units: sameOrder && extras.length ? extras : undefined,
+        units: sameOrder && packUnitPayload.length > 1 ? packUnitPayload : undefined,
       });
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
@@ -383,7 +419,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
                   setSameOrder(e.target.checked);
                   if (e.target.checked) {
                     setAnotherVehicle(false);
-                    setExtraUnits((rows) => (rows.length ? rows : [{ model: "", variant: "" }]));
+                    setExtraUnits((rows) => (rows.length ? rows : [{ model: "", variant: "", cxDemand: "" }]));
                   }
                 }}
               />
@@ -394,8 +430,8 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             <div className="space-y-2" data-testid="same-order-units">
               <p className="text-[11px] text-ink-soft">
                 {isExecutive
-                  ? "Unit 1 is the model above. Add Unit 2, 3… Payable is the sum of Cx Demand across units."
-                  : "Unit 1 is the model above. Add Unit 2, 3… Price and scheme for each extra SKU come from Price Master + Scheme Master. Payable is the sum."}
+                  ? "Unit 1 is the model above. Add Unit 2, 3… Cx Demand is separate for each unit — pack payable is the sum."
+                  : "Unit 1 is the model above. Add Unit 2, 3… Cx Demand is separate for each unit (grouped on the deal card). Pack payable is the sum."}
               </p>
               {extraUnits.map((u, i) => (
                 <div key={i} className="grid grid-cols-1 sm:grid-cols-2 gap-2" data-testid={`same-order-unit-${i + 2}`}>
@@ -405,7 +441,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
                       value={u.model}
                       onChange={(e) => {
                         const model = e.target.value;
-                        setExtraUnits((rows) => rows.map((row, idx) => (idx === i ? { model, variant: "" } : row)));
+                        setExtraUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, model, variant: "" } : row)));
                       }}
                     >
                       <option value="">—</option>
@@ -433,7 +469,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
               ))}
               <div className="flex gap-2">
                 <Button type="button" variant="secondary" className="!py-1 !px-2.5 text-xs" data-testid="same-order-add-unit"
-                  onClick={() => setExtraUnits((rows) => [...rows, { model: "", variant: "" }])}>
+                  onClick={() => setExtraUnits((rows) => [...rows, { model: "", variant: "", cxDemand: "" }])}>
                   Add unit
                 </Button>
                 {extraUnits.length > 1 && (
@@ -457,6 +493,20 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             snapshot={deal}
             cxDemand={form.budget}
             onCxDemand={(v) => { cxTouched.current = true; setForm((f) => ({ ...f, budget: v })); }}
+            unitCxDemands={sameOrder
+              ? [Number(form.budget) || 0, ...extraUnits.map((u) => Number(u.cxDemand) || 0)]
+              : undefined}
+            onUnitCxDemand={sameOrder ? (i, v) => {
+              if (i === 0) {
+                cxTouched.current = true;
+                setForm((f) => ({ ...f, budget: v }));
+              } else {
+                extraCxTouched.current[i - 1] = true;
+                setExtraUnits((rows) => rows.map((row, idx) => (
+                  idx === i - 1 ? { ...row, cxDemand: v } : row
+                )));
+              }
+            } : undefined}
             loading={dealLoading}
             missingPrice={!form.interestedModel || !form.variant}
             showOwnerPnl={!!canSeeOwnerCommercials}

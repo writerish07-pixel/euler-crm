@@ -164,3 +164,34 @@ test("pack card lists each unit net", async () => {
   await act(async () => { root.unmount(); });
   host.remove();
 });
+
+test("pack card groups a Cx Demand field per unit plus pack total", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  const onUnit = jest.fn();
+  await act(async () => {
+    root.render(
+      <DealFormatCard
+        snapshot={{
+          pack: true, unitCount: 2, exShowroom: 1800000, rto: 0, insurance: 0,
+          priceTotal: 1800000, netToCx: 1800000, suggestedCxDemand: 1800000,
+          units: [
+            { model: "Turbo Max", variant: "A", netToCx: 600000, cxDemand: 590000 },
+            { model: "Storm", variant: "B", netToCx: 1200000, cxDemand: 1180000 },
+          ],
+        }}
+        cxDemand={590000}
+        unitCxDemands={[590000, 1180000]}
+        onUnitCxDemand={onUnit}
+      />,
+    );
+  });
+  const group = host.querySelector('[data-testid="deal-pack-cx-group"]');
+  expect(group).toBeTruthy();
+  expect(host.querySelector('[data-testid="lead-budget"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="deal-cx-demand-unit-2"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="deal-cx-demand"]').textContent).toMatch(/17,70,000|1,770,000|1770000/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});

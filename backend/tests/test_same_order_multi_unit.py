@@ -1489,3 +1489,110 @@ async def test_billed_date_switches_scheme_month(client):
     assert rules.json().get("asOf") == "2026-09-15"
     u1 = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 1})
     assert u1.json().get("asOf") == "2026-10-03"
+
+
+def test_unit_specs_keep_each_units_cx_demand():
+    specs = server._unit_specs_from("Turbo Max", "Pack A", [
+        {"model": "Turbo Max", "variant": "Pack A", "cxDemand": 590000},
+        {"model": "Storm", "variant": "Pack B", "cxDemand": 1180000},
+    ])
+    assert len(specs) == 2
+    assert ce.num(specs[0].get("cxDemand")) == 590000
+    assert ce.num(specs[1].get("cxDemand")) == 1180000
+    assert specs[0]["model"] == "Turbo Max"
+    assert specs[1]["model"] == "Storm"
+
+
+@pytest.mark.asyncio
+async def test_same_order_create_stamps_per_unit_cx_demand(client):
+    mobile = "9813302111"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-CX-A", "PM-CX-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CX-A", "model": "Turbo Max", "variant": "Cx A",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CX-B", "model": "Storm", "variant": "Cx B",
+        "exShowroom": 1200000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    r = await client.post("/api/leads", json={
+        "customerName": "Pack Per Unit Cx",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Cx A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "budget": 1770000,
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"model": "Turbo Max", "variant": "Cx A", "cxDemand": 590000},
+            {"model": "Storm", "variant": "Cx B", "cxDemand": 1180000},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    units = body.get("units") or []
+    assert len(units) == 2
+    assert ce.num(units[0].get("cxDemand")) == 590000
+    assert ce.num(units[1].get("cxDemand")) == 1180000
+    assert ce.num(units[0].get("cxDemand")) != ce.num(body.get("cxDemand"))
+    assert ce.num(body.get("cxDemand")) == ce.round2(
+        ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
+    deal_units = (body.get("dealFormat") or {}).get("units") or []
+    assert ce.num(deal_units[0].get("cxDemand")) == 590000
+    assert ce.num(deal_units[1].get("cxDemand")) == 1180000
+
+
+@pytest.mark.asyncio
+async def test_owner_field_sets_one_pack_unit_cx_demand(client):
+    mobile = "9813302222"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-CXE-A", "PM-CXE-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CXE-A", "model": "Turbo Max", "variant": "Cx E A",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CXE-B", "model": "Storm", "variant": "Cx E B",
+        "exShowroom": 1200000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    created = await client.post("/api/leads", json={
+        "customerName": "Pack Edit Cx",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Cx E A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"model": "Turbo Max", "variant": "Cx E A"},
+            {"model": "Storm", "variant": "Cx E B"},
+        ],
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    u2_before = ce.num((created.json().get("units") or [{}, {}])[1].get("customerPayable"))
+    edited = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "cxDemand", "value": 580000, "unitSno": 1,
+    })
+    assert edited.status_code == 200, edited.text
+    units = edited.json().get("units") or []
+    assert ce.num(units[0].get("cxDemand")) == 580000
+    assert ce.num(units[0].get("customerPayable")) == 580000
+    assert ce.num(units[1].get("cxDemand") or 0) != 580000
+    assert ce.num(units[1].get("customerPayable")) != 580000
+    assert ce.num(units[1].get("customerPayable")) > 0
+    again = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "cxDemand", "value": 1190000, "unitSno": 2,
+    })
+    assert again.status_code == 200, again.text
+    units = again.json().get("units") or []
+    assert ce.num(units[0].get("cxDemand")) == 580000
+    assert ce.num(units[1].get("cxDemand")) == 1190000
+    assert ce.num(again.json().get("cxDemand")) == ce.round2(
+        ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
