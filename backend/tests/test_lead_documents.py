@@ -437,6 +437,37 @@ async def test_another_vehicle_with_extra_amount_copies_support_email(client):
     assert float(stored.get("oemExtraSupportReceived") or 0) == 7000
 
 
+def test_octet_stream_jpeg_is_sniffed_as_photo():
+    jpeg = b"\xff\xd8\xff" + b"\x00" * 80
+    class Fake:
+        content_type = "application/octet-stream"
+        filename = "image"
+    assert server.lead_docs._content_type(Fake(), kind="oem_extra_support", data=jpeg) == "image/jpeg"
+    assert server.lead_docs._sniff_content_type(b"\x89PNG\r\n\x1a\n" + b"x") == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_oem_extra_support_upload_accepts_nameless_jpeg(client):
+    r = await client.post("/api/leads", json={
+        "customerName": "Extra Proof", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
+    lid = r.json()["leadId"]
+    jpeg = b"\xff\xd8\xff" + b"\x00" * 200
+    up = await upload_bytes(
+        client, f"/api/leads/{lid}/documents", "oem_extra_support",
+        jpeg, "image", "application/octet-stream")
+    assert up.status_code == 200, up.text
+    assert up.json()["kind"] == "oem_extra_support"
+    assert up.json()["contentType"] == "image/jpeg"
+    assert up.json()["filename"].endswith(".jpg")
+    huge = b"\xff\xd8\xff" + b"\x00" * (8 * 1024 * 1024 + 10)
+    denied = await upload_bytes(
+        client, f"/api/leads/{lid}/documents", "oem_extra_support",
+        huge, "photo.jpg", "image/jpeg")
+    assert denied.status_code == 422, denied.text
+    assert "8 MB" in denied.json()["detail"]
+
+
 def test_tl_kyc_permissions_do_not_need_own_lead():
     tl = {"role": "tl", "name": "Docs TL"}
     exec_u = {"role": "executive", "name": "Amit"}
