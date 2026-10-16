@@ -109,6 +109,7 @@ def webhook_urls(cfg: dict) -> dict:
     return {
         "voice": f"{base}/voice{q}",
         "gather": f"{base}/gather{q}",
+        "gatherConfig": f"{base}/gather-config{q}",
         "recorded": f"{base}/recorded{q}",
         "status": f"{base}/status{q}",
         "audio": f"{base}/audio",
@@ -147,6 +148,7 @@ async def get_config() -> dict:
         "quietEnd": quiet_end,
         "webhookSecret": (os.environ.get("EXOTEL_WEBHOOK_SECRET") or doc.get("webhookSecret") or "").strip(),
         "cronToken": (os.environ.get("EXOTEL_CRON_TOKEN") or doc.get("cronToken") or "").strip(),
+        "flowAppId": (os.environ.get("EXOTEL_FLOW_APP_ID") or doc.get("flowAppId") or "").strip(),
         "brand": BRAND,
     }
 
@@ -155,9 +157,17 @@ def public_config(cfg: dict) -> dict:
     out = {k: v for k, v in cfg.items() if k not in ("apiKey", "apiToken")}
     urls = webhook_urls(cfg)
     out["voiceUrl"] = urls["voice"]
+    out["gatherUrl"] = urls["gather"]
+    out["gatherConfigUrl"] = urls["gatherConfig"]
+    out["recordedUrl"] = urls["recorded"]
     out["statusUrl"] = urls["status"]
     out["cronUrl"] = urls["cron"]
     out["audioUrl"] = urls["audio"]
+    out["introAudioUrl"] = urls["audio"] + "/intro.mp3"
+    out["promptAudioUrl"] = urls["audio"] + "/prompt.mp3"
+    out["speakAudioUrl"] = urls["audio"] + "/speak.mp3"
+    out["thanksAudioUrl"] = urls["audio"] + "/thanks.mp3"
+    out["connectUrl"] = connect_flow_url(cfg)
     return out
 
 
@@ -177,6 +187,8 @@ async def save_config(body: dict) -> dict:
         updates["subdomain"] = str(body.get("subdomain") or DEFAULT_SUBDOMAIN).strip() or DEFAULT_SUBDOMAIN
     if "exoPhone" in body:
         updates["exoPhone"] = re.sub(r"\D", "", str(body.get("exoPhone") or "")) or DEFAULT_EXOPHONE
+    if "flowAppId" in body:
+        updates["flowAppId"] = re.sub(r"\D", "", str(body.get("flowAppId") or ""))
     if "enabled" in body:
         updates["enabled"] = bool(body.get("enabled"))
     if "quietStart" in body:
@@ -308,6 +320,28 @@ def schedule(coro):
         logger.warning("exotel: no running event loop; skipped")
 
 
+def gather_config_json(cfg: dict) -> dict:
+    """JSON Gather applet Primary URL — plays Hindi prompt, hash to finish."""
+    audio = webhook_urls(cfg)["audio"]
+    return {
+        "gather_prompt": {"audio_url": f"{audio}/prompt.mp3"},
+        "max_input_digits": 8,
+        "finish_on_key": "#",
+        "input_timeout": 12,
+        "repeat_menu": 1,
+        "repeat_gather_prompt": {"audio_url": f"{audio}/prompt.mp3"},
+    }
+
+
+def connect_flow_url(cfg: dict) -> str:
+    """Exotel Connect-to-flow Url. App Bazaar app_id is required for live calls."""
+    app_id = re.sub(r"\D", "", str((cfg or {}).get("flowAppId") or ""))
+    sid = str((cfg or {}).get("accountSid") or DEFAULT_SID).strip() or DEFAULT_SID
+    if app_id:
+        return f"http://my.exotel.com/{sid}/exoml/start_voice/{app_id}"
+    return webhook_urls(cfg or {})["voice"]
+
+
 def india_dial(phone: str) -> str:
     d = digits10(phone)
     if len(d) == 10:
@@ -385,7 +419,7 @@ async def _place_call_http(cfg: dict, customer: str, lead_id: str) -> dict:
     data = {
         "From": india_dial(customer),
         "CallerId": cfg["exoPhone"],
-        "Url": urls["voice"],
+        "Url": connect_flow_url(cfg),
         "StatusCallback": urls["status"],
         "StatusCallbackEvents[0]": "terminal",
         "CustomField": lead_id,
@@ -467,6 +501,45 @@ async def enqueue_after_booking(lead_id: str) -> dict:
         "dealVerifyLastStatus": "queued",
     })
     return {"ok": True, "nextAt": due}
+
+
+async def enqueue_unverified_booked(limit: int = 300) -> dict:
+    """Queue existing booked files that were never marked for verify.
+
+    Convert-to-booking queues new files. This covers the booked register that
+    already existed when Exotel was switched on. Does not place the calls.
+    """
+    q = {
+        "dealCancelled": {"$ne": True},
+        "dealVerifyPaused": {"$ne": True},
+        "dealVerifyStatus": {"$nin": ["pending", "calling", "failed", "queued", "listening", "answered", "paused"]},
+        "$or": [
+            {"dealVerifyAmount": {"$exists": False}},
+            {"dealVerifyAmount": 0},
+            {"dealVerifyAmount": None},
+            {"dealVerifyAmount": ""},
+        ],
+    }
+    rows = await _db().leads.find(q).sort("bookingDate", -1).to_list(800)
+    due = as_utc_iso(now_ist())
+    queued = 0
+    for lead in rows:
+        if queued >= limit:
+            break
+        if not _is_booked(lead):
+            continue
+        if parse_amount(lead.get("dealVerifyAmount")):
+            continue
+        if len(digits10(lead.get("mobile"))) != 10:
+            continue
+        await _apply(lead["leadId"], {
+            "dealVerifyStatus": "pending",
+            "dealVerifyPaused": False,
+            "dealVerifyNextAt": due,
+            "dealVerifyLastStatus": "queued",
+        })
+        queued += 1
+    return {"ok": True, "queued": queued}
 
 
 def _attempts_today(lead: dict) -> int:

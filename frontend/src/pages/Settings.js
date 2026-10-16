@@ -610,6 +610,7 @@ function ExotelCard() {
     quietEnd: 19,
     cronToken: "",
     webhookSecret: "",
+    flowAppId: "",
   });
   const [busy, setBusy] = useState(false);
 
@@ -627,6 +628,7 @@ function ExotelCard() {
         quietEnd: d.quietEnd || 19,
         cronToken: d.cronToken || "",
         webhookSecret: d.webhookSecret || "",
+        flowAppId: d.flowAppId || "",
       }));
     }).catch(() => {});
   }, []);
@@ -643,6 +645,7 @@ function ExotelCard() {
         quietEnd: Number(form.quietEnd) || 19,
         cronToken: form.cronToken,
         webhookSecret: form.webhookSecret,
+        flowAppId: form.flowAppId,
         enabled: true,
       };
       if (form.apiKey && !form.apiKey.includes("…") && !form.apiKey.startsWith("•")) body.apiKey = form.apiKey;
@@ -658,7 +661,10 @@ function ExotelCard() {
   const runJobs = async () => {
     try {
       const r = await post("/integrations/exotel/run-jobs", {});
-      toast.success(`Verify calls: placed ${r.placed || 0}, skipped ${r.skipped || 0}`);
+      toast.success(
+        `Verify calls: queued ${r.queued || 0}, placed ${r.placed || 0}, skipped ${r.skipped || 0}`
+        + (r.failed ? `, failed ${r.failed}` : ""),
+      );
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not place calls"));
     }
@@ -674,7 +680,12 @@ function ExotelCard() {
         After booking, Euler calls the customer in Hindi from the dealership ExoPhone and asks
         how much they paid. They can type the amount or speak it. Calls retry until an amount
         is stored. If that amount is more than receipts on the file, the lead is flagged.
+        For files already booked: use <b>Call booked leads now</b> (up to 40 rings, then the
+        rest continue every 15 minutes in the call window), or open one lead and tap Call now.
         Do not paste API tokens in chat — save them here.
+        Keep the landline ExoPhone on “Shubham Motors AI” for incoming calls. Create a
+        new App Bazaar app “Akar Euler deal verify” for outbound verify — do not reuse
+        the old AI app — and paste its app ID below.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Account SID">
@@ -713,13 +724,25 @@ function ExotelCard() {
           <Input value={form.webhookSecret} onChange={(e) => setForm({ ...form, webhookSecret: e.target.value })}
             placeholder="Filled on first save" />
         </Field>
+        <Field label="App Bazaar app ID (new Euler flow, not Shubham Motors AI)">
+          <Input data-testid="exotel-flow-app-id" value={form.flowAppId}
+            onChange={(e) => setForm({ ...form, flowAppId: e.target.value })}
+            placeholder="Number from start_voice/…" />
+        </Field>
       </div>
-      <p className="text-xs text-ink-faint mt-2 font-mono break-all">
-        Voice URL: {cfg?.voiceUrl || "https://euler-crm-production.up.railway.app/api/integrations/exotel/voice"}
-      </p>
+      <div className="text-xs text-ink-faint mt-2 space-y-1 font-mono break-all">
+        <p>Greeting audio: {cfg?.introAudioUrl || "…/audio/intro.mp3"}</p>
+        <p>Gather prompt audio: {cfg?.promptAudioUrl || "…/audio/prompt.mp3"}</p>
+        <p>Gather config URL: {cfg?.gatherConfigUrl || "…/gather-config"}</p>
+        <p>Passthru after keypad: {cfg?.gatherUrl || "…/gather"}</p>
+        <p>Speak audio: {cfg?.speakAudioUrl || "…/audio/speak.mp3"}</p>
+        <p>Passthru after voicemail: {cfg?.recordedUrl || "…/recorded"}</p>
+        <p>Thanks audio: {cfg?.thanksAudioUrl || "…/audio/thanks.mp3"}</p>
+        {cfg?.connectUrl ? <p>Connect URL: {cfg.connectUrl}</p> : null}
+      </div>
       <div className="flex flex-wrap gap-2 mt-4">
         <Button data-testid="exotel-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Exotel settings"}</Button>
-        <Button variant="secondary" onClick={runJobs}>Place due verify calls now</Button>
+        <Button variant="secondary" onClick={runJobs}>Call booked leads now</Button>
         <span className="text-xs text-ink-faint self-center">{cfg?.configured ? "Configured" : "Needs API key + token"}</span>
       </div>
     </Card>

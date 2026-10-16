@@ -46,6 +46,16 @@ export default function DealVerify() {
     }
   };
 
+  const callNow = async (leadId) => {
+    try {
+      await post(`/leads/${leadId}/deal-verify/call`, {});
+      toast.success("Verification call started");
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Call did not start"));
+    }
+  };
+
   return (
     <div data-testid="deal-verify-page">
       <PageHeader
@@ -89,6 +99,8 @@ export default function DealVerify() {
                     value={listen[r.leadId] || ""} placeholder="₹"
                     onChange={(e) => setListen((s) => ({ ...s, [r.leadId]: e.target.value }))} />
                   <Button variant="secondary" className="!py-1 !px-2" onClick={() => confirm(r.leadId)}>Save</Button>
+                  <Button variant="secondary" className="!py-1 !px-2" data-testid={`deal-verify-call-${r.leadId}`}
+                    onClick={() => callNow(r.leadId)}>Call now</Button>
                 </div>
               )
             ) },

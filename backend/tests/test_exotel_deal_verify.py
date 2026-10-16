@@ -79,6 +79,24 @@ def test_exoml_is_hindi_flow():
     assert "Hangup" not in empty
 
 
+def test_gather_config_json_uses_prompt_audio():
+    cfg = {"webhookSecret": "", "accountSid": "shubhammotors1"}
+    body = exo.gather_config_json(cfg)
+    assert body["finish_on_key"] == "#"
+    assert body["max_input_digits"] == 8
+    assert "prompt.mp3" in body["gather_prompt"]["audio_url"]
+
+
+def test_connect_url_uses_app_bazaar_id():
+    cfg = {
+        "accountSid": "shubhammotors1",
+        "flowAppId": "261787",
+        "webhookSecret": "",
+    }
+    url = exo.connect_flow_url(cfg)
+    assert url == "http://my.exotel.com/shubhammotors1/exoml/start_voice/261787"
+
+
 @pytest_asyncio.fixture
 async def client(monkeypatch):
     isolated = server.client["exotel_deal_verify_isolated"]
@@ -127,6 +145,7 @@ async def test_settings_mask_secrets(client):
         "enabled": True,
         "quietStart": 10,
         "quietEnd": 19,
+        "flowAppId": "261787",
     })
     assert r.status_code == 200, r.text
     body = r.json()
@@ -135,6 +154,8 @@ async def test_settings_mask_secrets(client):
     assert body["exoPhone"].endswith("37655")
     assert "…" in (body.get("apiKeyMasked") or "")
     assert body.get("webhookSecret")
+    assert body.get("flowAppId") == "261787"
+    assert "start_voice/261787" in (body.get("connectUrl") or "")
 
 
 @pytest.mark.asyncio
@@ -155,11 +176,10 @@ async def test_enqueue_then_dtmf_mismatch(client):
     assert placed.get("ok") is True
     assert placed["callSid"] == "sid-LD26EXO1"
 
-    r = await client.post("/api/integrations/exotel/gather", data={
-        "CallSid": "sid-LD26EXO1",
-        "CustomField": "LD26EXO1",
-        "Digits": "500000",
-    })
+    r = await client.get(
+        "/api/integrations/exotel/gather",
+        params={"CallSid": "sid-LD26EXO1", "CustomField": "LD26EXO1", "digits": '"500000"'},
+    )
     assert r.status_code == 200
     assert "xml" in r.headers.get("content-type", "")
     lead = await server.db.leads.find_one({"leadId": "LD26EXO1"})
@@ -277,6 +297,35 @@ async def test_due_calls_skip_unenqueued_booked(client, monkeypatch):
     assert res.get("ok") is True
     assert "LD26NEW" in placed
     assert "LD26OLD" not in placed
+
+
+@pytest.mark.asyncio
+async def test_run_jobs_queues_existing_booked(client, monkeypatch):
+    placed = []
+
+    async def capture(lead_id, *, force=False):
+        placed.append(lead_id)
+        return {"ok": True, "leadId": lead_id, "callSid": f"sid-{lead_id}"}
+
+    monkeypatch.setattr(exo, "place_verify_call", capture)
+    await server.db.leads.insert_one({
+        "leadId": "LD26OLD", "customerName": "Old Booked", "mobile": "9876500077",
+        "currentStatus": "Booked", "bookingDate": "2026-01-01",
+        "accountStatus": "Active",
+    })
+    queued = await exo.enqueue_unverified_booked(limit=50)
+    assert queued["queued"] == 1
+    lead = await server.db.leads.find_one({"leadId": "LD26OLD"})
+    assert lead["dealVerifyStatus"] == "pending"
+    res = await exo.run_due_calls(limit=25, force=True)
+    assert res.get("ok") is True
+    assert "LD26OLD" in placed
+
+    r = await client.post("/api/integrations/exotel/run-jobs")
+    assert r.status_code == 200
+    body = r.json()
+    assert "queued" in body
+    assert "placed" in body
 
 
 @pytest.mark.asyncio
