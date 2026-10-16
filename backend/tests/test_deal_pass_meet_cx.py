@@ -256,3 +256,71 @@ async def test_pack_rto_insurance_cut_shrinks_additional_not_payable(client):
     assert ce.num(u1.get("additionalDiscount")) == 20574
     assert ce.num(u2.get("additionalDiscount")) == 25000
     assert ce.num(u1.get("customerPayable")) != 820074
+
+
+def test_recut_cx_demand_round_trips_derive_additional():
+    gvc, scheme, addl = 989500, 0, 29500
+    recut = ce.recut_cx_demand_for_additional(gvc, scheme, addl)
+    assert recut["cxDemand"] == 960000
+    assert recut["additionalDiscount"] == 29500
+    derived = ce.derive_deal_customer_pass(gvc, recut["cxDemand"], scheme, 0)
+    assert derived["applied"] is True
+    assert derived["additionalDiscount"] == 29500
+    bigger = ce.recut_cx_demand_for_additional(gvc, scheme, 50000)
+    assert bigger["cxDemand"] == 939500
+    assert ce.derive_deal_customer_pass(
+        gvc, bigger["cxDemand"], scheme, 0)["additionalDiscount"] == 50000
+    capped = ce.recut_cx_demand_for_additional(gvc, 0, 5_000_000)
+    assert capped["cxDemand"] == 0
+    assert capped["additionalDiscount"] == 989500
+    assert capped["useDealPrice"] is False
+
+
+@pytest.mark.asyncio
+async def test_owner_additional_edit_recuts_cx_demand_and_sticks(client):
+    created = await client.post("/api/leads", json={
+        "customerName": "Owner Additional Edit",
+        "mobile": "9950993799",
+        "interestedModel": "Storm",
+        "variant": "Storm TR (PV) Reg C7 Deal",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "createdDate": "2026-09-23",
+        "budget": 960000,
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("additionalDiscount")) == 29500
+    assert ce.num(lead.get("customerPayable")) == 960000
+
+    edited = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "additionalDiscount", "value": 40000,
+    })
+    assert edited.status_code == 200, edited.text
+    body = edited.json()
+    assert ce.num(body["additionalDiscount"]) == 40000
+    assert ce.num(body["cxDemand"]) == 949500
+    assert ce.num(body["customerPayable"]) == 949500
+
+    scheme = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 10000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+    })
+    assert scheme.status_code == 200, scheme.text
+    again = scheme.json()
+    assert ce.num(again["additionalDiscount"]) == 10000
+    assert ce.num(again["cxDemand"]) == 979500
+    assert ce.num(again["customerPayable"]) == 979500
+
+    keep = await client.put(f"/api/leads/{lid}/scheme", json={
+        "benefitMode": "Partial Benefit",
+        "additionalDiscount": 10000,
+        "benefitPassedBreakup": "{}",
+        "schemeComponentsUsed": "{}",
+    })
+    assert keep.status_code == 200, keep.text
+    assert ce.num(keep.json()["additionalDiscount"]) == 10000
+    assert ce.num(keep.json()["cxDemand"]) == 979500

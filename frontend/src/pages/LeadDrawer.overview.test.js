@@ -9,13 +9,17 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
 jest.mock("react-router-dom", () => ({ Link: ({ children }) => children }));
 jest.mock("../lib/api", () => ({
-  put: jest.fn(() => Promise.resolve({})),
-  get: jest.fn(() => Promise.resolve({})),
-  post: jest.fn(() => Promise.resolve({})),
-  del: jest.fn(() => Promise.resolve({})),
+  put: () => Promise.resolve({}),
+  get: (url) => {
+    if (String(url).includes("oem-claims")) return Promise.resolve({ claims: [], schemeRegister: [] });
+    if (String(url).includes("scheme-rules")) return Promise.resolve({ rules: {} });
+    return Promise.resolve({});
+  },
+  post: () => Promise.resolve({}),
+  del: () => Promise.resolve({}),
   apiErrorMessage: (e, fallback) => fallback,
   apiErrorDetail: () => ({}),
-  downloadFile: jest.fn(() => Promise.resolve()),
+  downloadFile: () => Promise.resolve(),
 }));
 jest.mock("../context/AuthContext", () => ({
   useAuth: () => ({ isOwner: true, isTl: true, isSalesGm: false, isExecutive: false, isAccounts: false, canSeeOwnerCommercials: true }),
@@ -33,8 +37,11 @@ jest.mock("../components/LeadDocuments", () => ({
 jest.mock("../components/CallLink", () => () => null);
 jest.mock("../components/CompleteFormatDrawer", () => () => null);
 jest.mock("./BookEnquiryDrawer", () => () => null);
+jest.mock("../components/SchemeCircularPic", () => () => null);
+jest.mock("../components/TallyPackCheck", () => () => null);
+jest.mock("./DealVerify", () => ({ DealVerifyCard: () => null }));
 
-import { OverviewUnits, unitSource } from "./LeadDrawer";
+import { Overview, OverviewUnits, SchemeTab, unitSource } from "./LeadDrawer";
 
 function packLead() {
   return {
@@ -112,4 +119,84 @@ test("pack unit 1 source keeps own payable not the pack total", () => {
   const missing = unitSource(lead, { sno: 1, model: "Turbo Max", additionalDiscount: 59500 }, 0);
   expect(missing.customerPayable).toBe(0);
   expect(missing.cxDemand).toBeUndefined();
+});
+
+test("pack overview groups additional dealer discount per unit", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <Overview
+        lead={{
+          leadId: "LD-PACK-ADDL",
+          sameOrderMultiUnit: true,
+          cxDemand: 1770000,
+          budget: 1770000,
+          additionalDiscount: 50000,
+          units: [
+            { sno: 1, model: "Turbo Max", additionalDiscount: 20000, cxDemand: 580000, customerPayable: 580000 },
+            { sno: 2, model: "Storm", additionalDiscount: 30000, cxDemand: 1190000, customerPayable: 1190000 },
+          ],
+        }}
+        c={{ grossVehicleCost: 1800000, tcs: 0, totalDiscount: 50000, totalPassedToCustomer: 50000 }}
+        actions={{}}
+        onSaved={() => {}}
+      />,
+    );
+  });
+  expect(host.querySelector('[data-testid="pack-additional-discount-group"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="owner-field-additionalDiscount-unit-1"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="owner-field-additionalDiscount-unit-2"]')).toBeTruthy();
+  expect(host.textContent).toMatch(/Pack Additional/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+async function renderScheme({ isOwner = true, dealLocked = true } = {}) {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <SchemeTab
+        lead={{
+          leadId: "LD-SCHEME-ADDL",
+          cxDemand: dealLocked ? 960000 : 0,
+          budget: dealLocked ? 960000 : 0,
+          useDealPrice: dealLocked,
+          additionalDiscount: 29500,
+          interestedModel: "Storm",
+          variant: "Storm TR",
+        }}
+        c={{}}
+        actions={{ canScheme: true }}
+        isOwner={isOwner}
+        masters={{}}
+        onSaved={() => {}}
+      />,
+    );
+  });
+  return { host, root };
+}
+
+test("owner can edit additional when Cx Demand locks the deal", async () => {
+  const { host, root } = await renderScheme({ isOwner: true, dealLocked: true });
+  const input = host.querySelector('[data-testid="scheme-additionalDiscount"]');
+  expect(input).toBeTruthy();
+  expect(input.disabled).toBe(false);
+  expect(input.readOnly).toBe(false);
+  expect(host.textContent).toMatch(/Owner can set Additional/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("staff additional stays locked when Cx Demand is the deal", async () => {
+  const { host, root } = await renderScheme({ isOwner: false, dealLocked: true });
+  const input = host.querySelector('[data-testid="scheme-additionalDiscount"]');
+  expect(input).toBeTruthy();
+  expect(input.disabled).toBe(true);
+  expect(input.readOnly).toBe(true);
+  await act(async () => { root.unmount(); });
+  host.remove();
 });
