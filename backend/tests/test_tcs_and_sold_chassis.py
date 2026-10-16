@@ -683,6 +683,23 @@ def test_sku_for_sold_vehicle_prefers_converted_load_body():
     assert sku and sku.key == "turbo.maxx.dv220"
 
 
+def test_fill_lead_skus_single_unit_fb_to_dv():
+    lead = {
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "chassisNumber": "MD9SOLO01",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+    }
+    sold = [{
+        "chassis": "MD9SOLO01", "model": "Turbo Max", "variant": "Maxx (FB)",
+        "oemSkuKey": "turbo.maxx.fb", "updatedLoadBody": "DV220",
+    }]
+    patch = oem_sync.fill_lead_skus(lead, sold)
+    assert patch["interestedModel"] == "Turbo Max"
+    assert patch["variant"] == "Maxx (DV220)"
+    assert patch["originalVariant"] == "Maxx (FB)"
+    assert patch.get("oemBodyMismatch") is False
+
+
 def test_fill_pack_unit_skus_blank_and_fb_to_dv():
     lead = {
         "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
@@ -751,10 +768,11 @@ async def test_sold_sync_mismatch_only_after_delivered(client):
         "oemSkuKey": "turbo.maxx.dv220", "coulsonStatus": "SOLD",
     })
     stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
-    assert stats["bodyMismatch"] == 1
+    assert stats["bodyAdopted"] == 0
     lead = await server.db.leads.find_one({"leadId": "LD-BODY-MISMATCH"})
-    assert lead["variant"] == "Maxx (FB)"
-    assert lead["oemBodyMismatch"] is True
+    assert lead["variant"] == "Maxx (DV220)"
+    assert lead["originalVariant"] == "Maxx (FB)"
+    assert lead.get("oemBodyMismatch") is False
     assert lead["oemBilledVariant"] == "Maxx (DV220)"
     accept = await client.post("/api/leads/LD-BODY-MISMATCH/adopt-oem-body")
     assert accept.status_code == 200, accept.text

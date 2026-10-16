@@ -56,8 +56,8 @@ function unitSource(lead, unit, index) {
   return {
     ...lead,
     ...u,
-    interestedModel: u.model || "",
-    variant: u.variant || "",
+    interestedModel: u.model || lead.interestedModel,
+    variant: u.variant || lead.variant,
     consumerDiscount: u.consumerDiscount || 0,
     exchangeBonus: u.exchangeBonus || 0,
     loyaltyBonus: u.loyaltyBonus || 0,

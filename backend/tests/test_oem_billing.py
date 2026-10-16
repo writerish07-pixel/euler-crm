@@ -115,6 +115,26 @@ def test_billing_row_uses_lead_model_when_sold_has_none():
     assert rows[0]["variant"] == "Maxx (PV)"
 
 
+def test_billing_row_prefers_converted_dv_on_single_file():
+    sold = [{
+        "chassis": "MD9SOLODV01", "mobile": "9811100777",
+        "invoiceNumber": "INV-SOLO", "customerName": "Solo Convert",
+        "soldDate": "2026-10-16",
+        "model": "Turbo Max", "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+        "updatedLoadBody": "DV220",
+    }]
+    leads = [{
+        "leadId": "LD-SOLO", "customerName": "Solo Convert", "mobile": "9811100777",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "chassisNumber": "MD9SOLODV01",
+        "deliveryDate": "2026-10-16",
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["model"] == "Turbo Max"
+    assert rows[0]["variant"] == "Maxx (DV220)"
+
+
 def test_billing_row_prefers_pack_dv_over_sold_fb():
     """Chassis sat as FB, converted and billed DV — OEM Billing follows the pack DV."""
     sold = [{

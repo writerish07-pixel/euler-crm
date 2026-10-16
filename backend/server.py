@@ -848,18 +848,34 @@ def _sold_body_row_from_match(match):
 
 
 async def _sold_body_updates_for_lead(lead):
-    """Adopt billed body on an Active file; record mismatch after delivery/close."""
+    """Write billed/converted SKU on every file; reprice only while still Active."""
     match = await oem_sync.match_sold_family_for_lead(db, lead)
     row = _sold_body_row_from_match(match)
-    if not row or not oem_sync.can_adopt_sold_body(lead, row):
-        return {}, False
-    adopt = oem_sync.lead_allows_body_adopt(lead)
-    patch = oem_sync.sold_body_adopt_patch(lead, row, adopt=adopt)
-    fields = oem_sync.sold_body_fields(row)
-    units = oem_sync.apply_sold_body_to_units(
-        list((lead or {}).get("units") or []), row, fields, adopt=adopt)
-    if units and units != list((lead or {}).get("units") or []):
-        patch["units"] = units
+    family = []
+    if row:
+        family = [row]
+    for extra in (match or {}).get("units") or []:
+        if isinstance(extra, dict):
+            family.append(extra)
+    patch = oem_sync.fill_lead_skus(lead, family)
+    fields = oem_sync.sold_body_fields(row) if row else None
+    current = {
+        "model": (lead or {}).get("interestedModel") or "",
+        "variant": (lead or {}).get("variant") or "",
+    }
+    adopt = bool(
+        row and fields and oem_sync.can_adopt_sold_body(lead, row)
+        and oem_sync.lead_allows_body_adopt(lead)
+        and oem_sync._sku_body_rank(fields) >= oem_sync._sku_body_rank(current)
+    )
+    if adopt:
+        extra = oem_sync.sold_body_adopt_patch(lead, row, adopt=True)
+        patch.update(extra)
+        units = oem_sync.apply_sold_body_to_units(
+            patch.get("units") or list((lead or {}).get("units") or []),
+            row, fields, adopt=True)
+        if units:
+            patch["units"] = units
     return patch, adopt
 
 
@@ -880,8 +896,8 @@ def _merge_delivery_units(existing, sold_units, lead=None):
     if not base:
         return [{
             "sno": i + 1,
-            "model": u.get("model") or "",
-            "variant": u.get("variant") or "",
+            "model": u.get("model") or (lead or {}).get("interestedModel") or "",
+            "variant": u.get("variant") or (lead or {}).get("variant") or "",
             "chassisNumber": u.get("chassis") or u.get("chassisNumber") or "",
             "invoiceNumber": u.get("invoiceNumber") or "",
             "numberPlate": u.get("numberPlate") or "",
@@ -918,9 +934,9 @@ def _merge_delivery_units(existing, sold_units, lead=None):
             unit["invoiceNumber"] = pick.get("invoiceNumber")
         if pick.get("numberPlate"):
             unit["numberPlate"] = pick.get("numberPlate")
-        if not unit.get("model") and pick.get("model"):
-            unit["model"] = pick.get("model")
-            unit["variant"] = pick.get("variant") or ""
+        if not unit.get("model"):
+            unit["model"] = pick.get("model") or (lead or {}).get("interestedModel") or ""
+            unit["variant"] = pick.get("variant") or (lead or {}).get("variant") or ""
     for i, s in enumerate(sold):
         if i in taken:
             continue
@@ -929,8 +945,8 @@ def _merge_delivery_units(existing, sold_units, lead=None):
             continue
         base.append({
             "sno": len(base) + 1,
-            "model": s.get("model") or "",
-            "variant": s.get("variant") or "",
+            "model": s.get("model") or (lead or {}).get("interestedModel") or "",
+            "variant": s.get("variant") or (lead or {}).get("variant") or "",
             "chassisNumber": s.get("chassis") or s.get("chassisNumber") or "",
             "invoiceNumber": s.get("invoiceNumber") or "",
             "numberPlate": s.get("numberPlate") or "",
@@ -6649,10 +6665,11 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
             "invoiceNumber": invoice, "numberPlate": plate,
         }]
     for i, u in enumerate(raw):
+        own_model = str(u.get("model") or u.get("interestedModel") or "").strip()
         rec = {
             "sno": int(u.get("sno") or i + 1),
-            "model": str(u.get("model") or u.get("interestedModel") or "").strip(),
-            "variant": str(u.get("variant") or "").strip(),
+            "model": own_model or str(model or "").strip(),
+            "variant": str(u.get("variant") or "").strip() or (str(variant or "").strip() if not own_model else ""),
             "chassisNumber": str(u.get("chassisNumber") or "").strip(),
             "invoiceNumber": str(u.get("invoiceNumber") or "").strip(),
             "numberPlate": str(u.get("numberPlate") or "").strip(),
@@ -10324,18 +10341,16 @@ async def _fresh_lead(lead):
 
 
 async def _refresh_pack_unit_skus(lead, sold_rows=None):
-    """Fill blank pack unit model/variant and adopt billed DV on that chassis."""
+    """Fill blank model/variant and adopt billed DV on every unit and the lead."""
     lead = await _fresh_lead(lead)
     if not lead or not (lead or {}).get("leadId"):
         return lead
-    units = oem_sync.fill_pack_unit_skus(lead, sold_rows)
-    if units == list((lead or {}).get("units") or []):
+    patch = oem_sync.fill_lead_skus(lead, sold_rows)
+    if not patch:
         return lead
-    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
-        "units": units,
-        "lastUpdated": now_iso(),
-        "oemSoldSyncedAt": now_iso(),
-    }})
+    patch["lastUpdated"] = now_iso()
+    patch["oemSoldSyncedAt"] = now_iso()
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
     return clean(await db.leads.find_one({"leadId": lead["leadId"]}))
 
 
@@ -10369,6 +10384,9 @@ async def _connect_oem_sold(lead, row):
     stamped = oem_sync.stamp_unit_vehicle_ids(lead, chassis, invoice, plate, sold_date)
     if stamped and stamped != list((lead or {}).get("units") or []):
         patch["units"] = stamped
+    sku_patch = oem_sync.fill_lead_skus({**(lead or {}), **patch}, [row])
+    if sku_patch:
+        patch.update(sku_patch)
     await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
     delivery_ids = {k: patch[k] for k in ("chassisNumber", "invoiceNumber", "numberPlate") if k in patch}
     if delivery_ids:
@@ -10460,8 +10478,9 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     mobile = oem_sync._digits10(src.get("mobile") or row.get("mobile"))
     invoice = str(src.get("invoiceNumber") or row.get("invoiceNumber") or "").strip()
     plate = str(src.get("numberPlate") or "").strip()
-    model = src.get("model") or row.get("model") or ""
-    variant = src.get("variant") or row.get("variant") or ""
+    billed = oem_sync.sold_body_fields(src) or oem_sync.sold_body_fields(row) or {}
+    model = billed.get("model") or src.get("model") or row.get("model") or ""
+    variant = billed.get("variant") or src.get("variant") or row.get("variant") or ""
     sold_date = str(src.get("soldDate") or row.get("soldDate") or "").strip()[:10] or today()
     lead_id = await next_id("lead", "LD26")
     doc = {

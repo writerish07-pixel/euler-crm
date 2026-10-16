@@ -1180,12 +1180,66 @@ def resolved_unit_sku(lead, row=None):
     )
 
 
+def fill_lead_skus(lead, sold_rows=None):
+    """Billed / converted SKU onto every unit and the lead header.
+
+    Applies to every CRM file — single unit or pack, booked or already
+    Delivered. Blank invoice lines pick up the billed body or the file's SKU.
+    FB that Coulson converted and billed as DV becomes DV; DV is not overwritten
+    with a stale yard FB.
+    """
+    units = fill_pack_unit_skus(lead, sold_rows)
+    patch = {}
+    if units != list((lead or {}).get("units") or []):
+        patch["units"] = units
+    by_ch = {}
+    for row in sold_rows or []:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if ch:
+            by_ch[ch] = row
+    ch = _norm_chassis((lead or {}).get("chassisNumber"))
+    row = by_ch.get(ch) if ch else None
+    if row is None and len(by_ch) == 1:
+        row = next(iter(by_ch.values()))
+    have = None
+    if str((lead or {}).get("interestedModel") or "").strip():
+        have = {
+            "model": (lead or {}).get("interestedModel") or "",
+            "variant": (lead or {}).get("variant") or "",
+            "bodyType": (lead or {}).get("bodyType") or "",
+            "oemSkuKey": (lead or {}).get("oemSkuKey") or "",
+        }
+    picked = pick_converted_sku(
+        sold_body_fields(row) if row else None,
+        have,
+        pack_sibling_sku_fields({**(lead or {}), "units": units or (lead or {}).get("units")}),
+        _raw_sold_sku_fields(row),
+    )
+    if picked and str(picked.get("model") or "").strip() and lead_body_differs(lead, picked):
+        if not (lead or {}).get("originalVariant"):
+            patch["originalModel"] = (lead or {}).get("interestedModel") or ""
+            patch["originalVariant"] = (lead or {}).get("variant") or ""
+        patch["interestedModel"] = picked["model"]
+        patch["variant"] = picked.get("variant") or ""
+        if picked.get("bodyType"):
+            patch["bodyType"] = picked["bodyType"]
+        if picked.get("oemSkuKey"):
+            patch["oemSkuKey"] = picked["oemSkuKey"]
+        billed = sold_body_fields(row) if row else None
+        if billed:
+            patch["oemBilledModel"] = billed.get("model")
+            patch["oemBilledVariant"] = billed.get("variant")
+            patch["oemBilledBodyType"] = billed.get("bodyType")
+            patch["oemBodyMismatch"] = False
+    return patch
+
+
 def fill_pack_unit_skus(lead, sold_rows=None):
     """Fill blank unit model/variant and adopt billed DV onto that chassis.
 
     Invoice-only appends land empty. Yard Sold can still say FB after Coulson
-    converted and billed DV. Same-order packs keep the converted body on every
-    line — including files already marked Delivered.
+    converted and billed DV. Every unit on every file keeps the converted body
+    — including files already marked Delivered.
     """
     units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
     if not units:
@@ -1643,8 +1697,9 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
 
     When Coulson billed a different body (FB → DV) on the same chassis, an
     Active file also takes that variant and the caller can reprice it.
-    Pack units — including already-delivered files — still take the billed /
-    converted body so the delivery drawer and OEM Billing match Coulson.
+    Every file — including already-delivered singles and packs — still takes
+    the billed / converted body so registers, the delivery drawer, and OEM
+    Billing match Coulson. Prices reprice only on a live not-yet-delivered file.
     """
     stats = {
         "updated": 0,
@@ -1746,11 +1801,14 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         family = sold_rows_for_lead(
             {**lead, "units": working_units}, sold,
             occupied - set(lead_chassis_list({**lead, "units": working_units})))
-        filled_units = fill_pack_unit_skus({**lead, "units": working_units}, family)
+        sku_patch = fill_lead_skus({**lead, "units": working_units}, family)
         units_filled = False
-        if filled_units != list((lead or {}).get("units") or []):
-            patch["units"] = filled_units
+        if sku_patch:
+            patch.update(sku_patch)
             units_filled = True
+            if sku_patch.get("variant") or sku_patch.get("interestedModel"):
+                body_mismatch = False
+                patch["oemBodyMismatch"] = False
         if oem_mobile and len(oem_mobile) == 10 and oem_mobile != lead_mobile:
             old = str(lead.get("mobile") or "").strip()
             old10 = _digits10(old)
@@ -1803,15 +1861,13 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
             continue
         family = sold_rows_for_lead(
             lead, sold, occupied - set(lead_chassis_list(lead)))
-        new_units = fill_pack_unit_skus(lead, family)
-        if new_units == list((lead or {}).get("units") or []):
+        sku_patch = fill_lead_skus(lead, family)
+        if not sku_patch:
             continue
-        await db.leads.update_one({"leadId": lid}, {"$set": {
-            "units": new_units,
-            "lastUpdated": now_iso(),
-            "oemSoldSyncedAt": now_iso(),
-        }})
-        lead["units"] = new_units
+        sku_patch["lastUpdated"] = now_iso()
+        sku_patch["oemSoldSyncedAt"] = now_iso()
+        await db.leads.update_one({"leadId": lid}, {"$set": sku_patch})
+        lead.update(sku_patch)
         stats["updated"] += 1
         stats["bodyUnitsFilled"] += 1
     return stats
