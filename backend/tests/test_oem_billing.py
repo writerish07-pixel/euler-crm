@@ -241,8 +241,22 @@ async def test_oem_billing_explicit_create_for_unmatched(client):
     lead = await server.db.leads.find_one({"chassisNumber": chassis})
     assert lead is not None
     assert lead["oemBillingCreated"] is True
-    assert lead["currentStatus"] == "New"
+    assert lead["currentStatus"] == "Delivered"
+    assert lead.get("deliveryStatus") == "Delivered"
+    assert lead.get("oemAutoDelivered") is True
+    assert lead.get("bookingDate") == "2026-09-05"
+    assert lead.get("deliveryDate") == "2026-09-05"
     assert lead["invoiceNumber"] == "CINV-MAKE"
+    assert server._is_booked_lead(lead) is True
+    assert server._is_followup_enquiry(lead) is False
+    listed = (await client.get("/api/leads")).json()
+    follow = (await client.get("/api/leads", params={"followup": True})).json()
+    assert any(row.get("leadId") == lead["leadId"] for row in listed)
+    assert not any(row.get("leadId") == lead["leadId"] for row in follow)
+    billed = await client.get("/api/oem-billing?month=2026-09")
+    assert billed.status_code == 200, billed.text
+    hit = next(x for x in billed.json()["rows"] if x["chassis"] == chassis)
+    assert hit["bucket"] == oem_sync.BUCKET_DELIVERED
     again = await client.post("/api/oem-billing/create", json={"chassis": chassis})
     assert again.status_code == 409
 
@@ -782,6 +796,23 @@ async def test_oem_billing_merges_empty_new_different_executive(client):
     assert hit["bucket"] != "needs_review"
 
 
+def test_classify_oem_created_delivered_lead_is_delivered():
+    sold = [{
+        "chassis": "MD9OEMDEL01", "mobile": "9811199008", "invoiceNumber": "INV-D",
+        "customerName": "Billed New", "soldDate": "2026-10-16",
+    }]
+    leads = [{
+        "leadId": "LD-OEM-DEL", "customerName": "Billed New", "mobile": "9811199008",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-16",
+        "bookingDate": "2026-10-16", "oemBillingCreated": True,
+        "oemAutoDelivered": True, "chassisNumber": "MD9OEMDEL01",
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["bucket"] == oem_sync.BUCKET_DELIVERED
+    assert rows[0]["leadId"] == "LD-OEM-DEL"
+
+
 def test_classify_oem_created_lead_is_pending_delivery():
     sold = [{
         "chassis": "MD9OEMNEW01", "mobile": "9811199001", "invoiceNumber": "INV-N",
@@ -1123,3 +1154,40 @@ def test_should_oem_auto_deliver_needs_unique_mobile_not_stub():
     ]) is False
     stub = {**lead, "oemBillingCreated": True}
     assert server._should_oem_auto_deliver(stub, sold_ch, sold) is False
+    assert server._should_oem_auto_deliver(stub, sold_ch, sold, all_leads=[stub]) is True
+    original = {**lead, "leadId": "LD-ORIG", "currentStatus": "Booked",
+                "bookingDate": "2026-09-01", "oemBillingCreated": False}
+    assert server._should_oem_auto_deliver(
+        stub, sold_ch, sold, all_leads=[stub, original]) is False
+
+
+@pytest.mark.asyncio
+async def test_sync_promotes_oem_created_new_file_onto_lead_register(client):
+    """Yesterday's Create-from-OEM New enquiry is billed — not a follow-up."""
+    chassis = "MD9OEMNEWREG01"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.delete_many({"mobile": "8302479825"})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "8302479825", "invoiceNumber": "AF-122-I26278232",
+        "customerName": "Rakesh kumar bobasya", "model": "Turbo Max", "variant": "Maxx (PV)",
+        "soldDate": "2026-10-16", "coulsonStatus": "SOLD",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD26000933", "customerName": "Rakesh kumar bobasya",
+        "mobile": "8302479825", "accountStatus": "Active", "currentStatus": "New",
+        "oemBillingCreated": True, "leadSource": "OEM Billing",
+        "chassisNumber": chassis, "invoiceNumber": "AF-122-I26278232",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "createdDate": "2026-10-16",
+    })
+    n = await server._auto_deliver_oem_sold_leads()
+    assert n >= 1
+    live = await server.db.leads.find_one({"leadId": "LD26000933"})
+    assert live["currentStatus"] == "Delivered"
+    assert live.get("oemAutoDelivered") is True
+    assert live.get("bookingDate") == "2026-10-16"
+    assert server._is_followup_enquiry(live) is False
+    listed = (await client.get("/api/leads")).json()
+    follow = (await client.get("/api/leads", params={"followup": True})).json()
+    assert any(row.get("leadId") == "LD26000933" for row in listed)
+    assert not any(row.get("leadId") == "LD26000933" for row in follow)
