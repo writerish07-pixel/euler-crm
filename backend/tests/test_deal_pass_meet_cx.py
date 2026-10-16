@@ -142,3 +142,88 @@ async def test_create_lead_leftover_goes_to_additional_not_extra_passed(client):
     assert ce.num(lead.get("oemExtraSupportPassed")) == 0
     assert ce.num(lead.get("oemExtraSupportRetained")) == 15000
     assert ce.num(lead.get("additionalDiscount")) == 29500
+
+
+def test_pack_unit_lock_recovers_deal_when_rto_insurance_cut():
+    """Messenger SCS: Additional 59,500 was vs list 5,500+19,000. Cutting those
+    charges must keep Cx Demand ~7,90,000 and shrink dealer Additional."""
+    snap = {
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+        "exShowroom": 825000, "registrationRto": 2200, "insurance": 17874,
+        "accessories": 0, "fastag": 0, "handlingCharges": 0, "trc": 0,
+        "extendedWarranty": 0, "rsaAmc": 0, "otherCharges": 0,
+        "additionalDiscount": 59500,
+    }
+    lock = ce.pack_unit_locked_cx_demand(snap, {"additionalDiscount": 59500})
+    assert lock == 790000
+    derived = ce.derive_deal_customer_pass(ce._gvc_from_charges(snap), lock, 0, 48000)
+    assert derived["applied"] is True
+    assert derived["additionalDiscount"] == 55074
+    assert derived["oemExtraSupportPassed"] == 0
+
+
+def test_pack_unit_lock_skips_when_additional_is_smaller_than_the_charge_cut():
+    """Per-unit pack test: RTO 10,000 / insurance 0 / Additional 5,000 must stay."""
+    snap = {
+        "model": "Turbo Max", "variant": "Unit A",
+        "exShowroom": 500000, "registrationRto": 10000, "insurance": 0,
+        "accessories": 0, "fastag": 0, "handlingCharges": 0, "trc": 0,
+        "extendedWarranty": 0, "rsaAmc": 0, "otherCharges": 0,
+        "additionalDiscount": 5000,
+    }
+    assert ce.pack_unit_locked_cx_demand(snap, {"additionalDiscount": 5000}) == 0
+    storm = {
+        "model": "Storm", "variant": "Unit B",
+        "exShowroom": 700000, "registrationRto": 20000, "insurance": 0,
+        "accessories": 0, "fastag": 0, "handlingCharges": 0, "trc": 0,
+        "extendedWarranty": 0, "rsaAmc": 0, "otherCharges": 0,
+        "additionalDiscount": 25000,
+    }
+    assert ce.pack_unit_locked_cx_demand(storm, {"additionalDiscount": 25000}) == 0
+
+
+@pytest.mark.asyncio
+async def test_pack_rto_insurance_cut_shrinks_additional_not_payable(client):
+    """Same-order pack: cheaper RTO/insurance reduces Additional (Dealer).
+
+    Mirrors messenger scs LD26000554 unit 1: Additional was quoted on list
+    5,500 + 19,000; editing those lines must not cheapen Cx Demand.
+    """
+    lid = "LD-PACK-RTO-INS"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-PACK-RTO-INS"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-PACK-RTO-INS",
+        "model": "Turbo Max", "variant": "Maxx Pack RTO",
+        "exShowroom": 825000, "rto": 5500, "insurance": 19000,
+        "handlingCharges": 0, "status": "active",
+    })
+    unit = {
+        "model": "Turbo Max", "variant": "Maxx Pack RTO",
+        "exShowroom": 825000, "rto": 5500, "insuranceAmount": 19000,
+        "additionalDiscount": 25000, "priceStructureSaved": True,
+        "schemeAllocationExplicit": True, "schemeAllocationV2": True,
+        "benefitPassedBreakup": "{}", "schemeComponentsUsed": "{}",
+    }
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "messenger scs rto", "mobile": "8980143566",
+        "interestedModel": "Turbo Max", "variant": "Maxx Pack RTO",
+        "executive": "Amit", "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-15", "sameOrderMultiUnit": True,
+        "priceStructureSaved": True, "schemeAllocationExplicit": True,
+        "schemeAllocationV2": True, "additionalDiscount": 25000,
+        "exShowroom": 825000, "rto": 5500, "insuranceAmount": 19000,
+        "units": [{**unit, "sno": 1}, {**unit, "sno": 2}],
+    })
+    cut = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 825000, "rto": 2200, "insuranceAmount": 17874, "unitSno": 1,
+    })
+    assert cut.status_code == 200, cut.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    u1 = (after.get("units") or [{}])[0]
+    u2 = (after.get("units") or [{}, {}])[1]
+    # Bug was 8,20,074 (GVC after the cut minus the old Additional).
+    assert ce.num(u1.get("customerPayable")) == 824500
+    assert ce.num(u1.get("additionalDiscount")) == 20574
+    assert ce.num(u2.get("additionalDiscount")) == 25000
+    assert ce.num(u1.get("customerPayable")) != 820074

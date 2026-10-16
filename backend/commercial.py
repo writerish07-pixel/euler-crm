@@ -139,6 +139,59 @@ def scheme_customer_benefit_ex_additional(alloc):
     ))
 
 
+def _gvc_from_charges(s):
+    """Gross vehicle cost from a commercial snapshot (same keys as totals)."""
+    s = s or {}
+    return round2(sum(
+        (insurance_charge_for_payable(s) if k == "insurance" else num(s.get(k)))
+        for k in CHARGE_KEYS
+    ))
+
+
+def pack_unit_locked_cx_demand(snap, unit=None):
+    """Agreed per-unit payable that Additional must protect.
+
+    Single-unit files keep Cx Demand when RTO/insurance change. Pack units
+    skipped that lock, so a cheaper RTO/insurance line dropped customer
+    payable instead of dealer Additional. Recover the deal from list
+    RTO/insurance minus Additional when the unit has no cxDemand yet.
+    """
+    unit = unit or {}
+    snap = snap or {}
+    cx = round2(num(unit.get("cxDemand") or snap.get("cxDemand")))
+    if cx > 0:
+        return cx
+    addl = round2(max(0.0, num(
+        unit["additionalDiscount"] if "additionalDiscount" in unit else snap.get("additionalDiscount"))))
+    if addl <= 0:
+        return 0.0
+    defaults = default_rto_insurance_for_model(
+        snap.get("model") or snap.get("interestedModel") or unit.get("model"),
+        snap.get("variant") or unit.get("variant"))
+    if not defaults:
+        return 0.0
+    list_rto, list_ins = defaults
+    cur_rto = _rto_amount(snap)
+    cur_ins = insurance_charge_for_payable(snap)
+    rto_above = cur_rto > list_rto + DEAL_AMOUNT_EQUAL_RUPEES
+    ins_above = cur_ins > list_ins + DEAL_AMOUNT_EQUAL_RUPEES
+    if rto_above or ins_above:
+        return 0.0
+    cut = round2(max(0.0, list_rto - cur_rto) + max(0.0, list_ins - cur_ins))
+    if cut <= DEAL_AMOUNT_EQUAL_RUPEES:
+        return 0.0
+    if addl + DEAL_AMOUNT_EQUAL_RUPEES < cut:
+        return 0.0
+    list_snap = dict(snap)
+    list_snap["rto"] = list_rto
+    list_snap["registrationRto"] = list_rto
+    list_snap["insurance"] = list_ins
+    list_snap["insuranceAmount"] = list_ins
+    list_gvc = _gvc_from_charges(list_snap)
+    deal = round2(list_gvc - addl)
+    return deal if deal > 0 else 0.0
+
+
 def derive_deal_customer_pass(price_total, deal, scheme_passed, extra_received):
     """Meet Cx Demand: scheme first (unchanged dealer-share), then Additional.
 
