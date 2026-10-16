@@ -77,6 +77,65 @@ def test_sold_doc_keeps_sold_date():
     assert row["invoiceNumber"] == "CINV-DATE"
 
 
+def test_sold_doc_reads_nested_invoice_model():
+    row = oem_sync._sold_doc({
+        "chassis": "MD9EVDAD26K217428",
+        "vehicle": {"model": "Turbo", "variant": "Range Maxx"},
+        "invoice_number": "AF-TODAY-1",
+        "_coulsonStatus": "INVOICED",
+    }, None, 0)
+    assert row["model"] == "Turbo"
+    assert row["variant"] == "Range Maxx"
+
+
+def test_sold_doc_falls_back_to_sap_product_name():
+    row = oem_sync._sold_doc({
+        "chassis": "MD9EVDAD26K217428",
+        "sap_product_name": "TURBO RANGEMAXX PV",
+        "invoice_number": "AF-TODAY-1",
+        "_coulsonStatus": "INVOICED",
+    }, None, 0)
+    assert row["model"] == "TURBO RANGEMAXX PV"
+
+
+def test_billing_row_uses_lead_model_when_sold_has_none():
+    sold = [{
+        "chassis": "MD9NOM01", "mobile": "9811100555", "invoiceNumber": "INV-N",
+        "customerName": "Radhe Plastics", "soldDate": "2026-10-16",
+    }]
+    leads = [{
+        "leadId": "LD-NOM", "customerName": "Radhe Plastics", "mobile": "9811100555",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "chassisNumber": "MD9NOM01",
+        "deliveryDate": "2026-10-16",
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["model"] == "Turbo Max"
+    assert rows[0]["variant"] == "Maxx (PV)"
+
+
+def test_billing_row_uses_pack_unit_model_for_that_chassis():
+    sold = [{
+        "chassis": "MD9UNITB01", "mobile": "9811100666", "invoiceNumber": "INV-U",
+        "customerName": "MessengerSCS", "soldDate": "2026-10-16",
+    }]
+    leads = [{
+        "leadId": "LD-PACK", "customerName": "MessengerSCS", "mobile": "9811100666",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "chassisNumber": "MD9UNITA01",
+        "deliveryDate": "2026-10-16",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9UNITA01", "model": "Turbo Max", "variant": "Maxx (PV)"},
+            {"sno": 2, "chassisNumber": "MD9UNITB01", "model": "Storm", "variant": "Storm LR (PV)"},
+        ],
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["model"] == "Storm"
+    assert rows[0]["variant"] == "Storm LR (PV)"
+
+
 def test_classify_pending_delivery_when_lead_is_booked():
     sold = [{
         "chassis": "MD9PEND0001", "mobile": "9811100222", "invoiceNumber": "INV-P",
