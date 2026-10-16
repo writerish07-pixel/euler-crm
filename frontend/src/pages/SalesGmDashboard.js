@@ -12,6 +12,7 @@ import YardStockCard from "../components/YardStockCard";
 import PeriodBar from "../components/PeriodBar";
 import ExecutiveScoreboard, { useMonthlyScoreboard } from "../components/ExecutiveScoreboard";
 import { thisMonth, thisYear } from "../lib/period";
+import { openLeadPath } from "../lib/leadPaths";
 
 /** Showroom-wide sales board — all executives, deal desk, no money posting. */
 export default function SalesGmDashboard() {
@@ -69,6 +70,7 @@ export default function SalesGmDashboard() {
 
       <div className="flex flex-wrap gap-2 mt-5">
         <Link to="/monthly"><Button variant="secondary" data-testid="gm-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
+        <Link to="/followup-leads"><Button variant="secondary" data-testid="gm-go-followup"><ClipboardCheck size={14} /> Follow-up register</Button></Link>
         <Link to="/leads"><Button variant="secondary" data-testid="gm-go-leads"><Users size={14} /> Lead Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="gm-go-bookings"><ClipboardCheck size={14} /> Bookings</Button></Link>
         <Link to="/deliveries"><Button variant="secondary" data-testid="gm-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>
@@ -91,7 +93,7 @@ export default function SalesGmDashboard() {
                     : "bg-sky-50 text-sky-700 ring-sky-600/20"}>{r.kind}</Badge>
               ) },
               { key: "customerName", label: "Customer", render: (r) => (
-                <Link to="/leads" className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                <Link to={openLeadPath(r.leadId, r)} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
               ) },
               { key: "executive", label: "Executive" },
               { key: "model", label: "Model" },

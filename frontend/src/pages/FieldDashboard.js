@@ -66,6 +66,7 @@ export default function FieldDashboard() {
 
       <div className="flex flex-wrap gap-2 mt-5">
         <Link to="/monthly"><Button variant="secondary" data-testid="field-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
+        <Link to="/followup-leads"><Button variant="secondary" data-testid="field-go-followup"><ClipboardCheck size={14} /> Follow-up register</Button></Link>
         <Link to="/leads"><Button variant="secondary" data-testid="field-go-leads"><Users size={14} /> Lead Register</Button></Link>
         <Link to="/bookings"><Button variant="secondary" data-testid="field-go-bookings"><ClipboardCheck size={14} /> Bookings</Button></Link>
         <Link to="/deliveries"><Button variant="secondary" data-testid="field-go-deliveries"><Truck size={14} /> Deliveries</Button></Link>

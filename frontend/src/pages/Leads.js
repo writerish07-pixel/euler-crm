@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Plus, ChevronRight, Upload } from "lucide-react";
 import ReportActions from "../components/ReportActions";
 import { toast } from "sonner";
@@ -16,10 +16,12 @@ import { usePeriodState } from "../lib/period";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 
-const STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Close Won", "Lost"];
+const REGISTER_STATUS_FILTERS = ["all", "Booked", "Finance Process", "Delivered", "Close Won"];
+const FOLLOWUP_STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Lost"];
 
-export default function Leads() {
+export default function Leads({ followup = false }) {
   const { isField, isExecutive, isShowroomAdmin } = useAuth();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [leads, setLeads] = useState([]);
   const [status, setStatus] = useState("all");
@@ -31,10 +33,14 @@ export default function Leads() {
   const [showImport, setShowImport] = useState(false);
   const [masters, setMasters] = useState(null);
   const period = usePeriodState();
+  const statusFilters = followup ? FOLLOWUP_STATUS_FILTERS : REGISTER_STATUS_FILTERS;
 
   const load = useCallback(() => {
-    loadList("/leads", setLeads, { status, q: q || undefined, ...period.params }, "Could not load leads");
-  }, [status, q, period.params]);
+    loadList("/leads", setLeads, {
+      status, q: q || undefined, ...period.params,
+      ...(followup ? { followup: 1 } : {}),
+    }, followup ? "Could not load follow-up leads" : "Could not load leads");
+  }, [status, q, period.params, followup]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters); }, []);
@@ -110,7 +116,7 @@ export default function Leads() {
         )}
       </div>
     ) },
-    ...(isShowroomAdmin ? [{
+    ...(!followup && isShowroomAdmin ? [{
       key: "updateFlags",
       label: "Needs update",
       render: (r) => {
@@ -129,7 +135,7 @@ export default function Leads() {
         );
       },
     }] : []),
-    ...(!isField ? [
+    ...(!isField && !followup ? [
       { key: "customerPayable", label: "Payable", align: "right", mono: true, render: (r) => inr(r.customerPayable) },
       { key: "customerOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.customerOutstanding > 0 ? "text-red-600 font-semibold" : "text-emerald-600"}>{inr(r.customerOutstanding)}</span> },
       // Money held above Customer Payable, and what has already gone back.
@@ -153,14 +159,16 @@ export default function Leads() {
   ];
 
   const pendingN = isExecutive ? leads.filter((l) => l.assignmentPending).length : 0;
-  const updateN = isShowroomAdmin ? leads.filter((l) => l.needsUpdate).length : 0;
-  const shown = isShowroomAdmin && needsUpdateOnly ? leads.filter((l) => l.needsUpdate) : leads;
+  const updateN = !followup && isShowroomAdmin ? leads.filter((l) => l.needsUpdate).length : 0;
+  const shown = !followup && isShowroomAdmin && needsUpdateOnly ? leads.filter((l) => l.needsUpdate) : leads;
 
   return (
     <div>
       <PageHeader
-        title="Lead Register"
-        subtitle={`${shown.length} leads · ${shown.reduce((n, r) => n + (Number(r.vehicleCount || (r.units || []).length) || 1), 0)} vehicles${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}${updateN ? ` · ${updateN} need update` : ""}`}
+        title={followup ? "Follow-up Lead Register" : "Lead Register"}
+        subtitle={followup
+          ? `${shown.length} enquiries · Convert to booking (Owner / GM approve a discount) to land on Lead Register${pendingN ? ` · ${pendingN} to Proceed` : ""}`
+          : `${shown.length} booked files · ${shown.reduce((n, r) => n + (Number(r.vehicleCount || (r.units || []).length) || 1), 0)} vehicles${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}${updateN ? ` · ${updateN} need update` : ""}`}
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
           {!isField && !isExecutive && (
@@ -176,7 +184,7 @@ export default function Leads() {
 
       <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="flex gap-1 overflow-x-auto bg-white rounded-lg p-1 border border-line shadow-card scrollbar-thin -mx-1 px-1 sm:mx-0 sm:flex-wrap">
-          {isShowroomAdmin && (
+          {!followup && isShowroomAdmin && (
             <button
               data-testid="filter-needs-update"
               onClick={() => setNeedsUpdateOnly((v) => !v)}
@@ -185,7 +193,7 @@ export default function Leads() {
               Needs update{updateN ? ` (${updateN})` : ""}
             </button>
           )}
-          {STATUS_FILTERS.map((s) => (
+          {statusFilters.map((s) => (
             <button
               key={s}
               data-testid={`filter-${s}`}
@@ -206,7 +214,7 @@ export default function Leads() {
         onRowClick={(r) => openLead(r)}
         columns={columns}
         rows={shown}
-        empty="No leads match this filter"
+        empty={followup ? "No follow-up enquiries match this filter" : "No booked files match this filter"}
       />
 
       {active && (
@@ -223,7 +231,13 @@ export default function Leads() {
         <NewLeadDrawer
           masters={masters}
           onClose={() => setShowNew(false)}
-          onCreated={(id) => { setShowNew(false); load(); if (id) setActive(id); }}
+          onCreated={(id) => {
+            setShowNew(false);
+            load();
+            if (!id) return;
+            if (followup) setActive(id);
+            else navigate(`/followup-leads?open=${encodeURIComponent(id)}`);
+          }}
         />
       )}
       {showImport && (

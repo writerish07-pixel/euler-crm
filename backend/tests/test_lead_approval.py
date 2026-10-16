@@ -195,8 +195,9 @@ async def test_owner_approve_creates_the_live_lead(exec_client, client):
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["customerName"] == "Approved Cust"
     assert server.ce.num(lead.get("budget")) == 185000
-    listed = (await exec_client.get("/api/leads")).json()
+    listed = (await exec_client.get("/api/leads", params={"followup": True})).json()
     assert any(l["leadId"] == lid for l in listed)
+    assert not any(l["leadId"] == lid for l in (await exec_client.get("/api/leads")).json())
     again = await client.post(f"/api/lead-requests/{rid}/approve")
     assert again.status_code == 200
     assert again.json().get("already") is True

@@ -41,6 +41,8 @@ export default function Dashboard() {
           : "MTD + YTD morning board"}
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
+          <Link to="/followup-leads"><Button variant="secondary" data-testid="ops-go-followup"><ClipboardCheck size={14} /> Follow-up register</Button></Link>
+          <Link to="/leads"><Button variant="secondary" data-testid="ops-go-leads"><Users size={14} /> Lead Register</Button></Link>
           <Link to="/monthly"><Button variant="secondary" data-testid="ops-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         </div>}
       />
@@ -56,7 +58,9 @@ export default function Dashboard() {
         <StatCard label="Active Bookings" value={d ? num(k.activeBookings) : "—"} sub={d ? `${num(k.monthlyBookings)} booked MTD` : "loading"} icon={ClipboardCheck} tone="text-emerald-600" />
         <StatCard label="Total Leads" value={d ? num(k.totalLeads) : "—"} sub="live stock · not period-cut" icon={Users} />
         <StatCard label="Conversion" value={d ? `${k.conversion}%` : "—"} sub={d ? `${ytdCount(k.conversionYtd)}% · bookings ÷ MTD leads` : "bookings ÷ MTD leads"} icon={TrendingUp} tone="text-violet-600" />
-        <StatCard label="Follow-ups overdue" value={d ? num(k.followupOverdue) : "—"} sub={d ? `${num(k.followupDue)} due today` : "loading"} icon={AlertCircle} tone="text-red-600" />
+        <Link to="/followup-leads" className="block" data-testid="ops-followup-overdue">
+          <StatCard label="Follow-ups overdue" value={d ? num(k.followupOverdue) : "—"} sub={d ? `${num(k.followupDue)} due today` : "loading"} icon={AlertCircle} tone="text-red-600" />
+        </Link>
       </div>
 
       {isOwner && <OwnerPriceEditor />}

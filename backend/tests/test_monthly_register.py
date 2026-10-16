@@ -112,9 +112,9 @@ async def test_monthly_register_counts_leads_bookings_by_month(client):
     await make_lead(client, "Monthly Now", created=f"{ym}-05")
     await make_lead(client, "Monthly Old", created=other)
 
-    all_rows = (await client.get("/api/leads")).json()
-    now_rows = (await client.get("/api/leads", params={"month": ym})).json()
-    year_rows = (await client.get("/api/leads", params={"year": "2025"})).json()
+    all_rows = (await client.get("/api/leads", params={"followup": True})).json()
+    now_rows = (await client.get("/api/leads", params={"month": ym, "followup": True})).json()
+    year_rows = (await client.get("/api/leads", params={"year": "2025", "followup": True})).json()
     assert any(r["customerName"] == "Monthly Now" for r in now_rows)
     assert not any(r["customerName"] == "Monthly Old" for r in now_rows)
     assert any(r["customerName"] == "Monthly Old" for r in year_rows)

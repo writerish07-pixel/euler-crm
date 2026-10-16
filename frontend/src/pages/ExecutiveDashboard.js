@@ -15,6 +15,7 @@ import ExecutiveScoreboard, { useMonthlyScoreboard } from "../components/Executi
 import { thisMonth, thisYear } from "../lib/period";
 import { useAuth } from "../context/AuthContext";
 import NewLeadDrawer from "./NewLeadDrawer";
+import { openLeadPath } from "../lib/leadPaths";
 
 export default function ExecutiveDashboard({ teamView = false }) {
   // Team Leader home also renders this component so any new executive-dashboard
@@ -71,8 +72,12 @@ export default function ExecutiveDashboard({ teamView = false }) {
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
-        <StatCard label="Follow-ups due" value={num(k.followupDue)} icon={ClipboardCheck} tone="text-amber-600" />
-        <StatCard label="Follow-ups overdue" value={num(k.followupOverdue)} icon={AlertCircle} tone="text-red-600" />
+        <Link to="/followup-leads" className="block" data-testid="exec-followup-due">
+          <StatCard label="Follow-ups due" value={num(k.followupDue)} icon={ClipboardCheck} tone="text-amber-600" />
+        </Link>
+        <Link to="/followup-leads" className="block" data-testid="exec-followup-overdue">
+          <StatCard label="Follow-ups overdue" value={num(k.followupOverdue)} icon={AlertCircle} tone="text-red-600" />
+        </Link>
         <StatCard label="Finance stuck" value={num(k.financeStuck)} icon={Landmark} tone="text-violet-600" />
         <StatCard label="Customer OS (mine)" value={compactInr(k.customerOutstanding)} icon={IndianRupee} tone="text-red-600" />
         {isTl && (
@@ -87,7 +92,8 @@ export default function ExecutiveDashboard({ teamView = false }) {
         <Button data-testid="exec-shortcut-new-lead" onClick={() => setShowNew(true)}>
           <Plus size={14} /> {isExecutive && !team ? "Request lead" : "New Lead"}
         </Button>
-        <Link to="/leads"><Button variant="secondary" data-testid="exec-go-leads"><Users size={14} /> Leads</Button></Link>
+        <Link to="/followup-leads"><Button variant="secondary" data-testid="exec-go-followup"><ClipboardCheck size={14} /> Follow-up register</Button></Link>
+        <Link to="/leads"><Button variant="secondary" data-testid="exec-go-leads"><Users size={14} /> Lead Register</Button></Link>
         {isTl && (
           <Link to="/leads?needsUpdate=1">
             <Button variant="secondary" data-testid="exec-go-needs-update"><AlertCircle size={14} /> Needs update</Button>
@@ -111,7 +117,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
         <Card className="p-5 mt-6" data-testid="team-leads-table">
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-heading font-bold text-ink">Team leads</h3>
-            <Link to="/leads" className="text-xs text-cobalt">Open register</Link>
+            <Link to="/followup-leads" className="text-xs text-cobalt">Open follow-up register</Link>
           </div>
           <Table
             rowKey="leadId"
@@ -119,7 +125,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
             columns={[
               { key: "customerName", label: "Customer", render: (r) => (
                 <div>
-                  <Link to={`/leads?open=${encodeURIComponent(r.leadId)}`} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                  <Link to={openLeadPath(r.leadId, r)} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
                   <div className="text-[11px] font-mono text-ink-faint">{r.leadId}</div>
                 </div>
               ) },
@@ -146,7 +152,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
               ) },
               { key: "customerName", label: "Customer", render: (r) => (
                 <div>
-                  <Link to="/leads" className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                  <Link to={openLeadPath(r.leadId, r)} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
                   {r.executive ? <div className="text-[11px] text-ink-faint">{r.executive}</div> : null}
                 </div>
               ) },
@@ -183,7 +189,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
             columns={[
               { key: "customerName", label: "Customer", render: (r) => (
                 <div>
-                  <Link to={`/leads?open=${encodeURIComponent(r.leadId)}`} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
+                  <Link to={openLeadPath(r.leadId, r)} className="font-semibold text-cobalt hover:underline">{r.customerName || r.leadId}</Link>
                   {r.executive ? <div className="text-[11px] text-ink-faint">{r.executive}</div> : null}
                 </div>
               ) },
@@ -283,7 +289,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
           onCreated={(id) => {
             setShowNew(false);
             load();
-            if (id) navigate(`/leads?open=${encodeURIComponent(id)}`);
+            if (id) navigate(`/followup-leads?open=${encodeURIComponent(id)}`);
           }}
         />
       )}

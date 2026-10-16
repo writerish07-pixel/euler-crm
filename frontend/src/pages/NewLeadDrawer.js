@@ -184,7 +184,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
   const drawerSubtitle = needsApproval
     ? "Sent for owner or GM approval"
     : enquiryOnly
-      ? "Name, mobile, and vehicle if you have it. WhatsApp follow-up starts until Cx Demand is filled. A dealer discount waits on Approvals — not the Lead Register."
+      ? "Name, mobile, and vehicle if you have it. Lands on Follow-up Lead Register until Convert to Booking. A dealer discount waits on Approvals — then booking puts it on Lead Register."
       : "Capture a fresh enquiry";
 
   const saveLead = async (extra = {}) => {

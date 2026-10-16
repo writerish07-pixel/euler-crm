@@ -43,9 +43,10 @@ async def test_catalog_lists_registers_and_maps_paths(client):
     assert r.status_code == 200, r.text
     body = r.json()
     keys = {t["key"] for t in body["tabs"]}
-    assert {"leads", "bookings", "payments", "finance", "claims"} <= keys
+    assert {"leads", "bookings", "payments", "finance", "claims", "followup_leads"} <= keys
     assert body["pathToTab"]["/bookings"] == "bookings"
     assert body["pathToTab"]["/leads"] == "leads"
+    assert body["pathToTab"]["/followup-leads"] == "followup_leads"
     leads = next(t for t in body["tabs"] if t["key"] == "leads")
     assert leads["hasPeriod"] is True
     assert "Booked" in leads["statuses"]
@@ -99,6 +100,33 @@ async def test_tab_export_is_only_that_register(client):
 
 
 @pytest.mark.asyncio
+async def test_followup_export_excludes_booked_files(client):
+    await server.db.leads.insert_many([
+        {
+            "leadId": "LD26FU01", "customerName": "Walk In", "currentStatus": "New",
+            "createdDate": "2026-10-01", "dealApprovalPending": False,
+        },
+        {
+            "leadId": "LD26BK01", "customerName": "Booked File", "currentStatus": "Booked",
+            "bookingDate": "2026-10-02", "dealApprovalPending": False,
+        },
+    ])
+    fu = await client.get("/api/export", params={
+        "tab": "followup_leads", "columns": "leadId,customerName,currentStatus",
+    })
+    assert fu.status_code == 200, fu.text
+    fu_ids = [r[0] for r in list(_book(fu.content).active.iter_rows(values_only=True))[1:]]
+    assert "LD26FU01" in fu_ids
+    assert "LD26BK01" not in fu_ids
+    booked = await client.get("/api/export", params={
+        "tab": "leads", "columns": "leadId,customerName,currentStatus",
+    })
+    bk_ids = [r[0] for r in list(_book(booked.content).active.iter_rows(values_only=True))[1:]]
+    assert "LD26BK01" in bk_ids
+    assert "LD26FU01" not in bk_ids
+
+
+@pytest.mark.asyncio
 async def test_tab_export_search_and_period(client):
     await server.db.payments.insert_many([
         {"receiptNumber": "RC-A", "leadId": "LD1", "customerName": "Ramesh",
@@ -137,6 +165,7 @@ async def test_executive_cannot_export(client):
 def test_tab_for_path():
     assert tab_export.tab_for_path("/bookings") == "bookings"
     assert tab_export.tab_for_path("/leads") == "leads"
+    assert tab_export.tab_for_path("/followup-leads") == "followup_leads"
     assert tab_export.tab_for_path("/oem-claims/no-vehicle") == "oem_claims"
     assert tab_export.tab_for_path("/") == "leads"
     assert tab_export.tab_for_path("/settings") == "leads"

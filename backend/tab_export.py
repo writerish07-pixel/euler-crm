@@ -46,6 +46,21 @@ LEAD_STATUSES = (
     "New", "Contacted", "Follow-up", "In Progress", "Booked",
     "Finance Process", "Delivered", "Close Won", "Lost",
 )
+REGISTER_STATUSES = (
+    "Booked", "Finance Process", "Delivered", "Close Won",
+)
+FOLLOWUP_STATUSES = (
+    "New", "Contacted", "Follow-up", "In Progress", "Lost",
+)
+
+
+def _export_is_booked(doc) -> bool:
+    if (doc or {}).get("dealApprovalPending"):
+        return False
+    st = str((doc or {}).get("currentStatus") or "").lower()
+    if "deliver" in st or "book" in st or "finance" in st or "close won" in st:
+        return True
+    return bool((doc or {}).get("bookingDate") or (doc or {}).get("bookingId"))
 
 TABS: dict[str, Tab] = {}
 PATH_TO_TAB: dict[str, str] = {}
@@ -62,7 +77,7 @@ _register(Tab(
     key="leads", label="Lead Register", collection="leads",
     paths=("/leads", "/allocation", "/cancellations", "/whatsapp"),
     date_mode="lead",
-    status_field="currentStatus", statuses=LEAD_STATUSES,
+    status_field="currentStatus", statuses=REGISTER_STATUSES,
     search_fields=("customerName", "mobile", "leadId", "executive", "interestedModel"),
     sort=("leadId", -1),
     columns=(
@@ -88,6 +103,30 @@ _register(Tab(
         _col("chassisNumber", "Chassis"),
         _col("remarks", "Remarks"),
         _col("vehicleCount", "Units"),
+    ),
+))
+
+_register(Tab(
+    key="followup_leads", label="Follow-up Lead Register", collection="leads",
+    paths=("/followup-leads",),
+    date_mode="lead",
+    status_field="currentStatus", statuses=FOLLOWUP_STATUSES,
+    search_fields=("customerName", "mobile", "leadId", "executive", "interestedModel"),
+    sort=("leadId", -1),
+    columns=(
+        _col("leadId", "Lead ID", default=True),
+        _col("customerName", "Customer", default=True),
+        _col("mobile", "Mobile", default=True),
+        _col("interestedModel", "Model", default=True),
+        _col("variant", "Variant", default=True),
+        _col("executive", "Executive", default=True),
+        _col("currentStatus", "Status", default=True),
+        _col("createdDate", "Created", default=True),
+        _col("nextFollowupDate", "Next follow-up", default=True),
+        _col("leadSource", "Source"),
+        _col("remarks", "Remarks"),
+        _col("budget", "Budget"),
+        _col("cxDemand", "Cx Demand"),
     ),
 ))
 
@@ -650,6 +689,10 @@ async def load_rows(db, tab: Tab, *, month: str = "", year: str = "",
             rows = flattened
         elif tab.status_field and status and status not in ("", "all") and tab.loader:
             rows = [r for r in rows if str(r.get(tab.status_field) or "") == status]
+        if tab.key == "leads":
+            rows = [r for r in rows if _export_is_booked(r)]
+        elif tab.key == "followup_leads":
+            rows = [r for r in rows if not (r or {}).get("dealApprovalPending") and not _export_is_booked(r)]
     if tab.loader and tab.status_field and status and status not in ("", "all"):
         rows = [r for r in rows if str(r.get(tab.status_field) or "") == status]
     needle = str(q or "").strip().lower()

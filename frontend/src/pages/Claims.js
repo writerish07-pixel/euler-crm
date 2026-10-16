@@ -56,7 +56,7 @@ export default function Claims() {
   useEffect(() => { load(); }, [load]);
   const openManual = () => {
     setManual(true);
-    if (!leads.length) get("/leads").then(setLeads).catch(() => setLeads([]));
+    if (!leads.length) get("/leads", { scope: "all" }).then(setLeads).catch(() => setLeads([]));
   };
   const { openLead, drawer } = useLeadDrawer(load);
 
