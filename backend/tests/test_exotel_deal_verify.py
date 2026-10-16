@@ -67,7 +67,7 @@ def test_spoken_scripts_are_plain_hindi():
     blob = " ".join(exo.SPOKEN.values()).lower()
     assert "kitne paise" in blob
     assert "gaadi" in blob
-    assert "lakeerein" in blob or "lakeer" in blob
+    assert "lakeer" in blob
     assert "hash" not in blob
     assert "number" not in blob
     assert "keypad" not in blob

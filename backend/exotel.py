@@ -41,33 +41,33 @@ AUDIO_CLIPS = ("intro", "prompt", "speak", "thanks")
 # No English (hash, number, keypad, type, booking) and no formal Hindi (rashi, bhugtan).
 SPOKEN = {
     "intro": (
-        "Namaste. Main Akar Euler se bol rahi hoon. "
-        "Aapne hamari gaadi li hai. Bas ye batana hai — "
+        "Namaste, main Akar Euler se bol rahi hoon. "
+        "Aapne hamari gaadi li hai. Bas ye bata dijiye, "
         "gaadi ke liye aapne kitne paise diye."
     ),
     "prompt": (
-        "Gaadi ke liye aapne jitne paise diye, wo mobile par ek ek karke dabate jayein. "
-        "Jab dabana khatam ho jaye, to mobile ke neeche dayi taraf dekhein. "
-        "Wahan ek chhoti si jagah hai, us par do chhoti lakeerein bani hain. Wo daba den."
+        "Gaadi ke liye aapne jitne paise diye, wo mobile par ek ek karke daba dijiye. "
+        "Dabana khatam ho to neeche dayi taraf dekhiye, "
+        "do chhoti lakeeron wali jagah, wo daba dijiye."
     ),
-    "speak": "Agar daba nahi sakte, to ab munh se bol den. Aapne kitne paise diye.",
-    "thanks": "Dhanyavaad. Akar Euler.",
+    "speak": "Daba nahi sakte to koi baat nahi, ab munh se bol dijiye, aapne kitne paise diye.",
+    "thanks": "Dhanyavaad, Akar Euler.",
 }
 
 # Devanagari used when rebuilding the MP3s (clearer TTS than roman Hindi).
 SPOKEN_HI = {
     "intro": (
-        "नमस्ते। मैं आकर यूलर से बोल रही हूँ। "
-        "आपने हमारी गाड़ी ली है। बस ये बताना है — "
+        "नमस्ते, मैं आकर यूलर से बोल रही हूँ। "
+        "आपने हमारी गाड़ी ली है। बस ये बता दीजिये, "
         "गाड़ी के लिए आपने कितने पैसे दिए।"
     ),
     "prompt": (
-        "गाड़ी के लिए आपने जितने पैसे दिए, वो मोबाइल पर एक एक करके दबाते जाएं। "
-        "जब दबाना खत्म हो जाए, तो मोबाइल के नीचे दाईं तरफ़ देखें। "
-        "वहाँ एक छोटी सी जगह है, उस पर दो छोटी लकीरें बनी हैं। वो दबा दें।"
+        "गाड़ी के लिए आपने जितने पैसे दिए, वो मोबाइल पर एक एक करके दबा दीजिये। "
+        "दबाना खत्म हो तो नीचे दाईं तरफ़ देखिये, "
+        "दो छोटी लकीरों वाली जगह, वो दबा दीजिये।"
     ),
-    "speak": "अगर दबा नहीं सकते, तो अब मुँह से बोल दें। आपने कितने पैसे दिए।",
-    "thanks": "धन्यवाद। आकर यूलर।",
+    "speak": "दबा नहीं सकते तो कोई बात नहीं, अब मुँह से बोल दीजिये, आपने कितने पैसे दिए।",
+    "thanks": "धन्यवाद, आकर यूलर।",
 }
 
 # Hindi number words used when a recording is transcribed or staff types words.

@@ -1,4 +1,4 @@
-"""Rebuild Akar Euler verify MP3s — slow, plain Hindi for phone IVR.
+"""Rebuild Akar Euler verify MP3s — conversational Hindi for phone IVR.
 
 Needs: pip install edge-tts, ffmpeg on PATH.
 """
@@ -14,8 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import exotel as exo  # noqa: E402
 
 VOICE = "hi-IN-SwaraNeural"
-RATE = "-25%"
-PITCH = "-8Hz"
+RATE = "+8%"
+PITCH = "+2Hz"
 
 
 async def _synth(text: str, dest: Path):

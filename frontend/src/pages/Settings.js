@@ -677,9 +677,10 @@ function ExotelCard() {
         <h3 className="font-heading font-bold text-ink">Exotel (Akar Euler verify)</h3>
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        After booking, Euler calls in slow village Hindi from the dealership ExoPhone — no English
-        words. It asks how much money they paid for the vehicle, then to press those digits one by
-        one and the bottom-right key with two small lines (hash), or to say the amount out loud.
+        After booking, Euler calls in plain spoken Hindi from the dealership ExoPhone — like a
+        person talking, no English words. It asks how much money they paid for the vehicle, then
+        to press those digits one by one and the bottom-right key with two small lines (hash),
+        or to say the amount out loud.
         Calls retry until an amount is stored. If that amount is more than receipts on the file,
         the lead is flagged. After a greeting change, re-upload intro.mp3 as the App Bazaar
         Greeting and prompt.mp3 as the Gather prompt.
