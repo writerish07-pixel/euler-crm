@@ -658,7 +658,10 @@ function ExotelCard() {
   const runJobs = async () => {
     try {
       const r = await post("/integrations/exotel/run-jobs", {});
-      toast.success(`Verify calls: placed ${r.placed || 0}, skipped ${r.skipped || 0}`);
+      toast.success(
+        `Verify calls: queued ${r.queued || 0}, placed ${r.placed || 0}, skipped ${r.skipped || 0}`
+        + (r.failed ? `, failed ${r.failed}` : ""),
+      );
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not place calls"));
     }
@@ -674,6 +677,8 @@ function ExotelCard() {
         After booking, Euler calls the customer in Hindi from the dealership ExoPhone and asks
         how much they paid. They can type the amount or speak it. Calls retry until an amount
         is stored. If that amount is more than receipts on the file, the lead is flagged.
+        For files already booked: use <b>Call booked leads now</b> (up to 40 rings, then the
+        rest continue every 15 minutes in the call window), or open one lead and tap Call now.
         Do not paste API tokens in chat — save them here.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -719,7 +724,7 @@ function ExotelCard() {
       </p>
       <div className="flex flex-wrap gap-2 mt-4">
         <Button data-testid="exotel-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Exotel settings"}</Button>
-        <Button variant="secondary" onClick={runJobs}>Place due verify calls now</Button>
+        <Button variant="secondary" onClick={runJobs}>Call booked leads now</Button>
         <span className="text-xs text-ink-faint self-center">{cfg?.configured ? "Configured" : "Needs API key + token"}</span>
       </div>
     </Card>

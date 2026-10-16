@@ -469,6 +469,45 @@ async def enqueue_after_booking(lead_id: str) -> dict:
     return {"ok": True, "nextAt": due}
 
 
+async def enqueue_unverified_booked(limit: int = 300) -> dict:
+    """Queue existing booked files that were never marked for verify.
+
+    Convert-to-booking queues new files. This covers the booked register that
+    already existed when Exotel was switched on. Does not place the calls.
+    """
+    q = {
+        "dealCancelled": {"$ne": True},
+        "dealVerifyPaused": {"$ne": True},
+        "dealVerifyStatus": {"$nin": ["pending", "calling", "failed", "queued", "listening", "answered", "paused"]},
+        "$or": [
+            {"dealVerifyAmount": {"$exists": False}},
+            {"dealVerifyAmount": 0},
+            {"dealVerifyAmount": None},
+            {"dealVerifyAmount": ""},
+        ],
+    }
+    rows = await _db().leads.find(q).sort("bookingDate", -1).to_list(800)
+    due = as_utc_iso(now_ist())
+    queued = 0
+    for lead in rows:
+        if queued >= limit:
+            break
+        if not _is_booked(lead):
+            continue
+        if parse_amount(lead.get("dealVerifyAmount")):
+            continue
+        if len(digits10(lead.get("mobile"))) != 10:
+            continue
+        await _apply(lead["leadId"], {
+            "dealVerifyStatus": "pending",
+            "dealVerifyPaused": False,
+            "dealVerifyNextAt": due,
+            "dealVerifyLastStatus": "queued",
+        })
+        queued += 1
+    return {"ok": True, "queued": queued}
+
+
 def _attempts_today(lead: dict) -> int:
     if str(lead.get("dealVerifyAttemptsDate") or "") != today_ist():
         return 0

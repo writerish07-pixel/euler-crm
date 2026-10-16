@@ -280,6 +280,35 @@ async def test_due_calls_skip_unenqueued_booked(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_jobs_queues_existing_booked(client, monkeypatch):
+    placed = []
+
+    async def capture(lead_id, *, force=False):
+        placed.append(lead_id)
+        return {"ok": True, "leadId": lead_id, "callSid": f"sid-{lead_id}"}
+
+    monkeypatch.setattr(exo, "place_verify_call", capture)
+    await server.db.leads.insert_one({
+        "leadId": "LD26OLD", "customerName": "Old Booked", "mobile": "9876500077",
+        "currentStatus": "Booked", "bookingDate": "2026-01-01",
+        "accountStatus": "Active",
+    })
+    queued = await exo.enqueue_unverified_booked(limit=50)
+    assert queued["queued"] == 1
+    lead = await server.db.leads.find_one({"leadId": "LD26OLD"})
+    assert lead["dealVerifyStatus"] == "pending"
+    res = await exo.run_due_calls(limit=25, force=True)
+    assert res.get("ok") is True
+    assert "LD26OLD" in placed
+
+    r = await client.post("/api/integrations/exotel/run-jobs")
+    assert r.status_code == 200
+    body = r.json()
+    assert "queued" in body
+    assert "placed" in body
+
+
+@pytest.mark.asyncio
 async def test_recompute_refreshes_mismatch(client):
     await server.db.leads.insert_one({
         "leadId": "LD26EXO5", "customerName": "Later Receipt", "mobile": "9876500055",
