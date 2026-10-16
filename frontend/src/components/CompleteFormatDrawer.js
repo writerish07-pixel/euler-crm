@@ -194,7 +194,7 @@ export default function CompleteFormatDrawer({ row, onClose, onSaved }) {
         <LocalOemExtraBlock files={extraProof} setFiles={setExtraProof} amount={oemExtra} existingDocs={row.documents} />
         <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={row.documents}
           onPrint={printDealSheet} printBusy={busy} />
-        <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} />
+        <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} existingDocs={row.documents} />
       </div>
     </Drawer>
   );

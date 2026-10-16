@@ -245,9 +245,12 @@ export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onCha
   );
 }
 
-export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, copyFromSibling }) {
+export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, copyFromSibling, existingDocs = [] }) {
   const kinds = kycKinds(customerType);
   const b2b = customerType === "B2B";
+  const byKind = {};
+  (existingDocs || []).forEach((d) => { if (d?.kind) byKind[d.kind] = d; });
+  const attached = kinds.filter((k) => byKind[k]);
   return (
     <div className="sm:col-span-2 space-y-2" data-testid="kyc-block">
       <div className="text-xs font-semibold text-ink">KYC documents</div>
@@ -258,6 +261,11 @@ export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, c
           ? "B2B needs PAN, GST certificate and GSTIN. Aadhaar is optional."
           : "Aadhaar front & back and PAN are required. Phone camera uses the rear lens."}
       </p>
+      {attached.length > 0 && (
+        <p className="text-[11px] text-emerald-700" data-testid="kyc-existing">
+          Already attached · {attached.map((k) => byKind[k].filename || k).join(", ")}
+        </p>
+      )}
       {b2b && (
         <label className="block">
           <span className="block text-xs font-medium text-ink-soft mb-1">GSTIN *</span>
@@ -268,7 +276,8 @@ export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, c
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {kinds.map((kind) => (
           <div key={kind}>
-            <DocSlot kind={kind} pickId={`book-kyc-${kind}`} localFile={files[kind]} onLocalFile={(f) => setFiles((prev) => ({ ...prev, [kind]: f }))} canUpload />
+            <DocSlot kind={kind} pickId={`book-kyc-${kind}`} doc={byKind[kind]}
+              localFile={files[kind]} onLocalFile={(f) => setFiles((prev) => ({ ...prev, [kind]: f }))} canUpload />
             {b2b && (kind === "kyc_aadhaar_front" || kind === "kyc_aadhaar_back") && (
               <div className="text-[10px] text-ink-faint mt-0.5 px-1">Optional for B2B</div>
             )}

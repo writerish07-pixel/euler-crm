@@ -12,6 +12,12 @@ const mockAuth = {
   isTeamLead: false,
 };
 
+const previewState = {
+  needsApproval: false,
+  additionalDiscount: 0,
+  docs: [],
+};
+
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
 jest.mock("../lib/api", () => ({
   get: (url) => {
@@ -25,7 +31,9 @@ jest.mock("../lib/api", () => ({
     if (path.indexOf("commercial/deal-preview") >= 0) {
       return Promise.resolve({
         exShowroom: 785000, rto: 5500, insurance: 19000, priceTotal: 809500,
-        netToCx: 809500, priceFound: true, needsApproval: false,
+        netToCx: 809500, priceFound: true,
+        needsApproval: previewState.needsApproval,
+        additionalDiscount: previewState.additionalDiscount,
         schemeMonth: "2026-10",
         schemeOffers: [
           { key: "loyaltyBonus", label: "Loyalty Bonus", schemeAvailable: 10000 },
@@ -34,7 +42,7 @@ jest.mock("../lib/api", () => ({
         schemePassed: 0,
       });
     }
-    if (path.indexOf("/documents") >= 0) return Promise.resolve([]);
+    if (path.indexOf("/documents") >= 0) return Promise.resolve(previewState.docs);
     return Promise.resolve({});
   },
   post: jest.fn(() => Promise.resolve({ bookingId: "BK1", lead: { customerPayable: 809500 } })),
@@ -56,7 +64,7 @@ jest.mock("../context/AuthContext", () => ({
 }));
 jest.mock("../components/CallLink", () => () => null);
 
-import BookEnquiryDrawer from "./BookEnquiryDrawer";
+import BookEnquiryDrawer, { bookingDealAlreadyApproved } from "./BookEnquiryDrawer";
 
 const SCHEME_LEAD = {
   leadId: "LD26009901",
@@ -118,6 +126,72 @@ test("executive convert to booking hides OEM scheme offers and pass-on radios", 
   expect(drawer.querySelector('[data-testid="deal-additional"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
   host.remove();
+});
+
+test("after GM approval convert to booking confirms instead of sending again", async () => {
+  mockAuth.isExecutive = true;
+  mockAuth.isTeamLead = false;
+  previewState.needsApproval = true;
+  previewState.additionalDiscount = 44500;
+  previewState.docs = [
+    { kind: "deal_sheet", filename: "sheet.jpg", documentId: "DC1" },
+    { kind: "kyc_aadhaar_front", filename: "front.jpg", documentId: "DC2" },
+    { kind: "kyc_aadhaar_back", filename: "back.jpg", documentId: "DC3" },
+    { kind: "kyc_pan", filename: "pan.jpg", documentId: "DC4" },
+  ];
+  const { host, root, drawer } = await renderBookDrawer({
+    ...SCHEME_LEAD,
+    leadId: "LD26000928",
+    customerName: "Ghanshyam saini",
+    budget: 945000,
+    cxDemand: 945000,
+    bookingDealApprovedAt: "2026-10-16T12:00:00+00:00",
+    bookingDealCxDemand: 945000,
+    bookingDealAdditional: 44500,
+  });
+  const btn = drawer.querySelector('[data-testid="confirm-booking-btn"]');
+  expect(btn.textContent).toMatch(/Confirm Booking/i);
+  expect(btn.textContent).not.toMatch(/Send for approval/i);
+  expect(drawer.textContent).toMatch(/already approved/i);
+  expect(drawer.querySelector('[data-testid="deal-sheet-block"]')).toBeFalsy();
+  previewState.needsApproval = false;
+  previewState.additionalDiscount = 0;
+  previewState.docs = [];
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("discounted convert without prior approval still sends for approval", async () => {
+  mockAuth.isExecutive = true;
+  mockAuth.isTeamLead = false;
+  previewState.needsApproval = true;
+  previewState.additionalDiscount = 44500;
+  const { host, root, drawer } = await renderBookDrawer({
+    ...SCHEME_LEAD,
+    budget: 945000,
+    cxDemand: 945000,
+  });
+  const btn = drawer.querySelector('[data-testid="confirm-booking-btn"]');
+  expect(btn.textContent).toMatch(/Send for approval/i);
+  expect(drawer.querySelector('[data-testid="deal-sheet-block"]')).toBeTruthy();
+  previewState.needsApproval = false;
+  previewState.additionalDiscount = 0;
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("bookingDealAlreadyApproved matches Cx Demand and additional within a rupee", () => {
+  expect(bookingDealAlreadyApproved({
+    bookingDealApprovedAt: "2026-10-16T12:00:00+00:00",
+    bookingDealCxDemand: 945000,
+    bookingDealAdditional: 44500,
+  }, 945000, 44500)).toBe(true);
+  expect(bookingDealAlreadyApproved({
+    bookingDealApprovedAt: "2026-10-16T12:00:00+00:00",
+    bookingDealCxDemand: 945000,
+    bookingDealAdditional: 44500,
+  }, 900000, 44500)).toBe(false);
+  expect(bookingDealAlreadyApproved({}, 945000, 44500)).toBe(false);
 });
 
 test("team leader convert to booking hides OEM scheme offers and pass-on radios", async () => {
