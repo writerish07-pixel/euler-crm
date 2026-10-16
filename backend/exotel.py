@@ -557,11 +557,12 @@ async def enqueue_after_booking(lead_id: str) -> dict:
     return {"ok": True, "nextAt": due}
 
 
-async def enqueue_unverified_booked(limit: int = 300) -> dict:
-    """Queue existing booked files that were never marked for verify.
+async def enqueue_unverified_booked(limit: int = 400) -> dict:
+    """Queue every booked file that has not yet given an amount.
 
-    Convert-to-booking queues new files. This covers the booked register that
-    already existed when Exotel was switched on. Does not place the calls.
+    Convert-to-booking queues new files. The scheduler / cron also call this
+    so the booked register is auto-called without staff tapping Call now.
+    Does not place the calls.
     """
     q = {
         "dealCancelled": {"$ne": True},
@@ -821,8 +822,8 @@ async def run_due_calls(limit: int = 25, *, force: bool = False) -> dict:
             {"dealVerifyAmount": None},
             {"dealVerifyAmount": ""},
         ],
-        # Only files the CRM queued (after booking / Call now). Do not ring every
-        # historical booked lead the first time Exotel is switched on.
+        # Only files already marked for verify. Historical booked files are
+        # queued first by run_auto_calls / enqueue_unverified_booked.
         "dealVerifyStatus": {"$in": ["pending", "calling", "failed", "queued", "listening"]},
         "$and": [
             {"$or": [
@@ -855,6 +856,13 @@ async def run_due_calls(limit: int = 25, *, force: bool = False) -> dict:
             failed += 1
             reasons.append(res.get("reason") or "failed")
     return {"ok": True, "placed": placed, "skipped": skipped, "failed": failed, "reasons": reasons[:8]}
+
+
+async def run_auto_calls(limit: int = 25, *, force: bool = False, enqueue_limit: int = 400) -> dict:
+    """Queue every unverified booked file, then place due calls in the window."""
+    queued = await enqueue_unverified_booked(limit=enqueue_limit)
+    placed = await run_due_calls(limit=limit, force=force)
+    return {**placed, "queued": queued.get("queued", 0)}
 
 
 async def list_queue(filter: str = "mismatch", limit: int = 300) -> list:
@@ -894,8 +902,8 @@ async def scheduler_loop():
     while True:
         try:
             cfg = await get_config()
-            if cfg.get("enabled") and in_quiet_hours(now_ist(), cfg):
-                await run_due_calls(limit=15)
+            if cfg.get("enabled"):
+                await run_auto_calls(limit=25)
         except Exception:
             logger.exception("exotel scheduler tick failed")
-        await asyncio.sleep(15 * 60)
+        await asyncio.sleep(5 * 60)

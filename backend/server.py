@@ -16054,9 +16054,7 @@ async def exotel_save_settings(body: ExotelSettingsIn):
 
 @api.post("/integrations/exotel/run-jobs", dependencies=[Depends(owner_only)])
 async def exotel_run_jobs():
-    queued = await exo.enqueue_unverified_booked(limit=300)
-    placed = await exo.run_due_calls(limit=40)
-    return {**placed, "queued": queued.get("queued", 0)}
+    return await exo.run_auto_calls(limit=40)
 
 
 @api.get("/deal-verify", dependencies=[Depends(showroom_desk_only)])
@@ -16148,7 +16146,7 @@ async def exotel_cron(request: Request):
     got = request.headers.get("x-cron-token") or request.query_params.get("token") or ""
     if not token or got != token:
         raise HTTPException(401, "Invalid cron token")
-    return await exo.run_due_calls(limit=40)
+    return await exo.run_auto_calls(limit=40)
 
 
 @api.post("/integrations/botspace/send-daily-report", dependencies=[Depends(owner_only)])

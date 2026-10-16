@@ -677,19 +677,16 @@ function ExotelCard() {
         <h3 className="font-heading font-bold text-ink">Exotel (Akar Euler verify)</h3>
       </div>
       <p className="text-sm text-ink-soft mb-3">
-        After booking, Euler calls in plain spoken Hindi from the dealership ExoPhone — like a
-        person talking, no English words. It asks how much money they paid for the vehicle, then
-        to press those digits one by one and the bottom-right key with two small lines (hash),
-        or to say the amount out loud.
-        Calls retry until an amount is stored. If that amount is more than receipts on the file,
-        the lead is flagged. After a greeting change, re-upload intro.mp3 as the App Bazaar
-        Greeting and prompt.mp3 as the Gather prompt.
-        For files already booked: use <b>Call booked leads now</b> (up to 40 rings, then the
-        rest continue every 15 minutes in the call window), or open one lead and tap Call now.
+        Euler auto-calls every booked lead from the dealership ExoPhone (original Hindi
+        clips already in App Bazaar). New bookings queue a few minutes after Convert to
+        Booking. The booked register is picked up automatically in the call window
+        (default 10–19 IST), up to two tries a day, until the customer types or says the
+        amount. If that amount is more than receipts on the file, the lead is flagged.
+        <b> Call booked leads now</b> is only if you want a batch immediately. Per-lead
+        Call now still works on Deal verify.
         Do not paste API tokens in chat — save them here.
-        Keep the landline ExoPhone on “Shubham Motors AI” for incoming calls. Create a
-        new App Bazaar app “Akar Euler deal verify” for outbound verify — do not reuse
-        the old AI app — and paste its app ID below.
+        Keep the landline ExoPhone on “Shubham Motors AI” for incoming calls. The
+        outbound flow is the App Bazaar app “Akar Euler deal verify”.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Account SID">
