@@ -37,6 +37,39 @@ SLACK_RUPEES = 100
 AUDIO_DIR = Path(__file__).parent / "static" / "exotel"
 AUDIO_CLIPS = ("intro", "prompt", "speak", "thanks")
 
+# Plain spoken Hindi for milk / vegetable sellers. Same words as the MP3s.
+# Avoid English (booking, keypad, type) and formal words (rashi, bhugtan, pushti).
+SPOKEN = {
+    "intro": (
+        "Namaste. Main Akar Euler se baat kar rahi hoon. "
+        "Aapne hamari gaadi li hai. Hum poochna chahte hain — "
+        "gaadi ke liye aapne kitne paise diye."
+    ),
+    "prompt": (
+        "Jo paise aapne gaadi ke liye diye, wahi poora number phone ke button se dabaiye. "
+        "Number dabane ke baad hash wala button daba den. "
+        "Hash button par do chhoti linein bani hoti hain."
+    ),
+    "speak": "Agar number nahi daba sakte, to ab bolkar batayein. Aapne kitne paise diye.",
+    "thanks": "Dhanyavaad. Akar Euler.",
+}
+
+# Devanagari used when rebuilding the MP3s (clearer TTS than roman Hindi).
+SPOKEN_HI = {
+    "intro": (
+        "नमस्ते। मैं आकर यूलर से बात कर रही हूँ। "
+        "आपने हमारी गाड़ी ली है। हम पूछना चाहते हैं — "
+        "गाड़ी के लिए आपने कितने पैसे दिए।"
+    ),
+    "prompt": (
+        "जो पैसे आपने गाड़ी के लिए दिए, वही पूरा नंबर फ़ोन के बटनों से दबाएं। "
+        "नंबर दबाने के बाद, हैश वाला बटन दबा दें। "
+        "हैश बटन पर दो छोटी लाइनें बनी होती हैं।"
+    ),
+    "speak": "अगर नंबर नहीं दबा सकते, तो अब बोलकर बताएं। आपने कितने पैसे दिए।",
+    "thanks": "धन्यवाद। आकर यूलर।",
+}
+
 # Hindi number words used when a recording is transcribed or staff types words.
 _HI_ONES = {
     "शून्य": 0, "zero": 0, "एक": 1, "दो": 2, "तीन": 3, "चार": 4, "पाँच": 5, "पांच": 5,
@@ -377,9 +410,9 @@ def _play_or_say(cfg: dict, clip: str, spoken: str) -> str:
 
 def exoml_start(cfg: dict) -> str:
     urls = webhook_urls(cfg)
-    intro = _play_or_say(cfg, "intro", "Namaste. Akar Euler se baat ho rahi hai. Aapki booking ke baare mein ek chhoti si pushti hai.")
-    prompt = _play_or_say(cfg, "prompt", "Aapne showroom mein jitna bhugtan kiya hai, woh rashi keypad par type karke hash dabaiye. Type nahi kar sakte to rashi bolkar bata dijiye.")
-    speak = _play_or_say(cfg, "speak", "Kripya ab rashi bol kar bataiye.")
+    intro = _play_or_say(cfg, "intro", SPOKEN["intro"])
+    prompt = _play_or_say(cfg, "prompt", SPOKEN["prompt"])
+    speak = _play_or_say(cfg, "speak", SPOKEN["speak"])
     # Intro + prompt sit inside Gather so keypad during the greeting still counts.
     # Record here is a fallback if Exotel continues this document on timeout;
     # the gather webhook also returns Record when no digits arrive.
@@ -397,13 +430,13 @@ def exoml_start(cfg: dict) -> str:
 
 
 def exoml_after_digits(cfg: dict) -> str:
-    thanks = _play_or_say(cfg, "thanks", "Dhanyavaad. Akar Euler.")
+    thanks = _play_or_say(cfg, "thanks", SPOKEN["thanks"])
     return '<?xml version="1.0" encoding="UTF-8"?><Response>' + thanks + "<Hangup/></Response>"
 
 
 def exoml_record_then_thanks(cfg: dict) -> str:
     """Spoken-amount path after Gather timeout / empty keypad. Thanks play on /recorded."""
-    speak = _play_or_say(cfg, "speak", "Kripya ab rashi bol kar bataiye.")
+    speak = _play_or_say(cfg, "speak", SPOKEN["speak"])
     urls = webhook_urls(cfg)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
