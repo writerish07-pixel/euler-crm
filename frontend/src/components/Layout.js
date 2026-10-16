@@ -6,7 +6,7 @@ import {
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
   MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse, Bell,
-  FileCheck, Scale, CalendarDays,
+  FileCheck, Scale, CalendarDays, PhoneCall,
 } from "lucide-react";
 import { cx, Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
@@ -31,6 +31,7 @@ const NAV = [
     { to: "/quotations", label: "Quotations", icon: FileText, salesOnly: true },
     { to: "/activities", label: "Activity Log", icon: Activity, salesOnly: true },
     { to: "/edit-log", label: "Edit Log", icon: ScrollText, salesOnly: true },
+    { to: "/deal-verify", label: "Deal verify", icon: PhoneCall, showroomDesk: true },
     { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle, salesOnly: true },
     { to: "/cancellations", label: "Cancellations", icon: Ban },
     { to: "/allocation", label: "Lead Allocation", icon: UserCheck, showroomDesk: true },

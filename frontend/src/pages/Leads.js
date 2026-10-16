@@ -102,6 +102,11 @@ export default function Leads() {
             {Number(r.cancelCount) === 1 ? "Cancelled once" : `Cancelled ${r.cancelCount}×`}
           </Badge>
         )}
+        {r.dealVerifyMismatch && (
+          <Badge tone="bg-rose-50 text-rose-800 ring-rose-600/20" data-testid={`deal-verify-flag-${r.leadId}`}>
+            Deal mismatch
+          </Badge>
+        )}
       </div>
     ) },
     ...(isShowroomAdmin ? [{

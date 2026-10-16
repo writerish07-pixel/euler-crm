@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse, PhoneCall } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del, put, api, apiErrorMessage } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -217,6 +217,7 @@ export default function Settings() {
       {!isOemFinance && (
       <>
       {isOwner && <BotspaceCard />}
+      {isOwner && <ExotelCard />}
       {isOwner && <CoulsonCard />}
 
       {isOwner && (
@@ -592,6 +593,127 @@ function MastersListCard({ gsEnabled }) {
             </div>
           </div>
         ))}
+      </div>
+    </Card>
+  );
+}
+
+function ExotelCard() {
+  const [cfg, setCfg] = useState(null);
+  const [form, setForm] = useState({
+    accountSid: "shubhammotors1",
+    subdomain: "api.exotel.com",
+    exoPhone: "01414937655",
+    apiKey: "",
+    apiToken: "",
+    quietStart: 10,
+    quietEnd: 19,
+    cronToken: "",
+  });
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    get("/integrations/exotel").then((d) => {
+      setCfg(d);
+      setForm((f) => ({
+        ...f,
+        accountSid: d.accountSid || f.accountSid,
+        subdomain: d.subdomain || f.subdomain,
+        exoPhone: d.exoPhone || f.exoPhone,
+        apiKey: d.apiKeyMasked || "",
+        apiToken: d.apiTokenMasked || "",
+        quietStart: d.quietStart || 10,
+        quietEnd: d.quietEnd || 19,
+        cronToken: d.cronToken || "",
+      }));
+    }).catch(() => {});
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const body = {
+        accountSid: form.accountSid,
+        subdomain: form.subdomain,
+        exoPhone: form.exoPhone,
+        quietStart: Number(form.quietStart) || 10,
+        quietEnd: Number(form.quietEnd) || 19,
+        cronToken: form.cronToken,
+        enabled: true,
+      };
+      if (form.apiKey && !form.apiKey.includes("…") && !form.apiKey.startsWith("•")) body.apiKey = form.apiKey;
+      if (form.apiToken && !form.apiToken.includes("…") && !form.apiToken.startsWith("•")) body.apiToken = form.apiToken;
+      await put("/integrations/exotel", body);
+      toast.success("Exotel settings saved");
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Save failed"));
+    } finally { setBusy(false); }
+  };
+
+  const runJobs = async () => {
+    try {
+      const r = await post("/integrations/exotel/run-jobs", {});
+      toast.success(`Verify calls: placed ${r.placed || 0}, skipped ${r.skipped || 0}`);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not place calls"));
+    }
+  };
+
+  return (
+    <Card className="p-5 mb-6" data-testid="exotel-settings">
+      <div className="flex items-center gap-2 mb-1">
+        <PhoneCall size={16} className="text-cobalt" />
+        <h3 className="font-heading font-bold text-ink">Exotel (Akar Euler verify)</h3>
+      </div>
+      <p className="text-sm text-ink-soft mb-3">
+        After booking, Euler calls the customer in Hindi from the dealership ExoPhone and asks
+        how much they paid. They can type the amount or speak it. Calls retry until an amount
+        is stored. If that amount is more than receipts on the file, the lead is flagged.
+        Do not paste API tokens in chat — save them here.
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Account SID">
+          <Input data-testid="exotel-sid" value={form.accountSid}
+            onChange={(e) => setForm({ ...form, accountSid: e.target.value })} />
+        </Field>
+        <Field label="Subdomain">
+          <Input value={form.subdomain}
+            onChange={(e) => setForm({ ...form, subdomain: e.target.value })} />
+        </Field>
+        <Field label="ExoPhone (customer sees this)">
+          <Input data-testid="exotel-exophone" value={form.exoPhone}
+            onChange={(e) => setForm({ ...form, exoPhone: e.target.value })} />
+        </Field>
+        <Field label="API key">
+          <Input data-testid="exotel-api-key" type="password" value={form.apiKey}
+            onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="From Exotel API credentials" />
+        </Field>
+        <Field label="API token">
+          <Input data-testid="exotel-api-token" type="password" value={form.apiToken}
+            onChange={(e) => setForm({ ...form, apiToken: e.target.value })} placeholder="Shown once in Exotel" />
+        </Field>
+        <Field label="Call window start (IST hour)">
+          <Input type="number" min="0" max="23" value={form.quietStart}
+            onChange={(e) => setForm({ ...form, quietStart: e.target.value })} />
+        </Field>
+        <Field label="Call window end (IST hour)">
+          <Input type="number" min="1" max="24" value={form.quietEnd}
+            onChange={(e) => setForm({ ...form, quietEnd: e.target.value })} />
+        </Field>
+        <Field label="Cron token (optional)">
+          <Input value={form.cronToken} onChange={(e) => setForm({ ...form, cronToken: e.target.value })}
+            placeholder="For Railway / cron-job.org" />
+        </Field>
+      </div>
+      <p className="text-xs text-ink-faint mt-2 font-mono break-all">
+        Voice URL: {cfg?.voiceUrl || "https://euler-crm-production.up.railway.app/api/integrations/exotel/voice"}
+      </p>
+      <div className="flex flex-wrap gap-2 mt-4">
+        <Button data-testid="exotel-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Exotel settings"}</Button>
+        <Button variant="secondary" onClick={runJobs}>Place due verify calls now</Button>
+        <span className="text-xs text-ink-faint self-center">{cfg?.configured ? "Configured" : "Needs API key + token"}</span>
       </div>
     </Card>
   );

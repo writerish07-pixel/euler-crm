@@ -16,7 +16,7 @@ from typing import Optional, List, Any, Dict
 from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response, FileResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,6 +31,7 @@ import oem_claims
 import period as periodmod
 import coulson as coulson_client
 import botspace as wa
+import exotel as exo
 import web_push
 import lead_docs
 import tally_pack
@@ -3900,6 +3901,8 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         "insuranceAgentId": 1, "insuranceArrangedBy": 1,
         "registration": 1, "invoice": 1, "pdi": 1,
         "createdByUserId": 1, "createdByEmail": 1,
+        "dealVerifyStatus": 1, "dealVerifyAmount": 1, "dealVerifyMismatch": 1,
+        "dealVerifyMismatchKind": 1, "totalReceived": 1,
     }).sort("leadId", -1).to_list(cap)
     # An executive works their own leads only. A team lead sees their team.
     # Owner, Sales GM, Showroom Admin and Accounts see all.
@@ -7136,6 +7139,8 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
     await recompute_lead(lead_id)
     # WhatsApp booking confirm is fire-and-forget — must never fail this booking.
     wa.schedule(wa.notify_booking(lead_id))
+    # Hindi Exotel verify call — same rule: never fail this booking.
+    exo.schedule(exo.enqueue_after_booking(lead_id))
     return {"bookingId": booking_id, "snapshotId": snapshot_id, "lead": clean(await db.leads.find_one({"leadId": lead_id}))}
 
 
@@ -13177,6 +13182,8 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/share/dashboard"),
     ("PUT", "/api/leads/{lead_id}/extra-income"), ("GET", "/api/audit-log"),
     ("GET", "/api/edit-log"),
+    ("GET", "/api/integrations/exotel"),
+    ("GET", "/api/deal-verify"),
 ]
 OWNER_ONLY_ENDPOINTS = [
     "/api/dealer-earnings", "/api/reports/owner-commercial", "/api/reports/oem-claim-dashboard",
@@ -15829,6 +15836,149 @@ async def botspace_cron(request: Request):
     return await wa.run_daily_jobs()
 
 
+def _exoml(xml: str) -> Response:
+    return Response(content=xml, media_type="text/xml; charset=utf-8")
+
+
+async def _exotel_form(request: Request) -> dict:
+    data = {}
+    try:
+        form = await request.form()
+        data = {str(k): (v if isinstance(v, str) else str(v)) for k, v in form.items()}
+    except Exception:
+        data = {}
+    if not data:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                data = {str(k): "" if v is None else str(v) for k, v in body.items()}
+        except Exception:
+            data = {}
+    return data
+
+
+async def _exotel_token_ok(request: Request):
+    cfg = await exo.get_config()
+    secret = cfg.get("webhookSecret") or ""
+    if not secret:
+        return
+    got = request.query_params.get("token") or request.headers.get("x-exotel-token") or ""
+    if got != secret:
+        raise HTTPException(401, "Invalid Exotel token")
+
+
+class ExotelSettingsIn(BaseModel):
+    apiKey: Optional[str] = None
+    apiToken: Optional[str] = None
+    accountSid: Optional[str] = None
+    subdomain: Optional[str] = None
+    exoPhone: Optional[str] = None
+    enabled: Optional[bool] = None
+    quietStart: Optional[int] = None
+    quietEnd: Optional[int] = None
+    webhookSecret: Optional[str] = None
+    cronToken: Optional[str] = None
+
+
+class DealVerifyAmountIn(BaseModel):
+    amount: str = ""
+    paused: Optional[bool] = None
+
+
+@api.get("/integrations/exotel", dependencies=[Depends(owner_only)])
+async def exotel_settings():
+    return exo.public_config(await exo.get_config())
+
+
+@api.put("/integrations/exotel", dependencies=[Depends(owner_only)])
+async def exotel_save_settings(body: ExotelSettingsIn):
+    return await exo.save_config(body.model_dump(exclude_unset=True))
+
+
+@api.post("/integrations/exotel/run-jobs", dependencies=[Depends(owner_only)])
+async def exotel_run_jobs():
+    return await exo.run_due_calls(limit=40)
+
+
+@api.get("/deal-verify", dependencies=[Depends(showroom_desk_only)])
+async def deal_verify_queue(filter: str = "mismatch", limit: int = 300):
+    rows = await exo.list_queue(filter=filter, limit=limit)
+    return [clean(r) for r in rows]
+
+
+@api.post("/leads/{lead_id}/deal-verify/call", dependencies=[Depends(showroom_desk_only)])
+async def deal_verify_call_now(lead_id: str):
+    await get_lead_or_404(lead_id)
+    res = await exo.place_verify_call(lead_id, force=True)
+    if res.get("reason") == "exotel-not-configured":
+        raise HTTPException(422, "Exotel is not configured. Owner: Settings → Exotel.")
+    if not res.get("ok") and not res.get("skipped"):
+        raise HTTPException(502, res.get("reason") or "Exotel call failed")
+    return res
+
+
+@api.post("/leads/{lead_id}/deal-verify/amount", dependencies=[Depends(showroom_desk_only)])
+async def deal_verify_set_amount(lead_id: str, body: DealVerifyAmountIn):
+    await get_lead_or_404(lead_id)
+    if body.paused is not None and not str(body.amount or "").strip():
+        return await exo.pause_lead(lead_id, bool(body.paused))
+    res = await exo.record_amount(lead_id, body.amount, source="listened")
+    if not res.get("ok"):
+        raise HTTPException(422, "Enter the amount the customer paid")
+    return res
+
+
+@public.get("/integrations/exotel/audio/{name}")
+async def exotel_audio(name: str):
+    path = exo.audio_path(name.replace(".mp3", ""))
+    if not path:
+        raise HTTPException(404, "Unknown prompt")
+    return FileResponse(path, media_type="audio/mpeg")
+
+
+@public.get("/integrations/exotel/voice")
+@public.post("/integrations/exotel/voice")
+async def exotel_voice(request: Request):
+    await _exotel_token_ok(request)
+    cfg = await exo.get_config()
+    return _exoml(exo.exoml_start(cfg))
+
+
+@public.post("/integrations/exotel/gather")
+async def exotel_gather(request: Request):
+    await _exotel_token_ok(request)
+    form = await _exotel_form(request)
+    await exo.handle_gather(form)
+    cfg = await exo.get_config()
+    return _exoml(exo.exoml_after_digits(cfg))
+
+
+@public.post("/integrations/exotel/recorded")
+async def exotel_recorded(request: Request):
+    await _exotel_token_ok(request)
+    form = await _exotel_form(request)
+    await exo.handle_recorded(form)
+    cfg = await exo.get_config()
+    return _exoml(exo.exoml_after_digits(cfg))
+
+
+@public.post("/integrations/exotel/status")
+async def exotel_status(request: Request):
+    await _exotel_token_ok(request)
+    form = await _exotel_form(request)
+    return await exo.handle_status(form)
+
+
+@public.post("/integrations/exotel/cron")
+async def exotel_cron(request: Request):
+    cfg = await exo.get_config()
+    token = cfg.get("cronToken") or ""
+    got = request.headers.get("x-cron-token") or request.query_params.get("token") or ""
+    if not token or got != token:
+        raise HTTPException(401, "Invalid cron token")
+    return await exo.run_due_calls(limit=40)
+
+
 @api.post("/integrations/botspace/send-daily-report", dependencies=[Depends(owner_only)])
 async def botspace_send_daily_report(slot: str = "eod", force: bool = True,
                                     act=Depends(actor)):
@@ -16479,6 +16629,8 @@ async def startup():
         await db.oem_sold.create_index("mobile")
         # The daily revival sweep queries on these two together.
         await db.leads.create_index([("accountStatus", 1), ("reviveOn", 1)])
+        await db.leads.create_index("dealVerifyNextAt")
+        await db.leads.create_index("dealVerifyMismatch")
     except Exception:
         pass
     # Insurance agents / staff / cancel reasons are small and needed on the first
@@ -16507,6 +16659,11 @@ async def startup():
             asyncio.create_task(wa.scheduler_loop())
     except Exception:
         logging.exception("WHATSAPP_SCHEDULER_START_ERROR")
+    try:
+        if not _is_test_env():
+            asyncio.create_task(exo.scheduler_loop())
+    except Exception:
+        logging.exception("EXOTEL_SCHEDULER_START_ERROR")
 
 
 def _dedupe_finance_receipts(receipts):
