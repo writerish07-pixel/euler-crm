@@ -24,8 +24,55 @@ export function acceptForKind(kind) {
   return kind === TALLY_KIND ? TALLY_ACCEPT : ACCEPT;
 }
 
+export const DOC_MAX_BYTES = 8 * 1024 * 1024;
+const COMPRESS_FROM = 3.5 * 1024 * 1024;
+
 export function hintForKind(kind) {
-  return kind === TALLY_KIND ? "Photo, PDF or ZIP, max 12 MB" : "Photo or PDF, max 5 MB";
+  return kind === TALLY_KIND ? "Photo, PDF or ZIP, max 12 MB" : "Photo or PDF, max 8 MB";
+}
+
+function isZipFile(file) {
+  const name = String(file?.name || "").toLowerCase();
+  const type = String(file?.type || "");
+  return type.includes("zip") || name.endsWith(".zip");
+}
+
+/** Camera photos from the Windows desk often exceed 5 MB and then 25s-timeout as "Upload failed". */
+export async function fitImageForUpload(file) {
+  if (!file || file.size <= COMPRESS_FROM) return file;
+  if (isZipFile(file)) return file;
+  const type = String(file.type || "").toLowerCase();
+  const name = String(file.name || "").toLowerCase();
+  if (type.includes("pdf") || name.endsWith(".pdf")) return file;
+  // Windows Camera often sends application/octet-stream with no extension.
+  if (type && !type.startsWith("image/") && type !== "application/octet-stream") return file;
+  if (typeof createImageBitmap !== "function" || typeof document === "undefined") return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const maxEdge = 2000;
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height, 1));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    if (bitmap.close) bitmap.close();
+    let quality = 0.82;
+    let blob = null;
+    while (quality >= 0.55) {
+      blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+      if (blob && blob.size <= DOC_MAX_BYTES) break;
+      quality -= 0.09;
+    }
+    if (!blob) return file;
+    const name = String(file.name || "oem-proof.jpg").replace(/\.[^.]+$/, "") + ".jpg";
+    return new File([blob], name, { type: "image/jpeg", lastModified: Date.now() });
+  } catch {
+    return file;
+  }
 }
 
 function isZipDoc(doc) {
@@ -110,7 +157,13 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
     if (!uploadUrl) return;
     setBusy(true);
     try {
-      await uploadFile(uploadUrl, file, { kind, ...(extraFields || {}) });
+      const ready = await fitImageForUpload(file);
+      const zipOk = kind === TALLY_KIND && isZipFile(ready);
+      if (ready.size > DOC_MAX_BYTES && !zipOk) {
+        toast.error("File is over 8 MB. Compress the photo or send a smaller PDF.");
+        return;
+      }
+      await uploadFile(uploadUrl, ready, { kind, ...(extraFields || {}) });
       toast.success(`${label} saved`);
       onChanged && onChanged();
     } catch (e) {
@@ -229,7 +282,8 @@ export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, c
 export async function uploadKycFiles(url, files) {
   const kinds = Object.keys(files).filter((k) => files[k]);
   for (const kind of kinds) {
-    await uploadFile(url, files[kind], { kind });
+    const ready = await fitImageForUpload(files[kind]);
+    await uploadFile(url, ready, { kind });
   }
 }
 
@@ -412,7 +466,12 @@ export function RequestMissingUploads({ requestId, kinds = [], onUploaded }) {
   if (!requestId || !missing.length) return null;
   const save = async (kind, file) => {
     try {
-      await uploadFile(`/lead-requests/${requestId}/documents`, file, { kind });
+      const ready = await fitImageForUpload(file);
+      if (ready.size > DOC_MAX_BYTES) {
+        toast.error("File is over 8 MB. Compress the photo or send a smaller PDF.");
+        return;
+      }
+      await uploadFile(`/lead-requests/${requestId}/documents`, ready, { kind });
       toast.success(`${DOC_LABELS[kind] || kind} attached`);
       if (onUploaded) onUploaded();
     } catch (e) {

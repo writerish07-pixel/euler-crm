@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowLead360Path, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowLead360Path, isDocumentUploadPath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -84,6 +84,10 @@ describe("apiErrorMessage", () => {
     )).toBe("Could not save Coulson session");
     expect(apiErrorMessage({ message: "timeout of 25000ms exceeded", code: "ECONNABORTED" }))
       .toBe("The server took too long. Refresh and try again.");
+    expect(apiErrorMessage(
+      { message: "timeout of 25000ms exceeded", code: "ECONNABORTED" },
+      "Upload failed",
+    )).toMatch(/timed out/i);
   });
 });
 
@@ -140,12 +144,30 @@ describe("bulk mutations", () => {
     expect(isSlowOemBillingPath("/leads")).toBe(false);
     expect(isSlowLead360Path("/leads/LD26000932/360")).toBe(true);
     expect(isSlowLead360Path("/leads")).toBe(false);
+    expect(isDocumentUploadPath("/leads/LD26000926/documents")).toBe(true);
+    expect(isDocumentUploadPath("/lead-requests/RQ1/documents")).toBe(true);
+    expect(isDocumentUploadPath("/leads")).toBe(false);
+  });
+
+  test("document upload uses 90s and does not retry", async () => {
+    const err = Object.assign(new Error("timeout of 25000ms exceeded"), { code: "ECONNABORTED" });
+    const spy = jest.spyOn(api, "post").mockRejectedValue(err);
+    await expect(postForm("/leads/LD26000926/documents", { fake: true })).rejects.toBe(err);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][2]).toEqual({ timeout: 90000 });
   });
 
   test("GET /oem-billing uses a 180s timeout", async () => {
     const spy = jest.spyOn(api, "get").mockResolvedValue({ data: { rows: [] } });
     await get("/oem-billing");
     expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 180000 }));
+    spy.mockRestore();
+  });
+
+  test("GET /leads/:id/360 uses a 60s timeout", async () => {
+    const spy = jest.spyOn(api, "get").mockResolvedValue({ data: {} });
+    await get("/leads/LD26000932/360");
+    expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 60000 }));
     spy.mockRestore();
   });
 

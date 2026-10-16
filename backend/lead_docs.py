@@ -17,9 +17,14 @@ from fastapi.responses import StreamingResponse
 
 import auth as authmod
 
-MAX_BYTES = 5 * 1024 * 1024
+MAX_BYTES = 8 * 1024 * 1024
 # Zip of Tally bills stays under Mongo's 16 MB BSON document limit.
 ZIP_MAX_BYTES = 12 * 1024 * 1024
+JPEG_MAGIC = b"\xff\xd8\xff"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+PDF_MAGIC = b"%PDF"
+WEBP_RIFF = b"RIFF"
+WEBP_WEBP = b"WEBP"
 COLLECTION = "lead_documents"
 TALLY_KIND = "tally_invoice"
 ZIP_TYPES = {
@@ -58,8 +63,8 @@ EXTRA_SUPPORT_KIND = "oem_extra_support"
 DEAL_SHEET_KIND = "deal_sheet"
 
 ALLOWED_TYPES = {
-    "image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif",
-    "application/pdf",
+    "image/jpeg", "image/jpg", "image/pjpeg", "image/png", "image/webp",
+    "image/heic", "image/heif", "application/pdf",
 }
 EXT_TYPES = {
     ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
@@ -164,16 +169,38 @@ def _looks_like_zip(raw: str, name: str) -> bool:
     return raw in ZIP_TYPES or _is_zip_name(name)
 
 
-def _content_type(upload: UploadFile, *, kind: str = "") -> str:
+def _sniff_content_type(data: bytes) -> str:
+    """Windows Camera / File often sends application/octet-stream with no extension."""
+    if not data:
+        return ""
+    if data.startswith(JPEG_MAGIC):
+        return "image/jpeg"
+    if data.startswith(PNG_MAGIC):
+        return "image/png"
+    if data.startswith(PDF_MAGIC):
+        return "application/pdf"
+    if data.startswith(WEBP_RIFF) and data[8:12] == WEBP_WEBP:
+        return "image/webp"
+    if data.startswith(ZIP_MAGIC):
+        return "application/zip"
+    return ""
+
+
+def _content_type(upload: UploadFile, *, kind: str = "", data: bytes = b"") -> str:
     raw = (upload.content_type or "").split(";")[0].strip().lower()
     name = (upload.filename or "").lower()
     if kind == TALLY_KIND and _looks_like_zip(raw, name):
         return "application/zip"
     if raw in ALLOWED_TYPES:
-        return "image/jpeg" if raw == "image/jpg" else raw
+        return "image/jpeg" if raw in ("image/jpg", "image/pjpeg") else raw
     for ext, ctype in EXT_TYPES.items():
         if name.endswith(ext):
             return ctype
+    sniffed = _sniff_content_type(data)
+    if sniffed == "application/zip" and kind == TALLY_KIND:
+        return sniffed
+    if sniffed in ALLOWED_TYPES or sniffed in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
+        return sniffed
     if kind == TALLY_KIND:
         raise HTTPException(422, "Upload a photo, PDF or ZIP of the Tally GST invoice.")
     raise HTTPException(422, "Upload a photo or PDF (JPEG, PNG, WebP, HEIC, PDF).")
@@ -186,18 +213,23 @@ def _max_bytes(ctype: str, kind: str) -> int:
 
 
 async def read_upload(upload: UploadFile, *, kind: str = "") -> tuple[bytes, str, str]:
-    ctype = _content_type(upload, kind=kind)
     data = await upload.read()
     if not data:
         raise HTTPException(422, "The file is empty.")
+    ctype = _content_type(upload, kind=kind, data=data)
     limit = _max_bytes(ctype, kind)
     if len(data) > limit:
         if ctype == "application/zip":
             raise HTTPException(422, "ZIP is over 12 MB. Send a smaller archive.")
-        raise HTTPException(422, "File is over 5 MB. Compress the photo or send a smaller PDF.")
+        raise HTTPException(422, "File is over 8 MB. Compress the photo or send a smaller PDF.")
     if ctype == "application/zip" and not data.startswith(ZIP_MAGIC):
         raise HTTPException(422, "That file is not a ZIP. Export the Tally bills as a .zip.")
     filename = (upload.filename or "document").strip() or "document"
+    if filename in ("document", "blob", "image", "untitled"):
+        ext = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+                "application/pdf": ".pdf", "application/zip": ".zip" }.get(ctype)
+        if ext and not filename.lower().endswith(ext):
+            filename = f"oem-proof{ext}" if kind == EXTRA_SUPPORT_KIND else f"document{ext}"
     filename = re.sub(r"[^\w.\-]+", "_", filename)[:120]
     return data, ctype, filename
 

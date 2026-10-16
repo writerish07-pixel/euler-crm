@@ -3,7 +3,7 @@
  */
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, acceptForKind, hintForKind } from "./LeadDocuments";
+import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, acceptForKind, hintForKind, fitImageForUpload, DOC_MAX_BYTES } from "./LeadDocuments";
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -83,4 +83,18 @@ test("tally invoice slot accepts a ZIP; KYC does not", () => {
   expect(hintForKind("tally_invoice")).toMatch(/ZIP/);
   expect(acceptForKind("kyc_pan")).not.toMatch(/zip/i);
   expect(hintForKind("kyc_pan")).toMatch(/PDF/);
+  expect(hintForKind("oem_extra_support")).toMatch(/8 MB/);
+  expect(DOC_MAX_BYTES).toBe(8 * 1024 * 1024);
+});
+
+test("fitImageForUpload leaves a small PDF alone", async () => {
+  const pdf = new File([new Uint8Array([0x25, 0x50, 0x44, 0x46])], "mail.pdf", { type: "application/pdf" });
+  const out = await fitImageForUpload(pdf);
+  expect(out).toBe(pdf);
+});
+
+test("fitImageForUpload leaves a large PDF alone even without a type", async () => {
+  const pdf = new File([new Uint8Array(4 * 1024 * 1024)], "mail.pdf", { type: "" });
+  const out = await fitImageForUpload(pdf);
+  expect(out).toBe(pdf);
 });
