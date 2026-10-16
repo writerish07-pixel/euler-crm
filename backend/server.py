@@ -701,7 +701,26 @@ def _sold_date_for_lead(lead, sold_rows):
     return today()
 
 
-def _should_oem_auto_deliver(lead, sold_chassis, sold_rows=None):
+def _oem_created_has_booked_original(lead, all_leads):
+    """True when a booked/delivered file already exists on this mobile."""
+    lid = str((lead or {}).get("leadId") or "")
+    mobile = oem_sync._digits10(
+        (lead or {}).get("mobile") or (lead or {}).get("altMobile"))
+    if len(mobile) != 10:
+        return False
+    for other in all_leads or []:
+        if str((other or {}).get("leadId") or "") == lid:
+            continue
+        other_m = oem_sync._digits10(
+            (other or {}).get("mobile") or (other or {}).get("altMobile"))
+        if other_m != mobile:
+            continue
+        if oem_sync.is_commercial_original(other):
+            return True
+    return False
+
+
+def _should_oem_auto_deliver(lead, sold_chassis, sold_rows=None, all_leads=None):
     """Unique 10-digit mobile + billed chassis — not name-only fleets or OEM stubs."""
     if not lead:
         return False
@@ -709,9 +728,12 @@ def _should_oem_auto_deliver(lead, sold_chassis, sold_rows=None):
         return False
     if _is_delivered(lead):
         return False
-    if oem_sync.is_oem_billing_stub(lead):
+    stub = (oem_sync.is_oem_billing_stub(lead)
+            or ((lead or {}).get("oemBillingCreated")
+                and not oem_sync.is_commercial_original(lead)))
+    if stub and _oem_created_has_booked_original(lead, all_leads):
         return False
-    if (lead or {}).get("oemBillingCreated") and not oem_sync.is_commercial_original(lead):
+    if stub and all_leads is None:
         return False
     ch = oem_sync._norm_chassis(lead.get("chassisNumber"))
     inv = oem_sync._norm_invoice(lead.get("invoiceNumber"))
@@ -739,9 +761,10 @@ async def _auto_deliver_oem_sold_leads():
     """OEM billed + unique mobile on the file → Delivered, desk steps stay open."""
     sold = [r async for r in db.oem_sold.find({})]
     sold_ch = oem_sync.sold_chassis_set(sold)
+    leads = await oem_sync.load_oem_billing_leads(db)
     count = 0
-    for lead in await oem_sync.load_oem_billing_leads(db):
-        if not _should_oem_auto_deliver(lead, sold_ch, sold):
+    for lead in leads:
+        if not _should_oem_auto_deliver(lead, sold_ch, sold, all_leads=leads):
             continue
         try:
             await _mark_oem_auto_delivered(lead, sold)
@@ -772,6 +795,9 @@ async def _mark_oem_auto_delivered(lead, sold_rows=None):
         "accountStatus": "Active",
         "lastUpdated": now_iso(),
     })
+    if ((lead or {}).get("oemBillingCreated")
+            and not str((lead or {}).get("bookingDate") or "").strip()):
+        updates["bookingDate"] = sold_date or today()
     await db.leads.update_one(
         {"leadId": lid},
         {"$set": updates, "$unset": {"oemInvoiceMissing": ""}})
@@ -10369,11 +10395,12 @@ async def _append_oem_unit(lead, row):
 
 
 async def _insert_oem_billing_lead(row, sold_rows=None):
-    """Create a New lead from an unmatched Coulson Sold chassis.
+    """Create a retail file from an unmatched Coulson Sold chassis.
 
     KYC copies from the sibling file (same mobile, else same usable name).
     Price and scheme come from Price Master + Scheme Master for this unit's
-    model — not the first unit's negotiated deal. Never auto-delivered.
+    model — not the first unit's negotiated deal. OEM already billed this
+    chassis, so the file is Delivered on Lead Register — not a New enquiry.
     """
     chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
     if not chassis:
@@ -10407,17 +10434,19 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
         "interestedModel": model,
         "variant": variant,
         "executive": "",
-        "currentStatus": "New",
+        "currentStatus": "Delivered",
         "priority": "Normal",
         "budget": 0,
         "remarks": "",
         "financeRequired": "No",
         "exchangeRequired": "No",
         "createdDate": sold_date,
+        "bookingDate": sold_date,
         "customerType": "Individual",
         "gstin": "",
         "accountStatus": "Active",
-        "deliveryStatus": "",
+        "deliveryStatus": "Delivered",
+        "deliveryDate": sold_date,
         "outstandingAmount": 0, "customerOutstanding": 0, "companyOutstanding": 0,
         "totalReceived": 0, "customerPayable": 0, "grossVehicleCost": 0, "totalDiscount": 0,
         "consumerDiscount": 0, "exchangeBonus": 0, "loyaltyBonus": 0, "referralBonus": 0,
@@ -10429,6 +10458,9 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
         "invoiceNumber": invoice,
         "numberPlate": plate,
         "oemBillingCreated": True,
+        "oemAutoDelivered": True,
+        "oemInvoiced": True,
+        "oemStatusBeforeAutoDeliver": "New",
         "oemSoldSyncedAt": now_iso(),
     }
     await db.leads.insert_one(doc)
@@ -10442,6 +10474,9 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     await sheet_sync("activities", act_doc)
     await _copy_create_docs_from_sibling(lead_id, mobile=mobile, name=name)
     updated = await _apply_list_price_and_scheme(lead_id, model, variant, sold_date)
+    live = await db.leads.find_one({"leadId": lead_id}) or updated
+    await _mark_oem_auto_delivered(live, sold_rows)
+    updated = clean(await db.leads.find_one({"leadId": lead_id}) or updated)
     await sheet_sync("leads", updated)
     return updated
 
@@ -10735,7 +10770,8 @@ async def merge_oem_billing_repair(body: OemBillingRepairIn, act=Depends(actor))
 async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
     """Connect this Sold chassis to the live CRM file on the same mobile.
 
-    Mints a New lead only when no live register file exists for that person.
+    Mints a Delivered Lead Register file only when no live file exists for
+    that person. OEM already billed the chassis — it is not a New enquiry.
     """
     chassis = oem_sync._norm_chassis(body.chassis)
     if not chassis:
