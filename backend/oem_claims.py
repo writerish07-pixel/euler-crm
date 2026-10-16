@@ -2158,23 +2158,74 @@ async def resolve_oem_create_target(db, *, claim_number, line_id="", lead_id="",
     }
 
 
+def extra_support_from_lead(lead, unit_sno=None):
+    """Lead / pack-unit Extra Support amount and vehicle ids. Never Coulson money."""
+    import commercial as ce
+    sno = 0
+    try:
+        sno = int(unit_sno or 0)
+    except (TypeError, ValueError):
+        sno = 0
+    units = ce.extra_support_unit_rows(lead or {})
+    if sno and units:
+        unit = next((u for u in units if int(u.get("unitSno") or 0) == sno), {}) or {}
+        return (
+            round2(unit.get("oemExtraSupportReceived")),
+            str(unit.get("chassisNumber") or "").strip(),
+            str(unit.get("invoiceNumber") or "").strip(),
+            sno,
+        )
+    return (
+        round2(ce.num((lead or {}).get("oemExtraSupportReceived"))),
+        str((lead or {}).get("chassisNumber") or "").strip(),
+        str((lead or {}).get("invoiceNumber") or "").strip(),
+        sno,
+    )
+
+
+def _register_unit_filter(unit_sno=None):
+    sno = 0
+    try:
+        sno = int(unit_sno or 0)
+    except (TypeError, ValueError):
+        sno = 0
+    if sno:
+        return {"unitSno": sno}
+    return {"$or": [{"unitSno": {"$in": [None, 0]}}, {"unitSno": {"$exists": False}}]}
+
+
 async def ensure_register_row(db, lead, component_key, *, claim_amount=0.0,
-                              eligible_claim=0.0):
-    """Insert a Scheme Claim Register row for an existing lead. Money is scheme/lead only."""
+                              eligible_claim=0.0, unit_sno=None):
+    """Insert a Scheme Claim Register row for an existing lead. Money is scheme/lead only.
+
+    Keeps `_id` so Match can stamp the OEM claim number on the same document.
+    """
     import commercial as ce
     lead_id = str((lead or {}).get("leadId") or "").strip()
     key = str(component_key or "").strip()
     if not lead_id or not key:
         raise ValueError("Lead and scheme component are required.")
-    rec = await db.claims.find_one(
-        {"leadId": lead_id, "componentKey": key, "manual": {"$ne": True}})
+    sno = 0
+    try:
+        sno = int(unit_sno or 0)
+    except (TypeError, ValueError):
+        sno = 0
+    filt = {"leadId": lead_id, "componentKey": key, "manual": {"$ne": True}}
+    filt.update(_register_unit_filter(sno))
+    rec = await db.claims.find_one(filt)
     if rec:
-        rec.pop("_id", None)
         return rec, False
-    amt = round2(claim_amount)
-    elig = round2(eligible_claim if eligible_claim else claim_amount)
+    amt, chassis, invoice, sno = extra_support_from_lead(lead, sno)
+    if key != ce.OEM_EXTRA_SUPPORT_KEY:
+        amt = round2(claim_amount)
+        chassis = str(lead.get("chassisNumber") or "").strip()
+        invoice = str(lead.get("invoiceNumber") or "").strip()
+    elif round2(claim_amount) > 0 and amt <= 0:
+        amt = round2(claim_amount)
+    elig = round2(eligible_claim if eligible_claim else amt)
+    suffix = f"-u{sno}" if sno else ""
     doc = {
-        "claimId": f"CLM-{lead_id}-{key}",
+        "claimId": f"CLM-{lead_id}-{key}{suffix}",
         "leadId": lead_id,
         "customer": lead.get("customerName") or "",
         "model": lead.get("interestedModel") or "",
@@ -2188,17 +2239,72 @@ async def ensure_register_row(db, lead, component_key, *, claim_amount=0.0,
         "receivedAmount": 0.0,
         "claimStatus": "Pending",
         "claimReference": "",
-        "source": "Created from OEM claim",
+        "source": ("OEM Extra Support" if key == ce.OEM_EXTRA_SUPPORT_KEY
+                   else "Created from OEM claim"),
         "manual": False,
-        "chassisNumber": lead.get("chassisNumber") or "",
-        "invoiceNumber": lead.get("invoiceNumber") or "",
+        "chassisNumber": chassis,
+        "invoiceNumber": invoice,
         "schemeMonth": ce.scheme_month_from_date(
             lead.get("schemeAsOf") or lead.get("bookingDate") or ""),
         "submittedDate": "",
         "approvedDate": "",
     }
-    await db.claims.insert_one(dict(doc))
+    if sno:
+        doc["unitSno"] = sno
+    result = await db.claims.insert_one(dict(doc))
+    doc["_id"] = result.inserted_id
     return doc, True
+
+
+async def adopt_or_ensure_register_row(db, *, lead_id, lead, component_key,
+                                       unit_sno=None, claim_number="", line_id=""):
+    """Attach a Create-from-OEM empty row, or insert Extra Support from the CRM lead.
+
+    Match used to 422 when Extra Support lived only on the lead (no db.claims row)
+    or when Create had inserted a lead-less register row. Save match must still
+    link the debit note.
+    """
+    import commercial as ce
+    lead_id = str(lead_id or "").strip()
+    key = str(component_key or "").strip()
+    claim_number = str(claim_number or "").strip()
+    line_id = str(line_id or "").strip()
+    amt, chassis, invoice, sno = extra_support_from_lead(lead, unit_sno)
+    if claim_number:
+        filt = {
+            "leadId": {"$in": ["", None]},
+            "componentKey": key,
+            "manualOemClaimNumber": claim_number,
+            "manual": {"$ne": True},
+        }
+        if line_id:
+            filt["manualOemLineId"] = line_id
+        rec = await db.claims.find_one(filt)
+        if rec:
+            patch = {
+                "leadId": lead_id,
+                "customer": (lead or {}).get("customerName") or rec.get("customer") or "",
+                "model": (lead or {}).get("interestedModel") or rec.get("model") or "",
+                "variant": (lead or {}).get("variant") or rec.get("variant") or "",
+                "bookingDate": (lead or {}).get("bookingDate") or rec.get("bookingDate") or "",
+                "executive": (lead or {}).get("executive") or "",
+                "chassisNumber": chassis or rec.get("chassisNumber") or "",
+                "invoiceNumber": invoice or rec.get("invoiceNumber") or "",
+                "oemUnmatched": False,
+            }
+            if sno:
+                patch["unitSno"] = sno
+            if amt > 0:
+                patch["eligibleClaim"] = amt
+                patch["claimAmount"] = amt
+                if key == ce.OEM_EXTRA_SUPPORT_KEY:
+                    patch["source"] = "OEM Extra Support"
+            await db.claims.update_one({"_id": rec["_id"]}, {"$set": patch})
+            rec.update(patch)
+            return rec
+    rec, _created = await ensure_register_row(
+        db, lead, key, claim_amount=amt, eligible_claim=amt, unit_sno=sno)
+    return rec
 
 
 async def create_named_register_from_oem(db, *, claim_number, line_id="",
@@ -2380,15 +2486,20 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
         raise ValueError("That OEM claim is not in the last Euler sync. Sync from Euler first.")
     if _oem_note_is_dead(oem.get("status")):
         raise ValueError("That OEM claim is cancelled. Relink to the new live claim.")
+    lead_row = await db.leads.find_one({"leadId": lead_id}) or {}
+    if not str(lead_row.get("leadId") or "").strip():
+        raise ValueError("Pick an existing lead.")
+    if _lead_blocks_claim_relink(lead_row):
+        raise ValueError("This booking is cancelled. The claim cannot be relinked.")
     rec = await find_register_row(
         db, lead_id=lead_id, component_key=component_key, unit_sno=unit_sno)
     if not rec:
+        rec = await adopt_or_ensure_register_row(
+            db, lead_id=lead_id, lead=lead_row, component_key=component_key,
+            unit_sno=unit_sno, claim_number=str(oem.get("claimNumber") or ""),
+            line_id=want_line)
+    if not rec:
         raise ValueError("Scheme Claim Register has no row for that lead and component.")
-    lead_row = await db.leads.find_one(
-        {"leadId": lead_id},
-        {"customerName": 1, "dealCancelled": 1, "accountStatus": 1, "_id": 0}) or {}
-    if _lead_blocks_claim_relink(lead_row):
-        raise ValueError("This booking is cancelled. The claim cannot be relinked.")
     number = str(oem.get("claimNumber") or "").strip()
     prev_number = str(rec.get("manualOemClaimNumber") or "").strip()
     prev_line = str(rec.get("manualOemLineId") or "").strip()
