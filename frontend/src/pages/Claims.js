@@ -553,6 +553,7 @@ function MatchOemModal({ claim, onClose, onDone }) {
         leadId: claim.leadId, componentKey: claim.componentKey,
         claimNumber: claimNumber.trim(),
         lineId: lineId || (lines.length === 1 ? (lines[0].lineId || "") : ""),
+        ...(claim.unitSno ? { unitSno: claim.unitSno, unitSnos: [claim.unitSno] } : {}),
       });
       toast.success(relink
         ? `Relinked ${claim.component} to ${claimNumber.trim()}`
@@ -568,6 +569,7 @@ function MatchOemModal({ claim, onClose, onDone }) {
     try {
       await post("/claims/oem-match/clear", {
         leadId: claim.leadId, componentKey: claim.componentKey,
+        ...(claim.unitSno ? { unitSno: claim.unitSno, unitSnos: [claim.unitSno] } : {}),
       });
       toast.success("Manual match cleared");
       onDone();

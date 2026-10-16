@@ -2727,6 +2727,103 @@ async def test_match_extra_unit_snos_does_not_link_the_whole_pack(client):
 
 
 @pytest.mark.asyncio
+async def test_oem_created_extra_matches_subset_and_keeps_other_pack_units_open(client):
+    """Messenger SCS-style pack: one OEM Extra Support note covers 5 of 8 units.
+
+    Remaining units with Extra Support stay in Match until they are connected.
+    """
+    extras = tuple(
+        (48000.0, f"MD9PACK26J2171{i:02d}", f"AF-999-I26287{i:03d}")
+        for i in range(1, 9)
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _orphan_oem(
+        "AF-122-CLPACK5", line_id="es-5", claimed=240000.0,
+        chassis=extras[0][1], invoice=extras[0][2],
+        claim_type="Additional Discount Claim",
+        description="Amit requested approval for a Rs. 58,000 per unit discount "
+                    "(Euler share: Rs. 48,000) for Messenger SCS Jaipur's initial "
+                    "order of 5 Turbo Maxx vehicles")
+    created = await client.post("/api/claims/oem-create", json={
+        "claimNumber": "AF-122-CLPACK5", "lineId": "es-5"})
+    assert created.status_code == 200, created.text
+    matched = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CLPACK5", "lineId": "es-5",
+        "unitSnos": [1, 2, 3, 4, 5],
+    })
+    assert matched.status_code == 200, matched.text
+    linked = [c async for c in server.db.claims.find({
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "manualOemClaimNumber": "AF-122-CLPACK5",
+    })]
+    assert sorted(int(c.get("unitSno") or 0) for c in linked) == [1, 2, 3, 4, 5]
+    leftover = (await client.get("/api/claims/match-options")).json()
+    still = [x for x in leftover if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport"]
+    assert sorted(int(x["unitSno"]) for x in still) == [6, 7, 8]
+    assert all(not x.get("relinkable") for x in still)
+    await _orphan_oem(
+        "AF-122-CLPACK3", line_id="es-3", claimed=144000.0,
+        chassis=extras[5][1], invoice=extras[5][2],
+        claim_type="Additional Support",
+        description="Additional Support for units 6-8")
+    second = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CLPACK3", "lineId": "es-3",
+        "unitSnos": [6, 7, 8],
+    })
+    assert second.status_code == 200, second.text
+    after = (await client.get("/api/claims/match-options")).json()
+    assert not [x for x in after if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport"]
+    six = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 6})
+    assert six["manualOemClaimNumber"] == "AF-122-CLPACK3"
+
+
+@pytest.mark.asyncio
+async def test_relink_pack_extra_units_to_replacement_oem_claim(client):
+    extras = tuple(
+        (48000.0, f"MD9PACK26J2181{i:02d}", f"AF-999-I26288{i:03d}")
+        for i in range(1, 6)
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _orphan_oem("AF-999-CLOLDPACK", line_id="old-p", claimed=240000.0,
+                      chassis=extras[0][1], invoice=extras[0][2],
+                      claim_type="Additional Support",
+                      description="Additional Support for five Turbo Maxx")
+    assert (await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLOLDPACK", "lineId": "old-p",
+        "unitSnos": [1, 2, 3, 4, 5]})).status_code == 200
+    await server.db[oem_claims.CLAIMS_COLLECTION].update_one(
+        {"claimNumber": "AF-999-CLOLDPACK"}, {"$set": {"status": "Cancelled"}})
+    await oem_claims.apply_oem_filing_to_register(server.db, lead_ids=[lead_id], relink=False)
+    options = (await client.get("/api/claims/match-options")).json()
+    mine = [x for x in options if x["leadId"] == lead_id and x["componentKey"] == "oemExtraSupport"]
+    assert sorted(int(x["unitSno"]) for x in mine) == [1, 2, 3, 4, 5]
+    assert all(x.get("relinkable") for x in mine)
+    await _orphan_oem("AF-999-CLNEWPACK", line_id="new-p", claimed=240000.0,
+                      chassis=extras[0][1], invoice=extras[0][2],
+                      claim_type="Additional Support",
+                      description="Replacement Additional Support")
+    relinked = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLNEWPACK", "lineId": "new-p",
+        "unitSnos": [1, 2, 3, 4, 5]})
+    assert relinked.status_code == 200, relinked.text
+    assert relinked.json().get("relinked") is True
+    old = (await client.get("/api/oem-claims", params={"q": "AF-999-CLOLDPACK"})).json()[0]
+    new = (await client.get("/api/oem-claims", params={"q": "AF-999-CLNEWPACK"})).json()[0]
+    assert lead_id not in (old.get("leadIds") or [])
+    assert lead_id in (new.get("leadIds") or [])
+    for sno in (1, 2, 3, 4, 5):
+        rec = await server.db.claims.find_one(
+            {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": sno})
+        assert rec["manualOemClaimNumber"] == "AF-999-CLNEWPACK"
+        assert rec["claimStatus"] != "Cancelled"
+
+
+@pytest.mark.asyncio
 async def test_cancelled_invoice_rebill_is_flagged_on_the_lead(client, monkeypatch):
     lead_id = await _delivered_lead(client, chassis="MD9REBILL26G900001",
                                     invoice="AF-999-I26288002")

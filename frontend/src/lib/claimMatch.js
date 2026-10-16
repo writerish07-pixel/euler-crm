@@ -114,6 +114,43 @@ export function matchRegisterLeadRows(poolRows, relatedKey) {
   return scoped.length ? scoped : rows;
 }
 
+export function isOpenRegisterRow(r) {
+  return !["Received", "Dropped", "Cancelled"].includes(r?.claimStatus || "") && !r?.relinkable;
+}
+
+export function isRelinkableRegisterRow(r) {
+  return !!r?.relinkable;
+}
+
+/** Extra Support pack units that can still join this OEM claim.
+ *  Relink also lists unmatched open units so a newly created debit note can
+ *  attach the remaining vehicles of the same lead. */
+export function matchableExtraUnitRows(register, leadId, relink = false) {
+  const rows = (Array.isArray(register) ? register : []).filter((r) => (
+    r.leadId === leadId
+    && r.componentKey === "oemExtraSupport"
+    && Number(r.unitSno) > 0
+  ));
+  const picked = rows.filter((r) => (
+    relink ? (isRelinkableRegisterRow(r) || isOpenRegisterRow(r)) : isOpenRegisterRow(r)
+  ));
+  return [...new Map(picked.map((r) => [Number(r.unitSno), r])).values()]
+    .sort((a, b) => Number(a.unitSno) - Number(b.unitSno));
+}
+
+/** One dropdown option per lead — pack units are ticked separately. */
+export function extraSupportLeadOptions(rows) {
+  const out = [];
+  const seen = new Set();
+  for (const r of rows || []) {
+    const id = r.leadId;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(r);
+  }
+  return out;
+}
+
 export function lineNeedsCreate(row, li) {
   const st = row?.registerMatch?.state || "";
   if (st === "in_register") return false;
