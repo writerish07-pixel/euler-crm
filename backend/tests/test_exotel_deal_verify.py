@@ -79,6 +79,14 @@ def test_exoml_is_hindi_flow():
     assert "Hangup" not in empty
 
 
+def test_gather_config_json_uses_prompt_audio():
+    cfg = {"webhookSecret": "", "accountSid": "shubhammotors1"}
+    body = exo.gather_config_json(cfg)
+    assert body["finish_on_key"] == "#"
+    assert body["max_input_digits"] == 8
+    assert "prompt.mp3" in body["gather_prompt"]["audio_url"]
+
+
 def test_connect_url_uses_app_bazaar_id():
     cfg = {
         "accountSid": "shubhammotors1",
@@ -168,11 +176,10 @@ async def test_enqueue_then_dtmf_mismatch(client):
     assert placed.get("ok") is True
     assert placed["callSid"] == "sid-LD26EXO1"
 
-    r = await client.post("/api/integrations/exotel/gather", data={
-        "CallSid": "sid-LD26EXO1",
-        "CustomField": "LD26EXO1",
-        "Digits": "500000",
-    })
+    r = await client.get(
+        "/api/integrations/exotel/gather",
+        params={"CallSid": "sid-LD26EXO1", "CustomField": "LD26EXO1", "digits": '"500000"'},
+    )
     assert r.status_code == 200
     assert "xml" in r.headers.get("content-type", "")
     lead = await server.db.leads.find_one({"leadId": "LD26EXO1"})

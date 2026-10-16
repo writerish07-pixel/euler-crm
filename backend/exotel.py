@@ -109,6 +109,7 @@ def webhook_urls(cfg: dict) -> dict:
     return {
         "voice": f"{base}/voice{q}",
         "gather": f"{base}/gather{q}",
+        "gatherConfig": f"{base}/gather-config{q}",
         "recorded": f"{base}/recorded{q}",
         "status": f"{base}/status{q}",
         "audio": f"{base}/audio",
@@ -156,9 +157,16 @@ def public_config(cfg: dict) -> dict:
     out = {k: v for k, v in cfg.items() if k not in ("apiKey", "apiToken")}
     urls = webhook_urls(cfg)
     out["voiceUrl"] = urls["voice"]
+    out["gatherUrl"] = urls["gather"]
+    out["gatherConfigUrl"] = urls["gatherConfig"]
+    out["recordedUrl"] = urls["recorded"]
     out["statusUrl"] = urls["status"]
     out["cronUrl"] = urls["cron"]
     out["audioUrl"] = urls["audio"]
+    out["introAudioUrl"] = urls["audio"] + "/intro.mp3"
+    out["promptAudioUrl"] = urls["audio"] + "/prompt.mp3"
+    out["speakAudioUrl"] = urls["audio"] + "/speak.mp3"
+    out["thanksAudioUrl"] = urls["audio"] + "/thanks.mp3"
     out["connectUrl"] = connect_flow_url(cfg)
     return out
 
@@ -310,6 +318,19 @@ def schedule(coro):
         asyncio.get_running_loop().create_task(_run())
     except RuntimeError:
         logger.warning("exotel: no running event loop; skipped")
+
+
+def gather_config_json(cfg: dict) -> dict:
+    """JSON Gather applet Primary URL — plays Hindi prompt, hash to finish."""
+    audio = webhook_urls(cfg)["audio"]
+    return {
+        "gather_prompt": {"audio_url": f"{audio}/prompt.mp3"},
+        "max_input_digits": 8,
+        "finish_on_key": "#",
+        "input_timeout": 12,
+        "repeat_menu": 1,
+        "repeat_gather_prompt": {"audio_url": f"{audio}/prompt.mp3"},
+    }
 
 
 def connect_flow_url(cfg: dict) -> str:

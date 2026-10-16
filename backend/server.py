@@ -15845,20 +15845,33 @@ def _exoml(xml: str) -> Response:
     return Response(content=xml, media_type="text/xml; charset=utf-8")
 
 
+def _exotel_clean_val(v) -> str:
+    s = "" if v is None else str(v)
+    s = s.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1].strip()
+    return s
+
+
 async def _exotel_form(request: Request) -> dict:
     data = {}
     try:
         form = await request.form()
-        data = {str(k): (v if isinstance(v, str) else str(v)) for k, v in form.items()}
+        data = {str(k): _exotel_clean_val(v) for k, v in form.items()}
     except Exception:
         data = {}
     if not data:
         try:
             body = await request.json()
             if isinstance(body, dict):
-                data = {str(k): "" if v is None else str(v) for k, v in body.items()}
+                data = {str(k): _exotel_clean_val(v) for k, v in body.items()}
         except Exception:
             data = {}
+    for k, v in request.query_params.items():
+        if k == "token":
+            continue
+        if k not in data or data.get(k) in ("", None):
+            data[str(k)] = _exotel_clean_val(v)
     return data
 
 
@@ -15952,6 +15965,14 @@ async def exotel_voice(request: Request):
     return _exoml(exo.exoml_start(cfg))
 
 
+@public.get("/integrations/exotel/gather-config")
+async def exotel_gather_config(request: Request):
+    await _exotel_token_ok(request)
+    cfg = await exo.get_config()
+    return exo.gather_config_json(cfg)
+
+
+@public.get("/integrations/exotel/gather")
 @public.post("/integrations/exotel/gather")
 async def exotel_gather(request: Request):
     await _exotel_token_ok(request)
@@ -15964,6 +15985,7 @@ async def exotel_gather(request: Request):
     return _exoml(exo.exoml_record_then_thanks(cfg))
 
 
+@public.get("/integrations/exotel/recorded")
 @public.post("/integrations/exotel/recorded")
 async def exotel_recorded(request: Request):
     await _exotel_token_ok(request)
@@ -15973,6 +15995,7 @@ async def exotel_recorded(request: Request):
     return _exoml(exo.exoml_after_digits(cfg))
 
 
+@public.get("/integrations/exotel/status")
 @public.post("/integrations/exotel/status")
 async def exotel_status(request: Request):
     await _exotel_token_ok(request)

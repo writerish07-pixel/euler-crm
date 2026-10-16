@@ -730,14 +730,16 @@ function ExotelCard() {
             placeholder="Number from start_voice/…" />
         </Field>
       </div>
-      <p className="text-xs text-ink-faint mt-2 font-mono break-all">
-        Voice URL (paste into the new app): {cfg?.voiceUrl || "https://euler-crm-production.up.railway.app/api/integrations/exotel/voice"}
-      </p>
-      {cfg?.connectUrl ? (
-        <p className="text-xs text-ink-faint mt-1 font-mono break-all">
-          Connect URL: {cfg.connectUrl}
-        </p>
-      ) : null}
+      <div className="text-xs text-ink-faint mt-2 space-y-1 font-mono break-all">
+        <p>Greeting audio: {cfg?.introAudioUrl || "…/audio/intro.mp3"}</p>
+        <p>Gather prompt audio: {cfg?.promptAudioUrl || "…/audio/prompt.mp3"}</p>
+        <p>Gather config URL: {cfg?.gatherConfigUrl || "…/gather-config"}</p>
+        <p>Passthru after keypad: {cfg?.gatherUrl || "…/gather"}</p>
+        <p>Speak audio: {cfg?.speakAudioUrl || "…/audio/speak.mp3"}</p>
+        <p>Passthru after voicemail: {cfg?.recordedUrl || "…/recorded"}</p>
+        <p>Thanks audio: {cfg?.thanksAudioUrl || "…/audio/thanks.mp3"}</p>
+        {cfg?.connectUrl ? <p>Connect URL: {cfg.connectUrl}</p> : null}
+      </div>
       <div className="flex flex-wrap gap-2 mt-4">
         <Button data-testid="exotel-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Exotel settings"}</Button>
         <Button variant="secondary" onClick={runJobs}>Call booked leads now</Button>
