@@ -153,6 +153,31 @@ async def test_closed_file_uses_new_purchase_code(client):
 
 
 @pytest.mark.asyncio
+async def test_lost_or_cancelled_mobile_can_recreate(client):
+    """Rejected / Lost is out of the CRM — same mobile is a new enquiry."""
+    lost_m = next_mobile()
+    lost = await client.post("/api/leads", json=_enquiry("Lost Buyer", mobile=lost_m))
+    assert lost.status_code == 200, lost.text
+    await server.db.leads.update_one(
+        {"leadId": lost.json()["leadId"]},
+        {"$set": {
+            "currentStatus": "Lost",
+            "accountStatus": "Cancelled",
+            "dealCancelled": True,
+            "lastUpdated": server.now_iso(),
+        }},
+    )
+    matches = await client.get("/api/leads/mobile-matches", params={"mobile": lost_m})
+    assert matches.status_code == 200, matches.text
+    assert matches.json()["existing"] == []
+    assert matches.json()["code"] is None
+    fresh = await client.post("/api/leads", json=_enquiry("Lost Buyer", mobile=lost_m))
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["leadId"] != lost.json()["leadId"]
+    assert await server.db.leads.count_documents({"mobile": lost_m}) == 2
+
+
+@pytest.mark.asyncio
 async def test_name_clash_is_other_customer(client):
     mobile = next_mobile()
     await client.post("/api/leads", json=_enquiry("Ramesh Kumar", mobile=mobile))

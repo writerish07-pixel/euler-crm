@@ -4011,12 +4011,24 @@ def _mobile_pipeline_bucket(lead) -> str:
     if acct in ("cancelled", "inactive", "archived"):
         return "cancelled"
     status = str((lead or {}).get("currentStatus") or "").lower()
+    # Rejected / Lost is out of the CRM — staff may start a fresh file on this mobile.
+    if status in ("lost", "rejected"):
+        return "cancelled"
     ds = str((lead or {}).get("deliveryStatus") or "").lower()
     if ds == "delivered" or status == "delivered":
         return "delivered"
-    if acct == "closed" or status in ("close won", "closed", "lost"):
+    if acct == "closed" or status in ("close won", "closed"):
         return "closed"
     return "active"
+
+
+def _mobile_in_crm(lead) -> bool:
+    """Open, booked, delivered, or sold files still own this mobile.
+
+    Cancelled / Lost / rejected files are out of the CRM, so the same number
+    can be used on a new enquiry without Another vehicle.
+    """
+    return _mobile_pipeline_bucket(lead) in ("active", "delivered", "closed")
 
 
 def _mobile_lead_summary(lead) -> dict:
@@ -4165,7 +4177,7 @@ async def _pending_sharing_mobile(mobile: str, exclude_request_id: str = ""):
 
 
 async def _mobile_taken_by_lead(mobile: str, exclude_lead_id: str = ""):
-    rows = await _leads_sharing_mobile(mobile, exclude_lead_id)
+    rows = [l for l in await _leads_sharing_mobile(mobile, exclude_lead_id) if _mobile_in_crm(l)]
     return rows[0] if rows else None
 
 
@@ -4207,6 +4219,8 @@ async def _recent_identical_lead_create(body: "LeadIn"):
     rows = await db.leads.find(q).sort("lastUpdated", -1).to_list(8)
     now = datetime.now(timezone.utc)
     for row in rows:
+        if not _mobile_in_crm(row):
+            continue
         prev = _iso_to_utc(row.get("lastUpdated"))
         if not prev:
             continue
@@ -4220,7 +4234,7 @@ async def _raise_if_mobile_taken(mobile: str, *, incoming_name: str = "",
                                  exclude_lead_id: str = "", allow: bool = False,
                                  check_pending: bool = True):
     """409 for another executive's open file, or unless anotherVehicle is confirmed."""
-    existing = await _leads_sharing_mobile(mobile, exclude_lead_id)
+    existing = [l for l in await _leads_sharing_mobile(mobile, exclude_lead_id) if _mobile_in_crm(l)]
     pending = await _pending_sharing_mobile(mobile)
     other_leads, other_pending = _open_other_executive(existing, pending, incoming_executive)
     if other_leads or other_pending:
@@ -5250,7 +5264,7 @@ async def get_lead_split(user=Depends(current_user)):
 @api.get("/leads/mobile-matches")
 async def get_lead_mobile_matches(mobile: str = "", _sales=Depends(sales_staff_only)):
     """Leads and pending requests sharing this last-10 mobile. Before /leads/{id}."""
-    existing = await _leads_sharing_mobile(mobile)
+    existing = [l for l in await _leads_sharing_mobile(mobile) if _mobile_in_crm(l)]
     pending = await _pending_sharing_mobile(mobile)
     code = _mobile_conflict_code(existing) or ("mobile_active_deal" if pending else "")
     return {
@@ -8599,6 +8613,8 @@ async def _existing_lead_mobiles():
     """last-10-digits -> {leadId, customerName} of mobiles already on the register."""
     out = {}
     for l in await db.leads.find().to_list(5000):
+        if not _mobile_in_crm(l):
+            continue
         digits = re.sub(r"\D", "", str(l.get("mobile") or ""))
         if len(digits) >= 10:
             out[digits[-10:]] = {
