@@ -790,7 +790,14 @@ def test_component_mapping_reads_eulers_prose():
     # description, which used to paint OEM Extra Support as Not claimed.
     assert m("Additional Support",
              "Insurance Benefits Up to for invoice AF-122-I26270117") == "oemExtraSupport"
-    assert m("Additional Discount Claim", "") == "additionalDiscount"
+    # Dealer Additional is not claimable. That Coulson chip is Extra Support.
+    assert m("Additional Discount Claim", "") == "oemExtraSupport"
+    assert m(
+        "Additional Discount Claim",
+        "Additiniol support documents invoice copy & mail approval "
+        "Customer Name:- Kapoor Freight Carriers pvt ltd",
+    ) == "oemExtraSupport"
+    assert m("Scheme Claim", "addtiniol support documents customer name :- Swapna") == "oemExtraSupport"
 
 
 def test_rto_plus_insurance_beats_either_alone():

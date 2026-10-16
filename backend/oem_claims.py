@@ -1180,13 +1180,19 @@ ACCEPTED_STATUSES = GENERATED_STATUSES + ("Settled",)
 # still says "Insurance Benefits Up to…" in the description, and the word
 # "insurance" used to steal the match — OEM Extra Support then read Not claimed
 # while OEM Claim Settlements said In scheme register (AF-122-CL2627077).
+#
+# "Additional Discount Claim" is dealer-funded Additional, which is not an OEM
+# claim. Staff pick that chip for Extra Support (AF-122-CL2627161 Kapoor). Treat
+# it as Extra Support so Match lists the CRM file.
 CLAIM_TYPE_KEYS = (
     ("oemExtraSupport", (
-        "additional support", "dealer incentive", "support scheme (btl)",
-        "support scheme", "oem extra support", "oem extra",
+        "additional support", "additional discount claim", "dealer incentive",
+        "support scheme (btl)", "support scheme", "oem extra support", "oem extra",
     )),
-    ("additionalDiscount", ("additional discount claim",)),
 )
+
+# "Additiniol" / "addtiniol" support documents — same Extra Support prose.
+_SUPPORT_PROSE = re.compile(r"\b(?:add\w+|extra|special)\s+support\b")
 
 
 def _fold_claim_text(value):
@@ -1204,6 +1210,8 @@ def map_claim_type_to_component(claim_type, description=""):
         if any(p in type_folded for p in phrases):
             return key
     hay = f"{_fold_claim_text(description)} {type_folded}".strip()
+    if _SUPPORT_PROSE.search(hay):
+        return "oemExtraSupport"
     for key, phrases in COMPONENT_PHRASES:
         if any(p in hay for p in phrases):
             return key

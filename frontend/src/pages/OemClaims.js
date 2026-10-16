@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, lineChassisList, looksCombinedSupport, rowLeadIds, rowLineItems } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, lineChassisList, looksCombinedSupport, matchRegisterLeadRows, registerMatchKeys, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
@@ -579,7 +579,8 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const relink = !!row.relink;
   const line = row.matchLine || {};
   const already = lineLeadIds(line);
-  const relatedKey = line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "";
+  const inferredKey = line.componentKey || (row.registerMatch?.mappedComponents || [])[0] || "";
+  const relatedKey = registerMatchKeys(inferredKey)[0] || inferredKey;
   const [register, setRegister] = useState([]);
   const [loading, setLoading] = useState(true);
   const [leadId, setLeadId] = useState(already[0] || rowLeadIds(row)[0] || "");
@@ -623,11 +624,9 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   const poolRows = relink
     ? register.filter(isRelinkableRegisterRow)
     : register.filter(isOpenRegisterRow);
-  // Only leads that still have this scheme component unmatched. Never fall
-  // back to the whole register (that listed every early lead).
-  const leadSource = relatedKey
-    ? poolRows.filter((r) => r.componentKey === relatedKey)
-    : poolRows;
+  // Prefer this scheme component, but if the OEM chip mapped to a key the
+  // register does not use (Additional Discount Claim), still list unmatched files.
+  const leadSource = matchRegisterLeadRows(poolRows, relatedKey);
   const leads = [...new Map(leadSource.map((r) => [optionId(r), r])).values()];
   for (const id of picked) {
     if (id && !leads.some((r) => r.leadId === id)) {
@@ -639,8 +638,9 @@ function MatchRegisterModal({ row, onClose, onDone }) {
     ? register.filter((r) => r.leadId === leadId && (!unitSno || (r.unitSno || 0) === unitSno))
     : [];
   const scopedLeadRows = leadRows.filter(relink ? isRelinkableRegisterRow : isOpenRegisterRow);
-  let options = relatedKey
-    ? scopedLeadRows.filter((r) => r.componentKey === relatedKey)
+  const relatedKeys = registerMatchKeys(relatedKey);
+  let options = relatedKeys.length
+    ? scopedLeadRows.filter((r) => relatedKeys.includes(r.componentKey))
     : scopedLeadRows;
   if (!options.length) options = scopedLeadRows;
   const extraCandidates = leads.filter((r) => r.leadId && !picked.includes(r.leadId)
