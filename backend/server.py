@@ -2049,6 +2049,10 @@ BOARD_LEAD_PROJ = {
     "nextFollowupDate": 1, "nextFollowup": 1, "executive": 1, "customerName": 1,
     "mobile": 1, "chassisNumber": 1, "numberPlate": 1,
     "vehicleCount": 1, "sameOrderMultiUnit": 1, "dealApprovalPending": 1,
+    # Slim pack-unit dates only — never the full unit price/scheme blobs.
+    "units.sno": 1, "units.deliveryDate": 1, "units.soldDate": 1,
+    "units.model": 1, "units.variant": 1,
+    "units.chassisNumber": 1, "units.numberPlate": 1,
     "dealCancelled": 1, "cancelHistory": 1, "leadSource": 1, "excessReceived": 1,
     "lastCancelDate": 1, "lastCancelReason": 1, "refundedAmount": 1,
     "schemeUse": 1, "schemeApplied": 1, "totalSchemeBenefit": 1, "schemeBenefit": 1,
@@ -2212,6 +2216,57 @@ def _delivered_vehicle_count_in_period(lead, period):
     if not _is_delivered_lead(lead):
         return 0
     return sum(1 for d in _pack_delivery_dates(lead) if periodmod.in_period(d, period))
+
+
+def _delivery_tracker_rows(lead, delivery=None):
+    """One tracker row per vehicle. Pack units keep their own delivery date."""
+    delivery = delivery or {}
+    done = _is_delivered_lead(lead)
+    delivered_flag = delivery.get("delivered", "") or ("Yes" if done else "")
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    pack = oem_sync.is_same_order_pack(lead or {}) and len(units) > 1
+    shared = {
+        "leadId": (lead or {}).get("leadId"),
+        "customerName": (lead or {}).get("customerName"),
+        "mobile": (lead or {}).get("mobile"),
+        "executive": (lead or {}).get("executive") or "",
+        "insurance": delivery.get("insurance", ""),
+        "registration": delivery.get("registration", ""),
+        "invoice": delivery.get("invoice", ""),
+        "rc": delivery.get("rc", ""),
+        "pdi": delivery.get("pdi", ""),
+        "delivered": delivered_flag,
+    }
+    if not pack:
+        date = delivery.get("deliveryDate") or (lead or {}).get("deliveryDate") or (lead or {}).get("closedDate")
+        return [{
+            **shared,
+            "rowId": (lead or {}).get("leadId"),
+            "unitSno": 0,
+            "model": (lead or {}).get("interestedModel"),
+            "variant": (lead or {}).get("variant"),
+            "deliveryDate": date,
+            "chassisNumber": delivery.get("chassisNumber") or (lead or {}).get("chassisNumber") or "",
+            "numberPlate": delivery.get("numberPlate") or (lead or {}).get("numberPlate") or "",
+        }]
+    rows = []
+    for i, u in enumerate(units):
+        try:
+            sno = int(u.get("sno") or i + 1)
+        except (TypeError, ValueError):
+            sno = i + 1
+        date = _unit_delivery_date(lead, u) if done else _iso_day(u.get("deliveryDate"))
+        rows.append({
+            **shared,
+            "rowId": f"{(lead or {}).get('leadId')}::u{sno}",
+            "unitSno": sno,
+            "model": u.get("model") or (lead or {}).get("interestedModel"),
+            "variant": u.get("variant") or (lead or {}).get("variant"),
+            "deliveryDate": date,
+            "chassisNumber": u.get("chassisNumber") or "",
+            "numberPlate": u.get("numberPlate") or "",
+        })
+    return rows
 
 
 def _delivered_vehicle_count_on_day(lead, day):
@@ -10360,18 +10415,7 @@ async def list_deliveries(month: Optional[str] = None, year: Optional[str] = Non
     result = []
     for l in leads:
         d = del_by.get(l["leadId"]) or {}
-        done = _is_delivered_lead(l)
-        result.append({
-            "leadId": l["leadId"], "customerName": l.get("customerName"), "mobile": l.get("mobile"),
-            "executive": l.get("executive") or "",
-            "model": l.get("interestedModel"), "variant": l.get("variant"),
-            "insurance": d.get("insurance", ""), "registration": d.get("registration", ""),
-            "invoice": d.get("invoice", ""), "rc": d.get("rc", ""), "pdi": d.get("pdi", ""),
-            "delivered": d.get("delivered", "") or ("Yes" if done else ""),
-            "deliveryDate": d.get("deliveryDate") or l.get("deliveryDate") or l.get("closedDate"),
-            "chassisNumber": d.get("chassisNumber") or l.get("chassisNumber") or "",
-            "numberPlate": d.get("numberPlate") or l.get("numberPlate") or "",
-        })
+        result.extend(_delivery_tracker_rows(l, d))
     period = _parse_period(month, year)
     if period.is_all:
         return result

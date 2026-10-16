@@ -1601,6 +1601,58 @@ async def test_delivery_save_keeps_separate_unit_dates(client):
     assert units[0].get("deliveryDate") != units[1].get("deliveryDate")
 
 
+def test_delivery_tracker_splits_pack_unit_dates():
+    lead = {
+        "leadId": "LD-TRK", "customerName": "Tracker Pack",
+        "sameOrderMultiUnit": True, "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-16",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "deliveryDate": "2026-09-15",
+             "chassisNumber": "CH1"},
+            {"sno": 2, "model": "Storm", "deliveryDate": "2026-10-16",
+             "chassisNumber": "CH2"},
+        ],
+    }
+    rows = server._delivery_tracker_rows(lead)
+    assert [r["unitSno"] for r in rows] == [1, 2]
+    assert [r["deliveryDate"] for r in rows] == ["2026-09-15", "2026-10-16"]
+    assert rows[0]["chassisNumber"] == "CH1"
+    assert rows[1]["model"] == "Storm"
+
+
+@pytest.mark.asyncio
+async def test_deliveries_list_month_filter_uses_unit_dates(client):
+    lid = "LD-DELIV-LIST"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.deliveries.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "List Pack", "mobile": "9813301880",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-16",
+        "bookingDate": "2026-09-03", "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "deliveryDate": "2026-09-15", "chassisNumber": "MD9LIST1"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "deliveryDate": "2026-10-16", "chassisNumber": "MD9LIST2"},
+        ],
+    })
+    all_rows = (await client.get("/api/deliveries")).json()
+    pack = [r for r in all_rows if r.get("leadId") == lid]
+    assert len(pack) == 2
+    assert {r.get("deliveryDate") for r in pack} == {"2026-09-15", "2026-10-16"}
+    sept = (await client.get("/api/deliveries", params={"month": "2026-09"})).json()
+    sept_pack = [r for r in sept if r.get("leadId") == lid]
+    assert len(sept_pack) == 1
+    assert sept_pack[0].get("deliveryDate") == "2026-09-15"
+    octb = (await client.get("/api/deliveries", params={"month": "2026-10"})).json()
+    oct_pack = [r for r in octb if r.get("leadId") == lid]
+    assert len(oct_pack) == 1
+    assert oct_pack[0].get("deliveryDate") == "2026-10-16"
+
+
 def test_unit_specs_keep_each_units_cx_demand():
     specs = server._unit_specs_from("Turbo Max", "Pack A", [
         {"model": "Turbo Max", "variant": "Pack A", "cxDemand": 590000},

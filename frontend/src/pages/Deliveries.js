@@ -24,16 +24,26 @@ export default function Deliveries() {
         actions={<ReportActions onRefresh={load} />} />
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <Table
-        rowKey="leadId"
+        rowKey="rowId"
         columns={[
-          { key: "leadId", label: "Lead", mono: true },
+          { key: "leadId", label: "Lead", mono: true, render: (r) => (
+            <div>
+              <span className="font-mono">{r.leadId}</span>
+              {Number(r.unitSno) > 0 ? <div className="text-xs text-ink-faint">Unit {r.unitSno}</div> : null}
+            </div>
+          ) },
           { key: "customerName", label: "Customer", render: (r) => (
             <div>
               <span className="font-semibold">{r.customerName}</span>
               {r.executive ? <div className="text-xs text-ink-faint">{r.executive}</div> : null}
             </div>
           ) },
-          { key: "model", label: "Vehicle", render: (r) => <div className="text-sm">{r.model}<div className="text-xs text-ink-faint">{r.variant}</div></div> },
+          { key: "model", label: "Vehicle", render: (r) => (
+            <div className="text-sm">
+              {Number(r.unitSno) > 0 ? `Unit ${r.unitSno} · ` : ""}{r.model}
+              <div className="text-xs text-ink-faint">{r.variant}</div>
+            </div>
+          ) },
           { key: "checklist", label: "Checklist", render: (r) => (
             <div className="flex flex-wrap">
               <Chip ok={isOk(r.insurance)} label="INS" />

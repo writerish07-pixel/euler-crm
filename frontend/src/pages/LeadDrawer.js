@@ -542,6 +542,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 }
 
 function FieldOverview({ lead, booking, delivery }) {
+  const packUnits = packUnitList(lead);
   return (
     <div className="grid grid-cols-1 gap-5" data-testid="field-lead-overview">
       <Card className="p-4">
@@ -554,7 +555,15 @@ function FieldOverview({ lead, booking, delivery }) {
           <KV label="Created" value={fmtDate(lead.createdDate)} />
           <KV label="Next Follow-up" value={fmtDate(lead.nextFollowupDate || lead.nextFollowup)} />
           <KV label="Booking Date" value={fmtDate(lead.bookingDate || booking?.bookingDate)} />
-          <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+          {packUnits ? packUnits.map((u, i) => {
+            const sno = u.sno || i + 1;
+            return (
+              <KV key={sno} label={`Unit ${sno} delivery`}
+                value={fmtDate(u.deliveryDate || u.soldDate) || "—"} />
+            );
+          }) : (
+            <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+          )}
           <KV label="Finance Required" value={lead.financeRequired || "—"} />
           <KV label="Exchange" value={lead.exchangeRequired || "—"} />
         </div>
@@ -565,12 +574,21 @@ function FieldOverview({ lead, booking, delivery }) {
 }
 
 function FieldDeliveryReadOnly({ delivery, lead }) {
+  const packUnits = packUnitList(lead);
   return (
     <Card className="p-4" data-testid="field-delivery-readonly">
       <h4 className="font-heading font-bold text-ink text-sm mb-2">Delivery status</h4>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
         <KV label="Status" value={lead.deliveryStatus || lead.currentStatus || "—"} />
-        <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+        {packUnits ? packUnits.map((u, i) => {
+          const sno = u.sno || i + 1;
+          return (
+            <KV key={sno} label={`Unit ${sno} delivery`}
+              value={fmtDate(u.deliveryDate || u.soldDate) || "—"} />
+          );
+        }) : (
+          <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+        )}
         <KV label="Invoice" value={delivery?.invoiceNumber || lead.invoiceNumber || "—"} />
         <KV label="Chassis" value={delivery?.chassisNumber || "—"} />
         <KV label="Engine" value={delivery?.engineNumber || "—"} />
