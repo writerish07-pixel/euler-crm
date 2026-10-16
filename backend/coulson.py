@@ -378,10 +378,15 @@ def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
 
 # Billed vehicles leave PRESENT immediately. The dealer Sold tab is
 # vehicle-inventory/transfer?vehicle_status=SOLD. Chassis billed today also
-# land on Vehicle Invoices (`#/dealer-inventory-list`) before Sold catches up.
+# land on Vehicle Invoices (SPA `#/dealer-inventory-list` panel "Vehicle
+# Invoices") before Sold catches up. Oct 2026 Coulson app: that list is
+# GET /api/v1/dealer/invoice/vehicle — not vehicle-inventory/transfer.
 SOLD_INVENTORY_STATUSES = ("SOLD",)
 TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT", "IN TRANSIT", "TRANSIT")
+INVOICE_LIST_PATH = "dealer/invoice/vehicle"
 VEHICLE_INVOICE_PATHS = (
+    INVOICE_LIST_PATH,
+    "vehicle-inventory/vehicle-invoice",
     "vehicle-invoices",
     "vehicle-invoice",
     "dealer-inventory-list",
@@ -390,10 +395,12 @@ VEHICLE_INVOICE_PATHS = (
     "invoices",
 )
 _INVOICE_SORTS = (
+    json.dumps(["invoice_creation_ts", "DESC"]),
     json.dumps(["date", "DESC"]),
     json.dumps(["invoice_date", "DESC"]),
     json.dumps(["created_at", "DESC"]),
 )
+_CANCELLED_INVOICE = {"CANCELLED", "CANCELED", "DELETED"}
 
 
 def _vehicle_key(v):
@@ -435,30 +442,130 @@ def fetch_transit_inventory(token: str, limit=INVENTORY_PAGE):
     return rows
 
 
-def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
-    """Coulson Vehicle Invoices SPA (`#/dealer-inventory-list`).
+def _invoice_status(row) -> str:
+    return str((row or {}).get("status") or (row or {}).get("invoice_status") or "").strip().upper()
 
-    Billed-today chassis (16 Oct 2026 on the dealer site) appear here even when
-    the Sold tab still shows yesterday. 404 on a guessed path is not fatal —
-    the Sold pull remains the fallback. A timeout on one path must not walk
-    every remaining guess at DATA_TIMEOUT each.
+
+def _live_invoices(rows):
+    """Drop cancelled tax invoices so a rebill is not hidden by the old row."""
+    return [r for r in (rows or []) if _invoice_status(r) not in _CANCELLED_INVOICE]
+
+
+def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE):
+    """Page GET dealer/invoice/vehicle the way the Coulson SPA does.
+
+    Their Vehicle Invoices table sends offset as the 0-based *page index*
+    (page 0, 1, 2…) with limit = page size, sorted by invoice_creation_ts
+    DESC. Older inventory endpoints used row-skip offsets; if page 1 looks
+    like a 1-row slide of page 0 we switch to row skip so we still drain
+    the full 234-row month.
+    """
+    def pull(offset):
+        payload = get_json(token, INVOICE_LIST_PATH, {
+            "limit": str(limit),
+            "offset": str(offset),
+            "sort": json.dumps(["invoice_creation_ts", "DESC"]),
+        })
+        chunk = payload.get("data") or []
+        if not isinstance(chunk, list):
+            chunk = []
+        extras = payload.get("extras") or {}
+        total = None
+        got = extras.get("total_count")
+        if got is not None:
+            try:
+                total = int(got)
+            except (TypeError, ValueError):
+                total = None
+        return chunk, total
+
+    rows, seen = [], set()
+
+    def take(chunk):
+        added = 0
+        for v in chunk:
+            if not isinstance(v, dict):
+                continue
+            key = _vehicle_key(v) or str(v.get("id") or v.get("invoice_number") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(v)
+            added += 1
+        return added
+
+    first, total = pull(0)
+    take(first)
+    if not first or len(first) < limit or (total is not None and len(rows) >= total):
+        return rows
+
+    probe, _ = pull(1)
+    probe_new = take(probe)
+    # Page-index returns a mostly-new page. Row-skip offset=1 returns the
+    # same window shifted by one row (one new chassis, the rest duplicates).
+    page_index = bool(probe) and probe_new > (len(probe) / 2)
+    if page_index:
+        page = 2
+        while len(rows) < INVENTORY_MAX_ROWS:
+            if total is not None and len(rows) >= total:
+                break
+            chunk, _ = pull(page)
+            if not chunk:
+                break
+            added = take(chunk)
+            if len(chunk) < limit or added == 0:
+                break
+            page += 1
+        return rows
+
+    # Probe was a 1-row shift — API is row-skip. Re-pull from offset=limit.
+    rows, seen = [], set()
+    take(first)
+    offset = limit
+    while len(rows) < INVENTORY_MAX_ROWS:
+        if total is not None and len(rows) >= total:
+            break
+        chunk, _ = pull(offset)
+        if not chunk:
+            break
+        added = take(chunk)
+        if len(chunk) < limit or added == 0:
+            break
+        offset += limit
+    return rows
+
+
+def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
+    """Coulson Vehicle Invoices list — billed today even when Sold is yesterday.
+
+    Live path (Oct 2026 Coulson app): GET dealer/invoice/vehicle.
+    Guessed leftovers stay as fallbacks. A 404/400 on one path is not fatal;
+    a timeout on a guessed path must not skip the real one.
     """
     last_error = None
+    try:
+        chunk = _page_dealer_invoices(token, limit=limit)
+        return _merge_vehicle_rows([], _live_invoices(chunk), "INVOICED")
+    except CoulsonError as e:
+        last_error = e
+        if e.status not in (404, 405, 400):
+            log.info("Coulson %s failed: %s", INVOICE_LIST_PATH, e)
+            return []
+
     for path in VEHICLE_INVOICE_PATHS:
+        if path == INVOICE_LIST_PATH:
+            continue
         for sort in _INVOICE_SORTS:
             try:
-                chunk = _page_rows(token, path, {
-                    "view_type": "table",
-                    "sort": sort,
-                }, limit=limit)
+                chunk = _page_rows(token, path, {"sort": sort}, limit=limit)
             except CoulsonError as e:
                 last_error = e
                 if e.status in (404, 405, 400):
                     break
                 log.info("Coulson vehicle invoices %s failed: %s", path, e)
-                return []
+                break
             if chunk:
-                return _merge_vehicle_rows([], chunk, "INVOICED")
+                return _merge_vehicle_rows([], _live_invoices(chunk), "INVOICED")
     if last_error and last_error.status not in (404, 405, 400):
         log.info("Coulson vehicle invoices empty: %s", last_error)
     return []
