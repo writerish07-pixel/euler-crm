@@ -116,6 +116,11 @@ export function isBulkMutationPath(url) {
   );
 }
 
+export function isSlowIntegrationPath(url) {
+  const p = String(url || "").split("?")[0];
+  return p === "/integrations/coulson" || p.indexOf("/integrations/coulson/") === 0;
+}
+
 /** POST /leads mints a new leadId. A timeout / 502 / HTML miss after the
  *  first insert already landed used to replay the same create on Railway and
  *  then again on the Cloudflare origin — three New files for one tap. */
@@ -133,6 +138,9 @@ function mutationOpts(url, opts = {}) {
     timeout = p.indexOf("/leads/import/") === 0 || p.indexOf("/integrations/gsheets/backfill") === 0
       ? 180000
       : BULK_TIMEOUT_MS;
+  }
+  if (timeout === undefined && isSlowIntegrationPath(url)) {
+    timeout = 45000;
   }
   return { retry, timeout };
 }
@@ -208,7 +216,9 @@ async function withFallback(run) {
 
 export const get = (url, params, opts = {}) => withFallback(() => api.get(url, {
   params,
-  ...(opts.timeout ? { timeout: opts.timeout } : {}),
+  ...(opts.timeout || isSlowIntegrationPath(url)
+    ? { timeout: opts.timeout || 45000 }
+    : {}),
 }).then((r) => r.data));
 export const post = (url, body, opts = {}) => {
   const { retry, timeout } = mutationOpts(url, opts);
@@ -258,6 +268,12 @@ export function apiErrorMessage(err, fallback = "Request failed") {
   }
   if (detail && typeof detail === "object") {
     return detail.msg || detail.message || fallback;
+  }
+  const code = err?.code || err?.cause?.code;
+  if (code === "ECONNABORTED" || /timeout of \d+ms exceeded/i.test(String(err?.message || ""))) {
+    return fallback && fallback !== "Request failed"
+      ? fallback
+      : "The server took too long. Refresh and try again.";
   }
   return err?.message || fallback;
 }

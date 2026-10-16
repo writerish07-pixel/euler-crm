@@ -11401,6 +11401,8 @@ async def _coulson_status_payload(viewer=None):
     cat_doc = await db["system"].find_one({"_id": "oem_catalog"}) or {}
     count = await db.oem_inventory.count_documents({})
     is_owner = (viewer or {}).get("role") == "owner"
+    if not user or oem_sync.looks_masked_username(user):
+        user = (doc.get("username") or "").strip()
     shown = user if is_owner and not oem_sync.looks_masked_username(user) else oem_sync.mask_username(user)
     live_session = oem_sync.session_from_doc(doc)
     has_session = bool(live_session)
@@ -11431,7 +11433,6 @@ async def _coulson_status_payload(viewer=None):
         "claimsSyncedAt": doc.get("claimsSyncedAt"),
         "claimsSyncOk": doc.get("claimsSyncOk"),
         "soldCount": await db.oem_sold.count_documents({}),
-        "deliveredMissingVehicleIds": len(await oem_sync.delivered_missing_vehicle_ids(db)),
     }
 
 
@@ -11452,9 +11453,28 @@ async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
     typed_session = (body.sessionToken or "").strip()
     if typed_session:
         try:
-            claims = await asyncio.to_thread(coulson_client.verify_session_token, typed_session)
+            claims = coulson_client.parse_session_token(typed_session)
         except coulson_client.CoulsonError as e:
             await oem_sync._record_sync(db, False, str(e))
+            await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
+            st = await _coulson_status_payload(act)
+            st["loginOk"] = False
+            return st
+        ping_rejected = None
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(coulson_client.fetch_sap_models, typed_session),
+                timeout=6,
+            )
+        except asyncio.TimeoutError:
+            logging.warning("Coulson session ping timed out; saving a valid JWT anyway")
+        except coulson_client.CoulsonError as e:
+            if e.status in (401, 403):
+                ping_rejected = e
+            else:
+                logging.warning("Coulson session ping failed: %s", e)
+        if ping_rejected:
+            await oem_sync._record_sync(db, False, str(ping_rejected))
             await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
             st = await _coulson_status_payload(act)
             st["loginOk"] = False
@@ -11500,7 +11520,7 @@ async def coulson_save(body: CoulsonCredIn, act=Depends(actor)):
         st["lastError"] = "Coulson username and password are required"
         return st
     try:
-        coulson_client.login(user, pw)
+        await asyncio.to_thread(coulson_client.login, user, pw)
     except coulson_client.CoulsonError as e:
         await oem_sync._record_sync(db, False, str(e))
         await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
@@ -16763,7 +16783,12 @@ def _ensure_coulson_sync_loop():
 
 
 async def _coulson_sync_loop():
-    """Periodic Coulson pull. Never raises into the event loop."""
+    """Periodic Coulson pull. Never raises into the event loop.
+
+    Sleep first so a deploy / Save session can answer health and Settings
+    before the yard pull starts talking to Coulson.
+    """
+    await asyncio.sleep(20)
     while True:
         try:
             result = await oem_sync.sync_from_coulson(db, on_body_adopted=_reprice_after_sold_body)

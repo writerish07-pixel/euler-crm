@@ -5,6 +5,7 @@ offline). RTO, insurance, and other charges are never copied from OEM.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -285,7 +286,7 @@ async def _access_token(db, username=None, password=None):
     Returns (token, source) — source is session / settings / env / inline, or empty.
     """
     if username and password:
-        return coulson_client.login(username, password), "inline"
+        return await asyncio.to_thread(coulson_client.login, username, password), "inline"
     doc = await db["system"].find_one({"_id": "coulson"}) or {}
     token = session_from_doc(doc)
     if token:
@@ -293,7 +294,7 @@ async def _access_token(db, username=None, password=None):
     user, pw, src = await resolve_credentials(db)
     if credentials_configured(user, pw):
         try:
-            new_token = coulson_client.login(user, pw)
+            new_token = await asyncio.to_thread(coulson_client.login, user, pw)
             try:
                 await save_session(db, new_token, user)
             except Exception:
@@ -325,18 +326,18 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         return {"ok": False, "reason": "not_configured", "catalog": catalog_result,
                 "changedPriceIds": catalog_result.get("changedPriceIds") or []}
 
-    oem_models = coulson_client.fetch_sap_models(token)
-    vehicles = coulson_client.fetch_present_inventory(token)
+    oem_models = await asyncio.to_thread(coulson_client.fetch_sap_models, token)
+    vehicles = await asyncio.to_thread(coulson_client.fetch_present_inventory, token)
     sold_vehicles = []
     try:
-        sold_vehicles = coulson_client.fetch_sold_inventory(token) or []
+        sold_vehicles = await asyncio.to_thread(coulson_client.fetch_sold_inventory, token) or []
     except coulson_client.CoulsonError as e:
         log.warning("Coulson sold inventory skipped: %s", e)
     except Exception:
         log.exception("Coulson sold inventory failed")
     transit_vehicles = []
     try:
-        transit_vehicles = coulson_client.fetch_transit_inventory(token) or []
+        transit_vehicles = await asyncio.to_thread(coulson_client.fetch_transit_inventory, token) or []
     except coulson_client.CoulsonError as e:
         log.warning("Coulson transit inventory skipped: %s", e)
     except Exception:
@@ -701,12 +702,12 @@ async def refresh_sold_inventory(db):
     token, _src = await _access_token(db)
     if not token:
         return 0
-    sold_vehicles = coulson_client.fetch_sold_inventory(token) or []
+    sold_vehicles = await asyncio.to_thread(coulson_client.fetch_sold_inventory, token) or []
     if not sold_vehicles:
         return await db.oem_sold.count_documents({})
     oem_models = []
     try:
-        oem_models = coulson_client.fetch_sap_models(token) or []
+        oem_models = await asyncio.to_thread(coulson_client.fetch_sap_models, token) or []
     except coulson_client.CoulsonError:
         oem_models = []
     oem_by_id = {m.get("id"): m for m in oem_models if m.get("id")}
@@ -1578,10 +1579,25 @@ def _delivered_missing_vehicle_ids(lead):
     return not ch or not inv
 
 
+_MISSING_VEHICLE_PROJ = {
+    "_id": 0,
+    "leadId": 1, "customerName": 1, "mobile": 1, "altMobile": 1,
+    "chassisNumber": 1, "invoiceNumber": 1, "units": 1,
+    "sameOrderMultiUnit": 1, "vehicleCount": 1,
+    "deliveryStatus": 1, "currentStatus": 1, "accountStatus": 1, "dealCancelled": 1,
+}
+_DELIVERED_QUERY = {
+    "$or": [
+        {"deliveryStatus": {"$regex": r"^deliver", "$options": "i"}},
+        {"currentStatus": {"$regex": r"deliver|close won", "$options": "i"}},
+    ],
+}
+
+
 async def delivered_missing_vehicle_ids(db):
     """Delivered (not cancelled) leads still missing chassis and/or invoice."""
     rows = []
-    async for l in db.leads.find({}):
+    async for l in db.leads.find(_DELIVERED_QUERY, _MISSING_VEHICLE_PROJ):
         if not _delivered_missing_vehicle_ids(l):
             continue
         rows.append({
