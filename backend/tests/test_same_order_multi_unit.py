@@ -108,7 +108,7 @@ async def test_same_order_create_one_lead_many_units(client):
     assert units[0]["model"] == "Turbo Max"
     assert units[1]["model"] == "Storm"
     assert units[2]["model"] == "Hi-Load"
-    listed = await client.get("/api/leads", params={"q": "Fleet Pack"})
+    listed = await client.get("/api/leads", params={"q": "Fleet Pack", "scope": "all"})
     assert listed.status_code == 200
     hit = next(l for l in listed.json() if l["leadId"] == body["leadId"])
     assert hit["vehicleCount"] == 3
@@ -236,7 +236,7 @@ async def test_repair_same_mobile_without_created_date(client):
         })
     server._retry_dup_repair_done = True
     server._retry_dup_last_clean_at = 0.0
-    listed = await client.get("/api/leads", params={"q": "No Date Triple"})
+    listed = await client.get("/api/leads", params={"q": "No Date Triple", "scope": "all"})
     assert listed.status_code == 200, listed.text
     left = [l async for l in server.db.leads.find({"mobile": mobile})]
     assert len(left) == 1

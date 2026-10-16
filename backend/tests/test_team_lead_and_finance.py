@@ -124,7 +124,7 @@ async def test_team_lead_sees_only_own_team(client):
     assert mine.status_code == 200 and other.status_code == 200
     tl = await _login("tl.amit@euler.com", PW)
     try:
-        rows = (await tl.get("/api/leads")).json()
+        rows = (await tl.get("/api/leads", params={"followup": True})).json()
         names = {r["customerName"] for r in rows}
         assert "Team Cust" in names
         assert "Other Cust" not in names
@@ -163,7 +163,7 @@ async def test_team_lead_sees_team_when_login_name_is_short(client):
     assert mine.status_code == 200 and other.status_code == 200, (mine.text, other.text)
     tl = await _login("tl.short@euler.com", PW)
     try:
-        rows = (await tl.get("/api/leads")).json()
+        rows = (await tl.get("/api/leads", params={"followup": True})).json()
         names = {r["customerName"] for r in rows}
         assert "Short-name Team" in names
         assert "Other Team" not in names
@@ -197,7 +197,7 @@ async def test_team_lead_sees_execs_who_report_to_showroom_admin_same_name(clien
     assert mine.status_code == 200 and other.status_code == 200, (mine.text, other.text)
     tl = await _login("tl.showroom@euler.com", PW)
     try:
-        names = {r["customerName"] for r in (await tl.get("/api/leads")).json()}
+        names = {r["customerName"] for r in (await tl.get("/api/leads", params={"followup": True})).json()}
         assert "Showroom Team" in names
         assert "Not Sunil" not in names
     finally:
@@ -222,7 +222,7 @@ async def test_team_lead_create_appears_on_own_dashboard(client):
             "executive": "Desk Exec", "interestedModel": "Turbo Max"})
         assert made.status_code == 200, made.text
         lid = made.json()["leadId"]
-        rows = (await tl.get("/api/leads")).json()
+        rows = (await tl.get("/api/leads", params={"followup": True})).json()
         assert any(r["leadId"] == lid for r in rows)
         dash = (await tl.get("/api/executive/dashboard")).json()
         recent = {r["customerName"] for r in (dash.get("recentLeads") or [])}

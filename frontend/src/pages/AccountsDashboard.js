@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Wallet, Landmark, ReceiptText, ShieldCheck, Truck, AlertCircle,
-  IndianRupee, Printer, FileText, ExternalLink, Warehouse, CalendarDays,
+  IndianRupee, Printer, FileText, ExternalLink, Warehouse, CalendarDays, Users, ClipboardCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
@@ -97,6 +97,8 @@ export default function AccountsDashboard() {
       </div>
 
       <div className="flex flex-wrap gap-2 mt-5">
+        <Link to="/followup-leads"><Button variant="secondary" data-testid="acct-go-followup"><ClipboardCheck size={14} /> Follow-up register</Button></Link>
+        <Link to="/leads"><Button variant="secondary" data-testid="acct-go-leads"><Users size={14} /> Lead Register</Button></Link>
         <Link to="/monthly"><Button variant="secondary" data-testid="acct-go-monthly"><CalendarDays size={14} /> Monthly Register</Button></Link>
         <Link to="/payments"><Button variant="secondary" data-testid="acct-go-payments"><Wallet size={14} /> Payments</Button></Link>
         <Link to="/finance"><Button variant="secondary" data-testid="acct-go-finance"><Landmark size={14} /> Finance</Button></Link>

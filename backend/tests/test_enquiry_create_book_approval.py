@@ -1,4 +1,4 @@
-"""Walk-in enquiry creates live; discount + KYC gate Book, not create."""
+"""Walk-in enquiry creates live on Follow-up register; booking (+ approval) lands on Lead Register."""
 import io
 import os
 import sys
@@ -84,6 +84,14 @@ def _walkin(name="Walk In", **over):
     return body
 
 
+async def listed_register(c):
+    return (await c.get("/api/leads")).json()
+
+
+async def listed_followup(c):
+    return (await c.get("/api/leads", params={"followup": True})).json()
+
+
 async def attach_lead_kyc(c, lead_id):
     for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
         r = await c.post(
@@ -106,8 +114,13 @@ async def test_executive_walkin_without_cx_demand_creates_live(exec_client):
     assert server.ce.num(lead.get("budget")) == 0
     assert await server.db.lead_requests.count_documents(
         {"payload.customerName": "No Budget Walkin"}) == 0
-    listed = (await exec_client.get("/api/leads")).json()
-    assert any(row["leadId"] == body["leadId"] for row in listed)
+    listed = await listed_register(exec_client)
+    assert not any(row["leadId"] == body["leadId"] for row in listed)
+    follow = await listed_followup(exec_client)
+    assert any(row["leadId"] == body["leadId"] for row in follow)
+    opened = await exec_client.get(f"/api/leads/{body['leadId']}/360")
+    assert opened.status_code == 200, opened.text
+    assert opened.json().get("lead", {}).get("leadId") == body["leadId"]
 
 
 @pytest.mark.asyncio
@@ -119,9 +132,11 @@ async def test_discounted_create_is_pending_not_on_register(exec_client, client)
     assert body.get("requestId")
     assert not body.get("leadId")
     assert await server.db.leads.count_documents({"customerName": "Disc Walkin"}) == 0
-    listed = (await exec_client.get("/api/leads")).json()
+    listed = await listed_register(exec_client)
     assert not any(row.get("customerName") == "Disc Walkin" for row in listed)
-    owner_listed = (await client.get("/api/leads")).json()
+    follow = await listed_followup(exec_client)
+    assert not any(row.get("customerName") == "Disc Walkin" for row in follow)
+    owner_listed = await listed_register(client)
     assert not any(row.get("customerName") == "Disc Walkin" for row in owner_listed)
     waiting = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
     assert any(x.get("customerName") == "Disc Walkin" for x in waiting)
@@ -135,6 +150,8 @@ async def test_discounted_create_is_pending_not_on_register(exec_client, client)
 async def test_book_at_list_price_needs_kyc_not_approval(exec_client, client):
     r = await exec_client.post("/api/leads", json=_walkin("List Book"))
     lid = r.json()["leadId"]
+    assert any(row["leadId"] == lid for row in await listed_followup(exec_client))
+    assert not any(row["leadId"] == lid for row in await listed_register(exec_client))
     denied = await exec_client.post(
         f"/api/leads/{lid}/convert-booking",
         json={"bookingAmount": 5000, "executive": "Executive", "bookingDate": "2026-10-10"})
@@ -146,6 +163,8 @@ async def test_book_at_list_price_needs_kyc_not_approval(exec_client, client):
     assert ok.status_code == 200, ok.text
     assert ok.json().get("bookingId")
     assert await server.db.lead_requests.count_documents({"existingLeadId": lid}) == 0
+    assert any(row["leadId"] == lid for row in await listed_register(exec_client))
+    assert not any(row["leadId"] == lid for row in await listed_followup(exec_client))
 
 
 @pytest.mark.asyncio
@@ -166,22 +185,26 @@ async def test_discounted_book_waits_for_owner_then_books(exec_client, client):
     assert req is not None
     parked = await server.db.leads.find_one({"leadId": lid})
     assert parked.get("dealApprovalPending") is True
-    exec_listed = (await exec_client.get("/api/leads")).json()
+    exec_listed = await listed_register(exec_client)
     assert not any(row["leadId"] == lid for row in exec_listed)
-    owner_listed = (await client.get("/api/leads")).json()
+    owner_listed = await listed_register(client)
     assert not any(row["leadId"] == lid for row in owner_listed)
+    assert not any(row["leadId"] == lid for row in await listed_followup(exec_client))
     ap = await client.post(f"/api/lead-requests/{req['requestId']}/approve")
     assert ap.status_code == 200, ap.text
     live = await server.db.leads.find_one({"leadId": lid})
     assert live.get("dealApprovalPending") is not True
-    after = (await exec_client.get("/api/leads")).json()
+    after = await listed_followup(exec_client)
     assert any(row["leadId"] == lid for row in after)
+    assert not any(row["leadId"] == lid for row in await listed_register(exec_client))
     booked = await exec_client.post(
         f"/api/leads/{lid}/convert-booking",
         json={"bookingAmount": 5000, "executive": "Executive", "bookingDate": "2026-10-10"})
     assert booked.status_code == 200, booked.text
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["currentStatus"] == "Booked"
+    assert any(row["leadId"] == lid for row in await listed_register(exec_client))
+    assert not any(row["leadId"] == lid for row in await listed_followup(exec_client))
 
 
 @pytest.mark.asyncio
@@ -204,8 +227,9 @@ async def test_reject_booking_deal_restores_open_enquiry(exec_client, client):
     live = await server.db.leads.find_one({"leadId": lid})
     assert live.get("dealApprovalPending") is not True
     assert server.ce.num(live.get("cxDemand") or live.get("budget")) == 0
-    listed = (await exec_client.get("/api/leads")).json()
+    listed = await listed_followup(exec_client)
     assert any(row["leadId"] == lid for row in listed)
+    assert not any(row["leadId"] == lid for row in await listed_register(exec_client))
     assert wa.followup_due({**live, "createdDate": "2026-10-01"}, "2026-10-04") is True
 
 
@@ -223,8 +247,9 @@ async def test_existing_pending_booking_deal_is_parked_on_register_load(exec_cli
     })
     n = await server._park_pending_booking_deal_leads()
     assert n >= 1
-    listed = (await exec_client.get("/api/leads")).json()
+    listed = await listed_register(exec_client)
     assert not any(row["leadId"] == lid for row in listed)
+    assert not any(row["leadId"] == lid for row in await listed_followup(exec_client))
     parked = await server.db.leads.find_one({"leadId": lid})
     assert parked.get("dealApprovalPending") is True
 

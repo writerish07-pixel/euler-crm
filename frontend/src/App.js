@@ -60,7 +60,7 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, oemOk, dealDesk, showroomDesk, staffDesk, gmHome, monthlyOk, oemClaimDesk }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, accountsOk, oemOk, dealDesk, showroomDesk, staffDesk, gmHome, monthlyOk, oemClaimDesk }) {
   const auth = useAuth();
   const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = auth;
   const loc = useLocation();
@@ -94,7 +94,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   if (financeView && !canViewFinance) return <Navigate to={homePath(auth)} replace />;
   if (moneyDesk && !isMoneyDesk) return <Navigate to={homePath(auth)} replace />;
   if (oemClaimDesk && !canMatchOemClaims) return <Navigate to={homePath(auth)} replace />;
-  if (salesOnly && !isSalesStaff && !(fieldOk && isField)) {
+  if (salesOnly && !isSalesStaff && !(fieldOk && isField) && !(accountsOk && isAccounts)) {
     return <Navigate to={homePath(auth)} replace />;
   }
   return <Layout><ErrorBoundary compact>{children}</ErrorBoundary></Layout>;
@@ -131,6 +131,7 @@ function AppRoutes() {
       fieldOk={opts.fieldOk}
       fieldOnly={opts.fieldOnly}
       accountsHome={opts.accountsHome}
+      accountsOk={opts.accountsOk}
       oemOk={opts.oemOk}
       dealDesk={opts.dealDesk}
       showroomDesk={opts.showroomDesk}
@@ -151,7 +152,8 @@ function AppRoutes() {
       <Route path="/accounts" element={P(<AccountsDashboard />, { accountsHome: true })} />
       <Route path="/field" element={P(<FieldDashboard />, { fieldOnly: true })} />
       <Route path="/gm" element={P(<SalesGmDashboard />, { gmHome: true })} />
-      <Route path="/leads" element={P(<Leads />, { salesOnly: true, fieldOk: true })} />
+      <Route path="/leads" element={P(<Leads />, { salesOnly: true, fieldOk: true, accountsOk: true })} />
+      <Route path="/followup-leads" element={P(<Leads followup />, { salesOnly: true, fieldOk: true, accountsOk: true })} />
       <Route path="/approvals" element={P(<Approvals />, { salesOnly: true })} />
       <Route path="/bookings" element={P(<Bookings />, { salesOnly: true, fieldOk: true })} />
       <Route path="/quotations" element={P(<Quotations />, { salesOnly: true })} />

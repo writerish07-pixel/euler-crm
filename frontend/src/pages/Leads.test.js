@@ -48,14 +48,14 @@ jest.mock("../context/AuthContext", () => ({
 
 import Leads from "./Leads";
 
-async function renderLeads() {
+async function renderLeads(followup = false) {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
     root.render(
       <MemoryRouter>
-        <Leads />
+        <Leads followup={followup} />
       </MemoryRouter>,
     );
   });
@@ -70,15 +70,27 @@ afterEach(() => {
   mockAuth.isField = false;
 });
 
-test("owner lead register still offers the New status filter", async () => {
-  const { root } = await renderLeads();
-  expect(document.querySelector('[data-testid="filter-New"]')).toBeTruthy();
+test("owner lead register is booked files, not New enquiries", async () => {
+  const { host, root } = await renderLeads();
+  expect(host.textContent).toMatch(/Lead Register/);
+  expect(document.querySelector('[data-testid="filter-New"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="filter-Booked"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
 });
 
-test("showroom admin lead register keeps New so OEM and approved files stay visible", async () => {
+test("follow-up lead register lists New enquiries", async () => {
+  const { host, root } = await renderLeads(true);
+  expect(host.textContent).toMatch(/Follow-up Lead Register/);
+  expect(document.querySelector('[data-testid="filter-New"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="filter-Contacted"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="filter-all"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="filter-Booked"]')).toBeFalsy();
+  await act(async () => { root.unmount(); });
+});
+
+test("showroom admin follow-up register keeps New so OEM and approved files stay visible", async () => {
   mockAuth.isShowroomAdmin = true;
-  const { root } = await renderLeads();
+  const { root } = await renderLeads(true);
   expect(document.querySelector('[data-testid="filter-New"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="filter-Contacted"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="filter-all"]')).toBeTruthy();
