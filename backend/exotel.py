@@ -37,8 +37,8 @@ SLACK_RUPEES = 100
 AUDIO_DIR = Path(__file__).parent / "static" / "exotel"
 AUDIO_CLIPS = ("intro", "prompt", "speak", "thanks")
 
-# Village Hindi for less-literate customers. Same words as the MP3s.
-# No English (hash, number, keypad, type, booking) and no formal Hindi (rashi, bhugtan).
+# Same words as the MP3s. Intro/speak are conversational village Hindi.
+# Prompt is the original amount-ask clip (keypad + hash).
 SPOKEN = {
     "intro": (
         "Namaste, main Akar Euler se bol rahi hoon. "
