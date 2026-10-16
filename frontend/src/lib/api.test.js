@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -133,6 +133,26 @@ describe("bulk mutations", () => {
     expect(isSlowIntegrationPath("/integrations/coulson")).toBe(true);
     expect(isSlowIntegrationPath("/integrations/coulson/sync")).toBe(true);
     expect(isSlowIntegrationPath("/leads")).toBe(false);
+    expect(isBulkMutationPath("/oem-billing/sync")).toBe(true);
+    expect(isBulkMutationPath("/oem-billing/repair-merge")).toBe(true);
+    expect(isSlowOemBillingPath("/oem-billing")).toBe(true);
+    expect(isSlowOemBillingPath("/oem-billing/sync")).toBe(true);
+    expect(isSlowOemBillingPath("/leads")).toBe(false);
+  });
+
+  test("GET /oem-billing uses a 120s timeout", async () => {
+    const spy = jest.spyOn(api, "get").mockResolvedValue({ data: { rows: [] } });
+    await get("/oem-billing");
+    expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 120000 }));
+    spy.mockRestore();
+  });
+
+  test("POST /oem-billing/sync uses a 120s timeout and does not retry", async () => {
+    const err = Object.assign(new Error("Network Error"), { code: "ERR_NETWORK" });
+    const spy = jest.spyOn(api, "post").mockRejectedValue(err);
+    await expect(post("/oem-billing/sync", {})).rejects.toBe(err);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][2]).toEqual({ timeout: 120000 });
   });
 
   test("create lead does not retry a dropped connection", async () => {

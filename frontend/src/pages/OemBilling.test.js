@@ -61,13 +61,11 @@ const mockBilling = {
 };
 
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
+const mockGet = jest.fn();
+const mockPost = jest.fn();
 jest.mock("../lib/api", () => ({
-  get: (url) => {
-    if (String(url).includes("/oem-billing")) return Promise.resolve(mockBilling.current);
-    if (String(url).includes("/masters")) return Promise.resolve({ models: [] });
-    return Promise.resolve({});
-  },
-  post: jest.fn(() => Promise.resolve(mockBilling.current)),
+  get: (...args) => mockGet(...args),
+  post: (...args) => mockPost(...args),
   apiErrorMessage: (e, fallback) => fallback,
 }));
 jest.mock("../context/AuthContext", () => ({
@@ -78,7 +76,19 @@ jest.mock("../components/LeadLink", () => ({
   LeadLink: ({ leadId }) => <button type="button" data-testid={`lead-link-${leadId}`}>{leadId}</button>,
 }));
 
+import { toast } from "sonner";
 import OemBilling from "./OemBilling";
+
+beforeEach(() => {
+  toast.error.mockClear();
+  toast.success.mockClear();
+  mockGet.mockImplementation((url) => {
+    if (String(url).includes("/oem-billing")) return Promise.resolve(mockBilling.current);
+    if (String(url).includes("/masters")) return Promise.resolve({ models: [] });
+    return Promise.resolve({});
+  });
+  mockPost.mockResolvedValue(mockBilling.current);
+});
 
 test("OEM billing tab shows pending delivery without asking for chassis", async () => {
   const host = document.createElement("div");
@@ -94,6 +104,28 @@ test("OEM billing tab shows pending delivery without asking for chassis", async 
   expect(host.querySelector('[data-testid="oem-billing-relink"]')).toBeTruthy();
   expect(host.textContent).toMatch(/Pending Person/);
   expect(host.textContent).not.toMatch(/Select chassis/i);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("OEM billing load failure toasts instead of pretending billed files are zero", async () => {
+  mockGet.mockImplementation((url) => {
+    if (String(url).includes("/oem-billing")) {
+      return Promise.reject(Object.assign(new Error("timeout of 25000ms exceeded"), { code: "ECONNABORTED" }));
+    }
+    return Promise.resolve({});
+  });
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<OemBilling />);
+  });
+  await act(async () => { await Promise.resolve(); });
+  await act(async () => { await Promise.resolve(); });
+  expect(toast.error).toHaveBeenCalled();
+  expect(host.querySelector('[data-testid="oem-billing-load-error"]')).toBeTruthy();
+  expect(host.textContent).not.toMatch(/No OEM-billed files waiting to be marked delivered/);
   await act(async () => { root.unmount(); });
   host.remove();
 });

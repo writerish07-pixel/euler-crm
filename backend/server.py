@@ -740,7 +740,7 @@ async def _auto_deliver_oem_sold_leads():
     sold = [r async for r in db.oem_sold.find({})]
     sold_ch = oem_sync.sold_chassis_set(sold)
     count = 0
-    async for lead in db.leads.find({}):
+    for lead in await oem_sync.load_oem_billing_leads(db):
         if not _should_oem_auto_deliver(lead, sold_ch, sold):
             continue
         try:
@@ -10180,12 +10180,22 @@ def _family_sold_for_pack(row, sold_rows, leads, target):
     return out
 
 
+async def _fresh_lead(lead):
+    """Reload the full Mongo document before rewriting units / prices."""
+    lid = (lead or {}).get("leadId")
+    if not lid:
+        return lead
+    fresh = await db.leads.find_one({"leadId": lid})
+    return fresh or lead
+
+
 async def _connect_oem_sold(lead, row):
     """Put this Sold chassis on the live CRM file. Never mint a second id.
 
     Empty chassis → stamp. Same-order pack or a file that already holds a
     different chassis → append a unit. Do not overwrite a billed chassis.
     """
+    lead = await _fresh_lead(lead)
     chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
     if not chassis or not lead:
         return lead
@@ -10220,6 +10230,7 @@ async def _connect_oem_sold(lead, row):
 
 async def _append_oem_unit(lead, row):
     """Add one OEM billed chassis as a unit. Never rewrite unit 1 prices."""
+    lead = await _fresh_lead(lead)
     chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
     if not chassis:
         return lead
@@ -10282,7 +10293,7 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
     if not chassis:
         return None
-    async for existing in db.leads.find({}):
+    for existing in await oem_sync.load_oem_billing_leads(db):
         if (oem_sync.live_occupies_vehicle_id(existing)
                 and chassis in set(oem_sync.lead_chassis_list(existing))):
             return None
@@ -10358,7 +10369,7 @@ async def _create_leads_from_unmatched_oem_sold(*, mint_new=False):
     explicit one-row Create action after the desk confirms the customer is new.
     """
     sold = [r async for r in db.oem_sold.find({})]
-    leads = [l async for l in db.leads.find({})]
+    leads = await oem_sync.load_oem_billing_leads(db)
     created = []
     consumed = set()
     classified = oem_sync.classify_oem_billing(sold, leads)
@@ -10426,11 +10437,11 @@ async def list_oem_billing(month: Optional[str] = None, year: Optional[str] = No
                            bucket: str = ""):
     """Monthly OEM Sold list joined to CRM leads."""
     period = _parse_period(month, year)
-    rows = await oem_sync.list_oem_billing(db)
+    leads = await oem_sync.load_oem_billing_leads(db)
+    rows = await oem_sync.list_oem_billing(db, leads)
     if bucket:
         rows = [r for r in rows if r.get("bucket") == bucket]
     payload = _oem_billing_payload(rows, period)
-    leads = [l async for l in db.leads.find({})]
     payload["repair"] = _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
     return payload
 
@@ -10445,6 +10456,9 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     """
     try:
         await oem_sync.refresh_sold_inventory(db)
+    except coulson_client.CoulsonError as e:
+        logging.exception("Coulson sold refresh failed for OEM billing")
+        raise HTTPException(502, str(e) or "OEM Sold refresh failed") from e
     except Exception:
         logging.exception("Coulson sold refresh failed for OEM billing")
     stamped = {}
@@ -10454,7 +10468,7 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
         logging.exception("OEM billing could not backfill chassis/invoice")
         stamped = {}
     created = await _create_leads_from_unmatched_oem_sold()
-    leads = [l async for l in db.leads.find({})]
+    leads = await oem_sync.load_oem_billing_leads(db)
     relinked = []
     for pair in oem_sync.pair_oem_billing_stubs(leads):
         if (pair or {}).get("action") != "safe":
@@ -10471,14 +10485,14 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     except Exception:
         logging.exception("OEM billing auto-deliver after attach failed")
     period = _parse_period(month, year)
-    rows = await oem_sync.list_oem_billing(db)
+    leads = await oem_sync.load_oem_billing_leads(db)
+    rows = await oem_sync.list_oem_billing(db, leads)
     payload = _oem_billing_payload(rows, period)
     payload["createdLeadIds"] = created
     payload["created"] = len(created)
     payload["relinked"] = relinked
     payload["relinkedCount"] = len(relinked)
     payload["leadsVehicleIds"] = stamped
-    leads = [l async for l in db.leads.find({})]
     payload["repair"] = _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
     await write_audit(act, "sync", "oem-billing", new={
         "soldCount": payload.get("soldCount"),
@@ -10582,14 +10596,14 @@ async def _merge_oem_billing_stub(stub_id, original_id):
 @api.get("/oem-billing/repair-pairs", dependencies=[Depends(deal_desk_only)])
 async def list_oem_billing_repair_pairs():
     """Created-from-OEM stubs paired with the booked lead they should join."""
-    leads = [l async for l in db.leads.find({})]
+    leads = await oem_sync.load_oem_billing_leads(db)
     return _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
 
 
 @api.post("/oem-billing/repair-merge", dependencies=[Depends(deal_desk_only)])
 async def merge_oem_billing_repair(body: OemBillingRepairIn, act=Depends(actor)):
     """Move chassis from empty OEM stubs onto the original booked files."""
-    leads = [l async for l in db.leads.find({})]
+    leads = await oem_sync.load_oem_billing_leads(db)
     planned = oem_sync.pair_oem_billing_stubs(leads)
     allowed = {}
     for row in planned:
@@ -10619,7 +10633,7 @@ async def merge_oem_billing_repair(body: OemBillingRepairIn, act=Depends(actor))
         else:
             skipped.append({"stubLeadId": stub_id, "originalLeadId": original_id,
                             "reason": result.get("reason") or "merge failed"})
-    leads = [l async for l in db.leads.find({})]
+    leads = await oem_sync.load_oem_billing_leads(db)
     payload = _oem_repair_payload(oem_sync.pair_oem_billing_stubs(leads))
     payload["merged"] = merged
     payload["skipped"] = skipped
@@ -10642,7 +10656,7 @@ async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
     if not chassis:
         raise HTTPException(400, "Chassis is required")
     sold = [r async for r in db.oem_sold.find({})]
-    leads = [l async for l in db.leads.find({})]
+    leads = await oem_sync.load_oem_billing_leads(db)
     classified = oem_sync.classify_oem_billing(sold, leads)
     row = next((r for r in classified if oem_sync._norm_chassis(r.get("chassis")) == chassis), None)
     if not row:

@@ -17,6 +17,7 @@ from mongomock_motor import AsyncMongoMockClient  # noqa: E402
 motor.motor_asyncio.AsyncIOMotorClient = AsyncMongoMockClient
 
 import httpx  # noqa: E402
+import coulson as coulson_client  # noqa: E402
 import oem_sync  # noqa: E402
 import server  # noqa: E402
 
@@ -966,6 +967,65 @@ def test_clear_gone_sold_chassis_only_drops_missing_ids():
     assert patch["chassisNumber"] == "MD9KEEP01"
     assert patch["invoiceNumber"] == "KEEP"
     assert not oem_sync._norm_chassis(patch["units"][0]["chassisNumber"])
+
+
+def test_oem_billing_lead_proj_skips_scheme_and_docs():
+    proj = oem_sync.OEM_BILLING_LEAD_PROJ
+    assert proj["chassisNumber"] == 1
+    assert proj["units"] == 1
+    assert proj["oemBillingCreated"] == 1
+    assert "schemeUse" not in proj
+    assert "documents" not in proj
+    assert "kycDocs" not in proj
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_get_loads_leads_once_with_projection(client, monkeypatch):
+    calls = {"n": 0}
+    real = oem_sync.load_oem_billing_leads
+
+    async def wrapped(db):
+        calls["n"] += 1
+        return await real(db)
+
+    monkeypatch.setattr(oem_sync, "load_oem_billing_leads", wrapped)
+    r = await client.get("/api/oem-billing")
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_get_matches_without_scheme_blob(client):
+    chassis = "MD9PROJBLOB01"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.delete_many({"leadId": "LD-PROJ-BLOB"})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "9812299001", "invoiceNumber": "CINV-PROJ",
+        "customerName": "Proj Person", "soldDate": "2026-09-04", "coulsonStatus": "SOLD",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-PROJ-BLOB", "customerName": "Proj Person", "mobile": "9812299001",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "chassisNumber": chassis, "invoiceNumber": "CINV-PROJ",
+        "schemeUse": {"blob": "x" * 20000, "nested": {"a": list(range(200))}},
+        "documents": [{"data": "y" * 8000}],
+    })
+    r = await client.get("/api/oem-billing", params={"month": "2026-09"})
+    assert r.status_code == 200, r.text
+    hit = next(row for row in r.json()["rows"] if row["chassis"] == chassis)
+    assert hit["leadId"] == "LD-PROJ-BLOB"
+    assert hit["bucket"] == "pending_delivery"
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_sync_returns_502_when_coulson_fails(client, monkeypatch):
+    async def boom(_db):
+        raise coulson_client.CoulsonError("Coulson unreachable: timed out")
+
+    monkeypatch.setattr(oem_sync, "refresh_sold_inventory", boom)
+    r = await client.post("/api/oem-billing/sync")
+    assert r.status_code == 502, r.text
+    assert "Coulson" in r.json()["detail"]
 
 
 def test_should_oem_auto_deliver_needs_unique_mobile_not_stub():

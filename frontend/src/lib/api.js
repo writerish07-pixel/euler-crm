@@ -112,6 +112,8 @@ export function isBulkMutationPath(url) {
     || p.indexOf("/insurance/mis/") === 0
     || p.indexOf("/integrations/gsheets/backfill") === 0
     || p.indexOf("/integrations/coulson/sync") === 0
+    || p === "/oem-billing/sync"
+    || p === "/oem-billing/repair-merge"
     || p === "/admin/reset-transactions"
   );
 }
@@ -119,6 +121,12 @@ export function isBulkMutationPath(url) {
 export function isSlowIntegrationPath(url) {
   const p = String(url || "").split("?")[0];
   return p === "/integrations/coulson" || p.indexOf("/integrations/coulson/") === 0;
+}
+
+/** OEM Billing joins every Sold row to CRM leads and may refresh Coulson. */
+export function isSlowOemBillingPath(url) {
+  const p = String(url || "").split("?")[0];
+  return p === "/oem-billing" || p.indexOf("/oem-billing/") === 0;
 }
 
 /** POST /leads mints a new leadId. A timeout / 502 / HTML miss after the
@@ -137,7 +145,12 @@ function mutationOpts(url, opts = {}) {
     const p = String(url || "").split("?")[0];
     timeout = p.indexOf("/leads/import/") === 0 || p.indexOf("/integrations/gsheets/backfill") === 0
       ? 180000
-      : BULK_TIMEOUT_MS;
+      : isSlowOemBillingPath(url)
+        ? 120000
+        : BULK_TIMEOUT_MS;
+  }
+  if (timeout === undefined && isSlowOemBillingPath(url)) {
+    timeout = 120000;
   }
   if (timeout === undefined && isSlowIntegrationPath(url)) {
     timeout = 45000;
@@ -216,8 +229,8 @@ async function withFallback(run) {
 
 export const get = (url, params, opts = {}) => withFallback(() => api.get(url, {
   params,
-  ...(opts.timeout || isSlowIntegrationPath(url)
-    ? { timeout: opts.timeout || 45000 }
+  ...(opts.timeout || isSlowIntegrationPath(url) || isSlowOemBillingPath(url)
+    ? { timeout: opts.timeout || (isSlowOemBillingPath(url) ? 120000 : 45000) }
     : {}),
 }).then((r) => r.data));
 export const post = (url, body, opts = {}) => {

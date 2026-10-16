@@ -1061,7 +1061,7 @@ def _family_payload(lead, family):
 async def match_sold_for_lead(db, lead):
     """Unique remaining Sold row for this lead (chassis first, then mobile/name)."""
     rows = [r async for r in db.oem_sold.find({})]
-    leads = [l async for l in db.leads.find({})]
+    leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads, (lead or {}).get("leadId"))
     row = match_sold_row(lead, rows, occupied)
     if not row:
@@ -1072,7 +1072,7 @@ async def match_sold_for_lead(db, lead):
 async def match_sold_family_for_lead(db, lead):
     """Pack-aware Sold match: one row for a single file, every unit for a pack."""
     rows = [r async for r in db.oem_sold.find({})]
-    leads = [l async for l in db.leads.find({})]
+    leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads, (lead or {}).get("leadId"))
     family = sold_rows_for_lead(lead, rows, occupied)
     return _family_payload(lead, family)
@@ -1262,6 +1262,49 @@ def _field_taken(leads, field, value, except_id, *, chassis=False):
     return False
 
 
+# Classify / stamp / repair only need chassis, status, and identity.
+# Full lead docs carry scheme JSON and unit price blobs — the same payload
+# that pushed /dashboard past 25s after monthly register. OEM Billing GET/POST
+# still loaded every field 2–3 times, so Sync from OEM died and the page
+# showed zeros.
+OEM_BILLING_LEAD_PROJ = {
+    "_id": 0,
+    "leadId": 1,
+    "customerName": 1,
+    "mobile": 1,
+    "altMobile": 1,
+    "chassisNumber": 1,
+    "invoiceNumber": 1,
+    "numberPlate": 1,
+    "units": 1,
+    "sameOrderMultiUnit": 1,
+    "vehicleCount": 1,
+    "currentStatus": 1,
+    "accountStatus": 1,
+    "deliveryStatus": 1,
+    "dealCancelled": 1,
+    "oemBillingCreated": 1,
+    "oemAutoDelivered": 1,
+    "oemStatusBeforeAutoDeliver": 1,
+    "oemInvoiceMissing": 1,
+    "executive": 1,
+    "interestedModel": 1,
+    "variant": 1,
+    "model": 1,
+    "bookingDate": 1,
+    "bookingId": 1,
+    "deliveryDate": 1,
+    "totalReceived": 1,
+    "cancelledInvoiceNumber": 1,
+    "cancelledInvoices": 1,
+    "rebilledInvoiceNumber": 1,
+}
+
+
+async def load_oem_billing_leads(db):
+    return [l async for l in db.leads.find({}, OEM_BILLING_LEAD_PROJ)]
+
+
 async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
     """Write Coulson Sold chassis / invoice / plate onto every uniquely matched lead.
 
@@ -1287,7 +1330,7 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
     sold = [r async for r in db.oem_sold.find({})]
     if not sold:
         return stats
-    leads = [l async for l in db.leads.find({})]
+    leads = await load_oem_billing_leads(db)
     if not leads:
         return stats
 
@@ -1513,7 +1556,7 @@ async def delink_cancelled_sold_invoices(db):
     sold = [r async for r in db.oem_sold.find({})]
     sold_ch = sold_chassis_set(sold)
     stats = {"cleared": 0, "flagged": 0, "reverted": 0, "clearedIds": []}
-    async for lead in db.leads.find({}):
+    async for lead in db.leads.find({}, OEM_BILLING_LEAD_PROJ):
         if _lead_is_cancelled(lead):
             continue
         held = lead_chassis_list(lead)
@@ -1823,9 +1866,10 @@ def classify_oem_billing(sold_rows, leads):
     return out
 
 
-async def list_oem_billing(db):
+async def list_oem_billing(db, leads=None):
     sold = [r async for r in db.oem_sold.find({})]
-    leads = [l async for l in db.leads.find({})]
+    if leads is None:
+        leads = await load_oem_billing_leads(db)
     return classify_oem_billing(sold, leads)
 
 
