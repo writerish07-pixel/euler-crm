@@ -79,6 +79,16 @@ def test_exoml_is_hindi_flow():
     assert "Hangup" not in empty
 
 
+def test_connect_url_uses_app_bazaar_id():
+    cfg = {
+        "accountSid": "shubhammotors1",
+        "flowAppId": "261787",
+        "webhookSecret": "",
+    }
+    url = exo.connect_flow_url(cfg)
+    assert url == "http://my.exotel.com/shubhammotors1/exoml/start_voice/261787"
+
+
 @pytest_asyncio.fixture
 async def client(monkeypatch):
     isolated = server.client["exotel_deal_verify_isolated"]
@@ -127,6 +137,7 @@ async def test_settings_mask_secrets(client):
         "enabled": True,
         "quietStart": 10,
         "quietEnd": 19,
+        "flowAppId": "261787",
     })
     assert r.status_code == 200, r.text
     body = r.json()
@@ -135,6 +146,8 @@ async def test_settings_mask_secrets(client):
     assert body["exoPhone"].endswith("37655")
     assert "…" in (body.get("apiKeyMasked") or "")
     assert body.get("webhookSecret")
+    assert body.get("flowAppId") == "261787"
+    assert "start_voice/261787" in (body.get("connectUrl") or "")
 
 
 @pytest.mark.asyncio

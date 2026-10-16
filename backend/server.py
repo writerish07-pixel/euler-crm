@@ -15883,6 +15883,7 @@ class ExotelSettingsIn(BaseModel):
     quietEnd: Optional[int] = None
     webhookSecret: Optional[str] = None
     cronToken: Optional[str] = None
+    flowAppId: Optional[str] = None
 
 
 class DealVerifyAmountIn(BaseModel):

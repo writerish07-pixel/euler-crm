@@ -610,6 +610,7 @@ function ExotelCard() {
     quietEnd: 19,
     cronToken: "",
     webhookSecret: "",
+    flowAppId: "",
   });
   const [busy, setBusy] = useState(false);
 
@@ -627,6 +628,7 @@ function ExotelCard() {
         quietEnd: d.quietEnd || 19,
         cronToken: d.cronToken || "",
         webhookSecret: d.webhookSecret || "",
+        flowAppId: d.flowAppId || "",
       }));
     }).catch(() => {});
   }, []);
@@ -643,6 +645,7 @@ function ExotelCard() {
         quietEnd: Number(form.quietEnd) || 19,
         cronToken: form.cronToken,
         webhookSecret: form.webhookSecret,
+        flowAppId: form.flowAppId,
         enabled: true,
       };
       if (form.apiKey && !form.apiKey.includes("…") && !form.apiKey.startsWith("•")) body.apiKey = form.apiKey;
@@ -680,6 +683,9 @@ function ExotelCard() {
         For files already booked: use <b>Call booked leads now</b> (up to 40 rings, then the
         rest continue every 15 minutes in the call window), or open one lead and tap Call now.
         Do not paste API tokens in chat — save them here.
+        Keep the landline ExoPhone on “Shubham Motors AI” for incoming calls. Create a
+        new App Bazaar app “Akar Euler deal verify” for outbound verify — do not reuse
+        the old AI app — and paste its app ID below.
       </p>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Account SID">
@@ -718,10 +724,20 @@ function ExotelCard() {
           <Input value={form.webhookSecret} onChange={(e) => setForm({ ...form, webhookSecret: e.target.value })}
             placeholder="Filled on first save" />
         </Field>
+        <Field label="App Bazaar app ID (new Euler flow, not Shubham Motors AI)">
+          <Input data-testid="exotel-flow-app-id" value={form.flowAppId}
+            onChange={(e) => setForm({ ...form, flowAppId: e.target.value })}
+            placeholder="Number from start_voice/…" />
+        </Field>
       </div>
       <p className="text-xs text-ink-faint mt-2 font-mono break-all">
-        Voice URL: {cfg?.voiceUrl || "https://euler-crm-production.up.railway.app/api/integrations/exotel/voice"}
+        Voice URL (paste into the new app): {cfg?.voiceUrl || "https://euler-crm-production.up.railway.app/api/integrations/exotel/voice"}
       </p>
+      {cfg?.connectUrl ? (
+        <p className="text-xs text-ink-faint mt-1 font-mono break-all">
+          Connect URL: {cfg.connectUrl}
+        </p>
+      ) : null}
       <div className="flex flex-wrap gap-2 mt-4">
         <Button data-testid="exotel-save-btn" onClick={save} disabled={busy}>{busy ? "Saving…" : "Save Exotel settings"}</Button>
         <Button variant="secondary" onClick={runJobs}>Call booked leads now</Button>

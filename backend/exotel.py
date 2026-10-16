@@ -147,6 +147,7 @@ async def get_config() -> dict:
         "quietEnd": quiet_end,
         "webhookSecret": (os.environ.get("EXOTEL_WEBHOOK_SECRET") or doc.get("webhookSecret") or "").strip(),
         "cronToken": (os.environ.get("EXOTEL_CRON_TOKEN") or doc.get("cronToken") or "").strip(),
+        "flowAppId": (os.environ.get("EXOTEL_FLOW_APP_ID") or doc.get("flowAppId") or "").strip(),
         "brand": BRAND,
     }
 
@@ -158,6 +159,7 @@ def public_config(cfg: dict) -> dict:
     out["statusUrl"] = urls["status"]
     out["cronUrl"] = urls["cron"]
     out["audioUrl"] = urls["audio"]
+    out["connectUrl"] = connect_flow_url(cfg)
     return out
 
 
@@ -177,6 +179,8 @@ async def save_config(body: dict) -> dict:
         updates["subdomain"] = str(body.get("subdomain") or DEFAULT_SUBDOMAIN).strip() or DEFAULT_SUBDOMAIN
     if "exoPhone" in body:
         updates["exoPhone"] = re.sub(r"\D", "", str(body.get("exoPhone") or "")) or DEFAULT_EXOPHONE
+    if "flowAppId" in body:
+        updates["flowAppId"] = re.sub(r"\D", "", str(body.get("flowAppId") or ""))
     if "enabled" in body:
         updates["enabled"] = bool(body.get("enabled"))
     if "quietStart" in body:
@@ -308,6 +312,15 @@ def schedule(coro):
         logger.warning("exotel: no running event loop; skipped")
 
 
+def connect_flow_url(cfg: dict) -> str:
+    """Exotel Connect-to-flow Url. App Bazaar app_id is required for live calls."""
+    app_id = re.sub(r"\D", "", str((cfg or {}).get("flowAppId") or ""))
+    sid = str((cfg or {}).get("accountSid") or DEFAULT_SID).strip() or DEFAULT_SID
+    if app_id:
+        return f"http://my.exotel.com/{sid}/exoml/start_voice/{app_id}"
+    return webhook_urls(cfg or {})["voice"]
+
+
 def india_dial(phone: str) -> str:
     d = digits10(phone)
     if len(d) == 10:
@@ -385,7 +398,7 @@ async def _place_call_http(cfg: dict, customer: str, lead_id: str) -> dict:
     data = {
         "From": india_dial(customer),
         "CallerId": cfg["exoPhone"],
-        "Url": urls["voice"],
+        "Url": connect_flow_url(cfg),
         "StatusCallback": urls["status"],
         "StatusCallbackEvents[0]": "terminal",
         "CustomField": lead_id,
