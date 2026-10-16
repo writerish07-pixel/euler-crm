@@ -1561,6 +1561,46 @@ async def test_unit_delivery_date_splits_monthly_volume(client):
     assert str(lead.get("deliveryDate") or "")[:10] == "2026-10-16"
 
 
+@pytest.mark.asyncio
+async def test_delivery_save_keeps_separate_unit_dates(client):
+    lid = "LD-DELIV-KEEP"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Keep Dates", "mobile": "9813301777",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-03", "customerOutstanding": 0,
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP1", "invoiceNumber": "INV-K1"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP2", "invoiceNumber": "INV-K2"},
+        ],
+    })
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Done", "registration": "Done", "invoice": "Done",
+        "pdi": "Done", "insurerName": "TestIns",
+        "delivered": "",
+        "deliveryDate": "2026-10-16",
+        "invoiceNumber": "INV-K1",
+        "chassisNumber": "MD9KEEP1",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP1", "invoiceNumber": "INV-K1",
+             "deliveryDate": "2026-09-15"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP2", "invoiceNumber": "INV-K2",
+             "deliveryDate": "2026-10-16"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    units = (await server.db.leads.find_one({"leadId": lid})).get("units") or []
+    assert units[0].get("deliveryDate") == "2026-09-15"
+    assert units[1].get("deliveryDate") == "2026-10-16"
+    assert units[0].get("deliveryDate") != units[1].get("deliveryDate")
+
+
 def test_unit_specs_keep_each_units_cx_demand():
     specs = server._unit_specs_from("Turbo Max", "Pack A", [
         {"model": "Turbo Max", "variant": "Pack A", "cxDemand": 590000},

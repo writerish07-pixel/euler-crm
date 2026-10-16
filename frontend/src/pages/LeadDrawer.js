@@ -143,6 +143,32 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
   );
 }
 
+function PackDeliveryDateGroup({ lead, units, canEdit, onSaved }) {
+  if (!units || units.length < 2) return null;
+  return (
+    <div className="rounded-md border border-line bg-zinc-50/70 px-2 py-1.5 mb-2" data-testid="pack-delivery-date-group">
+      <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Delivery date · each unit</div>
+      {units.map((u, i) => {
+        const sno = u.sno || i + 1;
+        return (
+          <div key={sno} className="flex flex-wrap items-center justify-between gap-2 py-1">
+            <span className="text-sm text-ink-soft">
+              Unit {sno}{(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}
+            </span>
+            <UnitDeliveryDateField
+              leadId={lead.leadId}
+              sno={sno}
+              value={u.deliveryDate || ""}
+              canEdit={!!canEdit}
+              onSaved={onSaved}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved, canEditBilledDate }) {
   return (
     <div className="space-y-3" data-testid="pack-units-tab">
@@ -174,6 +200,12 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
           <span className="font-mono font-semibold">{inr(lead.cxDemand || lead.budget || lead.customerPayable)}</span>
         </div>
       </div>
+      <PackDeliveryDateGroup
+        lead={lead}
+        units={units}
+        canEdit={!!canEditBilledDate}
+        onSaved={onSaved}
+      />
       {units.map((u, i) => {
         const sno = u.sno || i + 1;
         return (
@@ -191,13 +223,6 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
                     leadId={lead.leadId}
                     sno={sno}
                     value={u.soldDate || ""}
-                    canEdit={!!canEditBilledDate}
-                    onSaved={onSaved}
-                  />
-                  <UnitDeliveryDateField
-                    leadId={lead.leadId}
-                    sno={sno}
-                    value={u.deliveryDate || u.soldDate || ""}
                     canEdit={!!canEditBilledDate}
                     onSaved={onSaved}
                   />
@@ -820,7 +845,7 @@ export function OverviewUnits({
         )}
       </div>
       <p className="text-[11px] text-ink-faint mb-2">
-        Each unit has its own billed date (scheme month) and delivery date (monthly delivery count).
+        Each unit has its own billed date (scheme month). Delivery dates are grouped below — monthly delivery counts use that unit’s date.
       </p>
       <ul className="space-y-2">
         {units.map((u, i) => {
@@ -845,13 +870,6 @@ export function OverviewUnits({
                 canEdit={!!canEditBilledDate}
                 onSaved={onSaved}
               />
-              <UnitDeliveryDateField
-                leadId={lead.leadId}
-                sno={sno}
-                value={u.deliveryDate || u.soldDate || ""}
-                canEdit={!!canEditBilledDate}
-                onSaved={onSaved}
-              />
               {onOpenUnit && !hideExecScheme && (
                 <span className="flex gap-1">
                   <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
@@ -866,6 +884,12 @@ export function OverviewUnits({
           );
         })}
       </ul>
+      <PackDeliveryDateGroup
+        lead={lead}
+        units={units}
+        canEdit={!!canEditBilledDate}
+        onSaved={onSaved}
+      />
       {Number(lead.customerPayable || lead.cxDemand) > 0 && (
         <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
           Pack payable {inr(lead.customerPayable || lead.cxDemand)}
@@ -2183,6 +2207,10 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           chassisNumber: u.chassisNumber || "",
           invoiceNumber: u.invoiceNumber || "",
           numberPlate: u.numberPlate || "",
+          soldDate: u.soldDate || "",
+          deliveryDate: u.deliveryDate || "",
+          availableBodyType: u.availableBodyType || "",
+          oemBilledBodyType: u.oemBilledBodyType || u.bodyType || "",
         }));
         const rows = base.length ? base : family.map((u, i) => ({
           sno: u.sno || i + 1,
@@ -2234,7 +2262,14 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   const toggle = (k) => { if (!locked) setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" })); };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
-    if (form.delivered === "Yes" && !form.deliveryDate) return toast.error("Delivery date is required");
+    const packLatest = packUnits.length > 1
+      ? packUnits.map((u) => String(u.deliveryDate || "").slice(0, 10)).filter(Boolean).sort().slice(-1)[0]
+      : form.deliveryDate;
+    if (form.delivered === "Yes" && packUnits.length > 1
+        && packUnits.some((u) => !String(u.deliveryDate || "").trim())) {
+      return toast.error("Enter a delivery date for each unit");
+    }
+    if (form.delivered === "Yes" && !packLatest) return toast.error("Delivery date is required");
     // The agent decides the payout slab; the server rejects a blank one too.
     if (form.delivered === "Yes" && !form.insuranceAgentId && !selfArranged) {
       return toast.error("Select the insurance agent before marking delivered");
@@ -2242,6 +2277,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
     try {
       await put(`/leads/${lead.leadId}/delivery`, {
         ...form,
+        deliveryDate: packLatest || form.deliveryDate,
         ...(packUnits.length > 1 ? { units: packUnits } : {}),
       });
       toast.success(form.delivered === "Yes"
@@ -2319,7 +2355,6 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                 <th className="py-1 pr-2">Chassis</th>
                 <th className="py-1 pr-2">Invoice</th>
                 <th className="py-1 pr-2">Number Plate</th>
-                <th className="py-1">Delivery date</th>
               </tr>
             </thead>
             <tbody>
@@ -2356,19 +2391,34 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                         if (i === 0) setForm((f) => ({ ...f, numberPlate: v }));
                       }} />
                   </td>
-                  <td className="py-1">
-                    <Input data-testid={`delivery-unit-date-${i + 1}`} type="date"
-                      value={u.deliveryDate || ""} disabled={locked}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, deliveryDate: v } : row)));
-                        if (i === 0) setForm((f) => ({ ...f, deliveryDate: v || f.deliveryDate }));
-                      }} />
-                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+      {packUnits.length > 1 && (
+        <div className="rounded-md border border-line bg-zinc-50/70 px-3 py-2 mb-3" data-testid="pack-delivery-date-group">
+          <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Delivery date · each unit</div>
+          <p className="text-[11px] text-ink-faint mb-2">
+            Monthly delivery counts use each unit’s date — not one date for the whole pack.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {packUnits.map((u, i) => (
+              <Field key={u.sno || i} label={`Unit ${u.sno || i + 1}${u.model ? ` · ${u.model}` : ""}`}>
+                <Input
+                  data-testid={`delivery-unit-date-${i + 1}`}
+                  type="date"
+                  value={u.deliveryDate || ""}
+                  disabled={locked}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, deliveryDate: v } : row)));
+                  }}
+                />
+              </Field>
+            ))}
+          </div>
         </div>
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2396,9 +2446,11 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
               .map((a) => <option key={a.agentId} value={a.agentId}>{a.agentName}</option>)}
           </Select>
         </Field>
-        <Field label={packUnits.length > 1 ? "File delivery date (latest unit)" : "Delivery Date"}>
+        {packUnits.length <= 1 && (
+        <Field label="Delivery Date">
           <Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} disabled={locked} />
         </Field>
+        )}
         <Field label="Mark Delivered?">
           <Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")} disabled={locked || alreadyDelivered || !canMarkDelivered}>
             <option value="">Not yet</option><option value="Yes">Yes — Delivered</option>
