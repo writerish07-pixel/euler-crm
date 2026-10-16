@@ -1100,6 +1100,125 @@ async def test_additional_support_claim_type_files_oem_extra_support(client, mon
 
 
 @pytest.mark.asyncio
+async def test_extra_support_linked_vehicle_auto_matches_without_manual(client, monkeypatch):
+    """OEM Extra Support create now mandates a chassis. Sync must join it to
+    the lead the way scheme claims already do — no Match OEM claim click."""
+    chassis = "MD9EXSUP26K218001"
+    invoice = "AF-999-I26291801"
+    lead_id = await _delivered_lead(client, chassis=chassis, invoice=invoice)
+    await _register_row(lead_id, "oemExtraSupport", 8000.0, chassis=chassis, invoice=invoice)
+    inner = journey("es-auto", "AF-999-CLESAUTO", chassis="", invoice="")
+    inner["line_items"][0]["claim_type"] = "Additional Support"
+    inner["line_items"][0].pop("chassis", None)
+    inner["line_items"][0].pop("source_invoice_number", None)
+    inner["line_items"][0]["description"] = (
+        "Claim Type :- Additional Support Customer Name:- Radhe Plastics")
+    inner["line_items"][0]["vehicles"] = [
+        {"id": "veh-1", "chassis_number": chassis, "invoice_number": invoice}]
+    inner["line_items"][0]["linked_vehicle_ids"] = ["veh-1"]
+    inner["line_items"][0]["total_amount"] = 8000.0
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("es-auto", "AF-999-CLESAUTO")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-999-CLESAUTO"})).json()
+    assert oem, oem
+    line = oem[0]["lineItems"][0]
+    assert line["chassis"] == chassis
+    assert line["matchedBy"] == "chassis"
+    assert lead_id in (line.get("leadIds") or [line.get("leadId")])
+    extra = next(r for r in (await client.get("/api/claims")).json()
+                 if r["leadId"] == lead_id and r["componentKey"] == "oemExtraSupport")
+    assert extra["oemMatch"]["state"] == "filed"
+    assert extra["oemMatch"].get("manual") is not True
+    assert "AF-999-CLESAUTO" in extra["oemMatch"]["claimNumbers"]
+    assert extra["claimReference"] == "AF-999-CLESAUTO"
+    assert extra["eligibleClaim"] == 8000.0
+
+
+@pytest.mark.asyncio
+async def test_extra_support_two_linked_chassis_match_two_leads(client, monkeypatch):
+    a_ch, b_ch = "MD9EXSUP26K218011", "MD9EXSUP26K218012"
+    a = await _delivered_lead(client, chassis=a_ch, invoice="AF-999-I26291811")
+    b = await _delivered_lead(client, chassis=b_ch, invoice="AF-999-I26291812")
+    await _register_row(a, "oemExtraSupport", 5000.0, chassis=a_ch)
+    await _register_row(b, "oemExtraSupport", 5000.0, chassis=b_ch)
+    inner = journey("es-two", "AF-999-CLESTWO", chassis="", invoice="")
+    inner["line_items"][0]["claim_type"] = "Additional Support"
+    inner["line_items"][0].pop("chassis", None)
+    inner["line_items"][0].pop("source_invoice_number", None)
+    inner["line_items"][0]["vehicles"] = [
+        {"chassis": a_ch}, {"chassis_number": b_ch}]
+    inner["line_items"][0]["linked_vehicle_ids"] = [a_ch, b_ch]
+    inner["line_items"][0]["total_amount"] = 10000.0
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("es-two", "AF-999-CLESTWO")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-999-CLESTWO"})).json()[0]
+    line = oem["lineItems"][0]
+    assert set(line.get("leadIds") or []) == {a, b}
+    assert line["matchedBy"] == "chassis"
+    rows = (await client.get("/api/claims")).json()
+    ra = next(x for x in rows if x["leadId"] == a and x["componentKey"] == "oemExtraSupport")
+    rb = next(x for x in rows if x["leadId"] == b and x["componentKey"] == "oemExtraSupport")
+    assert ra["oemMatch"]["state"] == rb["oemMatch"]["state"] == "filed"
+    assert ra["oemMatch"].get("manual") is not True
+    assert rb["oemMatch"].get("manual") is not True
+    assert ra["eligibleClaim"] == 5000.0
+    assert rb["eligibleClaim"] == 5000.0
+
+
+@pytest.mark.asyncio
+async def test_extra_support_without_chassis_still_needs_manual(client, monkeypatch):
+    """Pre-update Additional Support notes had no vehicle. Manual match stays."""
+    lead_id = await _delivered_lead(client, chassis="MD9EXOLD26K218021",
+                                    invoice="AF-999-I26291821")
+    await _register_row(lead_id, "oemExtraSupport", 5000.0)
+    inner = journey("es-old", "AF-999-CLESOLD", chassis="", invoice="")
+    inner["line_items"][0]["claim_type"] = "Additional Support"
+    inner["line_items"][0].pop("chassis", None)
+    inner["line_items"][0].pop("source_invoice_number", None)
+    inner["line_items"][0]["description"] = (
+        "Claim Type :- Additional Support Customer Name:- Old Note")
+    inner["line_items"][0]["total_amount"] = 5000.0
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("es-old", "AF-999-CLESOLD")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-999-CLESOLD"})).json()[0]
+    line = oem["lineItems"][0]
+    assert not line.get("chassis")
+    assert not line.get("leadId")
+    assert line.get("matchedBy") in ("", None)
+    extra = next(r for r in (await client.get("/api/claims")).json()
+                 if r["leadId"] == lead_id and r["componentKey"] == "oemExtraSupport")
+    assert extra["oemMatch"]["state"] == "not_filed"
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLESOLD", "lineId": line["lineId"]})
+    assert r.status_code == 200, r.text
+    linked = (await client.get("/api/oem-claims", params={"q": "AF-999-CLESOLD"})).json()[0]
+    assert linked["lineItems"][0]["matchedBy"] == "manual"
+    assert linked["lineItems"][0]["leadId"] == lead_id
+
+
+@pytest.mark.asyncio
 async def test_extra_support_stays_unclaimed_when_euler_only_filed_insurance(client, monkeypatch):
     """Scheme Claim + Insurance Benefits is an insurance filing, not Extra Support."""
     lead_id = await _delivered_lead(client)
@@ -1309,6 +1428,51 @@ def test_line_item_reads_coulson_chassis_number_alias():
     })
     assert line["chassis"] == "MD9EMVDL26H217561"
     assert line["sourceInvoiceNumber"] == "AF-122-I26270162"
+
+
+def test_extra_support_reads_mandatory_linked_vehicles():
+    """Oct 2026 Coulson Extra Support create requires a vehicle; the journey
+    returns it as vehicles[] / linked_vehicle_ids / chassis_no — not `chassis`."""
+    line = oem_claims.normalise_line_item({
+        "id": "es-veh",
+        "claim_type": "Additional Support",
+        "chassis_no": "  md9exsup26k217428 ",
+        "vehicles": [{"id": "veh-uuid-1", "chassis_number": "MD9EXSUP26K217428",
+                      "invoice_number": "AF-122-I26291001"}],
+        "linked_vehicle_ids": ["veh-uuid-1"],
+        "description": "Claim Type :- Additional Support Customer Name:- Radhe Plastics",
+        "total_amount": 8000,
+    })
+    assert line["componentKey"] == "oemExtraSupport"
+    assert line["chassis"] == "MD9EXSUP26K217428"
+    assert line["chassisList"] == ["MD9EXSUP26K217428"]
+
+
+def test_extra_support_reads_several_linked_chassis():
+    line = oem_claims.normalise_line_item({
+        "id": "es-two",
+        "claim_type": "Additional Support",
+        "linked_vehicle_ids": ["MD9EXSUP26K217501", "MD9EXSUP26K217502"],
+        "vehicles": [
+            {"chassis": "MD9EXSUP26K217501"},
+            {"chassisNumber": "MD9EXSUP26K217502"},
+        ],
+        "total_amount": 10000,
+    })
+    assert line["chassisList"] == ["MD9EXSUP26K217501", "MD9EXSUP26K217502"]
+    assert line["chassis"] == "MD9EXSUP26K217501"
+
+
+def test_vehicle_uuid_is_not_treated_as_chassis():
+    line = oem_claims.normalise_line_item({
+        "id": "es-uuid",
+        "claim_type": "Additional Support",
+        "linked_vehicle_ids": ["86be8411-0506-4e32-b117-8d94c0d4ec5f"],
+        "vehicle_id": "86be8411-0506-4e32-b117-8d94c0d4ec5f",
+        "total_amount": 5000,
+    })
+    assert line["chassis"] == ""
+    assert line["chassisList"] == []
 
 
 @pytest.mark.asyncio

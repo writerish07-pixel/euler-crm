@@ -535,7 +535,7 @@ function MatchOemModal({ claim, onClose, onDone }) {
     const alreadyPicked = r.claimNumber && r.claimNumber === claimNumber;
     if (!alreadyPicked && st === "in_register" && !relink) return false;
     if (!needle) return true;
-    const blob = `${r.claimNumber || ""} ${rowLeadIds(r).join(" ")} ${rowLineItems(r).map((li) => `${li.chassis || ""} ${li.sourceInvoiceNumber || ""} ${li.description || ""} ${li.customerName || ""}`).join(" ")}`.toLowerCase();
+    const blob = `${r.claimNumber || ""} ${rowLeadIds(r).join(" ")} ${rowLineItems(r).map((li) => `${(li.chassisList || []).join(" ") || li.chassis || ""} ${li.sourceInvoiceNumber || ""} ${li.description || ""} ${li.customerName || ""}`).join(" ")}`.toLowerCase();
     return blob.includes(needle);
   }).slice(0, 40);
   const picked = shown.find((r) => r.claimNumber === claimNumber) || oemRows.find((r) => r.claimNumber === claimNumber);
@@ -607,7 +607,7 @@ function MatchOemModal({ claim, onClose, onDone }) {
               <div className="text-ink-faint whitespace-normal">
                 {r.status} · {rowLineItems(r).length > 1
                   ? `${rowLineItems(r).length} items`
-                  : oemLineText(rowLineItems(r)[0]) || (rowLineItems(r).map((li) => li.chassis).filter(Boolean).join(", ") || "no chassis")}
+                  : oemLineText(rowLineItems(r)[0]) || (rowLineItems(r).flatMap((li) => li.chassisList && li.chassisList.length ? li.chassisList : (li.chassis ? [li.chassis] : [])).join(", ") || "no chassis")}
               </div>
             </button>
           ))}

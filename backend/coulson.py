@@ -320,43 +320,108 @@ def fetch_sap_models(token: str):
     return data if isinstance(data, list) else []
 
 
+def _row_page_key(row):
+    if not isinstance(row, dict):
+        return ""
+    return (
+        str(row.get("id") or "").strip()
+        or _vehicle_key(row)
+        or str(row.get("debit_note_number") or row.get("invoice_number") or "")
+    )
+
+
 def _page_rows(token: str, path: str, params: Optional[dict] = None, *,
                limit=INVENTORY_PAGE, max_rows=INVENTORY_MAX_ROWS, meta=None):
-    """Walk `{success, data[], extras.total_count}`. Keep earlier pages if a later page fails."""
-    offset = 0
-    rows = []
+    """Walk `{success, data[], extras.total_count}`. Keep earlier pages if a later page fails.
+
+    Live Coulson SPA (debit-note, dealer-inventory) sends offset as a 0-based
+    *page index*. Yard / Sold still use row-skip. Probe offset=1: a mostly-new
+    page means page-index; a 1-row slide means row-skip.
+    """
+    rows, seen = [], set()
     total = None
     last_error = None
     base = dict(params or {})
-    while offset < max_rows:
-        page = {**base, "limit": str(limit), "offset": str(offset)}
-        try:
-            payload = get_json(token, path, page)
-        except CoulsonError as e:
-            last_error = e
-            log.warning("Coulson %s offset=%s failed: %s", path, offset, e)
-            break
+
+    def pull(off):
+        payload = get_json(token, path, {**base, "limit": str(limit), "offset": str(off)})
         chunk = payload.get("data") or []
         if not isinstance(chunk, list):
             chunk = []
-        rows.extend(r for r in chunk if r)
         extras = payload.get("extras") or {}
         got = extras.get("total_count")
+        parsed = None
         if got is not None:
             try:
-                total = int(got)
+                parsed = int(got)
             except (TypeError, ValueError):
-                pass
-        if not chunk or len(chunk) < limit:
-            break
+                parsed = None
+        return chunk, parsed
+
+    def take(chunk):
+        added = 0
+        for row in chunk:
+            if not row:
+                continue
+            key = _row_page_key(row) or f"idx:{len(rows)}"
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+            added += 1
+        return added
+
+    try:
+        first, total = pull(0)
+    except CoulsonError as e:
+        last_error = e
+        log.warning("Coulson %s offset=%s failed: %s", path, 0, e)
+        if meta is not None:
+            meta["total"] = total
+            meta["complete"] = False
+        raise last_error
+    take(first)
+    if not first or len(first) < limit or (total is not None and len(rows) >= total):
+        if meta is not None:
+            meta["total"] = total
+            meta["complete"] = True
+        return rows
+
+    page_index = False
+    try:
+        probe, tot2 = pull(1)
+        if tot2 is not None:
+            total = tot2
+        probe_new = take(probe)
+        page_index = bool(probe) and probe_new > (len(probe) / 2)
+    except CoulsonError as e:
+        last_error = e
+        log.warning("Coulson %s offset=%s failed: %s", path, 1, e)
+        if meta is not None:
+            meta["total"] = total
+            meta["complete"] = False
+        return rows
+
+    nxt = 2 if page_index else limit
+    step = 1 if page_index else limit
+    while len(rows) < max_rows:
         if total is not None and len(rows) >= total:
             break
-        offset += limit
+        try:
+            chunk, tot2 = pull(nxt)
+        except CoulsonError as e:
+            last_error = e
+            log.warning("Coulson %s offset=%s failed: %s", path, nxt, e)
+            break
+        if tot2 is not None:
+            total = tot2
+        added = take(chunk)
+        if not chunk or len(chunk) < limit or added == 0:
+            break
+        nxt += step
     if meta is not None:
         meta["total"] = total
         meta["complete"] = last_error is None
-    if not rows and last_error:
-        raise last_error
     return rows
 
 
@@ -644,6 +709,11 @@ def journey_has_vehicle_lines(blob):
     """True when at least one line carries a chassis or a source invoice."""
     for item in pick_line_items(blob):
         if (item.get("chassis") or item.get("chassis_number") or item.get("chassisNumber")
+                or item.get("chassis_no") or item.get("chassisNo")
+                or item.get("vehicles") or item.get("linked_vehicles")
+                or item.get("linked_vehicle_ids") or item.get("linkedVehicleIds")
+                or item.get("vehicle_ids") or item.get("vehicleIds")
+                or item.get("vehicle_id") or item.get("vehicleId")
                 or item.get("source_invoice_number") or item.get("sourceInvoiceNumber")
                 or item.get("source_invoice") or item.get("invoice_number")):
             return True
@@ -745,16 +815,23 @@ def fetch_claim_journey(token: str, debit_note_id: str):
         log.info("Coulson journey %s returned no line items (keys=%s)", note_id, last_keys)
     return last
 
-# The eleven buckets the Claim Settlements List tabs across, approval order first
-# and terminal states last. Used to sweep per-status when one unfiltered pull comes
-# back short of the true total.
+# Status values the Claim Settlements List tabs across, approval order first
+# and terminal states last. Used to sweep per-status when one unfiltered pull
+# comes back short of the true total.
+#
+# Oct 2026 Coulson SPA: the Zno filter still *labels* Dealer Development but
+# posts **Expansion Team Approval Pending**. Bill Posted in SAP is a new tab.
+# Sales Invoice Generation Pending dropped from the filter; keep it so older
+# notes still get swept.
 CLAIM_STATUSES = (
     "RM Approval Pending",
     "Dealer Development Department Approval Pending",
+    "Expansion Team Approval Pending",
     "Sales Department Approval Pending",
     "Finance Department Approval Pending",
     "Credit Note Generation Pending",
     "Sales Invoice Generation Pending",
+    "Bill Posted in SAP",
     "Credit Note Generated",
     "Sales Invoice Generated",
     "Settled",
@@ -786,19 +863,37 @@ def fetch_allowed_showrooms(token: str):
     return data if isinstance(data, list) else []
 
 
-def fetch_claim_status_counts(token: str, showroom_id: str = ""):
-    """The eleven tab numbers, already aggregated by Coulson — one call, no paging.
+CLAIM_STATUS_COUNT_PATHS = (
+    "claim-analytics/status-counts",
+    "status-counts",
+)
 
-    Their own Claim Settlements List header is built from this, so it is the cheapest
-    honest answer to "how many claims exist", and the yardstick a full sweep is checked
-    against.
+
+def fetch_claim_status_counts(token: str, showroom_id: str = ""):
+    """Tab numbers, already aggregated by Coulson — one call, no paging.
+
+    Oct 2026 SPA reads `claim-analytics/status-counts`. Older `status-counts`
+    stays as fallback so a renamed route does not make the sweep think the
+    unfiltered list was complete.
     """
     params = {}
     if str(showroom_id or "").strip():
         params["showroom_id"] = str(showroom_id).strip()
-    payload = get_json(token, "status-counts", params or None)
-    data = payload.get("data")
-    return data if isinstance(data, (dict, list)) else {}
+    last = None
+    for path in CLAIM_STATUS_COUNT_PATHS:
+        try:
+            payload = get_json(token, path, params or None)
+        except CoulsonError as e:
+            last = e
+            if e.status in (404, 405, 400):
+                continue
+            raise
+        data = payload.get("data")
+        if isinstance(data, (dict, list)) and data:
+            return data
+    if last and last.status not in (404, 405, 400):
+        raise last
+    return {}
 
 
 def diagnose(username: str, password: str) -> dict:
