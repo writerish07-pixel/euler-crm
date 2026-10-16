@@ -103,7 +103,7 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
                   : "bg-white text-ink ring-line hover:bg-zinc-50"
               }`}
             >
-              Unit {sno}{u.model ? ` · ${u.model}` : ""}{u.variant ? ` ${u.variant}` : ""}
+              Unit {sno}{(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}{(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
               {u.customerPayable ? ` · ${inr(u.customerPayable)}` : ""}
               {u.soldDate ? ` · billed ${fmtDate(u.soldDate)}` : ""}
               {priced && schemed ? " ✓" : ""}
@@ -142,7 +142,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-ink">
-                  Unit {sno}{u.model ? ` · ${u.model}` : ""}{u.variant ? ` ${u.variant}` : ""}
+                  Unit {sno}{(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}{(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
                 </div>
                 <div className="font-mono font-bold text-cobalt mt-1" data-testid={`units-tab-payable-${sno}`}>
                   {inr(u.customerPayable)}
@@ -721,8 +721,8 @@ export function OverviewUnits({
             <li key={sno} className="flex flex-wrap items-center gap-2 text-xs text-ink" data-testid={`overview-unit-${sno}`}>
               <span className="min-w-0">
                 Unit {sno}
-                {u.model ? ` · ${u.model}` : ""}
-                {u.variant ? ` ${u.variant}` : ""}
+                {(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}
+                {(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
                 {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
                 {priced && schemed ? " · filled" : (hideExecScheme ? "" : " · Price / Scheme open")}
               </span>
@@ -1938,8 +1938,8 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
     (lead.units && lead.units.length > 1) || lead.sameOrderMultiUnit
       ? (lead.units || []).map((u, i) => ({
         sno: u.sno || i + 1,
-        model: u.model || "",
-        variant: u.variant || "",
+        model: u.model || lead.interestedModel || "",
+        variant: u.variant || lead.variant || "",
         chassisNumber: u.chassisNumber || "",
         invoiceNumber: u.invoiceNumber || "",
         numberPlate: u.numberPlate || "",
@@ -1987,16 +1987,16 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
       setPackUnits((cur) => {
         const base = (cur.length ? cur : (lead.units || [])).map((u, i) => ({
           sno: u.sno || i + 1,
-          model: u.model || "",
-          variant: u.variant || "",
+          model: u.model || lead.interestedModel || "",
+          variant: u.variant || lead.variant || "",
           chassisNumber: u.chassisNumber || "",
           invoiceNumber: u.invoiceNumber || "",
           numberPlate: u.numberPlate || "",
         }));
         const rows = base.length ? base : family.map((u, i) => ({
           sno: u.sno || i + 1,
-          model: u.model || "",
-          variant: u.variant || "",
+          model: u.model || lead.interestedModel || "",
+          variant: u.variant || lead.variant || "",
           chassisNumber: u.chassis || u.chassisNumber || "",
           invoiceNumber: u.invoiceNumber || "",
           numberPlate: u.numberPlate || "",

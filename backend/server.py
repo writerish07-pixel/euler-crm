@@ -10323,6 +10323,22 @@ async def _fresh_lead(lead):
     return fresh or lead
 
 
+async def _refresh_pack_unit_skus(lead, sold_rows=None):
+    """Fill blank pack unit model/variant and adopt billed DV on that chassis."""
+    lead = await _fresh_lead(lead)
+    if not lead or not (lead or {}).get("leadId"):
+        return lead
+    units = oem_sync.fill_pack_unit_skus(lead, sold_rows)
+    if units == list((lead or {}).get("units") or []):
+        return lead
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
+        "units": units,
+        "lastUpdated": now_iso(),
+        "oemSoldSyncedAt": now_iso(),
+    }})
+    return clean(await db.leads.find_one({"leadId": lead["leadId"]}))
+
+
 async def _connect_oem_sold(lead, row):
     """Put this Sold chassis on the live CRM file. Never mint a second id.
 
@@ -10334,7 +10350,7 @@ async def _connect_oem_sold(lead, row):
     if not chassis or not lead:
         return lead
     if chassis in set(oem_sync.lead_chassis_list(lead)):
-        return lead
+        return await _refresh_pack_unit_skus(lead, [row])
     have = set(oem_sync.lead_chassis_list(lead))
     if have or oem_sync.is_same_order_pack(lead):
         return await _append_oem_unit(lead, row)
@@ -10369,11 +10385,12 @@ async def _append_oem_unit(lead, row):
     if not chassis:
         return lead
     if chassis in set(oem_sync.lead_chassis_list(lead)):
-        return lead
+        return await _refresh_pack_unit_skus(lead, [row])
     invoice = str((row or {}).get("invoiceNumber") or "").strip()
     plate = str((row or {}).get("numberPlate") or "").strip()
-    model = (row or {}).get("model") or ""
-    variant = (row or {}).get("variant") or ""
+    picked = oem_sync.resolved_unit_sku(lead, row) or {}
+    model = picked.get("model") or (row or {}).get("model") or ""
+    variant = picked.get("variant") or (row or {}).get("variant") or ""
     sold_date = str((row or {}).get("soldDate") or "")[:10] or today()
     units = _ensure_lead_units(lead)
     if units and not oem_sync._norm_chassis(units[0].get("chassisNumber")):
@@ -10401,6 +10418,7 @@ async def _append_oem_unit(lead, row):
         units.append(rec)
     for i, u in enumerate(units):
         u["sno"] = i + 1
+    units = oem_sync.fill_pack_unit_skus({**(lead or {}), "units": units}, [row])
     patch = {
         "units": units,
         "sameOrderMultiUnit": True,
@@ -10537,6 +10555,7 @@ async def _create_leads_from_unmatched_oem_sold(*, mint_new=False):
                         continue
                     live = await _append_oem_unit(live, sold_row) or live
                     consumed.add(ch)
+                live = await _refresh_pack_unit_skus(live, family) or live
             else:
                 live = await _connect_oem_sold(target, row) or live
                 consumed.add(chassis)

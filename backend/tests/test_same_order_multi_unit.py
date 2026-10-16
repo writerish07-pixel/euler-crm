@@ -1216,6 +1216,41 @@ async def test_append_oem_unit_keeps_own_billed_date(client):
 
 
 @pytest.mark.asyncio
+async def test_append_oem_unit_fills_model_from_pack_sibling(client):
+    lid = "LD-BLANK-SKU"
+    mobile = "8980143999"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-BLANK-DV"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-BLANK-DV", "model": "Turbo Max", "variant": "Maxx (DV220)",
+        "exShowroom": 809999, "rto": 5500, "insurance": 19000, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Messenger SCS", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9SIBA01"},
+        ],
+    })
+    updated = await server._append_oem_unit(
+        await server.db.leads.find_one({"leadId": lid}),
+        {"chassis": "MD9SIBB06", "invoiceNumber": "INV-BLANK",
+         "model": "Turbo Max", "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+         "soldDate": "2026-10-16"},
+    )
+    units = (updated or {}).get("units") or []
+    assert len(units) == 2
+    assert units[1]["chassisNumber"] == "MD9SIBB06"
+    assert units[1]["model"] == "Turbo Max"
+    assert units[1]["variant"] == "Maxx (DV220)"
+
+
+@pytest.mark.asyncio
 async def test_add_unit_keeps_own_billed_date(client):
     mobile = "9813301888"
     await server.db.leads.delete_many({"mobile": mobile})

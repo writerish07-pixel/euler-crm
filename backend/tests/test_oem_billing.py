@@ -115,6 +115,31 @@ def test_billing_row_uses_lead_model_when_sold_has_none():
     assert rows[0]["variant"] == "Maxx (PV)"
 
 
+def test_billing_row_prefers_pack_dv_over_sold_fb():
+    """Chassis sat as FB, converted and billed DV — OEM Billing follows the pack DV."""
+    sold = [{
+        "chassis": "MD9J217750", "mobile": "8980143558",
+        "invoiceNumber": "AF-122-I26270230",
+        "customerName": "MessengerSCS", "soldDate": "2026-10-16",
+        "model": "Turbo Max", "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+    }]
+    leads = [{
+        "leadId": "LD26000554", "customerName": "MessengerSCS", "mobile": "8980143558",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "chassisNumber": "MD9UNITA01",
+        "deliveryDate": "2026-10-16",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9UNITA01", "model": "Turbo Max", "variant": "Maxx (DV220)"},
+            {"sno": 6, "chassisNumber": "MD9J217750", "model": "", "variant": ""},
+        ],
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["model"] == "Turbo Max"
+    assert rows[0]["variant"] == "Maxx (DV220)"
+
+
 def test_billing_row_uses_pack_unit_model_for_that_chassis():
     sold = [{
         "chassis": "MD9UNITB01", "mobile": "9811100666", "invoiceNumber": "INV-U",
