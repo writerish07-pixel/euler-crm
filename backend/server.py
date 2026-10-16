@@ -3554,6 +3554,34 @@ def _staff_period_metrics(m):
     }
 
 
+def _executive_scoreboard(leads, period) -> list:
+    """Per-executive leads / bookings / deliveries in the selected period."""
+    execs = {}
+    for l in leads or []:
+        name = (l.get("executive") or "Unassigned").strip() or "Unassigned"
+        row = execs.setdefault(name, {
+            "executive": name, "leads": 0, "bookings": 0, "deliveries": 0,
+        })
+        if periodmod.in_period(l.get("createdDate"), period):
+            row["leads"] += 1
+        if _is_booked_lead(l) and periodmod.in_period(l.get("bookingDate"), period):
+            row["bookings"] += 1
+        if _is_delivered_lead(l) and periodmod.in_period(_retail_date(l), period):
+            row["deliveries"] += 1
+    out = sorted(
+        [r for r in execs.values() if r["leads"] or r["bookings"] or r["deliveries"]],
+        key=lambda x: (-x["deliveries"], -x["bookings"], -x["leads"], x["executive"]),
+    )
+    for row in out:
+        row["conversion"] = (
+            round((row["bookings"] / row["leads"] * 100), 1) if row["leads"] else 0.0
+        )
+        row["deliveryConversion"] = (
+            round((row["deliveries"] / row["bookings"] * 100), 1) if row["bookings"] else 0.0
+        )
+    return out
+
+
 async def _monthly_payload(period, *, oem=False, src=None, staff=False):
     src = src if src is not None else await _period_source()
     focus = periodmod.focus_year(period)
@@ -3577,6 +3605,7 @@ async def _monthly_payload(period, *, oem=False, src=None, staff=False):
         "mtd": {**wrap(mtd), "period": periodmod.as_dict(mtd_p)},
         "ytd": {**wrap(ytd), "period": periodmod.as_dict(ytd_p)},
         "byMonth": by_month,
+        "byExecutive": _executive_scoreboard(src["leads"], period),
     }
 
 

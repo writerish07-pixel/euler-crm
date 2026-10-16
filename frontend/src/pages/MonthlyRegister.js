@@ -9,6 +9,7 @@ import { thisMonth, thisYear, periodParams, periodLabel } from "../lib/period";
 import { Card, PageHeader, StatCard, Table } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
+import ExecutiveScoreboard from "../components/ExecutiveScoreboard";
 import { useAuth } from "../context/AuthContext";
 
 function MetricGrid({ m, volumeOnly, ownerPnl }) {
@@ -127,6 +128,10 @@ export default function MonthlyRegister() {
             <h3 className="font-heading font-bold text-ink mb-3">Selected · {d.period?.label || selectedLabel}</h3>
             <MetricGrid m={d.selected} volumeOnly={volumeOnly} ownerPnl={ownerPnl} />
           </section>
+          <ExecutiveScoreboard
+            rows={d.byExecutive || []}
+            subtitle={`${d.period?.label || selectedLabel} · Book % = bookings÷leads · Del % = deliveries÷bookings. Executive sees own files; Team Leader sees their team.`}
+          />
           <div className="grid lg:grid-cols-2 gap-4 mb-6">
             <Strip title={`This month (MTD) · ${d.mtd?.period?.label || ""}`} m={d.mtd} testId="monthly-mtd" volumeOnly={volumeOnly} ownerPnl={ownerPnl} />
             <Strip title={`${d.ytd?.period?.label || "YTD"}`} m={d.ytd} testId="monthly-ytd" volumeOnly={volumeOnly} ownerPnl={ownerPnl} />

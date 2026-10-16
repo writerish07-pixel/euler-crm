@@ -10,6 +10,9 @@ import { inr, compactInr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
+import PeriodBar from "../components/PeriodBar";
+import ExecutiveScoreboard, { useMonthlyScoreboard } from "../components/ExecutiveScoreboard";
+import { thisMonth, thisYear } from "../lib/period";
 import { useAuth } from "../context/AuthContext";
 import NewLeadDrawer from "./NewLeadDrawer";
 
@@ -22,6 +25,9 @@ export default function ExecutiveDashboard({ teamView = false }) {
   const [d, setD] = useState(null);
   const [masters, setMasters] = useState(null);
   const [showNew, setShowNew] = useState(false);
+  const [month, setMonth] = useState(thisMonth());
+  const [year, setYear] = useState(thisYear());
+  const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
     get("/executive/dashboard").then(setD).catch(() => toast.error("Could not load executive dashboard"));
   }, []);
@@ -85,6 +91,14 @@ export default function ExecutiveDashboard({ teamView = false }) {
         <Link to="/activities"><Button variant="secondary" data-testid="exec-go-activities"><Activity size={14} /> Activities</Button></Link>
         <Link to="/inventory"><Button variant="secondary" data-testid="exec-go-inventory"><Warehouse size={14} /> Inventory</Button></Link>
       </div>
+
+      <ExecutiveScoreboard
+        rows={board}
+        title={isTeamLead || team ? "Team scoreboard" : "My scoreboard"}
+        subtitle={`${month || year || "All"} · Book % = bookings÷leads · Del % = deliveries÷bookings`}
+      >
+        <PeriodBar month={month} year={year} onChange={({ month: m, year: y }) => { setMonth(m || ""); setYear(y || ""); }} />
+      </ExecutiveScoreboard>
 
       {(isTeamLead || isTl) && (
         <Card className="p-5 mt-6" data-testid="team-leads-table">
