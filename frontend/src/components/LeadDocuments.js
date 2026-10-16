@@ -36,8 +36,10 @@ function isZipDoc(doc) {
 
 /** Phone rear camera plus a separate file picker — iOS `capture` forces camera-only. */
 export function CameraFilePick({ onFile, disabled, testId, accept = ACCEPT }) {
-  const takeId = `${testId || "doc"}-camera`;
-  const fileId = `${testId || "doc"}-file`;
+  const uid = React.useId().replace(/:/g, "");
+  const takeId = `pick-${uid}-camera`;
+  const fileId = `pick-${uid}-file`;
+  const testBase = testId || "doc";
   const onChange = (e) => {
     const f = e.target.files?.[0];
     e.target.value = "";
@@ -47,11 +49,11 @@ export function CameraFilePick({ onFile, disabled, testId, accept = ACCEPT }) {
     <div className="flex flex-wrap gap-1.5">
       <input id={takeId} type="file" accept="image/*" capture="environment" className="sr-only" disabled={disabled} onChange={onChange} />
       <input id={fileId} type="file" accept={accept} className="sr-only" disabled={disabled} onChange={onChange} />
-      <label htmlFor={takeId} data-testid={takeId}
+      <label htmlFor={takeId} data-testid={`${testBase}-camera`}
         className={`inline-flex items-center gap-1 rounded-lg ring-1 ring-inset ring-line px-2 py-1 text-[11px] font-medium ${disabled ? "opacity-50 pointer-events-none" : "bg-white text-ink hover:bg-zinc-50 cursor-pointer"}`}>
         <Camera size={12} /> Camera
       </label>
-      <label htmlFor={fileId} data-testid={fileId}
+      <label htmlFor={fileId} data-testid={`${testBase}-file`}
         className={`inline-flex items-center gap-1 rounded-lg ring-1 ring-inset ring-line px-2 py-1 text-[11px] font-medium ${disabled ? "opacity-50 pointer-events-none" : "bg-white text-ink hover:bg-zinc-50 cursor-pointer"}`}>
         <FileUp size={12} /> File
       </label>
@@ -96,12 +98,13 @@ function DocThumb({ doc }) {
   );
 }
 
-export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUpload, canDownload = true, onChanged, extraFields }) {
+export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUpload, canDownload = true, onChanged, extraFields, pickId }) {
   const [busy, setBusy] = useState(false);
   const label = DOC_LABELS[kind] || kind;
   const save = async (file) => {
     if (onLocalFile) {
       onLocalFile(file);
+      toast.success(`${label} attached`);
       return;
     }
     if (!uploadUrl) return;
@@ -136,7 +139,7 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
         <div className="text-xs font-semibold text-ink">{label}</div>
         <div className="text-[11px] text-ink-faint truncate">{doc?.filename || localFile?.name || hintForKind(kind)}</div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {canUpload && <CameraFilePick onFile={save} disabled={busy} testId={`doc-${kind}`} accept={acceptForKind(kind)} />}
+          {canUpload && <CameraFilePick onFile={save} disabled={busy} testId={pickId || `doc-${kind}`} accept={acceptForKind(kind)} />}
           {doc && canDownload && (
             <button type="button" className="inline-flex items-center gap-1 text-[11px] text-cobalt" data-testid={`doc-dl-${kind}`}
               onClick={() => openDocumentFile(doc.documentId, doc.filename).catch(() => toast.error("Download failed"))}>
@@ -176,6 +179,7 @@ export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onCha
             kind={kind}
             doc={byKind[kind]}
             uploadUrl={leadId ? `/leads/${leadId}/documents` : ""}
+            pickId={`lead-${kind}`}
             canUpload={canUploadKinds.includes(kind)}
             onChanged={() => {
               get(`/leads/${leadId}/documents`).then(setRows).catch(() => {});
@@ -211,7 +215,7 @@ export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, c
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {kinds.map((kind) => (
           <div key={kind}>
-            <DocSlot kind={kind} localFile={files[kind]} onLocalFile={(f) => setFiles((prev) => ({ ...prev, [kind]: f }))} canUpload />
+            <DocSlot kind={kind} pickId={`book-kyc-${kind}`} localFile={files[kind]} onLocalFile={(f) => setFiles((prev) => ({ ...prev, [kind]: f }))} canUpload />
             {b2b && (kind === "kyc_aadhaar_front" || kind === "kyc_aadhaar_back") && (
               <div className="text-[10px] text-ink-faint mt-0.5 px-1">Optional for B2B</div>
             )}
@@ -333,6 +337,7 @@ export function LocalDealSheetBlock({ files, setFiles, existingDocs = [], onPrin
       )}
       <DocSlot
         kind="deal_sheet"
+        pickId="book-deal-sheet"
         localFile={files.deal_sheet}
         onLocalFile={(f) => setFiles((prev) => ({ ...prev, deal_sheet: f }))}
         canUpload
@@ -361,6 +366,7 @@ export function LocalOemExtraBlock({ files, setFiles, amount, existingDocs = [],
       )}
       <DocSlot
         kind="oem_extra_support"
+        pickId="book-oem-extra"
         localFile={files.oem_extra_support}
         onLocalFile={(f) => setFiles((prev) => ({ ...prev, oem_extra_support: f }))}
         canUpload

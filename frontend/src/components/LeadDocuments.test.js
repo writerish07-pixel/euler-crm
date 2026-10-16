@@ -36,6 +36,29 @@ test("dealSheetReady is required unless the file or an existing scan is present"
   expect(dealSheetReady({}, [{ kind: "kyc_pan" }])).toMatch(/deal sheet/i);
 });
 
+test("two deal-sheet Camera/File pickers do not share the same input", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <>
+        <LocalDealSheetBlock files={{}} setFiles={() => {}} />
+        <LocalDealSheetBlock files={{}} setFiles={() => {}} />
+      </>,
+    );
+  });
+  const fileInputs = [...host.querySelectorAll('input[type="file"]')].filter((el) => !el.hasAttribute("capture"));
+  const ids = fileInputs.map((el) => el.id);
+  expect(ids.length).toBe(2);
+  expect(new Set(ids).size).toBe(2);
+  const labels = [...host.querySelectorAll('[data-testid="book-deal-sheet-file"]')];
+  expect(labels.length).toBe(2);
+  expect(labels[0].getAttribute("for")).not.toBe(labels[1].getAttribute("for"));
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("deal sheet block offers print then upload", async () => {
   const host = document.createElement("div");
   document.body.appendChild(host);
