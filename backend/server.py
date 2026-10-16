@@ -1687,6 +1687,8 @@ class LeadUnitIn(BaseModel):
     numberPlate: str = ""
     soldDate: Optional[str] = None
     deliveryDate: Optional[str] = None
+    # Pack Cx Demand is per vehicle. Omitted = Price Master net for this unit.
+    cxDemand: Optional[float] = None
 
 
 class AddLeadUnitIn(BaseModel):
@@ -4671,6 +4673,8 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
             (rest[0].get("model") or "").strip().lower() == (unit1["model"] or "").strip().lower()
             and (rest[0].get("variant") or "").strip().lower() == (unit1["variant"] or "").strip().lower()
         ):
+            if ce.num(rest[0].get("cxDemand")) > 0:
+                unit1["cxDemand"] = ce.round2(ce.num(rest[0].get("cxDemand")))
             rest = rest[1:]
         pack_units = [unit1] + rest
         same_order = len(pack_units) > 1
@@ -4718,7 +4722,8 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
         for extra_u in pack_units:
             rec = await _price_unit_from_master(
                 extra_u.get("model"), extra_u.get("variant"), created_date)
-            priced.append({
+            unit_cx = ce.round2(ce.num(extra_u.get("cxDemand")))
+            row = {
                 "sno": len(priced) + 1,
                 "model": extra_u.get("model") or "",
                 "variant": extra_u.get("variant") or "",
@@ -4726,9 +4731,19 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
                 "invoiceNumber": extra_u.get("invoiceNumber") or "",
                 "numberPlate": extra_u.get("numberPlate") or "",
                 **rec,
-            })
+            }
+            if unit_cx > 0:
+                row["cxDemand"] = unit_cx
+                row["budget"] = unit_cx
+                row["useDealPrice"] = True
+            priced.append(row)
+        unit_cxs = [ce.round2(ce.num(u.get("cxDemand"))) for u in priced]
+        if any(x > 0 for x in unit_cxs):
+            cx = ce.round2(sum(unit_cxs))
         deal = await _deal_format_for_pack(priced, cx, created_date, scheme_pass_on)
-        if cx <= 0:
+        if ce.num(deal.get("cxDemand")) > 0:
+            cx = ce.round2(ce.num(deal.get("cxDemand")))
+        elif cx <= 0:
             cx = ce.round2(ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx")))
         patch = {
             "units": priced,
@@ -6422,6 +6437,8 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
 class OwnerFieldIn(BaseModel):
     field: str
     value: Optional[Any] = None
+    # Same-order pack: Cx Demand is per unit. Omit = lead-level field.
+    unitSno: Optional[int] = None
 
 
 OWNER_IDENTITY_FIELDS = {
@@ -6440,6 +6457,34 @@ OWNER_SCHEME_FIELDS = {
 }
 
 
+async def _set_pack_unit_cx_demand(lead_id, unit_sno, value, act):
+    """Write Cx Demand onto one pack unit. Pack total is the sum after recompute."""
+    lead = await get_lead_or_404(lead_id)
+    if not oem_sync.is_same_order_pack(lead):
+        raise HTTPException(422, "unitSno only applies to a same-order pack.")
+    idx, units = _resolve_unit_index(lead, unit_sno)
+    cx = ce.round2(max(0.0, ce.num(value)))
+    old_u = dict(units[idx] or {})
+    u = dict(old_u)
+    u["cxDemand"] = cx
+    u["budget"] = cx
+    u["useDealPrice"] = cx > 0
+    units[idx] = u
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "units": units,
+        "lastUpdated": now_iso(),
+        "lastUpdatedBy": act.get("email", ""),
+    }})
+    await recompute_lead(lead_id)
+    await write_audit(
+        act, "update", "lead-field", leadId=lead_id,
+        old={"unitSno": idx + 1, "cxDemand": old_u.get("cxDemand")},
+        new={"unitSno": idx + 1, "cxDemand": cx})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    return _lead_for_viewer(clean(updated), act)
+
+
 @api.put("/leads/{lead_id}/owner-field")
 async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(actor),
                                _owner=Depends(owner_only)):
@@ -6454,6 +6499,8 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
     value = body.value
     if field in ("budget", "bookingAmount") and value is not None:
         value = ce.round2(max(0.0, ce.num(value)))
+    if field == "budget" and body.unitSno:
+        return await _set_pack_unit_cx_demand(lead_id, body.unitSno, value, act)
     if field in OWNER_IDENTITY_FIELDS:
         return await update_lead(lead_id, LeadUpdateIn(**{field: value}), act, None)
     if field in OWNER_PRICE_FIELDS:
@@ -7407,31 +7454,58 @@ def _unit_specs_from(model, variant, raw_units):
     }
     rest = []
     for u in _normalize_lead_units(raw_units):
-        rest.append({
+        spec = {
             "model": str(u.get("model") or "").strip(),
             "variant": str(u.get("variant") or "").strip(),
             "chassisNumber": u.get("chassisNumber") or "",
             "invoiceNumber": u.get("invoiceNumber") or "",
             "numberPlate": u.get("numberPlate") or "",
-        })
+        }
+        if ce.num(u.get("cxDemand")) > 0:
+            spec["cxDemand"] = ce.round2(ce.num(u.get("cxDemand")))
+        rest.append(spec)
     if rest and (
         rest[0]["model"].lower() == unit1["model"].lower()
         and rest[0]["variant"].lower() == unit1["variant"].lower()
     ):
+        if ce.num(rest[0].get("cxDemand")) > 0:
+            unit1["cxDemand"] = rest[0]["cxDemand"]
         rest = rest[1:]
     specs = [unit1] + rest if (unit1["model"] or unit1["variant"]) else rest
     return [s for s in specs if s.get("model") or s.get("variant")]
 
 
 async def _deal_format_for_pack(unit_specs, cx_demand=0, on=None, scheme_pass_on=None):
-    """Price Master + scheme + TCS per unit, then one pack deal card."""
+    """Price Master + scheme + TCS per unit, then one pack deal card.
+
+    Each spec may carry its own Cx Demand. The pack total is the sum of those
+    unit deals — never one figure dumped onto every sibling.
+    """
     lines = []
+    own_cxs = []
     for spec in unit_specs or []:
+        unit_cx = ce.round2(ce.num((spec or {}).get("cxDemand")))
         line = await _deal_format_for(
-            spec.get("model"), spec.get("variant"), 0, on, scheme_pass_on)
+            spec.get("model"), spec.get("variant"), unit_cx, on, scheme_pass_on)
         line["chassisNumber"] = spec.get("chassisNumber") or ""
+        if unit_cx > 0:
+            line["cxDemand"] = unit_cx
+        own_cxs.append(unit_cx)
         lines.append(line)
-    return ce.sum_deal_formats(lines, cx_demand)
+    if any(x > 0 for x in own_cxs):
+        pack_cx = ce.round2(sum(
+            own_cxs[i] if own_cxs[i] > 0 else ce.num(
+                lines[i].get("cxDemand") or lines[i].get("suggestedCxDemand")
+                or lines[i].get("netToCx"))
+            for i in range(len(lines))
+        ))
+    else:
+        pack_cx = cx_demand
+    out = ce.sum_deal_formats(lines, pack_cx)
+    for i, line in enumerate(out.get("units") or []):
+        if i < len(own_cxs) and own_cxs[i] > 0:
+            line["cxDemand"] = own_cxs[i]
+    return out
 
 
 async def _persist_scheme_pass_on(lead_id, pass_on, as_of=None):
