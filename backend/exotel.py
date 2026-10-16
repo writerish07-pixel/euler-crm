@@ -26,7 +26,9 @@ IST = timezone(timedelta(hours=5, minutes=30))
 SETTINGS_ID = "exotel"
 BRAND = "Akar Euler"
 DEFAULT_SID = "shubhammotors1"
-DEFAULT_SUBDOMAIN = "api.exotel.com"
+DEFAULT_SUBDOMAIN = "api.in.exotel.com"
+SG_API_HOST = "api.exotel.com"
+IN_API_HOST = "api.in.exotel.com"
 DEFAULT_EXOPHONE = "01414937655"
 DEFAULT_QUIET_START = 10
 DEFAULT_QUIET_END = 19
@@ -412,10 +414,28 @@ def exoml_record_then_thanks(cfg: dict) -> str:
     )
 
 
+def _exotel_fail_reason(body, status_code) -> str:
+    if isinstance(body, dict):
+        ex = body.get("RestException") if isinstance(body.get("RestException"), dict) else {}
+        msg = ex.get("Message") or ex.get("message") or body.get("Message") or body.get("raw")
+        if msg:
+            return str(msg).strip()[:220]
+    return f"Exotel HTTP {status_code}"
+
+
+def _api_hosts(cfg: dict) -> list:
+    primary = (cfg.get("subdomain") or DEFAULT_SUBDOMAIN).strip() or DEFAULT_SUBDOMAIN
+    alt = IN_API_HOST if IN_API_HOST not in primary else SG_API_HOST
+    hosts = [primary]
+    if alt not in hosts:
+        hosts.append(alt)
+    return hosts
+
+
 async def _place_call_http(cfg: dict, customer: str, lead_id: str) -> dict:
+    """Connect-to-flow only. Do not send Record/To — those belong to connect-two-numbers."""
     urls = webhook_urls(cfg)
     sid = cfg["accountSid"]
-    url = f"https://{cfg['subdomain']}/v1/Accounts/{sid}/Calls/connect.json"
     data = {
         "From": india_dial(customer),
         "CallerId": cfg["exoPhone"],
@@ -424,29 +444,36 @@ async def _place_call_http(cfg: dict, customer: str, lead_id: str) -> dict:
         "StatusCallbackEvents[0]": "terminal",
         "CustomField": lead_id,
         "CallType": "trans",
-        "Record": "true",
         "TimeLimit": "120",
         "TimeOut": "25",
     }
     auth = (cfg["apiKey"], cfg["apiToken"])
+    last = {"ok": False, "statusCode": 0, "callSid": "", "status": "", "body": {}, "reason": "exotel-no-response"}
     async with httpx.AsyncClient(timeout=20.0) as client:
-        r = await client.post(url, data=data, auth=auth)
-    body = {}
-    try:
-        body = r.json()
-    except Exception:
-        body = {"raw": (r.text or "")[:400]}
-    call = body.get("Call") if isinstance(body, dict) else None
-    if not isinstance(call, dict):
-        call = body if isinstance(body, dict) else {}
-    ok = r.status_code < 400 and bool(call.get("Sid") or call.get("CallSid"))
-    return {
-        "ok": ok,
-        "statusCode": r.status_code,
-        "callSid": call.get("Sid") or call.get("CallSid") or "",
-        "status": call.get("Status") or "",
-        "body": body,
-    }
+        for host in _api_hosts(cfg):
+            url = f"https://{host}/v1/Accounts/{sid}/Calls/connect.json"
+            r = await client.post(url, data=data, auth=auth)
+            body = {}
+            try:
+                body = r.json()
+            except Exception:
+                body = {"raw": (r.text or "")[:400]}
+            call = body.get("Call") if isinstance(body, dict) else None
+            if not isinstance(call, dict):
+                call = body if isinstance(body, dict) else {}
+            ok = r.status_code < 400 and bool(call.get("Sid") or call.get("CallSid"))
+            last = {
+                "ok": ok,
+                "statusCode": r.status_code,
+                "callSid": call.get("Sid") or call.get("CallSid") or "",
+                "status": call.get("Status") or "",
+                "body": body,
+                "reason": "" if ok else _exotel_fail_reason(body, r.status_code),
+                "host": host,
+            }
+            if ok or r.status_code not in (401, 403, 404):
+                break
+    return last
 
 
 def snapshot(lead: dict) -> dict:
@@ -587,7 +614,9 @@ async def place_verify_call(lead_id: str, *, force: bool = False) -> dict:
         "dealVerifyAttemptsToday": today_n,
         "dealVerifyAttemptsDate": today,
         "dealVerifyLastAt": now_iso(),
-        "dealVerifyLastStatus": result.get("status") or ("queued" if result.get("ok") else "failed"),
+        "dealVerifyLastStatus": result.get("status") or (
+            "queued" if result.get("ok") else (result.get("reason") or "failed")
+        ),
         "dealVerifyNextAt": due,
     })
     await _db().deal_verify_calls.insert_one({
@@ -595,12 +624,15 @@ async def place_verify_call(lead_id: str, *, force: bool = False) -> dict:
         "callSid": result.get("callSid") or "",
         "ok": bool(result.get("ok")),
         "statusCode": result.get("statusCode"),
+        "reason": result.get("reason") or "",
+        "host": result.get("host") or "",
         "createdAt": now_iso(),
         "customer": mobile,
     })
     if not result.get("ok"):
-        logger.warning("EXOTEL_CALL_FAILED lead=%s status=%s body=%s",
-                       lead_id, result.get("statusCode"), str(result.get("body"))[:300])
+        logger.warning("EXOTEL_CALL_FAILED lead=%s status=%s reason=%s body=%s",
+                       lead_id, result.get("statusCode"), result.get("reason"),
+                       str(result.get("body"))[:300])
     return {**result, "leadId": lead_id, "attemptsToday": today_n}
 
 
