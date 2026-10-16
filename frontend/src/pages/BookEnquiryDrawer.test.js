@@ -115,7 +115,7 @@ test("executive convert to booking hides OEM scheme offers and pass-on radios", 
   expect(drawer.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
   expect(drawer.querySelector('[data-testid="pass-yes-loyaltyBonus"]')).toBeFalsy();
   expect(drawer.textContent).not.toMatch(/Loyalty Bonus/i);
-  expect(drawer.textContent).not.toMatch(/OEM scheme/i);
+  expect(drawer.querySelector('[data-testid="deal-additional"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
   host.remove();
 });
@@ -128,7 +128,6 @@ test("team leader convert to booking hides OEM scheme offers and pass-on radios"
   expect(drawer.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
   expect(drawer.querySelector('[data-testid="pass-yes-loyaltyBonus"]')).toBeFalsy();
   expect(drawer.textContent).not.toMatch(/Loyalty Bonus/i);
-  expect(drawer.textContent).not.toMatch(/OEM scheme/i);
   await act(async () => { root.unmount(); });
   host.remove();
 });

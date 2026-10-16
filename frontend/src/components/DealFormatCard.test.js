@@ -107,7 +107,7 @@ test("shows OEM scheme available with pass-on radios", async () => {
   host.remove();
 });
 
-test("hideScheme drops OEM scheme, additional and owner-only copy", async () => {
+test("hideScheme drops OEM scheme radios but still shows additional for owner approval", async () => {
   const host = document.createElement("div");
   document.body.appendChild(host);
   const root = createRoot(host);
@@ -129,11 +129,10 @@ test("hideScheme drops OEM scheme, additional and owner-only copy", async () => 
     );
   });
   expect(host.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
-  expect(host.querySelector('[data-testid="deal-additional"]')).toBeFalsy();
-  expect(host.querySelector('[data-testid="deal-owner-only"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="deal-additional"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="deal-owner-only"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="lead-budget"]')).toBeTruthy();
-  expect(host.textContent).toMatch(/Team Leader/i);
-  expect(host.textContent).not.toMatch(/OEM scheme/i);
+  expect(host.textContent).not.toMatch(/Loyalty Bonus/i);
   await act(async () => { root.unmount(); });
   host.remove();
 });
