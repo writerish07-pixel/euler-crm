@@ -441,7 +441,6 @@ async def _place_call_http(cfg: dict, customer: str, lead_id: str) -> dict:
         "CallerId": cfg["exoPhone"],
         "Url": connect_flow_url(cfg),
         "StatusCallback": urls["status"],
-        "StatusCallbackEvents[0]": "terminal",
         "CustomField": lead_id,
         "CallType": "trans",
         "TimeLimit": "120",
