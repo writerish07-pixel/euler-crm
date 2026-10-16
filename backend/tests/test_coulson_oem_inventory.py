@@ -926,6 +926,25 @@ def test_inventory_pages_past_the_old_5000_cap(monkeypatch):
     assert len(rows) == 5600
 
 
+def test_merge_overlays_invoice_onto_sold_tab_chassis():
+    rows = [{
+        "chassis": "MD9EVDAD26K217183",
+        "model": "Turbo", "variant": "Range Maxx",
+        "load_body": "FB", "updated_load_body": "DV220",
+        "_coulsonStatus": "SOLD",
+    }]
+    coulson_client._merge_vehicle_rows(rows, [{
+        "chassis": "MD9EVDAD26K217183",
+        "invoice_number": "AF-122-I26270228",
+        "customer_name": "MessengerSCS",
+        "status": "CREATED",
+    }], "INVOICED")
+    assert len(rows) == 1
+    assert rows[0]["invoice_number"] == "AF-122-I26270228"
+    assert rows[0]["updated_load_body"] == "DV220"
+    assert rows[0]["_coulsonStatus"] == "INVOICED"
+
+
 def test_sold_inventory_merges_vehicle_invoices(monkeypatch):
     """Chassis billed today live on Vehicle Invoices, not only the Sold tab."""
     def fake_get_json(token, path, params=None):

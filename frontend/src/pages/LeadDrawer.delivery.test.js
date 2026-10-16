@@ -109,6 +109,30 @@ test("same-order pack shows S.No. chassis table from OEM Sold", async () => {
   host.remove();
 });
 
+test("blank pack units show the lead model and variant", async () => {
+  mockOemSold.current = { matched: true, chassis: "MD9PACK1" };
+  const { host, root } = await renderDelivery({
+    lead: bookedLead({
+      interestedModel: "Turbo Max",
+      variant: "Maxx (DV220)",
+      sameOrderMultiUnit: true,
+      vehicleCount: 3,
+      units: [
+        { sno: 1, model: "Turbo Max", variant: "Maxx (DV220)", chassisNumber: "MD9A" },
+        { sno: 6, model: "", variant: "", chassisNumber: "MD9J217750" },
+        { sno: 7, model: "", variant: "", chassisNumber: "MD9K217101" },
+      ],
+    }),
+  });
+  const row6 = host.querySelector('[data-testid="delivery-unit-row-2"]');
+  const row7 = host.querySelector('[data-testid="delivery-unit-row-3"]');
+  expect(row6.textContent).toMatch(/Turbo Max/);
+  expect(row6.textContent).toMatch(/Maxx \(DV220\)/);
+  expect(row7.textContent).toMatch(/Maxx \(DV220\)/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("OEM Sold match fills chassis without typing", async () => {
   mockOemSold.current = {
     matched: true,

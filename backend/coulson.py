@@ -479,17 +479,36 @@ def _vehicle_key(v):
 
 
 def _merge_vehicle_rows(rows, chunk, status=""):
-    seen = {_vehicle_key(v) for v in rows if _vehicle_key(v)}
+    by_key = {}
+    for i, v in enumerate(rows):
+        k = _vehicle_key(v)
+        if k:
+            by_key[k] = i
     for v in chunk or []:
         if not isinstance(v, dict):
             continue
         key = _vehicle_key(v)
-        if not key or key in seen:
+        if not key:
             continue
-        seen.add(key)
         row = dict(v)
         if status:
             row["_coulsonStatus"] = row.get("_coulsonStatus") or status
+        if key in by_key:
+            dst = rows[by_key[key]]
+            _copy_model_fields(dst, row)
+            if row.get("updated_load_body"):
+                dst["updated_load_body"] = row["updated_load_body"]
+            for k in (
+                "invoice_number", "invoiceNumber", "customer_name", "customer_phone",
+                "customer_mobile", "registration_number", "invoice_creation_ts", "date",
+            ):
+                if row.get(k) not in (None, "") and (
+                        status == "INVOICED" or dst.get(k) in (None, "")):
+                    dst[k] = row[k]
+            if status == "INVOICED":
+                dst["_coulsonStatus"] = "INVOICED"
+            continue
+        by_key[key] = len(rows)
         rows.append(row)
     return rows
 

@@ -656,6 +656,72 @@ def test_sold_body_fields_maps_catalog_sku():
     })
 
 
+def test_sold_body_fields_converts_fb_when_updated_load_body_is_dv():
+    row = {
+        "model": "Turbo Max", "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+        "updatedLoadBody": "DV220",
+    }
+    fields = oem_sync.sold_body_fields(row)
+    assert fields["variant"] == "Maxx (DV220)"
+    assert fields["bodyType"] == "DV220"
+    assert fields["oemSkuKey"] == "turbo.maxx.dv220"
+
+
+def test_sku_for_sold_vehicle_prefers_converted_load_body():
+    oem_by_id = {
+        "oem-maxx-fb": {
+            "id": "oem-maxx-fb", "model": "Turbo", "variant": "Range Maxx",
+            "load_body": "FB", "sap_product_name": "TURBO RANGEMAXX FB",
+        },
+    }
+    sku = oem_sync.sku_for_sold_vehicle({
+        "model": "Turbo", "variant": "Range Maxx",
+        "load_body": "FB", "updated_load_body": "DV220",
+        "sap_vehicle_model_id": "oem-maxx-fb",
+        "sap_product_name": "TURBO RANGEMAXX FB",
+    }, oem_by_id)
+    assert sku and sku.key == "turbo.maxx.dv220"
+
+
+def test_fill_lead_skus_single_unit_fb_to_dv():
+    lead = {
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "chassisNumber": "MD9SOLO01",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+    }
+    sold = [{
+        "chassis": "MD9SOLO01", "model": "Turbo Max", "variant": "Maxx (FB)",
+        "oemSkuKey": "turbo.maxx.fb", "updatedLoadBody": "DV220",
+    }]
+    patch = oem_sync.fill_lead_skus(lead, sold)
+    assert patch["interestedModel"] == "Turbo Max"
+    assert patch["variant"] == "Maxx (DV220)"
+    assert patch["originalVariant"] == "Maxx (FB)"
+    assert patch.get("oemBodyMismatch") is False
+
+
+def test_fill_pack_unit_skus_blank_and_fb_to_dv():
+    lead = {
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9A", "model": "Turbo Max", "variant": "Maxx (DV220)"},
+            {"sno": 6, "chassisNumber": "MD9J217750", "model": "", "variant": ""},
+            {"sno": 7, "chassisNumber": "MD9K217101", "model": "Turbo Max", "variant": "Maxx (FB)"},
+        ],
+    }
+    sold = [
+        {"chassis": "MD9J217750", "model": "Turbo Max", "variant": "Maxx (FB)",
+         "oemSkuKey": "turbo.maxx.fb"},
+        {"chassis": "MD9K217101", "model": "Turbo Max", "variant": "Maxx (FB)",
+         "oemSkuKey": "turbo.maxx.fb", "updatedLoadBody": "DV220"},
+    ]
+    units = oem_sync.fill_pack_unit_skus(lead, sold)
+    assert units[1]["model"] == "Turbo Max"
+    assert units[1]["variant"] == "Maxx (DV220)"
+    assert units[2]["variant"] == "Maxx (DV220)"
+    assert units[2]["originalVariant"] == "Maxx (FB)"
+
+
 @pytest.mark.asyncio
 async def test_sold_sync_adopts_fb_to_dv_on_active_file(client):
     mobile = "9811100221"
@@ -702,16 +768,57 @@ async def test_sold_sync_mismatch_only_after_delivered(client):
         "oemSkuKey": "turbo.maxx.dv220", "coulsonStatus": "SOLD",
     })
     stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
-    assert stats["bodyMismatch"] == 1
+    assert stats["bodyAdopted"] == 0
     lead = await server.db.leads.find_one({"leadId": "LD-BODY-MISMATCH"})
-    assert lead["variant"] == "Maxx (FB)"
-    assert lead["oemBodyMismatch"] is True
+    assert lead["variant"] == "Maxx (DV220)"
+    assert lead["originalVariant"] == "Maxx (FB)"
+    assert lead.get("oemBodyMismatch") is False
     assert lead["oemBilledVariant"] == "Maxx (DV220)"
     accept = await client.post("/api/leads/LD-BODY-MISMATCH/adopt-oem-body")
     assert accept.status_code == 200, accept.text
     lead = await server.db.leads.find_one({"leadId": "LD-BODY-MISMATCH"})
     assert lead["variant"] == "Maxx (DV220)"
     assert lead.get("oemBodyMismatch") is False
+
+
+@pytest.mark.asyncio
+async def test_sold_sync_fills_delivered_pack_blank_units_as_dv(client):
+    mobile = "8980143558"
+    lid = "LD-PACK-FB-DV"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.oem_sold.delete_many({"mobile": mobile})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "MessengerSCS", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-10",
+        "sameOrderMultiUnit": True, "chassisNumber": "MD9PACKDV01",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9PACKDV01", "model": "Turbo Max",
+             "variant": "Maxx (DV220)"},
+            {"sno": 6, "chassisNumber": "MD9PACKFB06", "model": "", "variant": ""},
+            {"sno": 7, "chassisNumber": "MD9PACKFB07", "model": "Turbo Max",
+             "variant": "Maxx (FB)"},
+        ],
+    })
+    await server.db.oem_sold.insert_many([
+        {"chassis": "MD9PACKDV01", "mobile": mobile, "invoiceNumber": "INV-1",
+         "model": "Turbo Max", "variant": "Maxx (DV220)", "oemSkuKey": "turbo.maxx.dv220",
+         "coulsonStatus": "SOLD"},
+        {"chassis": "MD9PACKFB06", "mobile": mobile, "invoiceNumber": "INV-6",
+         "model": "Turbo Max", "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+         "coulsonStatus": "SOLD"},
+        {"chassis": "MD9PACKFB07", "mobile": mobile, "invoiceNumber": "INV-7",
+         "model": "Turbo Max", "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+         "updatedLoadBody": "DV220", "coulsonStatus": "SOLD"},
+    ])
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["bodyUnitsFilled"] >= 1
+    lead = await server.db.leads.find_one({"leadId": lid})
+    by_ch = {oem_sync._norm_chassis(u.get("chassisNumber")): u for u in lead["units"]}
+    assert by_ch["MD9PACKFB06"]["variant"] == "Maxx (DV220)"
+    assert by_ch["MD9PACKFB07"]["variant"] == "Maxx (DV220)"
+    assert lead["variant"] == "Maxx (DV220)"
 
 
 @pytest.mark.asyncio
