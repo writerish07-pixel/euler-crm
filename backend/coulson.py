@@ -25,7 +25,15 @@ log = logging.getLogger("coulson")
 DEFAULT_AUTH_URL = "https://euler-auth.eulerlogistics.com/api/v1"
 DEFAULT_API_URL = "https://coulson.eulerlogistics.com/api/v1"
 APP_NAME = "coulson"
-TIMEOUT = 25
+# Login / session ping must stay short so Settings Save cannot freeze the desk.
+LOGIN_TIMEOUT = 25
+# Yard, Sold, Vehicle Invoices and claims page Coulson slowly. 25s cut the
+# Sold pull mid-page after today's billed list grew, then OEM Billing kept
+# yesterday's chassis.
+DATA_TIMEOUT = 90
+TIMEOUT = LOGIN_TIMEOUT
+INVENTORY_PAGE = 200
+INVENTORY_MAX_ROWS = 20000
 
 
 class CoulsonError(Exception):
@@ -96,7 +104,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _no_redirect_opener = urllib.request.build_opener(_NoRedirect)
 
 
-def _request(url, method="GET", headers=None, body=None, follow_redirects=True):
+def _request(url, method="GET", headers=None, body=None, follow_redirects=True,
+             timeout=None):
     hdrs = {"Accept": "application/json"}
     if headers:
         hdrs.update(headers)
@@ -108,8 +117,9 @@ def _request(url, method="GET", headers=None, body=None, follow_redirects=True):
         data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     opener = urllib.request.urlopen if follow_redirects else _no_redirect_opener.open
+    seconds = DATA_TIMEOUT if timeout is None else timeout
     try:
-        with opener(req, timeout=TIMEOUT) as resp:
+        with opener(req, timeout=seconds) as resp:
             raw = resp.read()
             status = getattr(resp, "status", 200)
     except urllib.error.HTTPError as e:
@@ -117,6 +127,8 @@ def _request(url, method="GET", headers=None, body=None, follow_redirects=True):
         raise CoulsonError(_message_from_body(raw) or e.reason or str(e), status=e.code) from e
     except urllib.error.URLError as e:
         raise CoulsonError(f"Coulson unreachable: {e.reason}") from e
+    except TimeoutError as e:
+        raise CoulsonError(f"Coulson timed out after {seconds}s") from e
     try:
         parsed = json.loads(raw.decode() or "{}")
     except json.JSONDecodeError:
@@ -173,7 +185,7 @@ def login(username: str, password: str) -> str:
     url = f"{auth_url()}/login"
     headers = login_headers(username, password)
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=False) as client:
+        with httpx.Client(timeout=LOGIN_TIMEOUT, follow_redirects=False) as client:
             # No content=/json=/data= — a body-less POST, like `new Request(..., {method:"POST"})`.
             resp = client.post(url, headers=headers)
     except httpx.RequestError as e:
@@ -308,89 +320,180 @@ def fetch_sap_models(token: str):
     return data if isinstance(data, list) else []
 
 
-def fetch_inventory_by_status(token: str, vehicle_status: str, limit=200):
-    """Paginated vehicle-inventory/transfer for one Coulson vehicle_status."""
+def _page_rows(token: str, path: str, params: Optional[dict] = None, *,
+               limit=INVENTORY_PAGE, max_rows=INVENTORY_MAX_ROWS, meta=None):
+    """Walk `{success, data[], extras.total_count}`. Keep earlier pages if a later page fails."""
     offset = 0
     rows = []
     total = None
-    status = str(vehicle_status or "").strip() or "PRESENT"
-    while True:
-        payload = get_json(token, "vehicle-inventory/transfer", {
-            "view_type": "table",
-            "sort": json.dumps(["created_at", "DESC"]),
-            "limit": str(limit),
-            "offset": str(offset),
-            "vehicle_status": status,
-        })
+    last_error = None
+    base = dict(params or {})
+    while offset < max_rows:
+        page = {**base, "limit": str(limit), "offset": str(offset)}
+        try:
+            payload = get_json(token, path, page)
+        except CoulsonError as e:
+            last_error = e
+            log.warning("Coulson %s offset=%s failed: %s", path, offset, e)
+            break
         chunk = payload.get("data") or []
         if not isinstance(chunk, list):
             chunk = []
-        rows.extend(chunk)
+        rows.extend(r for r in chunk if r)
         extras = payload.get("extras") or {}
-        total = extras.get("total_count", total)
-        if not chunk or (total is not None and len(rows) >= int(total)) or len(chunk) < limit:
+        got = extras.get("total_count")
+        if got is not None:
+            try:
+                total = int(got)
+            except (TypeError, ValueError):
+                pass
+        if not chunk or len(chunk) < limit:
+            break
+        if total is not None and len(rows) >= total:
             break
         offset += limit
-        if offset > 5000:
-            break
+    if meta is not None:
+        meta["total"] = total
+        meta["complete"] = last_error is None
+    if not rows and last_error:
+        raise last_error
     return rows
 
 
-def fetch_present_inventory(token: str, limit=200):
+def fetch_inventory_by_status(token: str, vehicle_status: str, limit=INVENTORY_PAGE,
+                              sort=None, meta=None):
+    """Paginated vehicle-inventory/transfer for one Coulson vehicle_status."""
+    status = str(vehicle_status or "").strip() or "PRESENT"
+    return _page_rows(token, "vehicle-inventory/transfer", {
+        "view_type": "table",
+        "sort": sort or json.dumps(["created_at", "DESC"]),
+        "vehicle_status": status,
+    }, limit=limit, meta=meta)
+
+
+def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
     """Yard stock currently PRESENT at the logged-in dealer."""
     return fetch_inventory_by_status(token, "PRESENT", limit=limit)
 
 
-# Billed vehicles leave PRESENT immediately. The dealer Sold tab is the same
-# inventory API with vehicle_status=SOLD (Coulson SPA: Present / In Transit / Sold).
+# Billed vehicles leave PRESENT immediately. The dealer Sold tab is
+# vehicle-inventory/transfer?vehicle_status=SOLD. Chassis billed today also
+# land on Vehicle Invoices (`#/dealer-inventory-list`) before Sold catches up.
 SOLD_INVENTORY_STATUSES = ("SOLD",)
 TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT", "IN TRANSIT", "TRANSIT")
+VEHICLE_INVOICE_PATHS = (
+    "vehicle-invoices",
+    "vehicle-invoice",
+    "dealer-inventory-list",
+    "dealer-inventory",
+    "vehicle-inventory/invoices",
+    "invoices",
+)
+_INVOICE_SORTS = (
+    json.dumps(["date", "DESC"]),
+    json.dumps(["invoice_date", "DESC"]),
+    json.dumps(["created_at", "DESC"]),
+)
 
 
-def fetch_transit_inventory(token: str, limit=200):
+def _vehicle_key(v):
+    if not isinstance(v, dict):
+        return ""
+    return (
+        str(v.get("chassis") or v.get("chassis_number") or v.get("chassisNumber")
+            or v.get("vin") or "").strip().upper()
+        or str(v.get("id") or v.get("vehicle_id") or "")
+    )
+
+
+def _merge_vehicle_rows(rows, chunk, status=""):
+    seen = {_vehicle_key(v) for v in rows if _vehicle_key(v)}
+    for v in chunk or []:
+        if not isinstance(v, dict):
+            continue
+        key = _vehicle_key(v)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        row = dict(v)
+        if status:
+            row["_coulsonStatus"] = row.get("_coulsonStatus") or status
+        rows.append(row)
+    return rows
+
+
+def fetch_transit_inventory(token: str, limit=INVENTORY_PAGE):
     """Vehicles on the way to the dealer — Coulson In Transit tab."""
     rows = []
-    seen = set()
     for status in TRANSIT_INVENTORY_STATUSES:
         try:
             chunk = fetch_inventory_by_status(token, status, limit=limit)
         except CoulsonError as e:
             log.info("Coulson %s inventory skipped: %s", status, e)
             continue
-        for v in chunk or []:
-            key = str((v or {}).get("vin") or (v or {}).get("chassis") or (v or {}).get("id") or "")
-            if key and key in seen:
-                continue
-            if key:
-                seen.add(key)
-            if v:
-                rows.append(v)
+        _merge_vehicle_rows(rows, chunk, status)
     return rows
 
 
-def fetch_sold_inventory(token: str, limit=200):
-    """Vehicles billed / sold at this dealer — no longer in the yard list."""
-    rows = []
-    seen = set()
+def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
+    """Coulson Vehicle Invoices SPA (`#/dealer-inventory-list`).
+
+    Billed-today chassis (16 Oct 2026 on the dealer site) appear here even when
+    the Sold tab still shows yesterday. 404 on a guessed path is not fatal —
+    the Sold pull remains the fallback. A timeout on one path must not walk
+    every remaining guess at DATA_TIMEOUT each.
+    """
+    last_error = None
+    for path in VEHICLE_INVOICE_PATHS:
+        for sort in _INVOICE_SORTS:
+            try:
+                chunk = _page_rows(token, path, {
+                    "view_type": "table",
+                    "sort": sort,
+                }, limit=limit)
+            except CoulsonError as e:
+                last_error = e
+                if e.status in (404, 405, 400):
+                    break
+                log.info("Coulson vehicle invoices %s failed: %s", path, e)
+                return []
+            if chunk:
+                return _merge_vehicle_rows([], chunk, "INVOICED")
+    if last_error and last_error.status not in (404, 405, 400):
+        log.info("Coulson vehicle invoices empty: %s", last_error)
+    return []
+
+
+class _SoldPull(list):
+    """List of Sold/invoice rows plus whether the Sold tab was fully paged."""
+    complete = True
+
+
+def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
+    """Vehicles billed / sold — Sold tab PLUS Vehicle Invoices."""
+    rows = _SoldPull()
+    errors = []
+    complete = True
     for status in SOLD_INVENTORY_STATUSES:
+        meta = {}
         try:
-            chunk = fetch_inventory_by_status(token, status, limit=limit)
+            chunk = fetch_inventory_by_status(token, status, limit=limit, meta=meta)
         except CoulsonError as e:
             log.info("Coulson %s inventory skipped: %s", status, e)
+            errors.append(e)
+            complete = False
             continue
-        for v in chunk or []:
-            if not isinstance(v, dict):
-                continue
-            key = (
-                str(v.get("chassis") or v.get("chassis_number") or "").strip().upper()
-                or str(v.get("id") or v.get("vehicle_id") or "")
-            )
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            row = dict(v)
-            row["_coulsonStatus"] = status
-            rows.append(row)
+        _merge_vehicle_rows(rows, chunk, status)
+        if meta.get("complete") is False:
+            complete = False
+    try:
+        _merge_vehicle_rows(rows, fetch_vehicle_invoices(token, limit=limit), "INVOICED")
+    except CoulsonError as e:
+        log.info("Coulson vehicle invoices skipped: %s", e)
+        errors.append(e)
+    if not rows and errors:
+        raise errors[0]
+    rows.complete = complete
     return rows
 
 
@@ -553,7 +656,7 @@ CLAIM_STATUSES = (
 )
 
 
-def fetch_debit_notes(token: str, *, status: str = "", limit=100, max_rows=5000):
+def fetch_debit_notes(token: str, *, status: str = "", limit=100, max_rows=INVENTORY_MAX_ROWS):
     """Page through the Claim Settlements List. Returns (rows, total_count).
 
     Same envelope as vehicle-inventory/transfer — {success, data[], extras.total_count}
@@ -564,31 +667,10 @@ def fetch_debit_notes(token: str, *, status: str = "", limit=100, max_rows=5000)
     caller de-duplicates by id, which makes a wrong guess cost a wasted call rather than
     a wrong mirror.
     """
-    offset = 0
-    rows, total = [], None
-    while True:
-        params = {"limit": str(limit), "offset": str(offset)}
-        if status:
-            params["status"] = status
-        payload = get_json(token, CLAIM_LIST_PATH, params)
-        chunk = payload.get("data") or []
-        if not isinstance(chunk, list):
-            chunk = []
-        rows.extend(r for r in chunk if isinstance(r, dict))
-        got = (payload.get("extras") or {}).get("total_count")
-        if got is not None:
-            try:
-                total = int(got)
-            except (TypeError, ValueError):
-                pass
-        if not chunk or len(chunk) < limit:
-            break
-        if total is not None and len(rows) >= total:
-            break
-        offset += limit
-        if offset >= max_rows:
-            break
-    return rows, total
+    params = {"status": status} if status else {}
+    meta = {}
+    rows = _page_rows(token, CLAIM_LIST_PATH, params, limit=limit, max_rows=max_rows, meta=meta)
+    return rows, meta.get("total")
 
 
 def fetch_allowed_showrooms(token: str):

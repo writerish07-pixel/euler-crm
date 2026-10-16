@@ -140,19 +140,19 @@ describe("bulk mutations", () => {
     expect(isSlowOemBillingPath("/leads")).toBe(false);
   });
 
-  test("GET /oem-billing uses a 120s timeout", async () => {
+  test("GET /oem-billing uses a 180s timeout", async () => {
     const spy = jest.spyOn(api, "get").mockResolvedValue({ data: { rows: [] } });
     await get("/oem-billing");
-    expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 120000 }));
+    expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 180000 }));
     spy.mockRestore();
   });
 
-  test("POST /oem-billing/sync uses a 120s timeout and does not retry", async () => {
+  test("POST /oem-billing/sync uses a 180s timeout and does not retry", async () => {
     const err = Object.assign(new Error("Network Error"), { code: "ERR_NETWORK" });
     const spy = jest.spyOn(api, "post").mockRejectedValue(err);
     await expect(post("/oem-billing/sync", {})).rejects.toBe(err);
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0][2]).toEqual({ timeout: 120000 });
+    expect(spy.mock.calls[0][2]).toEqual({ timeout: 180000 });
   });
 
   test("create lead does not retry a dropped connection", async () => {

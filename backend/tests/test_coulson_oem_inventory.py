@@ -835,3 +835,146 @@ async def test_expired_session_renews_with_saved_password(client, monkeypatch):
     stored = await server.db["system"].find_one({"_id": "coulson"})
     assert stored.get("sessionToken") == renewed
 
+
+def test_data_timeout_is_longer_than_login():
+    assert coulson_client.LOGIN_TIMEOUT == 25
+    assert coulson_client.DATA_TIMEOUT >= 90
+    assert coulson_client.INVENTORY_MAX_ROWS > 5000
+
+
+def test_timeouterror_becomes_coulson_error(monkeypatch):
+    def boom(*a, **k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(coulson_client.urllib.request, "urlopen", boom)
+    with pytest.raises(coulson_client.CoulsonError, match="timed out"):
+        coulson_client.get_json("tok", "sap-vehicle-models")
+
+
+def test_inventory_keeps_first_page_when_later_page_fails(monkeypatch):
+    def fake_get_json(token, path, params=None):
+        offset = int((params or {}).get("offset") or 0)
+        if offset == 0:
+            return {"success": True, "data": [{"chassis": "MD9PAGE1"}],
+                    "extras": {"total_count": 400}}
+        raise coulson_client.CoulsonError("Coulson timed out after 90s")
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_inventory_by_status("tok", "SOLD", limit=1)
+    assert [r["chassis"] for r in rows] == ["MD9PAGE1"]
+
+
+def test_inventory_pages_past_the_old_5000_cap(monkeypatch):
+    def fake_get_json(token, path, params=None):
+        offset = int((params or {}).get("offset") or 0)
+        limit = int((params or {}).get("limit") or 200)
+        if offset >= 5600:
+            return {"success": True, "data": [], "extras": {"total_count": 5600}}
+        chunk = [{"chassis": f"MD9P{offset + i:05d}"} for i in range(limit)]
+        return {"success": True, "data": chunk, "extras": {"total_count": 5600}}
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_inventory_by_status("tok", "SOLD", limit=200)
+    assert len(rows) == 5600
+
+
+def test_sold_inventory_merges_vehicle_invoices(monkeypatch):
+    """Chassis billed today live on Vehicle Invoices, not only the Sold tab."""
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            return {"success": True, "data": [{
+                "chassis": "MD9EVDAD26J17964",
+                "customer_name": "Nanag Ram Prajapat",
+                "invoice_number": "AF-122-I26278215",
+                "created_at": "2026-10-15",
+            }], "extras": {"total_count": 1}}
+        if path == "vehicle-invoices":
+            return {"success": True, "data": [{
+                "chassis": "MD9EVDAD26K217428",
+                "registration_number": "EMCS-8598",
+                "customer_name": "RADHE RADHE PLASTIC",
+                "customer_phone": "9352347959",
+                "date": "16 Oct 2026",
+                "invoice_number": "AF-TODAY-1",
+            }], "extras": {"total_count": 1}}
+        raise coulson_client.CoulsonError("not found", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok", limit=200)
+    chassis = {r["chassis"] for r in rows}
+    assert "MD9EVDAD26J17964" in chassis
+    assert "MD9EVDAD26K217428" in chassis
+    today = next(r for r in rows if r["chassis"] == "MD9EVDAD26K217428")
+    assert today["_coulsonStatus"] == "INVOICED"
+    assert oem_sync.vehicle_sold_date(today) == "2026-10-16"
+    assert oem_sync.vehicle_mobile(today) == "9352347959"
+
+
+def test_sold_inventory_reraises_when_every_source_fails(monkeypatch):
+    def boom(token, path, params=None):
+        raise coulson_client.CoulsonError("Coulson timed out after 90s")
+
+    monkeypatch.setattr(coulson_client, "get_json", boom)
+    with pytest.raises(coulson_client.CoulsonError, match="timed out"):
+        coulson_client.fetch_sold_inventory("tok")
+
+
+def test_vehicle_invoices_404_is_not_fatal(monkeypatch):
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            return {"success": True, "data": [{"chassis": "MD9SOLDONLY01"}],
+                    "extras": {"total_count": 1}}
+        raise coulson_client.CoulsonError("nope", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok")
+    assert [r["chassis"] for r in rows] == ["MD9SOLDONLY01"]
+
+
+@pytest.mark.asyncio
+async def test_sync_empty_sold_does_not_wipe_oem_sold(client, monkeypatch):
+    chassis = "MD9SYNCKEEP01"
+    await server.db.oem_sold.delete_many({})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "9811100777", "invoiceNumber": "CINV-KEEP2",
+        "model": "Turbo Max", "variant": "Maxx (PV)", "coulsonStatus": "SOLD",
+    })
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
+    r = await client.post("/api/integrations/coulson/sync")
+    assert r.status_code == 200, r.text
+    row = await server.db.oem_sold.find_one({"chassis": chassis})
+    assert row is not None
+    assert row["invoiceNumber"] == "CINV-KEEP2"
+
+
+@pytest.mark.asyncio
+async def test_short_invoice_pull_upserts_today_without_wiping(client):
+    """Vehicle Invoices (234 billed) must add today's chassis onto yesterday's Sold list."""
+    await server.db.oem_sold.delete_many({})
+    await server.db.oem_sold.insert_many([
+        {"chassis": "MD9EVDAD26J17964", "mobile": "9602689086",
+         "invoiceNumber": "AF-OLD", "soldDate": "2026-10-15", "coulsonStatus": "SOLD"},
+        {"chassis": "MD9EVDAD26J17194", "mobile": "9929968641",
+         "invoiceNumber": "AF-OLD2", "soldDate": "2026-10-11", "coulsonStatus": "SOLD"},
+    ])
+    n = await oem_sync.replace_sold_inventory(server.db, [{
+        "chassis": "MD9EVDAD26K217428",
+        "customer_name": "RADHE RADHE PLASTIC",
+        "customer_phone": "9352347959",
+        "invoice_number": "AF-TODAY-1",
+        "date": "16 Oct 2026",
+        "_coulsonStatus": "INVOICED",
+    }], {}, {}, complete=False)
+    assert n == 3
+    today = await server.db.oem_sold.find_one({"chassis": "MD9EVDAD26K217428"})
+    assert today["soldDate"] == "2026-10-16"
+    assert today["mobile"] == "9352347959"
+    assert today["invoiceNumber"] == "AF-TODAY-1"
+    kept = await server.db.oem_sold.find_one({"chassis": "MD9EVDAD26J17964"})
+    assert kept["invoiceNumber"] == "AF-OLD"
+
