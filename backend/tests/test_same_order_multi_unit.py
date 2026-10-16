@@ -80,6 +80,44 @@ def test_volume_slice_counts_vehicles_not_just_leads():
     assert out["deliveries"] == 5
 
 
+def test_volume_slice_counts_each_unit_delivery_month():
+    """Messenger-style pack: Sept billed units stay in Sept, Oct units in Oct."""
+    sept = periodmod.parse_period(month="2026-09")
+    octb = periodmod.parse_period(month="2026-10")
+    pack = {
+        "createdDate": "2026-09-02", "bookingDate": "2026-09-03",
+        "deliveryDate": "2026-10-16", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "accountStatus": "Active",
+        "sameOrderMultiUnit": True,
+        "units": (
+            [{"model": "Turbo Max", "soldDate": "2026-09-15", "deliveryDate": "2026-09-15"}
+             for _ in range(5)]
+            + [{"model": "Turbo Max", "soldDate": "2026-10-16", "deliveryDate": "2026-10-16"}
+               for _ in range(3)]
+        ),
+    }
+    assert server._volume_slice([pack], [], sept, [])["deliveries"] == 5
+    assert server._volume_slice([pack], [], octb, [])["deliveries"] == 3
+
+
+def test_volume_slice_uses_sold_date_when_unit_delivery_missing():
+    """OEM auto-deliver may only stamp billed (sold) date on each unit."""
+    sept = periodmod.parse_period(month="2026-09")
+    octb = periodmod.parse_period(month="2026-10")
+    pack = {
+        "createdDate": "2026-09-02", "bookingDate": "2026-09-03",
+        "deliveryDate": "2026-10-16", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "accountStatus": "Active",
+        "sameOrderMultiUnit": True,
+        "units": (
+            [{"model": "Turbo Max", "soldDate": "2026-09-15"} for _ in range(5)]
+            + [{"model": "Turbo Max", "soldDate": "2026-10-16"} for _ in range(3)]
+        ),
+    }
+    assert server._volume_slice([pack], [], sept, [])["deliveries"] == 5
+    assert server._volume_slice([pack], [], octb, [])["deliveries"] == 3
+
+
 @pytest.mark.asyncio
 async def test_same_order_create_one_lead_many_units(client):
     mobile = "9813300111"
@@ -1431,3 +1469,35 @@ async def test_billed_date_switches_scheme_month(client):
     assert rules.json().get("asOf") == "2026-09-15"
     u1 = await client.get(f"/api/leads/{lid}/scheme-rules", params={"unit": 1})
     assert u1.json().get("asOf") == "2026-10-03"
+
+
+@pytest.mark.asyncio
+async def test_unit_delivery_date_splits_monthly_volume(client):
+    lid = "LD-DELIV-SPLIT"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Split Delivery", "mobile": "9813301888",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-16",
+        "bookingDate": "2026-09-03",
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "soldDate": "2026-09-15"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "soldDate": "2026-10-16"},
+        ],
+    })
+    r = await client.put(f"/api/leads/{lid}/units/1/delivery-date",
+                         json={"deliveryDate": "2026-09-15"})
+    assert r.status_code == 200, r.text
+    units = r.json().get("units") or []
+    assert units[0].get("deliveryDate") == "2026-09-15"
+    assert units[1].get("soldDate") == "2026-10-16"
+    lead = await server.db.leads.find_one({"leadId": lid})
+    sept = periodmod.parse_period(month="2026-09")
+    octb = periodmod.parse_period(month="2026-10")
+    assert server._delivered_vehicle_count_in_period(lead, sept) == 1
+    assert server._delivered_vehicle_count_in_period(lead, octb) == 1
+    assert str(lead.get("deliveryDate") or "")[:10] == "2026-10-16"

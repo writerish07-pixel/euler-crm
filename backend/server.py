@@ -692,12 +692,22 @@ async def _apply_sold_vehicle_ids():
 
 
 def _sold_date_for_lead(lead, sold_rows):
+    held = set(oem_sync.lead_chassis_list(lead) or [])
     ch = oem_sync._norm_chassis((lead or {}).get("chassisNumber"))
+    if ch:
+        held.add(ch)
+    dates = []
     for row in sold_rows or []:
-        if oem_sync._norm_chassis((row or {}).get("chassis")) == ch:
-            d = str((row or {}).get("soldDate") or "")[:10]
-            if d:
+        row_ch = oem_sync._norm_chassis((row or {}).get("chassis"))
+        if held and row_ch not in held:
+            continue
+        d = str((row or {}).get("soldDate") or "")[:10]
+        if d:
+            dates.append(d)
+            if row_ch == ch:
                 return d
+    if dates:
+        return max(dates)
     return today()
 
 
@@ -774,11 +784,41 @@ async def _auto_deliver_oem_sold_leads():
     return count
 
 
+def _stamp_unit_delivery_dates(lead, sold_rows=None, default_date=""):
+    """Give each pack unit its own delivery date (OEM billed date when known)."""
+    default_date = _iso_day(default_date) or today()
+    units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    by_ch = {}
+    for row in sold_rows or []:
+        ch = oem_sync._norm_chassis((row or {}).get("chassis"))
+        if ch:
+            by_ch[ch] = row
+    dates = []
+    out = []
+    for u in units:
+        rec = dict(u)
+        ch = oem_sync._norm_chassis(rec.get("chassisNumber"))
+        row = by_ch.get(ch) if ch else None
+        d = (
+            _iso_day(rec.get("deliveryDate"))
+            or _iso_day((row or {}).get("soldDate"))
+            or _iso_day(rec.get("soldDate"))
+            or default_date
+        )
+        rec["deliveryDate"] = d
+        if not _iso_day(rec.get("soldDate")) and _iso_day((row or {}).get("soldDate")):
+            rec["soldDate"] = _iso_day((row or {}).get("soldDate"))
+        dates.append(d)
+        out.append(rec)
+    return out, (max(dates) if dates else default_date)
+
+
 async def _mark_oem_auto_delivered(lead, sold_rows=None):
     lid = (lead or {}).get("leadId")
     if not lid:
         return
     sold_date = _sold_date_for_lead(lead, sold_rows)
+    unit_docs, sold_date = _stamp_unit_delivery_dates(lead, sold_rows, sold_date)
     updates = {}
     if oem_sync._lead_is_cancelled(lead):
         updates.update(_revive_updates(lead, anchor=sold_date or today(),
@@ -798,6 +838,11 @@ async def _mark_oem_auto_delivered(lead, sold_rows=None):
     if ((lead or {}).get("oemBillingCreated")
             and not str((lead or {}).get("bookingDate") or "").strip()):
         updates["bookingDate"] = sold_date or today()
+    if unit_docs:
+        updates["units"] = unit_docs
+        updates["vehicleCount"] = max(len(unit_docs), 1)
+        if len(unit_docs) > 1:
+            updates["sameOrderMultiUnit"] = True
     await db.leads.update_one(
         {"leadId": lid},
         {"$set": updates, "$unset": {"oemInvoiceMissing": ""}})
@@ -934,9 +979,14 @@ def _merge_delivery_units(existing, sold_units, lead=None):
             unit["invoiceNumber"] = pick.get("invoiceNumber")
         if pick.get("numberPlate"):
             unit["numberPlate"] = pick.get("numberPlate")
+        if pick.get("soldDate") and not unit.get("soldDate"):
+            unit["soldDate"] = str(pick.get("soldDate") or "")[:10]
+        if pick.get("deliveryDate") and not unit.get("deliveryDate"):
+            unit["deliveryDate"] = str(pick.get("deliveryDate") or "")[:10]
         if not unit.get("model"):
             unit["model"] = pick.get("model") or (lead or {}).get("interestedModel") or ""
             unit["variant"] = pick.get("variant") or (lead or {}).get("variant") or ""
+        oem_sync.stamp_available_billed_bodies(unit, pick)
     for i, s in enumerate(sold):
         if i in taken:
             continue
@@ -1633,6 +1683,8 @@ class LeadUnitIn(BaseModel):
     chassisNumber: str = ""
     invoiceNumber: str = ""
     numberPlate: str = ""
+    soldDate: Optional[str] = None
+    deliveryDate: Optional[str] = None
 
 
 class AddLeadUnitIn(BaseModel):
@@ -1645,6 +1697,11 @@ class AddLeadUnitIn(BaseModel):
 class UnitBilledDateIn(BaseModel):
     """OEM / Tally billed date for one pack unit. Drives that unit's scheme month."""
     soldDate: str
+
+
+class UnitDeliveryDateIn(BaseModel):
+    """Retail delivery date for one pack unit. Drives monthly delivery volume."""
+    deliveryDate: str
 
 
 class LeadUpdateIn(BaseModel):
@@ -2109,6 +2166,54 @@ def _retail_date(lead) -> str:
     """Date a retail is credited to. A lead closed without a Mark Delivered has no
     deliveryDate, so fall back to the closing date rather than dropping it from MTD."""
     return str(lead.get("deliveryDate") or lead.get("closedDate") or "")
+
+
+def _iso_day(raw):
+    d = str(raw or "").strip()[:10]
+    if len(d) == 10 and d[4] == "-" and d[7] == "-":
+        return d
+    return ""
+
+
+def _unit_delivery_date(lead, unit=None):
+    """This vehicle's delivery / retail date for monthly volume.
+
+    Pack units billed in different months must not all land on the lead's
+    one deliveryDate. Prefer the unit's own delivery date, then its billed
+    (OEM sold) date, then the file date.
+    """
+    return (
+        _iso_day((unit or {}).get("deliveryDate"))
+        or _iso_day((unit or {}).get("soldDate"))
+        or _retail_date(lead or {})
+    )
+
+
+def _pack_delivery_dates(lead):
+    """One date per vehicle on this file (packs split by unit)."""
+    if not lead:
+        return []
+    units = [u for u in (lead.get("units") or []) if isinstance(u, dict)]
+    if oem_sync.is_same_order_pack(lead) and len(units) > 1:
+        return [_unit_delivery_date(lead, u) for u in units]
+    d = _retail_date(lead)
+    n = max(oem_sync.vehicle_count(lead), 1)
+    return [d] * n if d else []
+
+
+def _delivered_vehicle_count_in_period(lead, period):
+    if not _is_delivered_lead(lead):
+        return 0
+    return sum(1 for d in _pack_delivery_dates(lead) if periodmod.in_period(d, period))
+
+
+def _delivered_vehicle_count_on_day(lead, day):
+    if not _is_delivered_lead(lead):
+        return 0
+    want = _iso_day(day)
+    if not want:
+        return 0
+    return sum(1 for d in _pack_delivery_dates(lead) if d == want)
 
 
 def _funnel_population(leads) -> list:
@@ -2643,9 +2748,7 @@ def _volume_slice(leads, payments, period, cancel_events, *, include_money=True)
     bookings_n = sum(
         oem_sync.vehicle_count(l) for l in leads
         if _is_booked_lead(l) and periodmod.in_period(l.get("bookingDate"), period))
-    deliveries_n = sum(
-        oem_sync.vehicle_count(l) for l in leads
-        if _is_delivered_lead(l) and periodmod.in_period(_retail_date(l), period))
+    deliveries_n = sum(_delivered_vehicle_count_in_period(l, period) for l in leads)
     conv = round((bookings_n / leads_n * 100), 1) if leads_n else 0.0
     del_conv = round((deliveries_n / bookings_n * 100), 1) if bookings_n else 0.0
     cancellations = sum(
@@ -2769,7 +2872,7 @@ async def dashboard():
         "kpis": {
             "todayLeads": len([l for l in leads if is_today(l.get("createdDate"))]),
             "todayBookings": len([l for l in booked if is_today(l.get("bookingDate"))]),
-            "todayDeliveries": len([l for l in delivered if is_today(l.get("deliveryDate"))]),
+            "todayDeliveries": sum(_delivered_vehicle_count_on_day(l, td) for l in delivered),
             "monthlyLeads": vol["mtd"]["leads"],
             "monthlyBookings": vol["mtd"]["bookings"],
             "activeBookings": len(active_booked),
@@ -2976,7 +3079,7 @@ async def executive_dashboard(user=Depends(current_user)):
 
     monthly_leads = [l for l in mine if in_month(l.get("createdDate"))]
     monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
-    monthly_deliveries = [l for l in delivered if in_month(_retail_date(l))]
+    monthly_deliveries = [l for l in delivered if any(in_month(d) for d in _pack_delivery_dates(l))]
 
     funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
     funnel = {k: 0 for k in funnel_order}
@@ -3010,7 +3113,8 @@ async def executive_dashboard(user=Depends(current_user)):
         models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})["bookings"] += 1
     for l in monthly_deliveries:
         m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
-        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})["deliveries"] += 1
+        n = sum(1 for d in _pack_delivery_dates(l) if in_month(d))
+        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})["deliveries"] += n
     for l in active_booked:
         m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
         models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0, "pending": 0})["pending"] += 1
@@ -3088,7 +3192,9 @@ async def executive_dashboard(user=Depends(current_user)):
     plan = await _load_exec_incentive_plan_for(user.get("name") or "")
     incentive = None
     if role == "executive" or role == "owner":
-        incentive = ce.evaluate_executive_incentive(len(monthly_deliveries), plan)
+        incentive = ce.evaluate_executive_incentive(
+            sum(1 for l in monthly_deliveries for d in _pack_delivery_dates(l) if in_month(d)),
+            plan)
         incentive["month"] = ym
         incentive["executive"] = plan.get("executive") or (user.get("name") or "")
 
@@ -3205,8 +3311,8 @@ async def _daily_report_data() -> dict:
 
     bookings_today = [l for l in booked if _booking_date(l) == td]
     bookings_mtd = [l for l in booked if in_month(_booking_date(l))]
-    deliveries_today = [l for l in delivered if _retail_date(l)[:10] == td]
-    deliveries_mtd = [l for l in delivered if in_month(_retail_date(l))]
+    deliveries_today = [l for l in delivered if _delivered_vehicle_count_on_day(l, td)]
+    deliveries_mtd = [l for l in delivered if any(in_month(d) for d in _pack_delivery_dates(l))]
 
     # Revenue = value of what was RETAILED this month (customer payable on MTD
     # deliveries). Not cash collected — that is `collectedMtd` below.
@@ -3252,12 +3358,20 @@ async def _daily_report_data() -> dict:
     def slot(l):
         return per_exec.get(_norm_name(l.get("executive")))
 
-    for rows, field in ((bookings_today, "bookingsToday"), (bookings_mtd, "bookingsMtd"),
-                        (deliveries_today, "deliveriesToday"), (deliveries_mtd, "deliveriesMtd")):
+    for rows, field in ((bookings_today, "bookingsToday"), (bookings_mtd, "bookingsMtd")):
         for l in rows:
             e = slot(l)
             if e:
                 e[field] += 1
+    for l in delivered:
+        e = slot(l)
+        if not e:
+            continue
+        for d in _pack_delivery_dates(l):
+            if d == td:
+                e["deliveriesToday"] += 1
+            if in_month(d):
+                e["deliveriesMtd"] += 1
     for l in leads:
         e = slot(l)
         if not e:
@@ -3299,7 +3413,8 @@ async def _daily_report_data() -> dict:
     return {
         "date": td, "month": ym,
         "bookingsToday": len(bookings_today), "bookingsMtd": len(bookings_mtd),
-        "deliveriesToday": len(deliveries_today), "deliveriesMtd": len(deliveries_mtd),
+        "deliveriesToday": sum(_delivered_vehicle_count_on_day(l, td) for l in delivered),
+        "deliveriesMtd": sum(1 for l in delivered for d in _pack_delivery_dates(l) if in_month(d)),
         "cancelledToday": len(cancels_today), "cancelledMtd": len(cancels_mtd),
         "revenueMtd": revenue_mtd, "collectedMtd": collected_mtd,
         "customerOutstanding": customer_outstanding,
@@ -3308,8 +3423,9 @@ async def _daily_report_data() -> dict:
         "financeOverdueFiles": len(overdue),
         "financeByFinancer": sorted(by_financer.values(), key=lambda x: -x["amount"]),
         "targetUnits": target_total,
-        "attainmentPct": (round(100.0 * len(deliveries_mtd) / target_total, 1)
-                          if target_total > 0 else None),
+        "attainmentPct": (round(100.0 * sum(
+            1 for l in delivered for d in _pack_delivery_dates(l) if in_month(d)
+        ) / target_total, 1) if target_total > 0 else None),
         "executives": ranked,
         "topExecutives": ranked[:3],
         "generatedAt": now_iso(),
@@ -3630,8 +3746,9 @@ def _period_metrics_from(src, period, *, cancel_events=None, include_pnl=True):
     m["bookings"]["amount"] = sum(ce.num(l.get("bookingAmount")) for l in booked)
 
     delivered = [l for l in leads if _is_delivered_lead(l)
-                 and periodmod.in_period(_retail_date(l), period)]
-    m["deliveries"]["count"] = len(delivered)
+                 and _delivered_vehicle_count_in_period(l, period)]
+    m["deliveries"]["count"] = sum(
+        _delivered_vehicle_count_in_period(l, period) for l in leads)
 
     pays = _rows_in_period(src["payments"], period, lambda p: p.get("date"))
     m["payments"]["count"] = len(pays)
@@ -3734,8 +3851,8 @@ def _executive_scoreboard(leads, period) -> list:
             row["leads"] += 1
         if _is_booked_lead(l) and periodmod.in_period(l.get("bookingDate"), period):
             row["bookings"] += 1
-        if _is_delivered_lead(l) and periodmod.in_period(_retail_date(l), period):
-            row["deliveries"] += 1
+        if _is_delivered_lead(l):
+            row["deliveries"] += _delivered_vehicle_count_in_period(l, period)
     out = sorted(
         [r for r in execs.values() if r["leads"] or r["bookings"] or r["deliveries"]],
         key=lambda x: (-x["deliveries"], -x["bookings"], -x["leads"], x["executive"]),
@@ -3888,7 +4005,7 @@ async def _ops_pipeline_dashboard():
 
     monthly_leads = [l for l in leads if in_month(l.get("createdDate"))]
     monthly_bookings = [l for l in booked if in_month(l.get("bookingDate"))]
-    monthly_deliveries = [l for l in delivered if in_month(_retail_date(l))]
+    monthly_deliveries = [l for l in delivered if any(in_month(d) for d in _pack_delivery_dates(l))]
 
     funnel_order = ["New", "Contacted", "Follow-up", "In Progress", "Booked", "Finance Process", "Delivered", "Lost"]
     funnel = {k: 0 for k in funnel_order}
@@ -3947,7 +4064,8 @@ async def _ops_pipeline_dashboard():
         models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0})["bookings"] += 1
     for l in monthly_deliveries:
         m = (l.get("interestedModel") or "Unknown").strip() or "Unknown"
-        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0})["deliveries"] += 1
+        n = sum(1 for d in _pack_delivery_dates(l) if in_month(d))
+        models.setdefault(m, {"model": m, "leads": 0, "bookings": 0, "deliveries": 0})["deliveries"] += n
 
     # Executive scoreboard — bookings stay counted after delivery/sold
     execs: dict = {}
@@ -3962,8 +4080,8 @@ async def _ops_pipeline_dashboard():
             row["leadsMtd"] += 1
         if _is_booked_lead(l) and in_month(l.get("bookingDate")):
             row["bookingsMtd"] += 1
-        if _is_delivered_lead(l) and in_month(_retail_date(l)):
-            row["deliveriesMtd"] += 1
+        if _is_delivered_lead(l):
+            row["deliveriesMtd"] += sum(1 for d in _pack_delivery_dates(l) if in_month(d))
         if (l.get("accountStatus") or "Active") == "Active":
             fd = followup_date(l)
             if fd and fd < td:
@@ -5054,6 +5172,40 @@ async def set_unit_billed_date(lead_id: str, unit_sno: int, body: UnitBilledDate
     await write_audit(act, "update", "unit-billed-date", leadId=lead_id,
                       old={"unitSno": idx + 1, "soldDate": old},
                       new={"unitSno": idx + 1, "soldDate": billed})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    return _lead_for_viewer(clean(updated), act)
+
+
+@api.put("/leads/{lead_id}/units/{unit_sno}/delivery-date")
+async def set_unit_delivery_date(lead_id: str, unit_sno: int, body: UnitDeliveryDateIn,
+                                 act=Depends(actor), _desk=Depends(deal_desk_only)):
+    """Save this unit's delivery date. Monthly delivery volume uses that date."""
+    lead = await get_lead_or_404(lead_id)
+    delivered_on = _parse_iso_date(body.deliveryDate, field="Delivery date")
+    idx, units = _resolve_unit_index(lead, unit_sno)
+    units = _ensure_lead_units(lead)
+    if idx >= len(units):
+        raise HTTPException(422, "That unit is not on this order.")
+    rec = dict(units[idx])
+    old = rec.get("deliveryDate") or ""
+    rec["deliveryDate"] = delivered_on
+    rec["sno"] = idx + 1
+    units[idx] = rec
+    dates = [_iso_day(u.get("deliveryDate")) or _iso_day(u.get("soldDate"))
+             for u in units]
+    dates = [d for d in dates if d]
+    patch = {"units": units, "lastUpdated": now_iso(),
+             "vehicleCount": max(len(units), 1)}
+    if dates:
+        patch["deliveryDate"] = max(dates)
+    if len(units) > 1:
+        patch["sameOrderMultiUnit"] = True
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    await recompute_lead(lead_id)
+    await write_audit(act, "update", "unit-delivery-date", leadId=lead_id,
+                      old={"unitSno": idx + 1, "deliveryDate": old},
+                      new={"unitSno": idx + 1, "deliveryDate": delivered_on})
     updated = await db.leads.find_one({"leadId": lead_id})
     await sheet_sync("leads", clean(dict(updated)))
     return _lead_for_viewer(clean(updated), act)
@@ -6682,6 +6834,14 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
         sold = str(u.get("soldDate") or "").strip()[:10]
         if sold:
             rec["soldDate"] = sold
+        delivered_on = str(u.get("deliveryDate") or "").strip()[:10]
+        if delivered_on:
+            rec["deliveryDate"] = delivered_on
+        for k in ("availableBodyType", "availableVariant", "availableModel",
+                  "oemBilledBodyType", "oemBilledVariant", "oemBilledModel",
+                  "originalVariant", "originalModel", "bodyType"):
+            if u.get(k):
+                rec[k] = u.get(k)
         _copy_unit_commercials(u, rec)
         if rec["model"] or rec["variant"] or rec["chassisNumber"]:
             units.append(rec)
@@ -6702,6 +6862,17 @@ def _unit1_from_lead(lead):
         "invoiceNumber": (lead or {}).get("invoiceNumber") or "",
         "numberPlate": (lead or {}).get("numberPlate") or "",
     }
+    sold = str((lead or {}).get("soldDate") or (lead or {}).get("schemeAsOf") or "").strip()[:10]
+    if sold:
+        rec["soldDate"] = sold
+    delivered_on = str((lead or {}).get("deliveryDate") or "").strip()[:10]
+    if delivered_on:
+        rec["deliveryDate"] = delivered_on
+    for k in ("availableBodyType", "availableVariant", "availableModel",
+              "oemBilledBodyType", "oemBilledVariant", "oemBilledModel",
+              "originalVariant", "originalModel", "bodyType"):
+        if (lead or {}).get(k):
+            rec[k] = (lead or {}).get(k)
     _copy_unit_commercials(lead, rec)
     return rec
 
@@ -10429,9 +10600,12 @@ async def _append_oem_unit(lead, row):
         units[0]["numberPlate"] = plate or units[0].get("numberPlate") or ""
         if sold_date:
             units[0]["soldDate"] = sold_date
+            if oem_sync._lead_is_delivered(lead) and not units[0].get("deliveryDate"):
+                units[0]["deliveryDate"] = sold_date
         if not units[0].get("model"):
             units[0]["model"] = model
             units[0]["variant"] = variant
+        oem_sync.stamp_available_billed_bodies(units[0], row)
     else:
         priced = await _price_unit_from_master(model, variant, sold_date)
         rec = {
@@ -10445,6 +10619,9 @@ async def _append_oem_unit(lead, row):
         }
         if sold_date:
             rec["soldDate"] = sold_date
+            if oem_sync._lead_is_delivered(lead) and not rec.get("deliveryDate"):
+                rec["deliveryDate"] = sold_date
+        oem_sync.stamp_available_billed_bodies(rec, row)
         units.append(rec)
     for i, u in enumerate(units):
         u["sno"] = i + 1
@@ -10921,6 +11098,15 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             body.chassisNumber = body.chassisNumber or unit_docs[0].get("chassisNumber") or ""
             body.invoiceNumber = body.invoiceNumber or unit_docs[0].get("invoiceNumber") or ""
             body.numberPlate = body.numberPlate or unit_docs[0].get("numberPlate") or ""
+    if delivered and unit_docs:
+        default_d = _iso_day(body.deliveryDate) or today()
+        for rec in unit_docs:
+            if not _iso_day(rec.get("deliveryDate")):
+                rec["deliveryDate"] = _iso_day(rec.get("soldDate")) or default_d
+        dates = [_iso_day(u.get("deliveryDate")) for u in unit_docs]
+        dates = [d for d in dates if d]
+        if dates:
+            body.deliveryDate = max(dates)
     await _assert_unique_vehicle_identifiers(
         lead_id,
         invoice_number=body.invoiceNumber,
@@ -12218,7 +12404,8 @@ async def _exec_incentive_board():
     for l in leads:
         if not _is_delivered_lead(l):
             continue
-        if not str(_retail_date(l) or "").startswith(ym):
+        n = sum(1 for d in _pack_delivery_dates(l) if str(d or "").startswith(ym))
+        if n <= 0:
             continue
         name = (l.get("executive") or "").strip()
         if not name:
@@ -12227,7 +12414,7 @@ async def _exec_incentive_board():
         if not k:
             continue
         remember(name)
-        units_by_key[k] = units_by_key.get(k, 0) + 1
+        units_by_key[k] = units_by_key.get(k, 0) + n
 
     board = []
     for k, name in display.items():

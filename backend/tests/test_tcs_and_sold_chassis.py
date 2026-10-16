@@ -665,6 +665,9 @@ def test_sold_body_fields_converts_fb_when_updated_load_body_is_dv():
     assert fields["variant"] == "Maxx (DV220)"
     assert fields["bodyType"] == "DV220"
     assert fields["oemSkuKey"] == "turbo.maxx.dv220"
+    avail = oem_sync.available_body_fields(row)
+    assert avail["bodyType"] == "FB"
+    assert avail["variant"] == "Maxx (FB)"
 
 
 def test_sku_for_sold_vehicle_prefers_converted_load_body():
@@ -698,6 +701,8 @@ def test_fill_lead_skus_single_unit_fb_to_dv():
     assert patch["variant"] == "Maxx (DV220)"
     assert patch["originalVariant"] == "Maxx (FB)"
     assert patch.get("oemBodyMismatch") is False
+    assert patch.get("availableBodyType") == "FB"
+    assert patch.get("oemBilledBodyType") == "DV220"
 
 
 def test_fill_pack_unit_skus_blank_and_fb_to_dv():
@@ -718,8 +723,64 @@ def test_fill_pack_unit_skus_blank_and_fb_to_dv():
     units = oem_sync.fill_pack_unit_skus(lead, sold)
     assert units[1]["model"] == "Turbo Max"
     assert units[1]["variant"] == "Maxx (DV220)"
+    assert units[1].get("availableBodyType") == "FB"
+    assert units[1].get("oemBilledBodyType") == "DV220"
     assert units[2]["variant"] == "Maxx (DV220)"
     assert units[2]["originalVariant"] == "Maxx (FB)"
+    assert units[2].get("availableBodyType") == "FB"
+    assert units[2].get("oemBilledBodyType") == "DV220"
+
+
+def test_available_and_billed_body_any_conversion():
+    """Yard body vs billed body — PV→DV, HD→DV, FB→PV, not only FB→DV."""
+    pv = {
+        "model": "Turbo Max", "variant": "Maxx (PV)", "oemSkuKey": "turbo.maxx.pv",
+        "updatedLoadBody": "DV220",
+    }
+    billed = oem_sync.sold_body_fields(pv)
+    avail = oem_sync.available_body_fields(pv)
+    assert billed["variant"] == "Maxx (DV220)" and billed["bodyType"] == "DV220"
+    assert avail["variant"] == "Maxx (PV)" and avail["bodyType"] == "PV"
+
+    hd = {
+        "model": "Turbo Max", "variant": "Maxx (HD)", "oemSkuKey": "turbo.maxx.hd",
+        "updatedLoadBody": "DV220",
+    }
+    billed = oem_sync.sold_body_fields(hd)
+    avail = oem_sync.available_body_fields(hd)
+    assert billed["bodyType"] == "DV220"
+    assert avail["bodyType"] == "HD"
+
+    fb_pv = {
+        "model": "Turbo Max", "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+        "updatedLoadBody": "PV",
+    }
+    billed = oem_sync.sold_body_fields(fb_pv)
+    avail = oem_sync.available_body_fields(fb_pv)
+    assert billed["variant"] == "Maxx (PV)" and billed["bodyType"] == "PV"
+    assert avail["variant"] == "Maxx (FB)" and avail["bodyType"] == "FB"
+
+
+def test_fill_pack_stamps_available_when_unit_already_billed_dv():
+    lead = {
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9K217101",
+             "model": "Turbo Max", "variant": "Maxx (DV220)"},
+        ],
+    }
+    sold = [{
+        "chassis": "MD9K217101", "model": "Turbo Max", "variant": "Maxx (FB)",
+        "oemSkuKey": "turbo.maxx.fb", "updatedLoadBody": "DV220",
+    }]
+    units = oem_sync.fill_pack_unit_skus(lead, sold)
+    assert units[0]["variant"] == "Maxx (DV220)"
+    assert units[0].get("availableBodyType") == "FB"
+    assert units[0].get("oemBilledBodyType") == "DV220"
+    patch = oem_sync.fill_lead_skus(lead, sold)
+    assert patch.get("availableBodyType") == "FB"
+    assert patch.get("oemBilledBodyType") == "DV220"
+    assert patch.get("interestedModel") in (None, "Turbo Max")
 
 
 @pytest.mark.asyncio

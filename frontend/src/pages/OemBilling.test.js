@@ -23,7 +23,9 @@ const mockBilling = {
         mobile: "9811100111",
         customerName: "Pending Person",
         model: "Turbo Max",
-        variant: "Maxx (PV)",
+        variant: "Maxx (DV220)",
+        billedBodyType: "DV220",
+        availableBodyType: "FB",
         soldDate: "2026-09-04",
         undated: false,
         bucket: "pending_delivery",
@@ -103,6 +105,7 @@ test("OEM billing tab shows pending delivery without asking for chassis", async 
   expect(host.querySelector('[data-testid="oem-billing-sync"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="oem-billing-relink"]')).toBeTruthy();
   expect(host.textContent).toMatch(/Pending Person/);
+  expect(host.textContent).toMatch(/billed DV220 · available FB/);
   expect(host.textContent).not.toMatch(/Select chassis/i);
   await act(async () => { root.unmount(); });
   host.remove();

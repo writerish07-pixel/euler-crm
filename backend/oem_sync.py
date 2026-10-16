@@ -269,6 +269,10 @@ def _inventory_doc(vehicle, sku, price):
         "oemModelId": vehicle.get("sap_vehicle_model_id") or "",
         "updatedLoadBody": vehicle.get("updated_load_body") or vehicle.get("load_body_assembly") or "",
         "loadBody": vehicle.get("load_body") or "",
+        "availableBodyType": cat.body_class(vehicle.get("load_body") or "")
+            if (vehicle.get("load_body") or "") else "",
+        "billedBodyType": sku.body_type if sku else cat.body_class(
+            vehicle.get("updated_load_body") or vehicle.get("load_body_assembly") or ""),
         "sapProductName": vehicle.get("sap_product_name") or vehicle.get("sapProductName") or "",
         "modelRegisteredName": vehicle.get("model_registered_name") or "",
         "plantStatus": vehicle.get("plant_status") or "",
@@ -799,6 +803,12 @@ def _fill_sold_model(doc, index):
         doc["bodyType"] = hit.get("bodyType") or ""
     if not doc.get("sapProductName"):
         doc["sapProductName"] = hit.get("sapProductName") or ""
+    if not doc.get("loadBody"):
+        doc["loadBody"] = hit.get("loadBody") or ""
+    if not doc.get("updatedLoadBody"):
+        doc["updatedLoadBody"] = hit.get("updatedLoadBody") or ""
+    if not doc.get("availableBodyType"):
+        doc["availableBodyType"] = hit.get("availableBodyType") or ""
     return doc
 
 
@@ -808,7 +818,9 @@ async def chassis_model_index(db):
     for coll in ("oem_sold", "oem_inventory", "oem_inventory_transit"):
         async for row in db[coll].find(
                 {}, {"chassis": 1, "model": 1, "variant": 1, "oemSkuKey": 1,
-                     "bodyType": 1, "sapProductName": 1}):
+                     "bodyType": 1, "sapProductName": 1,
+                     "loadBody": 1, "updatedLoadBody": 1,
+                     "availableBodyType": 1}):
             ch = _norm_chassis(row.get("chassis"))
             if not ch or not str(row.get("model") or "").strip():
                 continue
@@ -818,6 +830,9 @@ async def chassis_model_index(db):
                 "oemSkuKey": row.get("oemSkuKey") or "",
                 "bodyType": row.get("bodyType") or "",
                 "sapProductName": row.get("sapProductName") or "",
+                "loadBody": row.get("loadBody") or "",
+                "updatedLoadBody": row.get("updatedLoadBody") or "",
+                "availableBodyType": row.get("availableBodyType") or "",
             })
     return idx
 
@@ -1070,7 +1085,7 @@ def _fields_from_sku(sku):
 
 
 def _converted_body_sku(base_sku, load_body):
-    """Same OEM family, converted load body (FB → DV220)."""
+    """Same OEM family, different load body (FB↔DV, PV, HD, tipper, …)."""
     want = cat.body_class(load_body)
     if not base_sku or not want or want in ("STANDARD", "") or want == base_sku.body_class:
         return None
@@ -1086,8 +1101,9 @@ def _converted_body_sku(base_sku, load_body):
 def sold_body_fields(row):
     """Catalog-mapped CRM model/variant/body from a Sold row, or None.
 
-    Converted chassis often keep the original SAP id / FB variant on Sold.
-    Prefer updated load body when it maps to another SKU in the same family.
+    Converted chassis often keep the original SAP id / available body on Sold.
+    Prefer updated load body (billed body) when it maps to another SKU in the
+    same family — FB→DV, FB→PV, PV→DV, HD→DV, and any other body change.
     """
     row = row or {}
     stub_sku = cat.sku_for_oem_row(oem_stub_from_vehicle(row))
@@ -1102,6 +1118,78 @@ def sold_body_fields(row):
     )
     converted = _converted_body_sku(base, load)
     return _fields_from_sku(converted or stub_sku or key_sku or pair_sku)
+
+
+def available_body_fields(row):
+    """Yard / factory body the chassis was available as — not the billed body.
+
+    Coulson keeps `load_body` (available) and `updated_load_body` (billed).
+    originalVariant on a CRM unit is the same available SKU after a conversion.
+    """
+    row = row or {}
+    orig_var = str(row.get("originalVariant") or row.get("availableVariant") or "").strip()
+    orig_model = str(
+        row.get("originalModel") or row.get("availableModel")
+        or row.get("model") or row.get("interestedModel") or ""
+    ).strip()
+    if orig_var:
+        sku = cat.resolve_sku(orig_model, orig_var)
+        if sku:
+            return _fields_from_sku(sku)
+    load = str(row.get("loadBody") or row.get("load_body") or "").strip()
+    if load:
+        base = (
+            cat.resolve_sku(row.get("model"), row.get("variant"))
+            or next((s for s in cat.CATALOG if s.key == str(row.get("oemSkuKey") or "")), None)
+        )
+        avail = _converted_body_sku(base, load) if base else None
+        if avail:
+            return _fields_from_sku(avail)
+        stub = {
+            "model": row.get("model") or orig_model,
+            "variant": row.get("variant") or orig_var,
+            "load_body": load,
+            "sap_product_name": row.get("sapProductName") or row.get("sap_product_name") or "",
+        }
+        sku = cat.sku_for_oem_row(stub)
+        if sku:
+            return _fields_from_sku(sku)
+    raw = _raw_sold_sku_fields(row)
+    billed = sold_body_fields(row)
+    if raw and billed and (
+            _fold_sku(raw.get("variant")) != _fold_sku(billed.get("variant"))
+            or _fold_sku(raw.get("bodyType")) != _fold_sku(billed.get("bodyType"))):
+        return raw
+    if str(row.get("availableBodyType") or "").strip():
+        return {
+            "model": orig_model or (raw or {}).get("model") or "",
+            "variant": orig_var or str(row.get("availableVariant") or ""),
+            "bodyType": str(row.get("availableBodyType") or ""),
+            "oemSkuKey": "",
+        }
+    return raw
+
+
+def stamp_available_billed_bodies(target, row, *, billed=None, available=None):
+    """Write available + billed body onto a lead or unit dict. Working SKU is billed."""
+    rec = target if isinstance(target, dict) else {}
+    billed = billed if billed is not None else sold_body_fields(row)
+    available = available if available is not None else available_body_fields(row)
+    if billed:
+        rec["oemBilledModel"] = billed.get("model") or rec.get("oemBilledModel") or ""
+        rec["oemBilledVariant"] = billed.get("variant") or rec.get("oemBilledVariant") or ""
+        rec["oemBilledBodyType"] = billed.get("bodyType") or rec.get("oemBilledBodyType") or ""
+    if available:
+        rec["availableModel"] = available.get("model") or rec.get("availableModel") or ""
+        rec["availableVariant"] = available.get("variant") or rec.get("availableVariant") or ""
+        rec["availableBodyType"] = available.get("bodyType") or rec.get("availableBodyType") or ""
+        if billed and lead_body_differs(
+                {"interestedModel": available.get("model"), "variant": available.get("variant")},
+                billed):
+            if not rec.get("originalVariant"):
+                rec["originalModel"] = available.get("model") or rec.get("originalModel") or ""
+                rec["originalVariant"] = available.get("variant") or rec.get("originalVariant") or ""
+    return rec
 
 
 def _sku_body_rank(fields):
@@ -1120,15 +1208,33 @@ def _sku_body_rank(fields):
 
 
 def pick_converted_sku(*candidates):
-    """Same-family SKUs: prefer the converted billed body (FB → DV)."""
+    """Same-family SKUs: prefer the billed body over the available yard body.
+
+    Do not jump to another OEM family (Turbo Max must not become HiCity).
+    """
     rows = [c for c in candidates if isinstance(c, dict) and str(c.get("model") or "").strip()]
     if not rows:
         return None
     def _fam(f):
         return inventory_family_key(f.get("model"), f.get("variant") or "")
-    base_fam = next((_fam(r) for r in rows if _fam(r)), "")
-    same = [r for r in rows if _fam(r) == base_fam] or rows
-    return max(same, key=_sku_body_rank)
+    base_fam = _fam(rows[0]) or next((_fam(r) for r in rows if _fam(r)), "")
+    same = [r for r in rows if _fam(r) == base_fam] if base_fam else rows
+    return max(same or [rows[0]], key=_sku_body_rank)
+
+
+def available_differs_from_billed(available, billed):
+    """True when yard/available body is a different class than billed body."""
+    available = available or {}
+    billed = billed or {}
+    a_body = cat.body_class(available.get("bodyType") or available.get("variant") or "")
+    b_body = cat.body_class(billed.get("bodyType") or billed.get("variant") or "")
+    if a_body and b_body and a_body not in ("STANDARD", "") and b_body not in ("STANDARD", ""):
+        if a_body != b_body:
+            return True
+    return bool(available.get("variant")) and lead_body_differs(
+        {"interestedModel": available.get("model"), "variant": available.get("variant")},
+        billed,
+    )
 
 
 def pack_sibling_sku_fields(lead):
@@ -1209,28 +1315,39 @@ def fill_lead_skus(lead, sold_rows=None):
             "bodyType": (lead or {}).get("bodyType") or "",
             "oemSkuKey": (lead or {}).get("oemSkuKey") or "",
         }
+    billed = sold_body_fields(row) if row else None
     picked = pick_converted_sku(
-        sold_body_fields(row) if row else None,
+        billed,
         have,
         pack_sibling_sku_fields({**(lead or {}), "units": units or (lead or {}).get("units")}),
         _raw_sold_sku_fields(row),
     )
+    have_model = str((lead or {}).get("interestedModel") or "").strip()
     if picked and str(picked.get("model") or "").strip() and lead_body_differs(lead, picked):
-        if not (lead or {}).get("originalVariant"):
-            patch["originalModel"] = (lead or {}).get("interestedModel") or ""
-            patch["originalVariant"] = (lead or {}).get("variant") or ""
-        patch["interestedModel"] = picked["model"]
-        patch["variant"] = picked.get("variant") or ""
-        if picked.get("bodyType"):
-            patch["bodyType"] = picked["bodyType"]
-        if picked.get("oemSkuKey"):
-            patch["oemSkuKey"] = picked["oemSkuKey"]
-        billed = sold_body_fields(row) if row else None
-        if billed:
-            patch["oemBilledModel"] = billed.get("model")
-            patch["oemBilledVariant"] = billed.get("variant")
-            patch["oemBilledBodyType"] = billed.get("bodyType")
+        if have_model and not same_sold_family(lead, picked):
+            picked = None
+        else:
+            if not (lead or {}).get("originalVariant"):
+                patch["originalModel"] = (lead or {}).get("interestedModel") or ""
+                patch["originalVariant"] = (lead or {}).get("variant") or ""
+            patch["interestedModel"] = picked["model"]
+            patch["variant"] = picked.get("variant") or ""
+            if picked.get("bodyType"):
+                patch["bodyType"] = picked["bodyType"]
+            if picked.get("oemSkuKey"):
+                patch["oemSkuKey"] = picked["oemSkuKey"]
             patch["oemBodyMismatch"] = False
+    avail = available_body_fields(row) if row else None
+    use_billed = (picked or billed) if (picked or billed) else None
+    if row and available_differs_from_billed(avail, use_billed):
+        body_rec = {
+            "originalVariant": patch.get("originalVariant") or (lead or {}).get("originalVariant") or "",
+            "originalModel": patch.get("originalModel") or (lead or {}).get("originalModel") or "",
+        }
+        stamp_available_billed_bodies(body_rec, row, billed=use_billed, available=avail)
+        for k, v in body_rec.items():
+            if v and str((lead or {}).get(k) or "") != str(v):
+                patch[k] = v
     return patch
 
 
@@ -1263,8 +1380,9 @@ def fill_pack_unit_skus(lead, sold_rows=None):
                 "bodyType": rec.get("bodyType") or "",
                 "oemSkuKey": rec.get("oemSkuKey") or "",
             }
+        billed = sold_body_fields(row) if row else None
         picked = pick_converted_sku(
-            sold_body_fields(row) if row else None,
+            billed,
             have,
             sibling,
             _raw_sold_sku_fields(row),
@@ -1284,10 +1402,10 @@ def fill_pack_unit_skus(lead, sold_rows=None):
                     rec["bodyType"] = picked["bodyType"]
                 if picked.get("oemSkuKey"):
                     rec["oemSkuKey"] = picked["oemSkuKey"]
-                billed = sold_body_fields(row) if row else None
-                if billed:
-                    rec["oemBilledModel"] = billed.get("model")
-                    rec["oemBilledVariant"] = billed.get("variant")
+        avail = available_body_fields(row) if row else None
+        use_billed = (picked or billed) if (picked or billed) else None
+        if row and available_differs_from_billed(avail, use_billed):
+            stamp_available_billed_bodies(rec, row, billed=use_billed, available=avail)
         out.append(rec)
     return out
 
@@ -1338,6 +1456,7 @@ def sold_body_adopt_patch(lead, row, *, adopt=True):
         "oemBilledVariant": fields["variant"],
         "oemBilledBodyType": fields["bodyType"],
     }
+    stamp_available_billed_bodies(patch, row, billed=fields)
     if not adopt:
         patch["oemBodyMismatch"] = True
         return patch
@@ -1369,6 +1488,7 @@ def apply_sold_body_to_units(units, row, fields, *, adopt=True):
             u["variant"] = fields["variant"]
         u["oemBilledVariant"] = fields["variant"]
         u["oemBilledModel"] = fields["model"]
+        stamp_available_billed_bodies(u, row, billed=fields)
     return out
 
 
@@ -2137,6 +2257,14 @@ def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None):
         or lead_variant
         or ""
     ).strip()
+    billed = sold_body_fields(sold)
+    available = available_body_fields(sold)
+    billed_body = str((billed or {}).get("bodyType") or (sold or {}).get("billedBodyType")
+                      or (sold or {}).get("oemBilledBodyType") or "").strip()
+    available_body = str((available or {}).get("bodyType") or (sold or {}).get("availableBodyType")
+                         or (sold or {}).get("loadBody") or "").strip()
+    if available_body and cat.body_class(available_body) == cat.body_class(billed_body):
+        available_body = ""
     return {
         "chassis": chassis,
         "invoiceNumber": str((sold or {}).get("invoiceNumber") or "").strip(),
@@ -2144,6 +2272,9 @@ def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None):
         "customerName": str((sold or {}).get("customerName") or "").strip(),
         "model": model,
         "variant": variant,
+        "billedBodyType": billed_body or str((picked or {}).get("bodyType") or "").strip(),
+        "availableBodyType": available_body,
+        "availableVariant": str((available or {}).get("variant") or "").strip(),
         "soldDate": sold_date,
         "undated": not sold_date,
         "bucket": bucket,
