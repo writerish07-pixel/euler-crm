@@ -662,6 +662,28 @@ async def test_save_session_does_not_call_euler_login(client, monkeypatch):
     assert "sessionToken" not in body
     assert tok not in dumped
     assert "not-euler-secret" not in dumped
+    assert "deliveredMissingVehicleIds" not in body
+
+
+@pytest.mark.asyncio
+async def test_save_session_still_saves_when_coulson_ping_is_down(client, monkeypatch):
+    """A valid JWT must persist even when Coulson's inventory API hangs."""
+    monkeypatch.setattr(
+        coulson_client, "login",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("login")))
+    monkeypatch.setattr(
+        coulson_client, "fetch_sap_models",
+        lambda token: (_ for _ in ()).throw(
+            coulson_client.CoulsonError("Coulson unreachable: timed out")))
+    tok = _coulson_jwt()
+    r = await client.put("/api/integrations/coulson", json={"sessionToken": tok})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["loginOk"] is True
+    assert body["hasSession"] is True
+    assert body["username"] == "vaibhav.akar"
+    stored = await server.db["system"].find_one({"_id": "coulson"})
+    assert stored.get("sessionToken") == tok
 
 
 @pytest.mark.asyncio

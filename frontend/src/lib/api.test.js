@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -76,6 +76,15 @@ describe("apiErrorMessage", () => {
       response: { data: { detail: { code: "mobile_active_deal", message: "This mobile already has an open deal" } } },
     })).toBe("This mobile already has an open deal");
   });
+
+  test("hides axios timeout of 25000ms exceeded", () => {
+    expect(apiErrorMessage(
+      { message: "timeout of 25000ms exceeded", code: "ECONNABORTED" },
+      "Could not save Coulson session",
+    )).toBe("Could not save Coulson session");
+    expect(apiErrorMessage({ message: "timeout of 25000ms exceeded", code: "ECONNABORTED" }))
+      .toBe("The server took too long. Refresh and try again.");
+  });
 });
 
 describe("apiErrorDetail", () => {
@@ -121,6 +130,9 @@ describe("bulk mutations", () => {
     expect(isBulkMutationPath("/leads")).toBe(false);
     expect(isCreateOncePath("/leads")).toBe(true);
     expect(isCreateOncePath("/leads/allocate")).toBe(false);
+    expect(isSlowIntegrationPath("/integrations/coulson")).toBe(true);
+    expect(isSlowIntegrationPath("/integrations/coulson/sync")).toBe(true);
+    expect(isSlowIntegrationPath("/leads")).toBe(false);
   });
 
   test("create lead does not retry a dropped connection", async () => {
