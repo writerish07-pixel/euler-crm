@@ -222,19 +222,124 @@ def stage_progress(timeline, *, now=None):
     return out
 
 
-def _line_chassis(item):
-    """Chassis from whatever key (or nested vehicle) Coulson used on this line."""
+_CHASSIS_FIELD_KEYS = (
+    "chassis", "chassis_number", "chassisNumber", "chassis_no", "chassisNo",
+    "vin", "vehicle_chassis", "vehicleChassis",
+)
+_VEHICLE_LIST_KEYS = (
+    "vehicles", "linked_vehicles", "linkedVehicles", "vehicle_list",
+    "linked_vehicle", "linkedVehicle",
+)
+_VEHICLE_ID_KEYS = (
+    "linked_vehicle_ids", "linkedVehicleIds", "vehicle_ids", "vehicleIds",
+    "vehicle_id", "vehicleId",
+)
+
+
+def _looks_like_uuid(value):
+    return bool(re.fullmatch(
+        r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}",
+        str(value or "").strip(), re.I))
+
+
+def _looks_like_chassis_token(value):
+    """True for an Euler VIN / chassis, false for a Coulson vehicle UUID."""
+    ch = oem_sync._norm_chassis(value)
+    if not ch or _looks_like_uuid(ch) or "-" in ch:
+        return False
+    if ch.startswith("MD9") and len(ch) >= 13:
+        return True
+    return bool(11 <= len(ch) <= 20 and re.fullmatch(r"[A-Z0-9]+", ch))
+
+
+def _iter_vehicle_blobs(item):
+    """Vehicle dicts Coulson now hangs on Extra Support / debit-note lines."""
     if not isinstance(item, dict):
+        return []
+    blobs = []
+    vehicle = item.get("vehicle")
+    if isinstance(vehicle, dict):
+        blobs.append(vehicle)
+        inner = vehicle.get("vehicle")
+        if isinstance(inner, dict):
+            blobs.append(inner)
+    for key in _VEHICLE_LIST_KEYS:
+        val = item.get(key)
+        if isinstance(val, list):
+            for v in val:
+                if isinstance(v, dict):
+                    blobs.append(v)
+                elif isinstance(v, str) and v.strip():
+                    blobs.append({"chassis": v})
+        elif isinstance(val, dict):
+            blobs.append(val)
+            nested = val.get("data") or val.get("items") or val.get("vehicles")
+            if isinstance(nested, list):
+                blobs.extend(x for x in nested if isinstance(x, dict))
+    return blobs
+
+
+def _chassis_from_blob(blob):
+    if not isinstance(blob, dict):
         return ""
-    vehicle = item.get("vehicle") if isinstance(item.get("vehicle"), dict) else {}
-    ch = oem_sync._norm_chassis(
-        item.get("chassis") or item.get("chassis_number") or item.get("chassisNumber")
-        or item.get("vin") or vehicle.get("chassis") or vehicle.get("chassis_number"))
-    if ch:
-        return ch
-    hay = f"{item.get('description') or ''} {item.get('claim_type') or ''}"
-    m = re.search(r"\bMD9[A-Z0-9]{10,}\b", hay, re.I)
-    return oem_sync._norm_chassis(m.group(0) if m else "")
+    for key in _CHASSIS_FIELD_KEYS:
+        ch = oem_sync._norm_chassis(blob.get(key))
+        if _looks_like_chassis_token(ch):
+            return ch
+    return ""
+
+
+def _line_chassis_list(item):
+    """Every chassis Coulson attached to this line.
+
+    Oct 2026 Extra Support create requires at least one vehicle and posts
+    `line_item_N_linked_vehicle_ids` (and sometimes `vehicle_id`). The journey
+    returns those as `vehicles[]`, `linked_vehicle_ids`, or nested `vehicle`.
+    Older Additional Support notes had none of these — empty list, manual match.
+    """
+    if not isinstance(item, dict):
+        return []
+    found = []
+
+    def add(raw):
+        ch = oem_sync._norm_chassis(raw)
+        if _looks_like_chassis_token(ch) and ch not in found:
+            found.append(ch)
+
+    for key in _CHASSIS_FIELD_KEYS:
+        add(item.get(key))
+    for blob in _iter_vehicle_blobs(item):
+        add(_chassis_from_blob(blob))
+    for key in _VEHICLE_ID_KEYS:
+        for raw in _as_id_list(item.get(key)):
+            add(raw)
+    hay = f"{item.get('description') or ''} {item.get('claim_type') or ''} {item.get('claimType') or ''}"
+    for m in re.finditer(r"\bMD9[A-Z0-9]{10,}\b", hay, re.I):
+        add(m.group(0))
+    for ch in item.get("chassisList") or []:
+        add(ch)
+    return found
+
+
+def _line_chassis(item):
+    """Primary chassis from whatever key (or nested vehicle) Coulson used."""
+    found = _line_chassis_list(item)
+    return found[0] if found else ""
+
+
+def line_chassis_list(line):
+    """Normalised chassis on a stored line, including Extra Support multi-vehicle."""
+    if not isinstance(line, dict):
+        return []
+    out = []
+    primary = oem_sync._norm_chassis(line.get("chassis"))
+    if _looks_like_chassis_token(primary):
+        out.append(primary)
+    for ch in line.get("chassisList") or []:
+        n = oem_sync._norm_chassis(ch)
+        if _looks_like_chassis_token(n) and n not in out:
+            out.append(n)
+    return out
 
 
 def _line_invoice(item):
@@ -301,7 +406,8 @@ def _first_text(*vals):
 def _oem_line_description(item, claim_type=""):
     """The prose Euler shows on Additional Support (claim type, customer, approver).
 
-    Extra Support lines often have no chassis — the customer name lives here.
+    Extra Support used to omit chassis; the customer name lived here. New notes
+    carry a mandatory vehicle, but this prose is still what the desk reads.
     Prefer the OEM description blob when it already names the customer.
     """
     if not isinstance(item, dict):
@@ -353,13 +459,15 @@ def normalise_line_item(item):
     approved_by = _first_text(
         item.get("approved_by"), item.get("approvedBy"), item.get("approved_by_name"),
     )
+    chassis_list = _line_chassis_list(item)
     return {
         "lineId": str(item.get("id") or item.get("line_id") or item.get("lineId") or ""),
         "claimType": claim_type,
         "description": description,
         "customerName": customer_name,
         "approvedBy": approved_by,
-        "chassis": _line_chassis(item),
+        "chassis": chassis_list[0] if chassis_list else "",
+        "chassisList": chassis_list,
         "sourceInvoiceNumber": _line_invoice(item),
         "model": str(item.get("model") or "").strip(),
         "variant": str(item.get("variant") or "").strip(),
@@ -545,7 +653,8 @@ def _normalise_lines(raw):
 
 def _lines_have_vehicle(lines):
     return any(
-        isinstance(li, dict) and (li.get("chassis") or li.get("sourceInvoiceNumber"))
+        isinstance(li, dict) and (
+            li.get("chassis") or line_chassis_list(li) or li.get("sourceInvoiceNumber"))
         for li in (lines or []) if isinstance(li, dict))
 
 
@@ -841,6 +950,11 @@ async def link_claim_lines(db, doc, index=None):
     mobile can. A line that matches on chassis but disagrees on invoice is linked and
     FLAGGED rather than silently accepted: that disagreement is real information.
 
+    Extra Support now requires a vehicle in the OEM app, so those lines auto-match
+    the same way as scheme claims. One Extra Support line can name several chassis
+    (`linked_vehicle_ids`); each matching lead is stamped. Old notes with no
+    chassis still keep a desk-made manual join.
+
     Cancelled notes are left as stored. Chassis relink must not glue a cancelled
     debit note back onto the lead after the desk moved to the replacement.
     """
@@ -851,15 +965,32 @@ async def link_claim_lines(db, doc, index=None):
     for line in lines:
         held = line_lead_ids(line)
         held_names = line_lead_customers(line)
-        lead = await _lead_for_chassis(db, line.get("chassis"), index)
-        matched_by = "chassis" if lead else ""
-        if not lead:
+        auto_pairs = []
+        auto_leads = []
+        matched_by = ""
+        for ch in line_chassis_list(line):
+            lead = await _lead_for_chassis(db, ch, index)
+            if not lead:
+                continue
+            auto_id = str(lead.get("leadId") or "").strip()
+            if not auto_id or auto_id in {p[0] for p in auto_pairs}:
+                continue
+            auto_pairs.append((auto_id, str(lead.get("customerName") or "")))
+            auto_leads.append((ch, lead))
+            matched_by = "chassis"
+        if not auto_pairs:
             lead = await _lead_for_invoice(db, line.get("sourceInvoiceNumber"), index)
-            matched_by = "invoice" if lead else ""
-        if not lead:
+            if lead:
+                auto_id = str(lead.get("leadId") or "").strip()
+                if auto_id:
+                    auto_pairs.append((auto_id, str(lead.get("customerName") or "")))
+                    auto_leads.append(("", lead))
+                    matched_by = "invoice"
+        if not auto_pairs:
             if line.get("matchedBy") == "manual" and held:
-                # Desk-made Extra Support joins often have no chassis. Relink
-                # must not wipe them — including a second lead on a 5000+5000 line.
+                # Desk-made Extra Support joins on old chassis-less notes.
+                # Relink must not wipe them — including a second lead on a
+                # 5000+5000 line.
                 stamp_line_leads(line, list(zip(held, held_names)))
                 line["matchedBy"] = "manual"
                 for lid in held:
@@ -868,37 +999,40 @@ async def link_claim_lines(db, doc, index=None):
                 continue
             stamp_line_leads(line, [])
             continue
-        auto_id = str(lead.get("leadId") or "").strip()
-        auto_name = str(lead.get("customerName") or "")
+        pairs = list(auto_pairs)
         if line.get("matchedBy") == "manual" and held:
-            pairs = list(zip(held, held_names))
-            if auto_id and auto_id not in held:
-                pairs.insert(0, (auto_id, auto_name))
-            stamp_line_leads(line, pairs)
-            line["matchedBy"] = "manual"
-        else:
-            stamp_line_leads(line, [(auto_id, auto_name)])
-            line["matchedBy"] = matched_by
+            for lid, name in zip(held, held_names):
+                if lid not in {p[0] for p in pairs}:
+                    pairs.append((lid, name))
+        stamp_line_leads(line, pairs)
+        line["matchedBy"] = matched_by
         want_inv = str(line.get("sourceInvoiceNumber") or "").strip()
-        got_inv = oem_sync.invoice_for_chassis(lead, line.get("chassis"))
-        if matched_by == "chassis" and want_inv and got_inv and (
-                oem_sync._norm_invoice(want_inv) != oem_sync._norm_invoice(got_inv)):
-            line["invoiceMismatch"] = True
-            line["invoiceCancelled"] = True
-            line["cancelledInvoiceNumber"] = want_inv
-            line["newInvoiceNumber"] = got_inv
-            conflicts.append({
-                "detail": (
-                    f"{line.get('chassis')}: invoice {want_inv} cancelled; "
-                    f"new invoice {got_inv} on {auto_id}"
-                ),
-                "chassis": line.get("chassis") or "",
-                "leadId": auto_id,
-                "cancelledInvoice": want_inv,
-                "newInvoice": got_inv,
-                "invoiceCancelled": True,
-            })
-        else:
+        mismatch = False
+        for ch, lead in auto_leads:
+            if matched_by != "chassis" or not ch:
+                continue
+            auto_id = str(lead.get("leadId") or "").strip()
+            got_inv = oem_sync.invoice_for_chassis(lead, ch)
+            if want_inv and got_inv and (
+                    oem_sync._norm_invoice(want_inv) != oem_sync._norm_invoice(got_inv)):
+                mismatch = True
+                line["invoiceMismatch"] = True
+                line["invoiceCancelled"] = True
+                line["cancelledInvoiceNumber"] = want_inv
+                line["newInvoiceNumber"] = got_inv
+                conflicts.append({
+                    "detail": (
+                        f"{ch}: invoice {want_inv} cancelled; "
+                        f"new invoice {got_inv} on {auto_id}"
+                    ),
+                    "chassis": ch,
+                    "leadId": auto_id,
+                    "cancelledInvoice": want_inv,
+                    "newInvoice": got_inv,
+                    "invoiceCancelled": True,
+                })
+                break
+        if not mismatch:
             line["invoiceMismatch"] = False
             line["invoiceCancelled"] = False
         for lid in line_lead_ids(line):
@@ -1087,8 +1221,7 @@ async def annotate_resubmissions(db):
     by_chassis = {}
     async for row in db[CLAIMS_COLLECTION].find({}):
         for line in _line_item_list(row.get("lineItems")):
-            ch = oem_sync._norm_chassis(line.get("chassis"))
-            if ch:
+            for ch in line_chassis_list(line):
                 by_chassis.setdefault(ch, []).append(row)
     for ch, rows in by_chassis.items():
         rows.sort(key=lambda r: str(r.get("createdAt") or ""))
@@ -1097,16 +1230,18 @@ async def annotate_resubmissions(db):
         created = str(row.get("createdAt") or "")
         successor = ""
         for line in _line_item_list(row.get("lineItems")):
-            ch = oem_sync._norm_chassis(line.get("chassis"))
-            for other in by_chassis.get(ch) or []:
-                if other.get("debitNoteId") == row.get("debitNoteId"):
-                    continue
-                if str(other.get("createdAt") or "") <= created:
-                    continue
-                if str(other.get("status") or "") == "Cancelled":
-                    continue
-                successor = other.get("claimNumber") or ""
-                break
+            for ch in line_chassis_list(line):
+                for other in by_chassis.get(ch) or []:
+                    if other.get("debitNoteId") == row.get("debitNoteId"):
+                        continue
+                    if str(other.get("createdAt") or "") <= created:
+                        continue
+                    if str(other.get("status") or "") == "Cancelled":
+                        continue
+                    successor = other.get("claimNumber") or ""
+                    break
+                if successor:
+                    break
             if successor:
                 break
         patch = {"resubmittedBy": successor, "needsResubmission": not successor}
@@ -1227,8 +1362,7 @@ async def register_match_index(db, *, relink=True):
         for line in coerce_line_items(row):
             for lead_id in line_lead_ids(line):
                 _absorb_line(by_lead.setdefault(lead_id, _empty_match_entry()), row, line)
-            ch = oem_sync._norm_chassis(line.get("chassis"))
-            if ch:
+            for ch in line_chassis_list(line):
                 _absorb_line(by_chassis.setdefault(ch, _empty_match_entry()), row, line)
             inv = str(line.get("sourceInvoiceNumber") or "").strip().lower()
             if not inv:
@@ -1514,7 +1648,24 @@ async def apply_oem_filing_to_register(db, index=None):
     patched = []
     for c in claims:
         lead = leads.get(c.get("leadId")) or {}
-        chassis = c.get("chassisNumber") or lead.get("chassisNumber") or ""
+        chassis = c.get("chassisNumber") or ""
+        if not chassis and c.get("unitSno"):
+            try:
+                want_unit = int(c.get("unitSno"))
+            except (TypeError, ValueError):
+                want_unit = None
+            for u in (lead.get("units") or []):
+                if not isinstance(u, dict):
+                    continue
+                try:
+                    got_unit = int(u.get("unitSno") or 0)
+                except (TypeError, ValueError):
+                    got_unit = 0
+                if want_unit is not None and got_unit == want_unit:
+                    chassis = u.get("chassisNumber") or ""
+                    break
+        if not chassis:
+            chassis = lead.get("chassisNumber") or ""
         invoice = c.get("invoiceNumber") or lead.get("invoiceNumber") or ""
         match = match_state(
             index, c.get("leadId") or "", c.get("componentKey") or "",
@@ -1577,7 +1728,7 @@ async def oem_only_lines(db, register_pairs):
                 "claimType": line.get("claimType") or "",
                 "mappedComponent": key,
                 "amount": round2(line.get("totalAmount")),
-                "hasVehicle": bool(line.get("chassis") or line.get("sourceInvoiceNumber")),
+                "hasVehicle": bool(line_chassis_list(line) or line.get("sourceInvoiceNumber")),
                 "reason": "unknown_lead",
             })
     out.sort(key=lambda r: -r["amount"])
@@ -1700,7 +1851,7 @@ def _claim_matches_query(row, *, q="", chassis="", invoice=""):
     lines = _line_item_list(row.get("lineItems"))
     if chassis:
         ch = oem_sync._norm_chassis(chassis)
-        if not any(oem_sync._norm_chassis(li.get("chassis")) == ch for li in lines):
+        if not any(ch in line_chassis_list(li) for li in lines):
             return False
     if invoice:
         inv = str(invoice or "").strip().lower()
@@ -1713,7 +1864,7 @@ def _claim_matches_query(row, *, q="", chassis="", invoice=""):
             str(row.get("claimNumber") or ""),
             str(row.get("status") or ""),
             " ".join(_as_id_list(row.get("leadIds"))),
-            " ".join(str(li.get("chassis") or "") for li in lines),
+            " ".join(" ".join(line_chassis_list(li)) for li in lines),
             " ".join(str(li.get("sourceInvoiceNumber") or "") for li in lines),
             " ".join(str(li.get("leadCustomer") or "") for li in lines),
             " ".join(str(li.get("description") or "") for li in lines),
@@ -1985,7 +2136,10 @@ async def resolve_oem_create_target(db, *, claim_number, line_id="", lead_id="",
     want_lead = str(lead_id or line.get("leadId") or "").strip()
     lead = await db.leads.find_one({"leadId": want_lead}) if want_lead else None
     if not lead:
-        lead = await _lead_for_chassis(db, line.get("chassis"))
+        for ch in line_chassis_list(line):
+            lead = await _lead_for_chassis(db, ch)
+            if lead:
+                break
     if not lead:
         lead = await _lead_for_invoice(db, line.get("sourceInvoiceNumber"))
     if not lead:

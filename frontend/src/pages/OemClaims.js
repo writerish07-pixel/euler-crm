@@ -418,7 +418,11 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                       || li.sourceInvoiceNumber
                       || ""}
                   </div>
-                  {li.chassis ? <div className="font-mono text-ink-faint">{li.chassis}</div> : null}
+                  {(li.chassisList && li.chassisList.length
+                    ? li.chassisList
+                    : (li.chassis ? [li.chassis] : [])).map((ch) => (
+                    <div key={ch} className="font-mono text-ink-faint">{ch}</div>
+                  ))}
                   {li.sourceInvoiceNumber
                     ? <div className="font-mono text-ink-faint">{li.sourceInvoiceNumber}</div>
                     : null}
@@ -677,7 +681,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
         <p className="text-sm text-ink-soft">
           {relink
             ? "Use this when the previous OEM claim was cancelled and refiled under the right head. This lead is detached from the cancelled note and attached here. Money stays on the register."
-            : "Use this when chassis or claim wording did not join automatically. A debit note with several Extra Support items is matched one item at a time. Money stays on the register; this only links the OEM claim."}
+            : "New Extra Support claims match by the chassis filled in the OEM app. Use this for older notes with no vehicle, or when wording did not join automatically. A debit note with several Extra Support items is matched one item at a time. Money stays on the register; this only links the OEM claim."}
         </p>
         {looksCombinedSupport(line) ? (
           <p className="text-xs text-amber-800">

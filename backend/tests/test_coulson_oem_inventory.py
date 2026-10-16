@@ -836,6 +836,54 @@ async def test_expired_session_renews_with_saved_password(client, monkeypatch):
     assert stored.get("sessionToken") == renewed
 
 
+def test_claim_statuses_include_expansion_team_and_bill_posted():
+    assert "Expansion Team Approval Pending" in coulson_client.CLAIM_STATUSES
+    assert "Bill Posted in SAP" in coulson_client.CLAIM_STATUSES
+    assert "Dealer Development Department Approval Pending" in coulson_client.CLAIM_STATUSES
+
+
+def test_status_counts_prefers_claim_analytics_path(monkeypatch):
+    seen = []
+
+    def fake_get_json(token, path, params=None):
+        seen.append(path)
+        if path == "claim-analytics/status-counts":
+            return {"success": True, "data": {"RM Approval Pending": 4}}
+        raise coulson_client.CoulsonError("nope", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    assert coulson_client.fetch_claim_status_counts("tok") == {"RM Approval Pending": 4}
+    assert seen[0] == "claim-analytics/status-counts"
+
+
+def test_status_counts_falls_back_to_legacy_path(monkeypatch):
+    def fake_get_json(token, path, params=None):
+        if path == "claim-analytics/status-counts":
+            raise coulson_client.CoulsonError("missing", status=404)
+        if path == "status-counts":
+            return {"success": True, "data": {"Settled": 9}}
+        raise coulson_client.CoulsonError("nope", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    assert coulson_client.fetch_claim_status_counts("tok") == {"Settled": 9}
+
+
+def test_page_rows_uses_page_index_when_offset_one_is_a_new_page(monkeypatch):
+    pages = {
+        0: [{"id": "a"}, {"id": "b"}],
+        1: [{"id": "c"}, {"id": "d"}],
+        2: [{"id": "e"}],
+    }
+
+    def fake_get_json(token, path, params=None):
+        off = int((params or {}).get("offset") or 0)
+        return {"success": True, "data": pages.get(off, []), "extras": {"total_count": 5}}
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client._page_rows("tok", "debit-note", limit=2)
+    assert [r["id"] for r in rows] == ["a", "b", "c", "d", "e"]
+
+
 def test_data_timeout_is_longer_than_login():
     assert coulson_client.LOGIN_TIMEOUT == 25
     assert coulson_client.DATA_TIMEOUT >= 90
