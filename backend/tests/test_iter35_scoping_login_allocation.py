@@ -80,12 +80,12 @@ async def test_the_lead_register_is_scoped_to_the_executive(client, exec_client)
     mine = await make_lead(client, "ITER35 Mine", executive="Executive")
     theirs = await make_lead(client, "ITER35 Theirs", executive="Sanjay")
 
-    ids = {l["leadId"] for l in (await exec_client.get("/api/leads")).json()}
+    ids = {l["leadId"] for l in (await exec_client.get("/api/leads", params={"followup": True})).json()}
     assert mine in ids
     assert theirs not in ids
 
     # The owner still sees both.
-    all_ids = {l["leadId"] for l in (await client.get("/api/leads")).json()}
+    all_ids = {l["leadId"] for l in (await client.get("/api/leads", params={"followup": True})).json()}
     assert {mine, theirs} <= all_ids
 
 
@@ -139,7 +139,7 @@ async def test_the_owner_and_accounts_are_not_scoped(client):
 async def test_an_unassigned_lead_is_invisible_to_executives(client, exec_client):
     """The reason the allocation page exists: nobody is working this."""
     orphan = await make_lead(client, "ITER35 Orphan", executive="")
-    ids = {l["leadId"] for l in (await exec_client.get("/api/leads")).json()}
+    ids = {l["leadId"] for l in (await exec_client.get("/api/leads", params={"followup": True})).json()}
     assert orphan not in ids
     assert (await exec_client.get(f"/api/leads/{orphan}")).status_code == 403
 
@@ -296,7 +296,7 @@ async def test_leads_can_be_allocated_in_bulk(client, exec_client, exec_on_staff
 
     # ...and visible immediately afterwards.
     assert (await exec_client.get(f"/api/leads/{a}")).status_code == 200
-    ids = {l["leadId"] for l in (await exec_client.get("/api/leads")).json()}
+    ids = {l["leadId"] for l in (await exec_client.get("/api/leads", params={"followup": True})).json()}
     assert {a, b} <= ids
 
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { NavLink, Link, useLocation, useNavigate } from "react-router-dom";
 import {
-  LayoutDashboard, Users, ClipboardList, Wallet, Truck, Landmark,
+  LayoutDashboard, Users, ClipboardList, ClipboardCheck, Wallet, Truck, Landmark,
   ShieldCheck, FileText, Percent, Trophy, Tag, ReceiptText,
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
@@ -15,6 +15,7 @@ import { get } from "../lib/api";
 import LeadDrawer from "../pages/LeadDrawer";
 import ExportDialog from "./ExportDialog";
 import { fmtWhen } from "../lib/format";
+import { openLeadPath } from "../lib/leadPaths";
 
 const NAV = [
   { section: "Overview", items: [
@@ -25,6 +26,7 @@ const NAV = [
     { to: "/accounts", label: "Accounts Dashboard", icon: Calculator, accountsHome: true },
   ]},
   { section: "Sales Pipeline", pipeline: true, items: [
+    { to: "/followup-leads", label: "Follow-up Lead Register", icon: ClipboardCheck },
     { to: "/leads", label: "Lead Register", icon: Users },
     { to: "/approvals", label: "Approvals", icon: Bell, salesOnly: true, approvals: true },
     { to: "/bookings", label: "Bookings", icon: ClipboardList },
@@ -122,8 +124,10 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5 overscroll-contain">
         {nav.map((group) => {
           if (group.ownerOnly && !isOwner) return null;
-          if (group.pipeline && !isSalesStaff && !isField) return null;
+          if (group.pipeline && !isSalesStaff && !isField && !isAccounts) return null;
           const items = group.items.filter((i) => {
+            if (isAccounts && !isSalesStaff && !isField
+                && i.to !== "/followup-leads" && i.to !== "/leads") return false;
             if (i.ownerOnly && !isOwner) return false;
             if (i.salesOnly && !isSalesStaff) return false;
             if (i.moneyDesk && !isMoneyDesk) return false;
@@ -225,7 +229,7 @@ function GlobalLeadSearch() {
     const t = setTimeout(() => {
       const term = q.trim();
       if (term.length < 2) { setHits([]); return; }
-      get("/leads", { q: term, limit: 8 }).then((rows) => {
+      get("/leads", { q: term, limit: 8, scope: "all" }).then((rows) => {
         setHits(Array.isArray(rows) ? rows.slice(0, 8) : []);
         setOpen(true);
       }).catch(() => setHits([]));
@@ -241,12 +245,13 @@ function GlobalLeadSearch() {
     return () => document.removeEventListener("mousedown", onDoc);
   }, []);
 
-  const pick = (id) => {
+  const pick = (row) => {
+    const id = row?.leadId || row;
     setOpen(false);
     setQ("");
     setHits([]);
     if (isSalesStaff || isField) {
-      navigate(`/leads?open=${encodeURIComponent(id)}`);
+      navigate(openLeadPath(id, row));
       return;
     }
     setDrawerLead(id);
@@ -272,7 +277,7 @@ function GlobalLeadSearch() {
               key={r.leadId}
               type="button"
               data-testid={`search-hit-${r.leadId}`}
-              onClick={() => pick(r.leadId)}
+              onClick={() => pick(r)}
               className="w-full text-left px-3 py-2 hover:bg-zinc-50"
             >
               <div className="text-sm font-semibold text-ink">{r.customerName}</div>

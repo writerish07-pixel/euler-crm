@@ -45,7 +45,7 @@ export default function Allocation() {
       (s.executiveMatches || []).forEach((row) => { picks[row.key] = row.suggested || ""; });
       setMatchPick(picks);
     }).catch(() => {});
-    get("/leads").then(setLeads).catch(() => toast.error("Could not load leads"));
+    get("/leads", { scope: "all" }).then(setLeads).catch(() => toast.error("Could not load leads"));
     get("/masters").then((m) => setExecs(m.executives || [])).catch(() => {});
   }, []);
   useEffect(() => { load(); }, [load]);

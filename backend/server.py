@@ -2290,6 +2290,46 @@ def _on_staff_register(lead) -> bool:
     return not bool((lead or {}).get("dealApprovalPending"))
 
 
+def _is_followup_enquiry(lead) -> bool:
+    """Unbooked pipeline file — Follow-up Lead Register, not Lead Register."""
+    return _on_staff_register(lead) and not _is_booked_lead(lead)
+
+
+def _on_lead_register(lead) -> bool:
+    """Booked / finance / delivered file after Convert to Booking (and approval)."""
+    return _on_staff_register(lead) and _is_booked_lead(lead)
+
+
+def _lead_list_scope(followup, scope) -> str:
+    if followup:
+        return "followup"
+    s = str(scope or "").strip().lower().replace("_", "-")
+    if s in ("followup", "follow-up", "enquiry"):
+        return "followup"
+    if s in ("all", "any", "search"):
+        return "all"
+    return "register"
+
+
+def _apply_lead_list_scope(leads, kind: str) -> list:
+    if kind == "followup":
+        return [l for l in (leads or []) if _is_followup_enquiry(l)]
+    if kind == "all":
+        return [l for l in (leads or []) if _on_staff_register(l)]
+    return [l for l in (leads or []) if _on_lead_register(l)]
+
+
+def _slim_360_enquiry(lead) -> bool:
+    """Walk-in with no booking / chassis — skip OEM sold scan and scheme master."""
+    if _is_booked_lead(lead):
+        return False
+    if str((lead or {}).get("chassisNumber") or "").strip():
+        return False
+    if oem_sync.is_same_order_pack(lead):
+        return False
+    return True
+
+
 def _exclude_parked_deals(leads) -> list:
     return [l for l in (leads or []) if _on_staff_register(l)]
 
@@ -2297,9 +2337,9 @@ def _exclude_parked_deals(leads) -> list:
 def _leads_for_executive(leads, user) -> list:
     """Match lead.executive to the logged-in executive's name (or email local-part).
 
-    Split-assigned imported leads stay on the Lead Register under the executive
-    name (including `assignmentPending`). They work them after tapping Proceed
-    and GM / Owner Approve — they are not hidden from the register.
+    Split-assigned imported leads stay under the executive name (including
+    `assignmentPending`) on Follow-up Lead Register until Convert to Booking.
+    They work them after tapping Proceed and GM / Owner Approve.
     Discounted Convert to Booking files are hidden via `dealApprovalPending`.
     """
     return [l for l in leads if _executive_name_matches(user, (l or {}).get("executive"))]
@@ -4034,6 +4074,8 @@ async def _team_visible_lead_ids(user, lead_ids):
 async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      month: Optional[str] = None, year: Optional[str] = None,
                      limit: Optional[int] = None,
+                     followup: Optional[bool] = False,
+                     scope: Optional[str] = None,
                      user=Depends(current_user)):
     # Boot already scans for retry-dups. Waiting on that lock (or repeating the
     # 15k-row pass) after every deploy made GET /leads time out — empty register.
@@ -4075,12 +4117,14 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
         "createdByUserId": 1, "createdByEmail": 1,
         "dealVerifyStatus": 1, "dealVerifyAmount": 1, "dealVerifyMismatch": 1,
         "dealVerifyMismatchKind": 1, "totalReceived": 1,
+        "budget": 1, "cxDemand": 1, "nextFollowupDate": 1, "bookingId": 1,
     }).sort("leadId", -1).to_list(cap)
     # An executive works their own leads only. A team lead sees their team.
     # Owner, Sales GM, Showroom Admin and Accounts see all.
     if _is_scoped_sales(user):
         leads = await _leads_for_scoped_viewer(leads, user)
     leads = _exclude_parked_deals(leads)
+    leads = _apply_lead_list_scope(leads, _lead_list_scope(followup, scope))
     period = _parse_period(month, year)
     leads = _rows_in_period(
         leads, period, lambda l: periodmod.lead_register_date(l, status or ""))
@@ -5754,23 +5798,37 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
             "fieldView": True,
             "whatsapp": {"count": 0, "lastAt": None, "optOut": False, "sessionOpen": False},
         }
+    slim = _slim_360_enquiry(lead)
     if oem_sync.is_same_order_pack(lead):
         # Always rewrite unit amounts + pack payable. Extra units already had
         # Price Master ex-showroom from Add unit but customerPayable stayed ₹0
         # because 360 only recomputed when hydrate inserted a missing price.
-        await _hydrate_pack_unit_prices(lead)
-        await recompute_lead(lead_id)
-        lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
-    lead = clean(await _ensure_booking_advance_receipt(lead) or lead)
+        try:
+            await _hydrate_pack_unit_prices(lead)
+            await recompute_lead(lead_id)
+            lead = clean(await db.leads.find_one({"leadId": lead_id}) or lead)
+        except Exception as exc:
+            logger.exception("pack hydrate failed for %s: %s", lead_id, exc)
+    try:
+        lead = clean(await _ensure_booking_advance_receipt(lead) or lead)
+    except Exception as exc:
+        logger.exception("booking advance hydrate failed for %s: %s", lead_id, exc)
     snap = lead_to_snapshot(lead)
-    scheme_rows = await get_scheme_rows()
-    commercials = ce.compute_full_commercials(snap, scheme_rows)
+    scheme_rows = [] if slim else await get_scheme_rows()
+    try:
+        commercials = ce.compute_full_commercials(snap, scheme_rows or None)
+    except Exception as exc:
+        logger.exception("commercials failed for %s: %s", lead_id, exc)
+        commercials = {}
     if oem_sync.is_same_order_pack(lead):
-        pack_c = _pack_overview_commercials(lead, scheme_rows)
-        commercials = {**commercials, **pack_c}
-        # Drawer payable / outstanding follow the pack sum, not unit-1 minus pack discount.
-        if pack_c.get("customerPayable") is not None:
-            commercials["customerPayable"] = pack_c["customerPayable"]
+        try:
+            pack_c = _pack_overview_commercials(lead, scheme_rows)
+            commercials = {**commercials, **pack_c}
+            # Drawer payable / outstanding follow the pack sum, not unit-1 minus pack discount.
+            if pack_c.get("customerPayable") is not None:
+                commercials["customerPayable"] = pack_c["customerPayable"]
+        except Exception as exc:
+            logger.exception("pack commercials failed for %s: %s", lead_id, exc)
     payments = [clean(p) for p in await db.payments.find({"leadId": lead_id}).sort("date", 1).to_list(500)]
     activities = [clean(a) for a in await db.activities.find({"leadId": lead_id}).sort("activityId", -1).to_list(500)]
     delivery = clean(await db.deliveries.find_one({"leadId": lead_id}) or {})
@@ -5792,15 +5850,31 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         lead = _staff_safe_lead(lead)
         commercials = _staff_safe_commercials(commercials)
         billing_summary = _staff_safe_billing(billing_summary)
+    documents = []
+    try:
+        documents = await lead_docs.list_docs(
+            db, user, lead_id=lead_id, own=_is_own_lead(lead, user))
+    except Exception as exc:
+        logger.exception("list_docs failed for %s: %s", lead_id, exc)
+    oem_sold = None
+    if not slim:
+        try:
+            oem_sold = await oem_sync.match_sold_family_for_lead(db, lead)
+        except Exception as exc:
+            logger.exception("oem sold match failed for %s: %s", lead_id, exc)
+    whatsapp = {"count": 0, "lastAt": None, "optOut": False, "sessionOpen": False}
+    try:
+        whatsapp = await wa.summary_for_lead(lead_id)
+    except Exception as exc:
+        logger.exception("whatsapp summary failed for %s: %s", lead_id, exc)
     return {
         "lead": lead, "commercials": commercials, "payments": payments,
         "activities": activities, "delivery": delivery, "booking": booking,
         "claims": claims, "actions": lead_actions(lead, user),
         "billingSummary": billing_summary or None,
-        "documents": await lead_docs.list_docs(
-            db, user, lead_id=lead_id, own=_is_own_lead(lead, user)),
-        "oemSold": await oem_sync.match_sold_family_for_lead(db, lead),
-        "whatsapp": await wa.summary_for_lead(lead_id),
+        "documents": documents,
+        "oemSold": oem_sold,
+        "whatsapp": whatsapp,
     }
 
 

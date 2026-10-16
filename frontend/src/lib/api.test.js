@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowLead360Path, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -138,6 +138,8 @@ describe("bulk mutations", () => {
     expect(isSlowOemBillingPath("/oem-billing")).toBe(true);
     expect(isSlowOemBillingPath("/oem-billing/sync")).toBe(true);
     expect(isSlowOemBillingPath("/leads")).toBe(false);
+    expect(isSlowLead360Path("/leads/LD26000932/360")).toBe(true);
+    expect(isSlowLead360Path("/leads")).toBe(false);
   });
 
   test("GET /oem-billing uses a 180s timeout", async () => {

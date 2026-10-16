@@ -130,6 +130,12 @@ export function isSlowOemBillingPath(url) {
   return p === "/oem-billing" || p.indexOf("/oem-billing/") === 0;
 }
 
+/** GET /leads/{id}/360 used to scan every Sold row + scheme master. */
+export function isSlowLead360Path(url) {
+  const p = String(url || "").split("?")[0];
+  return /\/leads\/[^/]+\/360$/.test(p);
+}
+
 /** POST /leads mints a new leadId. A timeout / 502 / HTML miss after the
  *  first insert already landed used to replay the same create on Railway and
  *  then again on the Cloudflare origin — three New files for one tap. */
@@ -233,6 +239,8 @@ export const get = (url, params, opts = {}) => withFallback(() => api.get(url, {
   params,
   ...(opts.timeout || isSlowIntegrationPath(url) || isSlowOemBillingPath(url)
     ? { timeout: opts.timeout || (isSlowOemBillingPath(url) ? OEM_SYNC_TIMEOUT_MS : 45000) }
+  ...(opts.timeout || isSlowIntegrationPath(url) || isSlowOemBillingPath(url) || isSlowLead360Path(url)
+    ? { timeout: opts.timeout || (isSlowOemBillingPath(url) ? 120000 : isSlowLead360Path(url) ? 60000 : 45000) }
     : {}),
 }).then((r) => r.data));
 export const post = (url, body, opts = {}) => {

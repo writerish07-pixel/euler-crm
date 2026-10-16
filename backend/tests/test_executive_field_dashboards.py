@@ -280,7 +280,7 @@ async def test_asm_lead_360_hides_commercials(client):
     assert "customerOutstanding" not in body["lead"]
     assert body["actions"].get("canBook") is False
 
-    listing = await client.get("/api/leads")
+    listing = await client.get("/api/leads", params={"followup": True})
     assert listing.status_code == 200
     row = next(x for x in listing.json() if x["leadId"] == lead_id)
     assert "customerPayable" not in row
@@ -330,7 +330,7 @@ async def test_executive_360_hides_owner_pnl_keeps_customer_money(client):
     assert "margin" not in commercials
     assert "dealerSchemeRetained" not in commercials
     assert "oemClaimCompanyShare" not in commercials
-    listing = await client.get("/api/leads")
+    listing = await client.get("/api/leads", params={"followup": True})
     row = next(x for x in listing.json() if x["leadId"] == lead_id)
     assert "dealerMarginNetExGst" not in row
     assert row.get("customerPayable") == 850000

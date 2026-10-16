@@ -311,11 +311,11 @@ async def test_search_q_finds_name_mobile_id(client):
         "customerName": "Searchable Singh", "mobile": "9876543210",
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "executive": "Amit"})
     lid = r.json()["leadId"]
-    by_name = (await client.get("/api/leads", params={"q": "Searchable", "limit": 8})).json()
+    by_name = (await client.get("/api/leads", params={"q": "Searchable", "limit": 8, "scope": "all"})).json()
     assert any(l["leadId"] == lid for l in by_name)
-    by_mob = (await client.get("/api/leads", params={"q": "9876543210", "limit": 8})).json()
+    by_mob = (await client.get("/api/leads", params={"q": "9876543210", "limit": 8, "scope": "all"})).json()
     assert any(l["leadId"] == lid for l in by_mob)
-    by_id = (await client.get("/api/leads", params={"q": lid, "limit": 8})).json()
+    by_id = (await client.get("/api/leads", params={"q": lid, "limit": 8, "scope": "all"})).json()
     assert any(l["leadId"] == lid for l in by_id)
 
 
@@ -510,14 +510,14 @@ async def test_showroom_admin_lead_register_includes_new(client, tl_client):
         {"leadId": new_id}, {"$set": {"oemBillingCreated": True}})
     await server.db.leads.update_one(
         {"leadId": live_id}, {"$set": {"currentStatus": "Contacted"}})
-    tl_all = (await tl_client.get("/api/leads")).json()
+    tl_all = (await tl_client.get("/api/leads", params={"followup": True})).json()
     tl_ids = {row["leadId"] for row in tl_all}
     assert new_id in tl_ids
     assert live_id in tl_ids
     assert any(row["leadId"] == new_id and row.get("currentStatus") == "New" for row in tl_all)
-    only_new = (await tl_client.get("/api/leads", params={"status": "New"})).json()
+    only_new = (await tl_client.get("/api/leads", params={"status": "New", "followup": True})).json()
     assert any(row["leadId"] == new_id for row in only_new)
-    contacted = (await tl_client.get("/api/leads", params={"status": "Contacted"})).json()
+    contacted = (await tl_client.get("/api/leads", params={"status": "Contacted", "followup": True})).json()
     assert any(row["leadId"] == live_id for row in contacted)
 
 

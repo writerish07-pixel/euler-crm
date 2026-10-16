@@ -100,7 +100,7 @@ async def test_gm_sees_all_leads_and_commercials(client):
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         c.headers.update({"Authorization": f"Bearer {tok}"})
-        listing = await c.get("/api/leads")
+        listing = await c.get("/api/leads", params={"followup": True})
         assert listing.status_code == 200
         assert any(x["leadId"] == lid for x in listing.json())
         d360 = await c.get(f"/api/leads/{lid}/360")

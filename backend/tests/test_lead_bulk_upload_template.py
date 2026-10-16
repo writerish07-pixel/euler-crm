@@ -508,7 +508,7 @@ async def test_bulk_import_assigns_blank_executives_by_saved_split(client):
         dash = await exec_c.get("/api/executive/dashboard")
         assert dash.status_code == 200, dash.text
         assert "leadSplit" not in dash.json()
-        mine = await exec_c.get("/api/leads")
+        mine = await exec_c.get("/api/leads", params={"followup": True})
         assert mine.status_code == 200
         names = {d["customerName"] for d in mine.json()}
         assert "Keep Named" in names
@@ -663,7 +663,7 @@ async def test_apply_split_names_unassigned_leads_pending_approval(client):
     assert all(d.get("executive") for d in leads.values())
     assert all(d.get("assignmentPending") is True for d in leads.values())
 
-    listed = (await client.get("/api/leads")).json()
+    listed = (await client.get("/api/leads", params={"followup": True})).json()
     named = {d["customerName"]: d["executive"] for d in listed}
     assert len(named) == 10
     assert all(named.values())
@@ -676,7 +676,7 @@ async def test_apply_split_names_unassigned_leads_pending_approval(client):
     assert created.status_code == 200, created.text
     exec_c = await _login("amit.apply@euler.com", "execPass#1")
     try:
-        mine = (await exec_c.get("/api/leads")).json()
+        mine = (await exec_c.get("/api/leads", params={"followup": True})).json()
         assert len(mine) == 7
         assert all(d.get("assignmentPending") is True for d in mine)
         assert all(d.get("approvalRequestId") for d in mine)
@@ -718,7 +718,7 @@ async def test_apply_split_names_unassigned_leads_pending_approval(client):
         assert live.get("assignmentPending") is False
         assert live["executive"] == "Amit"
         assert (await exec_c.get(f"/api/leads/{lid}")).status_code == 200
-        ids = {d["leadId"] for d in (await exec_c.get("/api/leads")).json()}
+        ids = {d["leadId"] for d in (await exec_c.get("/api/leads", params={"followup": True})).json()}
         assert lid in ids
     finally:
         await exec_c.aclose()

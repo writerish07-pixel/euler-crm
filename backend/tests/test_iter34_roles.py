@@ -291,7 +291,7 @@ async def test_an_executive_still_feeds_leads_and_booking_amount(client, exec_cl
     assert body.get("leadId")
     assert not body.get("pending")
     lid = body["leadId"]
-    names = {l["customerName"] for l in (await exec_client.get("/api/leads")).json()}
+    names = {l["customerName"] for l in (await exec_client.get("/api/leads", params={"followup": True})).json()}
     assert "ITER34 Exec lead" in names
     assert lid.startswith("LD26")
     await attach_kyc(exec_client, lid)

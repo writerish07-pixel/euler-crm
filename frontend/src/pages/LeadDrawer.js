@@ -184,7 +184,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 
   const load = useCallback(() => {
     setLoadError(null);
-    get(`/leads/${leadId}/360`)
+    get(`/leads/${leadId}/360`, undefined, { timeout: 60000 })
       .then(setData)
       .catch((e) => {
         const msg = apiErrorMessage(e, "Failed to load lead");
