@@ -56,6 +56,11 @@ def test_vehicle_sold_date_reads_coulson_invoice_spa_date():
     assert oem_sync.vehicle_sold_date({"_created_at": "2 Sep 2026 13:34:38"}) == "2026-09-02"
     assert oem_sync._iso_date("16 Oct 2026") == "2026-10-16"
     assert oem_sync._iso_date("05-10-2026") == "2026-10-05"
+    assert oem_sync.vehicle_sold_date({
+        "invoice_creation_ts": "2026-10-16T13:34:38.000Z",
+    }) == "2026-10-16"
+    assert oem_sync._iso_date("1792108800") == "2026-10-16"
+    assert oem_sync._iso_date("1792108800000") == "2026-10-16"
 
 
 def test_sold_doc_keeps_sold_date():

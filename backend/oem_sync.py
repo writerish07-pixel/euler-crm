@@ -607,6 +607,8 @@ def vehicle_customer_name(row, *, nested=False):
 
 
 _SOLD_DATE_KEYS = (
+    "invoice_creation_ts", "invoiceCreationTs", "vehicle_invoice_date",
+    "customer_invoice_date", "sap_invoice_date", "sold_at", "soldAt",
     "invoice_date", "invoiceDate", "billed_at", "billedAt",
     "sold_date", "soldDate", "billing_date", "billingDate",
     "retail_date", "retailDate", "date", "Date", "_created_at",
@@ -633,6 +635,19 @@ def _iso_date(raw):
     if not s:
         return ""
     s = re.sub(r"\bSept\b", "Sep", s)
+    if s.isdigit():
+        try:
+            ts = int(s)
+        except ValueError:
+            return ""
+        if ts > 10_000_000_000:
+            ts //= 1000
+        if 1_000_000_000 <= ts <= 2_200_000_000:
+            try:
+                return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            except (OSError, OverflowError, ValueError):
+                return ""
+        return ""
     if len(s) >= 10 and s[4] == "-" and s[7] == "-":
         return s[:10]
     m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", s)

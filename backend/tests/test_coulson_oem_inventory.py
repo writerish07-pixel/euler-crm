@@ -888,14 +888,15 @@ def test_sold_inventory_merges_vehicle_invoices(monkeypatch):
                 "invoice_number": "AF-122-I26278215",
                 "created_at": "2026-10-15",
             }], "extras": {"total_count": 1}}
-        if path == "vehicle-invoices":
+        if path == "dealer/invoice/vehicle":
             return {"success": True, "data": [{
                 "chassis": "MD9EVDAD26K217428",
                 "registration_number": "EMCS-8598",
                 "customer_name": "RADHE RADHE PLASTIC",
                 "customer_phone": "9352347959",
-                "date": "16 Oct 2026",
+                "invoice_creation_ts": "2026-10-16T13:34:38.000Z",
                 "invoice_number": "AF-TODAY-1",
+                "status": "CREATED",
             }], "extras": {"total_count": 1}}
         raise coulson_client.CoulsonError("not found", status=404)
 
@@ -917,6 +918,56 @@ def test_sold_inventory_reraises_when_every_source_fails(monkeypatch):
     monkeypatch.setattr(coulson_client, "get_json", boom)
     with pytest.raises(coulson_client.CoulsonError, match="timed out"):
         coulson_client.fetch_sold_inventory("tok")
+
+
+def test_vehicle_invoices_skip_cancelled(monkeypatch):
+    def fake_get_json(token, path, params=None):
+        if path == "dealer/invoice/vehicle":
+            return {"success": True, "data": [
+                {"chassis": "MD9CANCEL01", "invoice_number": "AF-C",
+                 "status": "CANCELLED", "invoice_creation_ts": "2026-10-16T10:00:00Z"},
+                {"chassis": "MD9EVDAD26K217428", "invoice_number": "AF-OK",
+                 "status": "CREATED", "invoice_creation_ts": "2026-10-16T11:00:00Z",
+                 "customer_phone": "9352347959"},
+            ], "extras": {"total_count": 2}}
+        raise coulson_client.CoulsonError("nope", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_vehicle_invoices("tok")
+    assert [r["chassis"] for r in rows] == ["MD9EVDAD26K217428"]
+
+
+def test_dealer_invoices_page_by_index(monkeypatch):
+    pages = {
+        0: [{"chassis": "MD9P00"}, {"chassis": "MD9P01"}],
+        1: [{"chassis": "MD9P10"}, {"chassis": "MD9P11"}],
+        2: [{"chassis": "MD9P20"}],
+    }
+
+    def fake_get_json(token, path, params=None):
+        assert path == "dealer/invoice/vehicle"
+        off = int((params or {}).get("offset") or 0)
+        return {"success": True, "data": pages.get(off, []), "extras": {"total_count": 5}}
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_vehicle_invoices("tok", limit=2)
+    assert [r["chassis"] for r in rows] == [
+        "MD9P00", "MD9P01", "MD9P10", "MD9P11", "MD9P20",
+    ]
+
+
+def test_dealer_invoices_row_skip_when_offset_slides(monkeypatch):
+    all_rows = [{"chassis": f"MD9R{i:03d}"} for i in range(5)]
+
+    def fake_get_json(token, path, params=None):
+        off = int((params or {}).get("offset") or 0)
+        lim = int((params or {}).get("limit") or 2)
+        return {"success": True, "data": all_rows[off:off + lim],
+                "extras": {"total_count": 5}}
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_vehicle_invoices("tok", limit=2)
+    assert [r["chassis"] for r in rows] == [f"MD9R{i:03d}" for i in range(5)]
 
 
 def test_vehicle_invoices_404_is_not_fatal(monkeypatch):
