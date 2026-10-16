@@ -31,6 +31,9 @@ jest.mock("../lib/api", () => ({
     if (String(url) === "/masters") {
       return Promise.resolve({ executives: ["Executive"], models: ["Turbo Max"], leadSources: ["Walk-in"], priorities: ["Normal"] });
     }
+    if (String(url).indexOf("/reports/monthly") >= 0) {
+      return Promise.resolve({ byExecutive: [{ executive: "Executive", leads: 2, bookings: 1, deliveries: 0, conversion: 50, deliveryConversion: 0 }] });
+    }
     return Promise.resolve({});
   },
 }));

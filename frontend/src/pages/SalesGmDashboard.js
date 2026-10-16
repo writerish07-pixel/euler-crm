@@ -10,10 +10,16 @@ import { compactInr, inr, num, ytdCount, fmtTime } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
+import PeriodBar from "../components/PeriodBar";
+import ExecutiveScoreboard, { useMonthlyScoreboard } from "../components/ExecutiveScoreboard";
+import { thisMonth, thisYear } from "../lib/period";
 
 /** Showroom-wide sales board — all executives, deal desk, no money posting. */
 export default function SalesGmDashboard() {
   const [d, setD] = useState(null);
+  const [month, setMonth] = useState(thisMonth());
+  const [year, setYear] = useState(thisYear());
+  const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
     get("/sales-gm/dashboard").then(setD).catch(() => toast.error("Could not load Sales GM dashboard"));
   }, []);
@@ -109,29 +115,13 @@ export default function SalesGmDashboard() {
         </Card>
       </div>
 
-      <Card className="p-5 mt-6">
-        <h3 className="font-heading font-bold text-ink mb-1">Executive scoreboard</h3>
-        <p className="text-xs text-ink-soft mb-3">MTD · Book % = bookings÷leads (includes delivered) · Del % = deliveries÷bookings</p>
-        <Table
-          rowKey="executive"
-          empty="No executives on leads yet"
-          columns={[
-            { key: "executive", label: "Executive", render: (r) => <span className="font-semibold">{r.executive}</span> },
-            { key: "leadsMtd", label: "Leads", align: "right" },
-            { key: "bookingsMtd", label: "Books", align: "right" },
-            { key: "deliveriesMtd", label: "Del.", align: "right" },
-            { key: "conversion", label: "Book %", align: "right", render: (r) => `${r.conversion || 0}%` },
-            { key: "deliveryConversion", label: "Del %", align: "right", render: (r) => `${r.deliveryConversion || 0}%` },
-            { key: "followupOverdue", label: "FU overdue", align: "right", render: (r) => (
-              r.followupOverdue ? <Badge tone="bg-red-50 text-red-700 ring-red-600/20">{r.followupOverdue}</Badge> : "—"
-            ) },
-            { key: "pendingDeliveries", label: "Pending del.", align: "right", render: (r) => (
-              r.pendingDeliveries ? <Badge tone="bg-amber-50 text-amber-700 ring-amber-600/20">{r.pendingDeliveries}</Badge> : "—"
-            ) },
-          ]}
-          rows={d.executiveScoreboard || []}
-        />
-      </Card>
+      <ExecutiveScoreboard
+        rows={board}
+        subtitle={`${month || year || "All"} · Book % = bookings÷leads · Del % = deliveries÷bookings. Follow-up overdue and pending delivery are live.`}
+        hygieneByExec={Object.fromEntries((d.executiveScoreboard || []).map((r) => [r.executive, r]))}
+      >
+        <PeriodBar month={month} year={year} onChange={({ month: m, year: y }) => { setMonth(m || ""); setYear(y || ""); }} />
+      </ExecutiveScoreboard>
 
       <Card className="p-5 mt-6" data-testid="gm-exec-incentive">
         <div className="flex flex-wrap items-start justify-between gap-3 mb-3">

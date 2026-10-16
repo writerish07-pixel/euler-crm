@@ -131,6 +131,41 @@ async def test_monthly_register_counts_leads_bookings_by_month(client):
 
 
 @pytest.mark.asyncio
+async def test_monthly_scoreboard_splits_executives_by_month(client):
+    await server.db.leads.insert_many([
+        {
+            "leadId": "LD26SB1", "customerName": "Amit Sept", "executive": "Scoreboard Amit",
+            "createdDate": "2026-09-02", "bookingDate": "2026-09-10",
+            "currentStatus": "Booked", "accountStatus": "Active", "mobile": "9000000001",
+        },
+        {
+            "leadId": "LD26SB2", "customerName": "Rahul Sept", "executive": "Scoreboard Rahul",
+            "createdDate": "2026-09-03", "currentStatus": "New", "accountStatus": "Active",
+            "mobile": "9000000002",
+        },
+        {
+            "leadId": "LD26SB3", "customerName": "Amit Oct", "executive": "Scoreboard Amit",
+            "createdDate": "2026-10-02", "deliveryDate": "2026-10-20",
+            "deliveryStatus": "Delivered", "currentStatus": "Delivered",
+            "bookingDate": "2026-10-08", "accountStatus": "Active", "mobile": "9000000003",
+        },
+    ])
+    sept = (await client.get("/api/reports/monthly", params={"month": "2026-09"})).json()
+    board = {r["executive"]: r for r in sept["byExecutive"]}
+    assert board["Scoreboard Amit"]["leads"] == 1
+    assert board["Scoreboard Amit"]["bookings"] == 1
+    assert board["Scoreboard Amit"]["deliveries"] == 0
+    assert board["Scoreboard Rahul"]["leads"] == 1
+    assert board["Scoreboard Rahul"]["bookings"] == 0
+    octb = (await client.get("/api/reports/monthly", params={"month": "2026-10"})).json()
+    board2 = {r["executive"]: r for r in octb["byExecutive"]}
+    assert board2["Scoreboard Amit"]["leads"] == 1
+    assert board2["Scoreboard Amit"]["bookings"] == 1
+    assert board2["Scoreboard Amit"]["deliveries"] == 1
+    assert "Scoreboard Rahul" not in board2
+
+
+@pytest.mark.asyncio
 async def test_executive_opens_monthly_own_leads_not_export(exec_client, client):
     ym = periodmod.utc_month()
     before_exec = (await exec_client.get("/api/reports/monthly", params={"month": ym})).json()
