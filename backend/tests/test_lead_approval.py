@@ -195,6 +195,8 @@ async def test_owner_approve_creates_the_live_lead(exec_client, client):
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["customerName"] == "Approved Cust"
     assert server.ce.num(lead.get("budget")) == 185000
+    assert lead.get("bookingDealApprovedAt")
+    assert server.ce.num(lead.get("bookingDealCxDemand")) == 185000
     listed = (await exec_client.get("/api/leads", params={"followup": True})).json()
     assert any(l["leadId"] == lid for l in listed)
     assert not any(l["leadId"] == lid for l in (await exec_client.get("/api/leads")).json())
@@ -492,3 +494,35 @@ async def test_approval_oem_extra_without_proof_is_rejected(exec_client, client)
     assert await server.db.leads.count_documents({"customerName": "No Proof Extra"}) == 0
     req = await server.db.lead_requests.find_one({"requestId": rid})
     assert req["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_approved_create_books_without_second_approval(exec_client, client):
+    """Request a lead → Approve → Convert to Booking must Confirm Booking, not re-queue."""
+    payload = _enquiry("Once Approve", budget=185000)
+    r = await exec_client.post("/api/leads", json=payload)
+    assert r.status_code == 200, r.text
+    assert r.json().get("pending") is True
+    rid = r.json()["requestId"]
+    await attach_kyc(exec_client, rid)
+    ap = await client.post(f"/api/lead-requests/{rid}/approve")
+    assert ap.status_code == 200, ap.text
+    lid = ap.json()["leadId"]
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert live.get("bookingDealApprovedAt")
+    assert server.ce.num(live.get("bookingDealCxDemand")) == 185000
+    docs = await server.db[server.lead_docs.COLLECTION].count_documents({"leadId": lid})
+    assert docs >= 4
+    booked = await exec_client.post(
+        f"/api/leads/{lid}/convert-booking",
+        json={
+            "bookingAmount": 0, "executive": "Executive", "bookingDate": "2026-10-10",
+            "budget": 185000,
+        })
+    assert booked.status_code == 200, booked.text
+    assert booked.json().get("bookingId")
+    assert await server.db.lead_requests.count_documents({
+        "existingLeadId": lid, "requestKind": "booking_deal",
+    }) == 0
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["currentStatus"] == "Booked"

@@ -3,7 +3,7 @@
  */
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, acceptForKind, hintForKind, fitImageForUpload, DOC_MAX_BYTES } from "./LeadDocuments";
+import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, LocalKycBlock, acceptForKind, hintForKind, fitImageForUpload, DOC_MAX_BYTES } from "./LeadDocuments";
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -27,6 +27,33 @@ test("kycReady makes Aadhaar optional for B2B", () => {
   expect(kycReady("B2B", { kyc_pan: 1, kyc_gst: 1 }, "22AAAAA0000A1Z5")).toBe("");
   expect(kycReady("B2B", { kyc_pan: 1, kyc_gst: 1 }, "")).toBe("");
   expect(kycReady("B2B", { kyc_pan: 1 }, "22AAAAA0000A1Z5")).toMatch(/GST/);
+});
+
+test("KYC slots show files already on the lead instead of No file", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <LocalKycBlock
+        customerType="Individual"
+        files={{}}
+        setFiles={() => {}}
+        gstin=""
+        onGstin={() => {}}
+        existingDocs={[
+          { kind: "kyc_aadhaar_front", filename: "front.jpg", documentId: "DC1", contentType: "image/jpeg" },
+          { kind: "kyc_aadhaar_back", filename: "back.jpg", documentId: "DC2", contentType: "image/jpeg" },
+          { kind: "kyc_pan", filename: "pan.jpg", documentId: "DC3", contentType: "image/jpeg" },
+        ]}
+      />,
+    );
+  });
+  expect(host.textContent).toMatch(/Already attached/i);
+  expect(host.textContent).toMatch(/front\.jpg/);
+  expect(host.textContent).not.toMatch(/No file/);
+  await act(async () => { root.unmount(); });
+  host.remove();
 });
 
 test("dealSheetReady is required unless the file or an existing scan is present", () => {

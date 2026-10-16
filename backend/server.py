@@ -4703,6 +4703,22 @@ async def _ensure_pending_deals_parked():
             logging.exception("PARK_PENDING_DEAL_LEADS_ERROR")
 
 
+async def _stamp_booking_deal_approved(lead_id: str, user, cx_demand=None):
+    """Remember the approved Cx Demand so Convert to Booking does not re-queue."""
+    lid = str(lead_id or "").strip()
+    if not lid:
+        return
+    fresh = await db.leads.find_one({"leadId": lid}) or {}
+    cx = ce.round2(ce.num(
+        cx_demand if cx_demand is not None else (fresh.get("cxDemand") or fresh.get("budget"))))
+    await db.leads.update_one({"leadId": lid}, {"$set": {
+        "bookingDealApprovedAt": now_iso(),
+        "bookingDealApprovedBy": (user or {}).get("email") or "",
+        "bookingDealCxDemand": cx,
+        "bookingDealAdditional": ce.round2(ce.num(fresh.get("additionalDiscount"))),
+    }})
+
+
 async def _require_booking_deal_approval(lead, user):
     """Discounted Book waits for GM / Owner. Enquiries create live without this."""
     role = str((user or {}).get("role") or "")
@@ -5329,15 +5345,8 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
                 oem_extra_received=extra if extra > 0 else None,
                 scheme_pass_on=scheme_pass_on)
             if str(claimed.get("requestKind") or "") == "booking_deal":
-                fresh = await db.leads.find_one({"leadId": existing_id}) or {}
-                await db.leads.update_one({"leadId": existing_id}, {"$set": {
-                    "bookingDealApprovedAt": now_iso(),
-                    "bookingDealApprovedBy": user.get("email") or "",
-                    "bookingDealCxDemand": ce.round2(ce.num(
-                        payload.get("budget") or claimed.get("dealAmount"))),
-                    "bookingDealAdditional": ce.round2(ce.num(
-                        fresh.get("additionalDiscount"))),
-                }})
+                await _stamp_booking_deal_approved(
+                    existing_id, user, payload.get("budget") or claimed.get("dealAmount"))
             lead = clean(await db.leads.find_one({"leadId": existing_id}))
         else:
             body = LeadIn(**{**payload, "schemePassOn": scheme_pass_on, "anotherVehicle": True})
@@ -5349,7 +5358,9 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
                 await db.leads.update_one({"leadId": lead["leadId"]}, {
                     "$set": {"oemExtraSupportReceived": extra}})
                 await recompute_lead(lead["leadId"])
-                lead = clean(await db.leads.find_one({"leadId": lead["leadId"]}))
+            await _stamp_booking_deal_approved(
+                lead["leadId"], user, payload.get("budget") or claimed.get("dealAmount"))
+            lead = clean(await db.leads.find_one({"leadId": lead["leadId"]}))
     except HTTPException:
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})

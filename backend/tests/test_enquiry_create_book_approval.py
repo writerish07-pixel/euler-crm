@@ -194,15 +194,22 @@ async def test_discounted_book_waits_for_owner_then_books(exec_client, client):
     assert ap.status_code == 200, ap.text
     live = await server.db.leads.find_one({"leadId": lid})
     assert live.get("dealApprovalPending") is not True
+    assert live.get("bookingDealApprovedAt")
     after = await listed_followup(exec_client)
     assert any(row["leadId"] == lid for row in after)
     assert not any(row["leadId"] == lid for row in await listed_register(exec_client))
     booked = await exec_client.post(
         f"/api/leads/{lid}/convert-booking",
-        json={"bookingAmount": 5000, "executive": "Executive", "bookingDate": "2026-10-10"})
+        json={
+            "bookingAmount": 5000, "executive": "Executive", "bookingDate": "2026-10-10",
+            "budget": 790000,
+        })
     assert booked.status_code == 200, booked.text
     lead = await server.db.leads.find_one({"leadId": lid})
     assert lead["currentStatus"] == "Booked"
+    assert await server.db.lead_requests.count_documents({
+        "existingLeadId": lid, "requestKind": "booking_deal", "status": "pending",
+    }) == 0
     assert any(row["leadId"] == lid for row in await listed_register(exec_client))
     assert not any(row["leadId"] == lid for row in await listed_followup(exec_client))
 

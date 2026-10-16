@@ -33,6 +33,17 @@ function kindsPresent(docs, kinds) {
   return files;
 }
 
+function closeRupee(a, b) {
+  return Math.abs(Number(a || 0) - Number(b || 0)) <= 1;
+}
+
+export function bookingDealAlreadyApproved(lead, budget, additional) {
+  if (!lead || !lead.bookingDealApprovedAt) return false;
+  if (!closeRupee(lead.bookingDealCxDemand, budget)) return false;
+  if (additional == null) return true;
+  return closeRupee(lead.bookingDealAdditional, additional);
+}
+
 /** Convert to Booking: fill model / deal / KYC, then book or send for approval. */
 export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
   const { canSeeOwnerCommercials, isExecutive, isTeamLead } = useAuth();
@@ -101,7 +112,8 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
 
   const models = masters?.models || [];
   const priceFound = Boolean(deal && (deal.priceFound !== false) && Number(deal.exShowroom || deal.priceTotal) > 0);
-  const needsApproval = Boolean(Number(budget) > 0 && deal && deal.needsApproval);
+  const alreadyApproved = bookingDealAlreadyApproved(lead, budget, deal?.additionalDiscount);
+  const needsApproval = Boolean(Number(budget) > 0 && deal && deal.needsApproval && !alreadyApproved);
   const kycFiles = { ...kindsPresent(docs, customerType === "B2B"
     ? ["kyc_pan", "kyc_gst"] : ["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"]), ...kyc };
   const kycErr = kycReady(customerType, kycFiles, gstin);
@@ -205,8 +217,9 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
     >
       <div className="space-y-4" data-testid="book-enquiry-drawer">
         <p className="text-sm text-ink-soft">
-          Walk-in files start with name and mobile. Fill the vehicle, deal, KYC and papers here, then book.
-          A dealer discount leaves this file and waits on GM / Owner Approvals — Lead Register only after approval and booking.
+          {alreadyApproved
+            ? "This deal is already approved. Confirm Booking to put it on Lead Register. Papers already on the file stay — attach a replacement only if something changed."
+            : "Walk-in files start with name and mobile. Fill the vehicle, deal, KYC and papers here, then book. A dealer discount leaves this file and waits on GM / Owner Approvals — Lead Register only after approval and booking."}
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Model *">
@@ -268,7 +281,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
           <LocalDealSheetBlock files={dealSheet} setFiles={setDealSheet} existingDocs={docs}
             onPrint={printDealSheet} printBusy={busy} />
         )}
-        <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} />
+        <LocalKycBlock customerType={customerType} files={kyc} setFiles={setKyc} gstin={gstin} onGstin={setGstin} existingDocs={docs} />
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Booking Date"><Input data-testid="booking-date" type="date" value={form.bookingDate} onChange={setPay("bookingDate")} /></Field>
           <Field label="Booking advance (₹)">
