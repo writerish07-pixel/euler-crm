@@ -609,6 +609,7 @@ function ExotelCard() {
     quietStart: 10,
     quietEnd: 19,
     cronToken: "",
+    webhookSecret: "",
   });
   const [busy, setBusy] = useState(false);
 
@@ -625,6 +626,7 @@ function ExotelCard() {
         quietStart: d.quietStart || 10,
         quietEnd: d.quietEnd || 19,
         cronToken: d.cronToken || "",
+        webhookSecret: d.webhookSecret || "",
       }));
     }).catch(() => {});
   }, []);
@@ -640,6 +642,7 @@ function ExotelCard() {
         quietStart: Number(form.quietStart) || 10,
         quietEnd: Number(form.quietEnd) || 19,
         cronToken: form.cronToken,
+        webhookSecret: form.webhookSecret,
         enabled: true,
       };
       if (form.apiKey && !form.apiKey.includes("…") && !form.apiKey.startsWith("•")) body.apiKey = form.apiKey;
@@ -705,6 +708,10 @@ function ExotelCard() {
         <Field label="Cron token (optional)">
           <Input value={form.cronToken} onChange={(e) => setForm({ ...form, cronToken: e.target.value })}
             placeholder="For Railway / cron-job.org" />
+        </Field>
+        <Field label="Webhook token (auto-set on save)">
+          <Input value={form.webhookSecret} onChange={(e) => setForm({ ...form, webhookSecret: e.target.value })}
+            placeholder="Filled on first save" />
         </Field>
       </div>
       <p className="text-xs text-ink-faint mt-2 font-mono break-all">

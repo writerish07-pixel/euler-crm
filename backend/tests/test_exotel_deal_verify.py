@@ -57,6 +57,10 @@ def test_quiet_hours_and_next_slot():
     nxt = exo.next_slot(evening, cfg)
     assert nxt.hour == 10
     assert nxt.date() > evening.date()
+    stored = exo.as_utc_iso(nxt)
+    assert "+00:00" in stored or stored.endswith("Z")
+    later = datetime(2026, 10, 17, 5, 0, tzinfo=timezone.utc).isoformat()
+    assert stored <= later
 
 
 def test_exoml_is_hindi_flow():
@@ -65,10 +69,14 @@ def test_exoml_is_hindi_flow():
         "quietStart": 10, "quietEnd": 19,
     }
     xml = exo.exoml_start(cfg)
-    assert "Gather" in xml
+    gather = xml.split("<Gather", 1)[1]
+    assert "prompt.mp3" in gather
+    assert "intro.mp3" in gather.split("</Gather>", 1)[0]
     assert "Record" in xml
     assert "Akar Euler" in xml or "intro.mp3" in xml
-    assert "hash" in xml.lower() or "prompt.mp3" in xml
+    empty = exo.exoml_record_then_thanks(cfg)
+    assert "Record" in empty
+    assert "Hangup" not in empty
 
 
 @pytest_asyncio.fixture
@@ -126,6 +134,7 @@ async def test_settings_mask_secrets(client):
     assert body["configured"] is True
     assert body["exoPhone"].endswith("37655")
     assert "…" in (body.get("apiKeyMasked") or "")
+    assert body.get("webhookSecret")
 
 
 @pytest.mark.asyncio
@@ -140,6 +149,7 @@ async def test_enqueue_then_dtmf_mismatch(client):
     assert queued["ok"] is True
     lead = await server.db.leads.find_one({"leadId": "LD26EXO1"})
     assert lead["dealVerifyStatus"] == "pending"
+    assert "+00:00" in (lead.get("dealVerifyNextAt") or "") or str(lead.get("dealVerifyNextAt") or "").endswith("Z")
 
     placed = await exo.place_verify_call("LD26EXO1", force=True)
     assert placed.get("ok") is True
@@ -222,3 +232,67 @@ async def test_queue_lists_mismatch(client):
     assert r.status_code == 200
     ids = [x["leadId"] for x in r.json()]
     assert "LD26EXO4" in ids
+
+
+@pytest.mark.asyncio
+async def test_gather_timeout_records_speech(client):
+    await server.db.leads.insert_one({
+        "leadId": "LD26EXO6", "customerName": "No Digits", "mobile": "9876500066",
+        "currentStatus": "Booked", "bookingDate": "2026-10-16",
+        "accountStatus": "Active", "totalReceived": 10000,
+        "dealVerifyStatus": "calling", "dealVerifyCallSid": "sid-empty",
+    })
+    r = await client.post("/api/integrations/exotel/gather", data={
+        "CallSid": "sid-empty",
+        "CustomField": "LD26EXO6",
+        "Digits": "",
+    })
+    assert r.status_code == 200
+    xml = r.text
+    assert "Record" in xml
+    assert "Hangup" not in xml
+
+
+@pytest.mark.asyncio
+async def test_due_calls_skip_unenqueued_booked(client, monkeypatch):
+    placed = []
+
+    async def capture(lead_id, *, force=False):
+        placed.append(lead_id)
+        return {"ok": True, "leadId": lead_id}
+
+    monkeypatch.setattr(exo, "place_verify_call", capture)
+    await server.db.leads.insert_one({
+        "leadId": "LD26OLD", "customerName": "Old Booked", "mobile": "9876500077",
+        "currentStatus": "Booked", "bookingDate": "2026-01-01",
+        "accountStatus": "Active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD26NEW", "customerName": "New Booked", "mobile": "9876500088",
+        "currentStatus": "Booked", "bookingDate": "2026-10-16",
+        "accountStatus": "Active",
+        "dealVerifyStatus": "pending", "dealVerifyNextAt": "2020-01-01T00:00:00+00:00",
+    })
+    res = await exo.run_due_calls(limit=25, force=True)
+    assert res.get("ok") is True
+    assert "LD26NEW" in placed
+    assert "LD26OLD" not in placed
+
+
+@pytest.mark.asyncio
+async def test_recompute_refreshes_mismatch(client):
+    await server.db.leads.insert_one({
+        "leadId": "LD26EXO5", "customerName": "Later Receipt", "mobile": "9876500055",
+        "currentStatus": "Booked", "bookingDate": "2026-10-16",
+        "accountStatus": "Active", "totalReceived": 10000, "customerPayable": 200000,
+        "dealVerifyAmount": 200000, "dealVerifyMismatch": True, "dealVerifyMismatchKind": "over",
+        "dealVerifyStatus": "answered",
+    })
+    await server.db.payments.insert_one({
+        "leadId": "LD26EXO5", "amount": 200000, "paymentMode": "UPI",
+        "date": "2026-10-16", "narration": "Balance",
+    })
+    await server.recompute_lead("LD26EXO5")
+    lead = await server.db.leads.find_one({"leadId": "LD26EXO5"})
+    assert lead["dealVerifyMismatch"] is False
+    assert lead["dealVerifyMismatchKind"] == ""

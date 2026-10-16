@@ -1284,6 +1284,11 @@ async def recompute_lead(lead_id):
         "lastUpdated": now_iso(),
         "vehicleCount": oem_sync.vehicle_count(lead),
     }
+    stated = exo.parse_amount(lead.get("dealVerifyAmount"))
+    if stated:
+        kind = exo.mismatch_kind(stated, total_received)
+        updates["dealVerifyMismatch"] = bool(kind)
+        updates["dealVerifyMismatchKind"] = kind
     if derived_pass and derived_pass.get("applied"):
         updates["additionalDiscount"] = derived_pass["additionalDiscount"]
         updates["oemExtraSupportPassed"] = derived_pass["oemExtraSupportPassed"]
@@ -15948,9 +15953,12 @@ async def exotel_voice(request: Request):
 async def exotel_gather(request: Request):
     await _exotel_token_ok(request)
     form = await _exotel_form(request)
-    await exo.handle_gather(form)
+    res = await exo.handle_gather(form)
     cfg = await exo.get_config()
-    return _exoml(exo.exoml_after_digits(cfg))
+    if res.get("ok"):
+        return _exoml(exo.exoml_after_digits(cfg))
+    # Timeout / empty keypad: keep the call open and record the spoken amount.
+    return _exoml(exo.exoml_record_then_thanks(cfg))
 
 
 @public.post("/integrations/exotel/recorded")

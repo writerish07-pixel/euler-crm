@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -59,6 +60,13 @@ def today_ist() -> str:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def as_utc_iso(dt: datetime) -> str:
+    """Store due-times in UTC so Mongo string compare matches now_iso()."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=IST)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def digits10(phone) -> str:
@@ -179,6 +187,8 @@ async def save_config(body: dict) -> dict:
     will_tok = updates.get("apiToken") or existing.get("apiToken")
     if will_key and will_tok and updates.get("enabled") is not False:
         updates["enabled"] = True
+    if not (updates.get("webhookSecret") or existing.get("webhookSecret")):
+        updates["webhookSecret"] = secrets.token_urlsafe(18)
     if updates:
         updates["updatedAt"] = now_iso()
         await db.settings.update_one({"_id": SETTINGS_ID}, {"$set": updates}, upsert=True)
@@ -334,11 +344,15 @@ def exoml_start(cfg: dict) -> str:
     intro = _play_or_say(cfg, "intro", "Namaste. Akar Euler se baat ho rahi hai. Aapki booking ke baare mein ek chhoti si pushti hai.")
     prompt = _play_or_say(cfg, "prompt", "Aapne showroom mein jitna bhugtan kiya hai, woh rashi keypad par type karke hash dabaiye. Type nahi kar sakte to rashi bolkar bata dijiye.")
     speak = _play_or_say(cfg, "speak", "Kripya ab rashi bol kar bataiye.")
+    # Intro + prompt sit inside Gather so keypad during the greeting still counts.
+    # Record here is a fallback if Exotel continues this document on timeout;
+    # the gather webhook also returns Record when no digits arrive.
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
-        f"{intro}{prompt}"
         f'<Gather timeout="12" finishOnKey="#" numDigits="8" method="POST" action="{xml_escape(urls["gather"])}">'
+        f"{intro}"
+        f"{prompt}"
         "</Gather>"
         f"{speak}"
         f'<Record maxLength="25" timeout="5" playBeep="true" method="POST" action="{xml_escape(urls["recorded"])}"/>'
@@ -352,15 +366,14 @@ def exoml_after_digits(cfg: dict) -> str:
 
 
 def exoml_record_then_thanks(cfg: dict) -> str:
+    """Spoken-amount path after Gather timeout / empty keypad. Thanks play on /recorded."""
     speak = _play_or_say(cfg, "speak", "Kripya ab rashi bol kar bataiye.")
-    thanks = _play_or_say(cfg, "thanks", "Dhanyavaad. Akar Euler.")
     urls = webhook_urls(cfg)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
         f"{speak}"
         f'<Record maxLength="25" timeout="5" playBeep="true" method="POST" action="{xml_escape(urls["recorded"])}"/>'
-        f"{thanks}"
         "</Response>"
     )
 
@@ -446,13 +459,14 @@ async def enqueue_after_booking(lead_id: str) -> dict:
     nxt = now_ist() + timedelta(minutes=8)
     if not in_quiet_hours(nxt, cfg):
         nxt = next_slot(now_ist(), cfg)
+    due = as_utc_iso(nxt)
     await _apply(lead_id, {
         "dealVerifyStatus": "pending",
         "dealVerifyPaused": False,
-        "dealVerifyNextAt": nxt.isoformat(),
+        "dealVerifyNextAt": due,
         "dealVerifyLastStatus": "queued",
     })
-    return {"ok": True, "nextAt": nxt.isoformat()}
+    return {"ok": True, "nextAt": due}
 
 
 def _attempts_today(lead: dict) -> int:
@@ -481,18 +495,18 @@ async def place_verify_call(lead_id: str, *, force: bool = False) -> dict:
         return {"ok": False, "reason": "no-mobile"}
     if not force:
         if not in_quiet_hours(now_ist(), cfg):
-            nxt = next_slot(now_ist(), cfg)
-            await _apply(lead_id, {"dealVerifyNextAt": nxt.isoformat(), "dealVerifyStatus": "pending"})
-            return {"ok": False, "reason": "quiet-hours", "nextAt": nxt.isoformat()}
+            due = as_utc_iso(next_slot(now_ist(), cfg))
+            await _apply(lead_id, {"dealVerifyNextAt": due, "dealVerifyStatus": "pending"})
+            return {"ok": False, "reason": "quiet-hours", "nextAt": due}
         if _attempts_today(lead) >= MAX_ATTEMPTS_PER_DAY:
-            nxt = next_slot(now_ist() + timedelta(hours=12), cfg)
-            await _apply(lead_id, {"dealVerifyNextAt": nxt.isoformat()})
-            return {"ok": False, "reason": "day-cap", "nextAt": nxt.isoformat()}
+            due = as_utc_iso(next_slot(now_ist() + timedelta(hours=12), cfg))
+            await _apply(lead_id, {"dealVerifyNextAt": due})
+            return {"ok": False, "reason": "day-cap", "nextAt": due}
     today = today_ist()
     today_n = _attempts_today(lead) + 1
     total_n = int(lead.get("dealVerifyAttempts") or 0) + 1
     result = await _place_call_http(cfg, mobile, lead_id)
-    nxt = next_slot(now_ist(), cfg)
+    due = as_utc_iso(next_slot(now_ist(), cfg))
     await _apply(lead_id, {
         "dealVerifyStatus": "calling" if result.get("ok") else "failed",
         "dealVerifyCallSid": result.get("callSid") or lead.get("dealVerifyCallSid") or "",
@@ -501,7 +515,7 @@ async def place_verify_call(lead_id: str, *, force: bool = False) -> dict:
         "dealVerifyAttemptsDate": today,
         "dealVerifyLastAt": now_iso(),
         "dealVerifyLastStatus": result.get("status") or ("queued" if result.get("ok") else "failed"),
-        "dealVerifyNextAt": nxt.isoformat(),
+        "dealVerifyNextAt": due,
     })
     await _db().deal_verify_calls.insert_one({
         "leadId": lead_id,
@@ -555,14 +569,14 @@ async def record_listening(lead_id: str, *, recording_url: str, call_sid: str = 
         if recording_url:
             await _apply(lead_id, {"dealVerifyRecordingUrl": recording_url})
         return {"ok": True, "skipped": "already-answered"}
-    nxt = next_slot(now_ist() + timedelta(hours=6), await get_config())
+    due = as_utc_iso(next_slot(now_ist() + timedelta(hours=6), await get_config()))
     lead = await _apply(lead_id, {
         "dealVerifyStatus": "listening",
         "dealVerifyRecordingUrl": recording_url,
         "dealVerifyCallSid": call_sid or lead.get("dealVerifyCallSid") or "",
         "dealVerifyLastAt": now_iso(),
         "dealVerifyLastStatus": "recorded",
-        "dealVerifyNextAt": nxt.isoformat(),
+        "dealVerifyNextAt": due,
     })
     return {"ok": True, "leadId": lead_id, **snapshot(lead)}
 
@@ -580,7 +594,7 @@ def _pick_lead_id(form: dict, custom: str = "") -> str:
 
 async def _lead_for_call(form: dict) -> Optional[dict]:
     db = _db()
-    sid = str(form.get("CallSid") or form.get("CallSid") or form.get("callSid") or "").strip()
+    sid = str(form.get("CallSid") or form.get("Sid") or form.get("callSid") or "").strip()
     lid = _pick_lead_id(form)
     if lid:
         return await db.leads.find_one({"leadId": lid})
@@ -629,12 +643,12 @@ async def handle_status(form: dict) -> dict:
     rec = str(form.get("RecordingUrl") or "")
     sid = str(form.get("CallSid") or form.get("Sid") or "")
     cfg = await get_config()
-    nxt = next_slot(now_ist(), cfg)
+    due = as_utc_iso(next_slot(now_ist(), cfg))
     updates = {
         "dealVerifyLastStatus": status or lead.get("dealVerifyLastStatus") or "",
         "dealVerifyLastAt": now_iso(),
         "dealVerifyCallSid": sid or lead.get("dealVerifyCallSid") or "",
-        "dealVerifyNextAt": nxt.isoformat(),
+        "dealVerifyNextAt": due,
     }
     if rec and not lead.get("dealVerifyRecordingUrl"):
         updates["dealVerifyRecordingUrl"] = rec
@@ -653,7 +667,7 @@ async def pause_lead(lead_id: str, paused: bool = True) -> dict:
     lead = await _apply(lead_id, {
         "dealVerifyPaused": bool(paused),
         "dealVerifyStatus": "paused" if paused else "pending",
-        "dealVerifyNextAt": "" if paused else next_slot(now_ist(), await get_config()).isoformat(),
+        "dealVerifyNextAt": "" if paused else as_utc_iso(next_slot(now_ist(), await get_config())),
     })
     return snapshot(lead or {})
 
@@ -675,7 +689,9 @@ async def run_due_calls(limit: int = 25, *, force: bool = False) -> dict:
             {"dealVerifyAmount": None},
             {"dealVerifyAmount": ""},
         ],
-        "dealVerifyStatus": {"$nin": ["answered"]},
+        # Only files the CRM queued (after booking / Call now). Do not ring every
+        # historical booked lead the first time Exotel is switched on.
+        "dealVerifyStatus": {"$in": ["pending", "calling", "failed", "queued", "listening"]},
         "$and": [
             {"$or": [
                 {"dealVerifyNextAt": {"$lte": now}},
