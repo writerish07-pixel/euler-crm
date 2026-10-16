@@ -126,6 +126,7 @@ async def test_place_call_skips_record_and_retries_india_host(monkeypatch):
     assert res["ok"] is True
     assert res["callSid"] == "sid-ok"
     assert "Record" not in posts[0]["data"]
+    assert "StatusCallbackEvents[0]" not in posts[0]["data"]
     assert posts[0]["data"]["From"] == "09667991287"
     assert any("api.in.exotel.com" in p["url"] for p in posts)
 
