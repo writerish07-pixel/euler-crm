@@ -105,6 +105,11 @@ test("same-order pack shows S.No. chassis table from OEM Sold", async () => {
   expect(host.querySelector('[data-testid="delivery-unit-chassis-2"]').value).toBe("MD9PACK2");
   expect(host.querySelector('[data-testid="delivery-unit-invoice-3"]').value).toBe("CINV-3");
   expect(host.querySelector('[data-testid="delivery-chassis"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="pack-delivery-date-group"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="delivery-unit-date-1"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="delivery-unit-date-2"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="delivery-unit-date-3"]')).toBeTruthy();
+  expect(host.textContent).not.toMatch(/File delivery date/i);
   await act(async () => { root.unmount(); });
   host.remove();
 });

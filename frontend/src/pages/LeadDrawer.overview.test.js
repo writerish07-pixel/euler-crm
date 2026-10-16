@@ -78,7 +78,9 @@ test("Details units area has add-unit, add-vehicle and billed-date edit", async 
   expect(host.querySelector('[data-testid="overview-add-another-vehicle-btn"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="unit-billed-btn-1"]')?.textContent).toMatch(/Billed/i);
   expect(host.querySelector('[data-testid="unit-billed-btn-2"]')?.textContent).toMatch(/Set billed date/i);
+  expect(host.querySelector('[data-testid="pack-delivery-date-group"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="unit-delivered-btn-1"]')?.textContent).toMatch(/Delivered|delivery date/i);
+  expect(host.querySelector('[data-testid="unit-delivered-btn-2"]')).toBeTruthy();
   expect(host.textContent).toMatch(/billed date/i);
   expect(host.textContent).toMatch(/delivery date/i);
   expect(host.textContent).toMatch(/billed DV220 · available FB/);

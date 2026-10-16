@@ -12,10 +12,28 @@ function Line({ k, v, strong, testid, tone }) {
   );
 }
 
+function packCxLines(d, demand, unitCxDemands) {
+  const units = (d && d.pack && Array.isArray(d.units) && d.units.length > 1) ? d.units : null;
+  if (!units) return null;
+  return units.map((u, i) => {
+    const fromProp = Array.isArray(unitCxDemands) && unitCxDemands[i] != null
+      ? Number(unitCxDemands[i]) || 0
+      : null;
+    const own = Number(u.cxDemand) || 0;
+    const fallback = i === 0 ? Number(demand) || 0 : 0;
+    return {
+      ...u,
+      cx: fromProp != null ? fromProp : (own || fallback),
+    };
+  });
+}
+
 export default function DealFormatCard({
   snapshot,
   cxDemand,
   onCxDemand,
+  unitCxDemands,
+  onUnitCxDemand,
   readOnly = false,
   loading = false,
   missingPrice = false,
@@ -28,7 +46,12 @@ export default function DealFormatCard({
 }) {
   const d = snapshot || {};
   const demand = cxDemand ?? d.cxDemand ?? 0;
-  const support = Number(d.supportRequired ?? ((d.netToCx || 0) - Number(demand || 0)));
+  const packCx = packCxLines(d, demand, unitCxDemands);
+  const packDemand = packCx
+    ? packCx.reduce((s, u) => s + (Number(u.cx) || 0), 0)
+    : Number(demand) || 0;
+  const quoted = packCx ? packDemand : Number(demand) || 0;
+  const support = Number(d.supportRequired ?? ((d.netToCx || 0) - quoted));
   const extra = support < 0;
   const priceTotal = Number(
     d.priceTotal ?? ((Number(d.exShowroom) || 0) + (Number(d.rto) || 0) + (Number(d.insurance) || 0)),
@@ -36,10 +59,10 @@ export default function DealFormatCard({
   const offers = hideScheme ? [] : (Array.isArray(d.schemeOffers) ? d.schemeOffers : []);
   const passed = hideScheme ? 0 : Number(d.schemePassed || 0);
   const additional = Number(
-    d.additionalDiscount ?? Math.max(0, priceTotal - (Number(demand) || 0) - passed),
+    d.additionalDiscount ?? Math.max(0, priceTotal - quoted - passed),
   );
   const ownerOnly = d.needsOwnerApproval == null
-    ? Math.abs(priceTotal - (Number(demand) || 0) - passed) >= 1
+    ? Math.abs(priceTotal - quoted - passed) >= 1
     : !!d.needsOwnerApproval;
   return (
     <div className="rounded-lg border border-line bg-paper px-3 py-3 space-y-1.5" data-testid="deal-format-card">
@@ -121,7 +144,38 @@ export default function DealFormatCard({
           <Line k="OEM scheme passed" v={passed} strong testid="deal-scheme-passed" tone={passed > 0 ? "text-emerald-700" : ""} />
         </div>
       )}
-      {readOnly ? (
+      {packCx ? (
+        <div className="rounded-md border border-line bg-white px-2 py-2 space-y-1.5" data-testid="deal-pack-cx-group">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft">
+            Cx Demand · each unit
+          </div>
+          {packCx.map((u, i) => (
+            readOnly ? (
+              <Line
+                key={i}
+                k={`Unit ${i + 1} Cx Demand${u.model ? ` · ${u.model}` : ""}`}
+                v={u.cx}
+                testid={`deal-cx-demand-unit-${i + 1}`}
+              />
+            ) : (
+              <Field key={i} label={`Unit ${i + 1} Cx Demand${u.model ? ` · ${u.model}` : ""} *`}>
+                <Input
+                  data-testid={i === 0 ? "lead-budget" : `deal-cx-demand-unit-${i + 1}`}
+                  type="number"
+                  min="0"
+                  value={u.cx || ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (onUnitCxDemand) onUnitCxDemand(i, v);
+                    else if (i === 0 && onCxDemand) onCxDemand(v);
+                  }}
+                />
+              </Field>
+            )
+          ))}
+          <Line k="Pack Cx Demand" v={packDemand} strong testid="deal-cx-demand" />
+        </div>
+      ) : readOnly ? (
         <Line k="Cx Demand" v={demand} strong testid="deal-cx-demand" />
       ) : (
         <Field label="Cx Demand (final amount to customer) *">
@@ -143,7 +197,7 @@ export default function DealFormatCard({
           tone={additional > 0 ? "text-amber-800" : ""}
         />
       </div>
-      {ownerOnly && Number(demand) > 0 && (
+      {ownerOnly && quoted > 0 && (
         <p className="text-[11px] text-rose-700" data-testid="deal-owner-only">
           Deal differs from my total after OEM scheme — only Owner can approve.
         </p>
@@ -160,7 +214,7 @@ export default function DealFormatCard({
       </div>
       )}
       <p className="text-[11px] text-ink-faint">
-        {hideScheme && !(ownerOnly && Number(demand) > 0)
+        {hideScheme && !(ownerOnly && quoted > 0)
           ? "Enter Cx Demand — the amount the customer will pay. Commercials are completed by the Team Leader."
           : offers.length
           ? "Pass on Yes gives the full OEM amount to the customer and recuts Additional (Dealer)."

@@ -143,6 +143,32 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
   );
 }
 
+function PackDeliveryDateGroup({ lead, units, canEdit, onSaved }) {
+  if (!units || units.length < 2) return null;
+  return (
+    <div className="rounded-md border border-line bg-zinc-50/70 px-2 py-1.5 mb-2" data-testid="pack-delivery-date-group">
+      <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Delivery date · each unit</div>
+      {units.map((u, i) => {
+        const sno = u.sno || i + 1;
+        return (
+          <div key={sno} className="flex flex-wrap items-center justify-between gap-2 py-1">
+            <span className="text-sm text-ink-soft">
+              Unit {sno}{(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}
+            </span>
+            <UnitDeliveryDateField
+              leadId={lead.leadId}
+              sno={sno}
+              value={u.deliveryDate || ""}
+              canEdit={!!canEdit}
+              onSaved={onSaved}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved, canEditBilledDate }) {
   return (
     <div className="space-y-3" data-testid="pack-units-tab">
@@ -150,6 +176,36 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
         This order has {units.length} units. Open Price Structure and Scheme on each vehicle.
         Payable {inr(lead.customerPayable)} · Outstanding {inr(lead.customerOutstanding)}.
       </p>
+      <div className="rounded-md border border-line bg-zinc-50/70 px-3 py-2" data-testid="pack-cx-demand-group">
+        <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Cx Demand · each unit</div>
+        {units.map((u, i) => {
+          const sno = u.sno || i + 1;
+          const amt = Number(u.cxDemand || u.customerPayable || 0);
+          return (
+            <OwnerKV
+              key={sno}
+              label={`Unit ${sno} Cx Demand`}
+              field="cxDemand"
+              unitSno={sno}
+              value={amt}
+              display={inr(amt)}
+              numeric
+              leadId={lead.leadId}
+              onSaved={onSaved}
+            />
+          );
+        })}
+        <div className="flex items-center justify-between pt-1 text-sm">
+          <span className="text-ink-soft">Pack Cx Demand</span>
+          <span className="font-mono font-semibold">{inr(lead.cxDemand || lead.budget || lead.customerPayable)}</span>
+        </div>
+      </div>
+      <PackDeliveryDateGroup
+        lead={lead}
+        units={units}
+        canEdit={!!canEditBilledDate}
+        onSaved={onSaved}
+      />
       {units.map((u, i) => {
         const sno = u.sno || i + 1;
         return (
@@ -167,13 +223,6 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
                     leadId={lead.leadId}
                     sno={sno}
                     value={u.soldDate || ""}
-                    canEdit={!!canEditBilledDate}
-                    onSaved={onSaved}
-                  />
-                  <UnitDeliveryDateField
-                    leadId={lead.leadId}
-                    sno={sno}
-                    value={u.deliveryDate || u.soldDate || ""}
                     canEdit={!!canEditBilledDate}
                     onSaved={onSaved}
                   />
@@ -493,6 +542,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
 }
 
 function FieldOverview({ lead, booking, delivery }) {
+  const packUnits = packUnitList(lead);
   return (
     <div className="grid grid-cols-1 gap-5" data-testid="field-lead-overview">
       <Card className="p-4">
@@ -505,7 +555,15 @@ function FieldOverview({ lead, booking, delivery }) {
           <KV label="Created" value={fmtDate(lead.createdDate)} />
           <KV label="Next Follow-up" value={fmtDate(lead.nextFollowupDate || lead.nextFollowup)} />
           <KV label="Booking Date" value={fmtDate(lead.bookingDate || booking?.bookingDate)} />
-          <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+          {packUnits ? packUnits.map((u, i) => {
+            const sno = u.sno || i + 1;
+            return (
+              <KV key={sno} label={`Unit ${sno} delivery`}
+                value={fmtDate(u.deliveryDate || u.soldDate) || "—"} />
+            );
+          }) : (
+            <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+          )}
           <KV label="Finance Required" value={lead.financeRequired || "—"} />
           <KV label="Exchange" value={lead.exchangeRequired || "—"} />
         </div>
@@ -516,12 +574,21 @@ function FieldOverview({ lead, booking, delivery }) {
 }
 
 function FieldDeliveryReadOnly({ delivery, lead }) {
+  const packUnits = packUnitList(lead);
   return (
     <Card className="p-4" data-testid="field-delivery-readonly">
       <h4 className="font-heading font-bold text-ink text-sm mb-2">Delivery status</h4>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
         <KV label="Status" value={lead.deliveryStatus || lead.currentStatus || "—"} />
-        <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+        {packUnits ? packUnits.map((u, i) => {
+          const sno = u.sno || i + 1;
+          return (
+            <KV key={sno} label={`Unit ${sno} delivery`}
+              value={fmtDate(u.deliveryDate || u.soldDate) || "—"} />
+          );
+        }) : (
+          <KV label="Delivery Date" value={fmtDate(lead.deliveryDate || delivery?.deliveryDate)} />
+        )}
         <KV label="Invoice" value={delivery?.invoiceNumber || lead.invoiceNumber || "—"} />
         <KV label="Chassis" value={delivery?.chassisNumber || "—"} />
         <KV label="Engine" value={delivery?.engineNumber || "—"} />
@@ -610,11 +677,12 @@ function KV({ label, value, tone }) {
   );
 }
 
-function OwnerKV({ label, field, value, display, type = "text", options, leadId, onSaved, tone, numeric }) {
+function OwnerKV({ label, field, value, display, type = "text", options, leadId, onSaved, tone, numeric, unitSno }) {
   const { isOwner } = useAuth();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value ?? "");
   const [busy, setBusy] = useState(false);
+  const fieldId = unitSno ? `${field}-unit-${unitSno}` : field;
   useEffect(() => { setDraft(value ?? ""); }, [value]);
   if (!isOwner) return <KV label={label} value={display ?? value ?? "—"} tone={tone} />;
   const save = async () => {
@@ -623,6 +691,7 @@ function OwnerKV({ label, field, value, display, type = "text", options, leadId,
       await put(`/leads/${leadId}/owner-field`, {
         field,
         value: numeric ? Number(draft) || 0 : draft,
+        ...(unitSno ? { unitSno } : {}),
       });
       toast.success(`${label} updated`);
       setEditing(false);
@@ -632,26 +701,26 @@ function OwnerKV({ label, field, value, display, type = "text", options, leadId,
     } finally { setBusy(false); }
   };
   return (
-    <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 last:border-0 min-w-0" data-testid={`owner-field-${field}`}>
+    <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 last:border-0 min-w-0" data-testid={`owner-field-${fieldId}`}>
       <span className="text-sm text-ink-soft shrink-0 pr-3">{label}</span>
       {editing ? (
         <div className="flex items-center gap-1 min-w-0">
           {options ? (
             <select className="rounded-md ring-1 ring-inset ring-line text-sm py-1 px-1.5 max-w-[10rem]"
-              value={draft} onChange={(e) => setDraft(e.target.value)} data-testid={`owner-edit-${field}`}>
+              value={draft} onChange={(e) => setDraft(e.target.value)} data-testid={`owner-edit-${fieldId}`}>
               {options.map((o) => <option key={o.value ?? o} value={o.value ?? o}>{o.label ?? o}</option>)}
             </select>
           ) : (
             <input className="rounded-md ring-1 ring-inset ring-line text-sm py-1 px-1.5 w-28 font-mono"
               type={type} value={draft} onChange={(e) => setDraft(e.target.value)}
-              data-testid={`owner-edit-${field}`} />
+              data-testid={`owner-edit-${fieldId}`} />
           )}
-          <Button className="!py-0.5 !px-1.5 text-[11px]" onClick={save} disabled={busy} data-testid={`owner-save-${field}`}>Save</Button>
+          <Button className="!py-0.5 !px-1.5 text-[11px]" onClick={save} disabled={busy} data-testid={`owner-save-${fieldId}`}>Save</Button>
           <Button variant="ghost" className="!py-0.5 !px-1.5 text-[11px]" onClick={() => { setDraft(value ?? ""); setEditing(false); }}>Cancel</Button>
         </div>
       ) : (
         <button type="button" className="inline-flex items-center gap-1 font-mono tabular text-sm font-medium text-right shrink-0 text-cobalt"
-          data-testid={`owner-edit-btn-${field}`} onClick={() => setEditing(true)}>
+          data-testid={`owner-edit-btn-${fieldId}`} onClick={() => setEditing(true)}>
           <span className={tone || "text-ink"}>{display ?? (value || value === 0 ? (numeric ? inr(value) : value) : "—")}</span>
           <Pencil size={11} className="text-ink-faint" />
         </button>
@@ -794,7 +863,7 @@ export function OverviewUnits({
         )}
       </div>
       <p className="text-[11px] text-ink-faint mb-2">
-        Each unit has its own billed date (scheme month) and delivery date (monthly delivery count).
+        Each unit has its own billed date (scheme month). Delivery dates are grouped below — monthly delivery counts use that unit’s date.
       </p>
       <ul className="space-y-2">
         {units.map((u, i) => {
@@ -819,13 +888,6 @@ export function OverviewUnits({
                 canEdit={!!canEditBilledDate}
                 onSaved={onSaved}
               />
-              <UnitDeliveryDateField
-                leadId={lead.leadId}
-                sno={sno}
-                value={u.deliveryDate || u.soldDate || ""}
-                canEdit={!!canEditBilledDate}
-                onSaved={onSaved}
-              />
               {onOpenUnit && !hideExecScheme && (
                 <span className="flex gap-1">
                   <Button variant="secondary" className="!py-0.5 !px-2 text-[11px]"
@@ -840,6 +902,12 @@ export function OverviewUnits({
           );
         })}
       </ul>
+      <PackDeliveryDateGroup
+        lead={lead}
+        units={units}
+        canEdit={!!canEditBilledDate}
+        onSaved={onSaved}
+      />
       {Number(lead.customerPayable || lead.cxDemand) > 0 && (
         <div className="text-xs font-semibold text-ink mt-1" data-testid="pack-total-payable">
           Pack payable {inr(lead.customerPayable || lead.cxDemand)}
@@ -858,13 +926,38 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
   const canUploadKyc = isOwner || isSalesGm || isTl || isTeamLead || isExecutive;
   const canSeeKyc = canUploadKyc || isAccounts;
   const lid = lead.leadId;
+  const packUnits = packUnitList(lead);
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
       <Card className="p-4">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Commercial Breakup</h4>
         <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
-        <OwnerKV label="Cx Demand" field="cxDemand" value={lead.cxDemand || lead.budget || 0}
-          display={inr(lead.cxDemand || lead.budget || 0)} numeric leadId={lid} onSaved={onSaved} />
+        {packUnits ? (
+          <div className="rounded-md border border-line bg-zinc-50/70 px-2 py-1.5 mb-1" data-testid="pack-cx-demand-group">
+            <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Cx Demand · each unit</div>
+            {packUnits.map((u, i) => {
+              const sno = u.sno || i + 1;
+              const amt = Number(u.cxDemand || u.customerPayable || 0);
+              return (
+                <OwnerKV
+                  key={sno}
+                  label={`Unit ${sno} Cx Demand`}
+                  field="cxDemand"
+                  unitSno={sno}
+                  value={amt}
+                  display={inr(amt)}
+                  numeric
+                  leadId={lid}
+                  onSaved={onSaved}
+                />
+              );
+            })}
+            <KV label="Pack Cx Demand" value={inr(lead.cxDemand || lead.budget || 0)} />
+          </div>
+        ) : (
+          <OwnerKV label="Cx Demand" field="cxDemand" value={lead.cxDemand || lead.budget || 0}
+            display={inr(lead.cxDemand || lead.budget || 0)} numeric leadId={lid} onSaved={onSaved} />
+        )}
         <p className="text-[11px] text-ink-faint -mt-1 mb-1">
           Payable and outstanding are the deal (Cx Demand). Extra vs GVC goes to dealer margin — not a cheaper customer price.
         </p>
@@ -1002,8 +1095,10 @@ function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}
             canEditBilledDate={canEditBilledDate}
             hideExecScheme={isExecutive}
           />
-          <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
-            display={inr(lead.budget || lead.cxDemand || 0)} numeric leadId={lid} onSaved={onSaved} />
+          {!packUnits && (
+            <OwnerKV label="Cx Demand" field="budget" value={lead.budget || lead.cxDemand || 0}
+              display={inr(lead.budget || lead.cxDemand || 0)} numeric leadId={lid} onSaved={onSaved} />
+          )}
           <OwnerKV label="Remarks" field="remarks" value={lead.remarks || ""} leadId={lid} onSaved={onSaved} />
         </div>
       </Card>
@@ -2130,6 +2225,10 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           chassisNumber: u.chassisNumber || "",
           invoiceNumber: u.invoiceNumber || "",
           numberPlate: u.numberPlate || "",
+          soldDate: u.soldDate || "",
+          deliveryDate: u.deliveryDate || "",
+          availableBodyType: u.availableBodyType || "",
+          oemBilledBodyType: u.oemBilledBodyType || u.bodyType || "",
         }));
         const rows = base.length ? base : family.map((u, i) => ({
           sno: u.sno || i + 1,
@@ -2181,7 +2280,14 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   const toggle = (k) => { if (!locked) setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" })); };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
-    if (form.delivered === "Yes" && !form.deliveryDate) return toast.error("Delivery date is required");
+    const packLatest = packUnits.length > 1
+      ? packUnits.map((u) => String(u.deliveryDate || "").slice(0, 10)).filter(Boolean).sort().slice(-1)[0]
+      : form.deliveryDate;
+    if (form.delivered === "Yes" && packUnits.length > 1
+        && packUnits.some((u) => !String(u.deliveryDate || "").trim())) {
+      return toast.error("Enter a delivery date for each unit");
+    }
+    if (form.delivered === "Yes" && !packLatest) return toast.error("Delivery date is required");
     // The agent decides the payout slab; the server rejects a blank one too.
     if (form.delivered === "Yes" && !form.insuranceAgentId && !selfArranged) {
       return toast.error("Select the insurance agent before marking delivered");
@@ -2189,6 +2295,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
     try {
       await put(`/leads/${lead.leadId}/delivery`, {
         ...form,
+        deliveryDate: packLatest || form.deliveryDate,
         ...(packUnits.length > 1 ? { units: packUnits } : {}),
       });
       toast.success(form.delivered === "Yes"
@@ -2266,7 +2373,6 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                 <th className="py-1 pr-2">Chassis</th>
                 <th className="py-1 pr-2">Invoice</th>
                 <th className="py-1 pr-2">Number Plate</th>
-                <th className="py-1">Delivery date</th>
               </tr>
             </thead>
             <tbody>
@@ -2303,19 +2409,34 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                         if (i === 0) setForm((f) => ({ ...f, numberPlate: v }));
                       }} />
                   </td>
-                  <td className="py-1">
-                    <Input data-testid={`delivery-unit-date-${i + 1}`} type="date"
-                      value={u.deliveryDate || ""} disabled={locked}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, deliveryDate: v } : row)));
-                        if (i === 0) setForm((f) => ({ ...f, deliveryDate: v || f.deliveryDate }));
-                      }} />
-                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+      {packUnits.length > 1 && (
+        <div className="rounded-md border border-line bg-zinc-50/70 px-3 py-2 mb-3" data-testid="pack-delivery-date-group">
+          <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Delivery date · each unit</div>
+          <p className="text-[11px] text-ink-faint mb-2">
+            Monthly delivery counts use each unit’s date — not one date for the whole pack.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {packUnits.map((u, i) => (
+              <Field key={u.sno || i} label={`Unit ${u.sno || i + 1}${u.model ? ` · ${u.model}` : ""}`}>
+                <Input
+                  data-testid={`delivery-unit-date-${i + 1}`}
+                  type="date"
+                  value={u.deliveryDate || ""}
+                  disabled={locked}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, deliveryDate: v } : row)));
+                  }}
+                />
+              </Field>
+            ))}
+          </div>
         </div>
       )}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2343,9 +2464,11 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
               .map((a) => <option key={a.agentId} value={a.agentId}>{a.agentName}</option>)}
           </Select>
         </Field>
-        <Field label={packUnits.length > 1 ? "File delivery date (latest unit)" : "Delivery Date"}>
+        {packUnits.length <= 1 && (
+        <Field label="Delivery Date">
           <Input type="date" value={form.deliveryDate || ""} onChange={set("deliveryDate")} disabled={locked} />
         </Field>
+        )}
         <Field label="Mark Delivered?">
           <Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")} disabled={locked || alreadyDelivered || !canMarkDelivered}>
             <option value="">Not yet</option><option value="Yes">Yes — Delivered</option>
@@ -2626,7 +2749,13 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           <Field label="Model"><Select value={form.interestedModel} onChange={set("interestedModel")} disabled={vehicleLocked}><option value="">—</option>{(m.models || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Variant"><Select value={form.variant} onChange={set("variant")} disabled={vehicleLocked}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
           <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{(m.priorities || ["Low","Normal","High","Urgent"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
-          <Field label="Cx Demand (₹)"><Input type="number" value={form.budget} onChange={set("budget")} data-testid="edit-cx-demand" /></Field>
+          {packUnitList(lead) ? (
+            <p className="sm:col-span-2 lg:col-span-3 text-xs text-ink-soft" data-testid="edit-pack-cx-hint">
+              Cx Demand is per unit on this pack — edit each unit on Overview.
+            </p>
+          ) : (
+            <Field label="Cx Demand (₹)"><Input type="number" value={form.budget} onChange={set("budget")} data-testid="edit-cx-demand" /></Field>
+          )}
           <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
           <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
           {isBookedLead && (

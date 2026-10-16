@@ -1559,3 +1559,202 @@ async def test_unit_delivery_date_splits_monthly_volume(client):
     assert server._delivered_vehicle_count_in_period(lead, sept) == 1
     assert server._delivered_vehicle_count_in_period(lead, octb) == 1
     assert str(lead.get("deliveryDate") or "")[:10] == "2026-10-16"
+
+
+@pytest.mark.asyncio
+async def test_delivery_save_keeps_separate_unit_dates(client):
+    lid = "LD-DELIV-KEEP"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Keep Dates", "mobile": "9813301777",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-03", "customerOutstanding": 0,
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP1", "invoiceNumber": "INV-K1"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP2", "invoiceNumber": "INV-K2"},
+        ],
+    })
+    r = await client.put(f"/api/leads/{lid}/delivery", json={
+        "insurance": "Done", "registration": "Done", "invoice": "Done",
+        "pdi": "Done", "insurerName": "TestIns",
+        "delivered": "",
+        "deliveryDate": "2026-10-16",
+        "invoiceNumber": "INV-K1",
+        "chassisNumber": "MD9KEEP1",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP1", "invoiceNumber": "INV-K1",
+             "deliveryDate": "2026-09-15"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "chassisNumber": "MD9KEEP2", "invoiceNumber": "INV-K2",
+             "deliveryDate": "2026-10-16"},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    units = (await server.db.leads.find_one({"leadId": lid})).get("units") or []
+    assert units[0].get("deliveryDate") == "2026-09-15"
+    assert units[1].get("deliveryDate") == "2026-10-16"
+    assert units[0].get("deliveryDate") != units[1].get("deliveryDate")
+
+
+def test_delivery_tracker_splits_pack_unit_dates():
+    lead = {
+        "leadId": "LD-TRK", "customerName": "Tracker Pack",
+        "sameOrderMultiUnit": True, "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-16",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "deliveryDate": "2026-09-15",
+             "chassisNumber": "CH1"},
+            {"sno": 2, "model": "Storm", "deliveryDate": "2026-10-16",
+             "chassisNumber": "CH2"},
+        ],
+    }
+    rows = server._delivery_tracker_rows(lead)
+    assert [r["unitSno"] for r in rows] == [1, 2]
+    assert [r["deliveryDate"] for r in rows] == ["2026-09-15", "2026-10-16"]
+    assert rows[0]["chassisNumber"] == "CH1"
+    assert rows[1]["model"] == "Storm"
+
+
+@pytest.mark.asyncio
+async def test_deliveries_list_month_filter_uses_unit_dates(client):
+    lid = "LD-DELIV-LIST"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.deliveries.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "List Pack", "mobile": "9813301880",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-16",
+        "bookingDate": "2026-09-03", "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "deliveryDate": "2026-09-15", "chassisNumber": "MD9LIST1"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (DV220)",
+             "deliveryDate": "2026-10-16", "chassisNumber": "MD9LIST2"},
+        ],
+    })
+    all_rows = (await client.get("/api/deliveries")).json()
+    pack = [r for r in all_rows if r.get("leadId") == lid]
+    assert len(pack) == 2
+    assert {r.get("deliveryDate") for r in pack} == {"2026-09-15", "2026-10-16"}
+    sept = (await client.get("/api/deliveries", params={"month": "2026-09"})).json()
+    sept_pack = [r for r in sept if r.get("leadId") == lid]
+    assert len(sept_pack) == 1
+    assert sept_pack[0].get("deliveryDate") == "2026-09-15"
+    octb = (await client.get("/api/deliveries", params={"month": "2026-10"})).json()
+    oct_pack = [r for r in octb if r.get("leadId") == lid]
+    assert len(oct_pack) == 1
+    assert oct_pack[0].get("deliveryDate") == "2026-10-16"
+
+
+def test_unit_specs_keep_each_units_cx_demand():
+    specs = server._unit_specs_from("Turbo Max", "Pack A", [
+        {"model": "Turbo Max", "variant": "Pack A", "cxDemand": 590000},
+        {"model": "Storm", "variant": "Pack B", "cxDemand": 1180000},
+    ])
+    assert len(specs) == 2
+    assert ce.num(specs[0].get("cxDemand")) == 590000
+    assert ce.num(specs[1].get("cxDemand")) == 1180000
+    assert specs[0]["model"] == "Turbo Max"
+    assert specs[1]["model"] == "Storm"
+
+
+@pytest.mark.asyncio
+async def test_same_order_create_stamps_per_unit_cx_demand(client):
+    mobile = "9813302111"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-CX-A", "PM-CX-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CX-A", "model": "Turbo Max", "variant": "Cx A",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CX-B", "model": "Storm", "variant": "Cx B",
+        "exShowroom": 1200000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    r = await client.post("/api/leads", json={
+        "customerName": "Pack Per Unit Cx",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Cx A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "budget": 1770000,
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"model": "Turbo Max", "variant": "Cx A", "cxDemand": 590000},
+            {"model": "Storm", "variant": "Cx B", "cxDemand": 1180000},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    units = body.get("units") or []
+    assert len(units) == 2
+    assert ce.num(units[0].get("cxDemand")) == 590000
+    assert ce.num(units[1].get("cxDemand")) == 1180000
+    assert ce.num(units[0].get("cxDemand")) != ce.num(body.get("cxDemand"))
+    assert ce.num(body.get("cxDemand")) == ce.round2(
+        ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
+    deal_units = (body.get("dealFormat") or {}).get("units") or []
+    assert ce.num(deal_units[0].get("cxDemand")) == 590000
+    assert ce.num(deal_units[1].get("cxDemand")) == 1180000
+
+
+@pytest.mark.asyncio
+async def test_owner_field_sets_one_pack_unit_cx_demand(client):
+    mobile = "9813302222"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-CXE-A", "PM-CXE-B"]}})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CXE-A", "model": "Turbo Max", "variant": "Cx E A",
+        "exShowroom": 600000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    await server.db.price_master.insert_one({
+        "priceId": "PM-CXE-B", "model": "Storm", "variant": "Cx E B",
+        "exShowroom": 1200000, "rto": 0, "insurance": 0, "handlingCharges": 0,
+        "status": "active",
+    })
+    created = await client.post("/api/leads", json={
+        "customerName": "Pack Edit Cx",
+        "mobile": mobile,
+        "interestedModel": "Turbo Max",
+        "variant": "Cx E A",
+        "executive": "Amit",
+        "leadSource": "Walk-in",
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"model": "Turbo Max", "variant": "Cx E A"},
+            {"model": "Storm", "variant": "Cx E B"},
+        ],
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    u2_before = ce.num((created.json().get("units") or [{}, {}])[1].get("customerPayable"))
+    edited = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "cxDemand", "value": 580000, "unitSno": 1,
+    })
+    assert edited.status_code == 200, edited.text
+    units = edited.json().get("units") or []
+    assert ce.num(units[0].get("cxDemand")) == 580000
+    assert ce.num(units[0].get("customerPayable")) == 580000
+    assert ce.num(units[1].get("cxDemand") or 0) != 580000
+    assert ce.num(units[1].get("customerPayable")) != 580000
+    assert ce.num(units[1].get("customerPayable")) > 0
+    again = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "cxDemand", "value": 1190000, "unitSno": 2,
+    })
+    assert again.status_code == 200, again.text
+    units = again.json().get("units") or []
+    assert ce.num(units[0].get("cxDemand")) == 580000
+    assert ce.num(units[1].get("cxDemand")) == 1190000
+    assert ce.num(again.json().get("cxDemand")) == ce.round2(
+        ce.num(units[0].get("customerPayable")) + ce.num(units[1].get("customerPayable")))
