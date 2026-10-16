@@ -14462,6 +14462,7 @@ async def claim_match_options(user=Depends(current_user)):
             blocked_leads.add(lid)
     rows = []
     lead_ids = set()
+    seen_pairs = set()
     async for c in db.claims.find(
             {"manual": {"$ne": True}},
             {"leadId": 1, "customer": 1, "componentKey": 1, "component": 1,
@@ -14470,6 +14471,9 @@ async def claim_match_options(user=Depends(current_user)):
              "_id": 0}):
         lid = str(c.get("leadId") or "").strip()
         key = str(c.get("componentKey") or "").strip()
+        sno = int(c.get("unitSno") or 0)
+        if lid and key:
+            seen_pairs.add((lid, key, sno))
         if not lid or not key or lid in blocked_leads:
             continue
         status = str(c.get("claimStatus") or "").strip()
@@ -14491,7 +14495,7 @@ async def claim_match_options(user=Depends(current_user)):
             "componentKey": key,
             "component": c.get("component") or ce.SCHEME_COMPONENT_LABELS.get(key, key),
             "claimStatus": status or "Pending",
-            "unitSno": int(c.get("unitSno") or 0) or None,
+            "unitSno": sno or None,
             "chassisNumber": c.get("chassisNumber") or "",
             "invoiceNumber": c.get("invoiceNumber") or "",
             "claimAmount": ce.round2(ce.num(c.get("claimAmount"))),
@@ -14499,6 +14503,57 @@ async def claim_match_options(user=Depends(current_user)):
             "linkedOemClaimNumber": manual if relinkable else "",
             "linkedOemStatus": linked_status if relinkable else "",
         })
+    # Extra Support often lives on the lead (oemExtraSupportReceived) until
+    # recompute / GET /claims upserts a db.claims row. The match modal must
+    # not call GET /claims, so list those files here or the Lead dropdown
+    # stays on "pick lead" with nothing in it.
+    extra_key = ce.OEM_EXTRA_SUPPORT_KEY
+    extra_label = ce.SCHEME_COMPONENT_LABELS.get(extra_key, extra_key)
+    async for lead in db.leads.find(
+            {"$or": [
+                {"oemExtraSupportReceived": {"$gt": 0}},
+                {"units.oemExtraSupportReceived": {"$gt": 0}},
+            ]},
+            {"leadId": 1, "customerName": 1, "units": 1,
+             "chassisNumber": 1, "invoiceNumber": 1,
+             "oemExtraSupportReceived": 1, "dealCancelled": 1,
+             "accountStatus": 1, "_id": 0}):
+        lid = str(lead.get("leadId") or "").strip()
+        if not lid or lid in blocked_leads or oem_claims._lead_blocks_claim_relink(lead):
+            continue
+        extra_units = ce.extra_support_unit_rows(lead)
+        if extra_units:
+            candidates = extra_units
+        else:
+            amt = ce.round2(ce.num(lead.get("oemExtraSupportReceived")))
+            if amt <= 0:
+                continue
+            candidates = [{
+                "unitSno": 0,
+                "oemExtraSupportReceived": amt,
+                "chassisNumber": lead.get("chassisNumber") or "",
+                "invoiceNumber": lead.get("invoiceNumber") or "",
+            }]
+        for unit in candidates:
+            sno = int(unit.get("unitSno") or 0)
+            if (lid, extra_key, sno) in seen_pairs:
+                continue
+            seen_pairs.add((lid, extra_key, sno))
+            lead_ids.add(lid)
+            rows.append({
+                "leadId": lid,
+                "customer": lead.get("customerName") or "",
+                "componentKey": extra_key,
+                "component": extra_label,
+                "claimStatus": "Pending",
+                "unitSno": sno or None,
+                "chassisNumber": unit.get("chassisNumber") or "",
+                "invoiceNumber": unit.get("invoiceNumber") or "",
+                "claimAmount": ce.round2(ce.num(unit.get("oemExtraSupportReceived"))),
+                "relinkable": False,
+                "linkedOemClaimNumber": "",
+                "linkedOemStatus": "",
+            })
     if lead_ids:
         names = {}
         extra = {}

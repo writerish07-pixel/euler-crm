@@ -1984,6 +1984,114 @@ async def test_match_options_lists_register_leads_without_the_full_claims_path(c
         assert (await c.get("/api/claims/match-options")).status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_match_options_lists_extra_support_from_lead_without_a_claims_row(client):
+    """AF-122-CL2627154 Swapna/Swarna Creations — Extra Support is on the lead,
+    GET /claims was never opened, Match Lead dropdown used to stay empty."""
+    lead_id = await _delivered_lead(client, chassis="MD9SWAP26G900001",
+                                    invoice="AF-999-I26289001")
+    await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "customerName": "Swarna Creations C/O Anmol Gupta",
+        "oemExtraSupportReceived": 5000.0,
+    }})
+    rows = (await client.get("/api/claims/match-options")).json()
+    mine = [r for r in rows if r["leadId"] == lead_id and r["componentKey"] == "oemExtraSupport"]
+    assert len(mine) == 1, rows
+    assert mine[0]["customer"] == "Swarna Creations C/O Anmol Gupta"
+    assert mine[0]["claimAmount"] == 5000.0
+    assert mine[0]["claimStatus"] == "Pending"
+    assert mine[0]["relinkable"] is False
+    assert not await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport"})
+
+
+@pytest.mark.asyncio
+async def test_match_creates_extra_support_register_row_when_missing(client):
+    """Save match must not 422 just because Extra Support was never on db.claims."""
+    lead_id = await _delivered_lead(client, chassis="MD9SWAP26G900002",
+                                    invoice="AF-999-I26289002")
+    await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "customerName": "Swarna Creations C/O Anmol Gupta",
+        "oemExtraSupportReceived": 5000.0,
+    }})
+    await _orphan_oem(
+        "AF-122-CL2627154", line_id="es-swapna", claimed=5000.0,
+        chassis="", invoice="",
+        claim_type="Additional Support",
+        description="addtiniol support documents customer name :- Swapna Creations")
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CL2627154", "lineId": "es-swapna"})
+    assert r.status_code == 200, r.text
+    rec = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport"})
+    assert rec, "match should insert the register row"
+    assert rec["manualOemClaimNumber"] == "AF-122-CL2627154"
+    assert rec["manualOemLineId"] == "es-swapna"
+    assert rec["claimAmount"] == 5000.0
+    assert rec["eligibleClaim"] == 5000.0
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CL2627154"})).json()[0]
+    assert lead_id in (oem.get("leadIds") or [])
+    assert oem["lineItems"][0]["matchedBy"] == "manual"
+    after = (await client.get("/api/claims/match-options")).json()
+    assert not [x for x in after if x["leadId"] == lead_id
+                and x["componentKey"] == "oemExtraSupport"]
+
+
+@pytest.mark.asyncio
+async def test_match_adopts_create_from_oem_empty_lead_row(client):
+    """Create-then-Match used to 422: Create stores leadId '', match-options hid it."""
+    lead_id = await _delivered_lead(client, chassis="MD9SWAP26G900003",
+                                    invoice="AF-999-I26289003")
+    await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "customerName": "Swarna Creations C/O Anmol Gupta",
+        "oemExtraSupportReceived": 8000.0,
+    }})
+    await _orphan_oem(
+        "AF-122-CLADOPT", line_id="es-adopt", claimed=8000.0,
+        chassis="", invoice="",
+        claim_type="Additional Support",
+        description="Claim Type :- Additional Support Customer Name:- Swapna Creations")
+    created = await client.post("/api/claims/oem-create", json={
+        "claimNumber": "AF-122-CLADOPT", "lineId": "es-adopt"})
+    assert created.status_code == 200, created.text
+    assert created.json()["register"]["leadId"] in ("", None)
+    options = (await client.get("/api/claims/match-options")).json()
+    mine = [r for r in options if r["leadId"] == lead_id and r["componentKey"] == "oemExtraSupport"]
+    assert len(mine) == 1, options
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CLADOPT", "lineId": "es-adopt"})
+    assert r.status_code == 200, r.text
+    empty = await server.db.claims.find_one({
+        "manualOemClaimNumber": "AF-122-CLADOPT",
+        "leadId": {"$in": ["", None]},
+    })
+    assert empty is None
+    rec = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport",
+         "manualOemClaimNumber": "AF-122-CLADOPT"})
+    assert rec
+    assert rec["claimAmount"] == 8000.0
+
+
+@pytest.mark.asyncio
+async def test_match_options_list_unmatched_pack_extra_from_units(client):
+    extras = (
+        (8000.0, "MD9PACK26G900041", "AF-999-I26287041"),
+        (5000.0, "MD9PACK26G900042", "AF-999-I26287042"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    rows = (await client.get("/api/claims/match-options")).json()
+    mine = [r for r in rows if r["leadId"] == lead_id and r["componentKey"] == "oemExtraSupport"]
+    snos = sorted(int(r.get("unitSno") or 0) for r in mine)
+    assert snos == [1, 2], mine
+    by_sno = {int(r["unitSno"]): r for r in mine}
+    assert by_sno[1]["claimAmount"] == 8000.0
+    assert by_sno[2]["claimAmount"] == 5000.0
+    assert by_sno[1]["chassisNumber"] == extras[0][1]
+
+
 def test_line_lead_helpers_keep_first_lead_and_extras():
     line = {"leadId": "LD1", "leadCustomer": "Mahendra"}
     assert oem_claims.line_lead_ids(line) == ["LD1"]

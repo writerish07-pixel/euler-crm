@@ -708,7 +708,9 @@ function MatchRegisterModal({ row, onClose, onDone }) {
             <p className="text-xs text-amber-800 mt-1">
               {relink
                 ? "No cancelled OEM matches to relink. Use Match for a lead that is not already attached."
-                : "No Scheme Claim Register rows yet. Use Create on this OEM line first, or open Scheme Claim Register."}
+                : relatedKey === "oemExtraSupport"
+                  ? "No Extra Support files in CRM to match. Enter OEM Extra Support on the lead first — Match lists that file even before it is on Scheme Claim Register."
+                  : "No Scheme Claim Register rows yet for this component. Open Scheme Claim Register, or enter the amount on the lead."}
             </p>
           ) : null}
         </Field>
