@@ -37,36 +37,36 @@ SLACK_RUPEES = 100
 AUDIO_DIR = Path(__file__).parent / "static" / "exotel"
 AUDIO_CLIPS = ("intro", "prompt", "speak", "thanks")
 
-# Plain spoken Hindi for milk / vegetable sellers. Same words as the MP3s.
-# Avoid English (booking, keypad, type) and formal words (rashi, bhugtan, pushti).
+# Village Hindi for less-literate customers. Same words as the MP3s.
+# No English (hash, number, keypad, type, booking) and no formal Hindi (rashi, bhugtan).
 SPOKEN = {
     "intro": (
-        "Namaste. Main Akar Euler se baat kar rahi hoon. "
-        "Aapne hamari gaadi li hai. Hum poochna chahte hain — "
+        "Namaste. Main Akar Euler se bol rahi hoon. "
+        "Aapne hamari gaadi li hai. Bas ye batana hai — "
         "gaadi ke liye aapne kitne paise diye."
     ),
     "prompt": (
-        "Jo paise aapne gaadi ke liye diye, wahi poora number phone ke button se dabaiye. "
-        "Number dabane ke baad hash wala button daba den. "
-        "Hash button par do chhoti linein bani hoti hain."
+        "Gaadi ke liye aapne jitne paise diye, wo mobile par ek ek karke dabate jayein. "
+        "Jab dabana khatam ho jaye, to mobile ke neeche dayi taraf dekhein. "
+        "Wahan ek chhoti si jagah hai, us par do chhoti lakeerein bani hain. Wo daba den."
     ),
-    "speak": "Agar number nahi daba sakte, to ab bolkar batayein. Aapne kitne paise diye.",
+    "speak": "Agar daba nahi sakte, to ab munh se bol den. Aapne kitne paise diye.",
     "thanks": "Dhanyavaad. Akar Euler.",
 }
 
 # Devanagari used when rebuilding the MP3s (clearer TTS than roman Hindi).
 SPOKEN_HI = {
     "intro": (
-        "नमस्ते। मैं आकर यूलर से बात कर रही हूँ। "
-        "आपने हमारी गाड़ी ली है। हम पूछना चाहते हैं — "
+        "नमस्ते। मैं आकर यूलर से बोल रही हूँ। "
+        "आपने हमारी गाड़ी ली है। बस ये बताना है — "
         "गाड़ी के लिए आपने कितने पैसे दिए।"
     ),
     "prompt": (
-        "जो पैसे आपने गाड़ी के लिए दिए, वही पूरा नंबर फ़ोन के बटनों से दबाएं। "
-        "नंबर दबाने के बाद, हैश वाला बटन दबा दें। "
-        "हैश बटन पर दो छोटी लाइनें बनी होती हैं।"
+        "गाड़ी के लिए आपने जितने पैसे दिए, वो मोबाइल पर एक एक करके दबाते जाएं। "
+        "जब दबाना खत्म हो जाए, तो मोबाइल के नीचे दाईं तरफ़ देखें। "
+        "वहाँ एक छोटी सी जगह है, उस पर दो छोटी लकीरें बनी हैं। वो दबा दें।"
     ),
-    "speak": "अगर नंबर नहीं दबा सकते, तो अब बोलकर बताएं। आपने कितने पैसे दिए।",
+    "speak": "अगर दबा नहीं सकते, तो अब मुँह से बोल दें। आपने कितने पैसे दिए।",
     "thanks": "धन्यवाद। आकर यूलर।",
 }
 
