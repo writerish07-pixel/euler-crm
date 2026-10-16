@@ -602,7 +602,7 @@ function ExotelCard() {
   const [cfg, setCfg] = useState(null);
   const [form, setForm] = useState({
     accountSid: "shubhammotors1",
-    subdomain: "api.exotel.com",
+    subdomain: "api.in.exotel.com",
     exoPhone: "01414937655",
     apiKey: "",
     apiToken: "",
@@ -692,7 +692,7 @@ function ExotelCard() {
           <Input data-testid="exotel-sid" value={form.accountSid}
             onChange={(e) => setForm({ ...form, accountSid: e.target.value })} />
         </Field>
-        <Field label="Subdomain">
+        <Field label="Subdomain (India account: api.in.exotel.com)">
           <Input value={form.subdomain}
             onChange={(e) => setForm({ ...form, subdomain: e.target.value })} />
         </Field>

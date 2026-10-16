@@ -87,6 +87,49 @@ def test_gather_config_json_uses_prompt_audio():
     assert "prompt.mp3" in body["gather_prompt"]["audio_url"]
 
 
+@pytest.mark.asyncio
+async def test_place_call_skips_record_and_retries_india_host(monkeypatch):
+    posts = []
+
+    class FakeResp:
+        def __init__(self, code, body):
+            self.status_code = code
+            self.text = ""
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, data=None, auth=None):
+            posts.append({"url": url, "data": dict(data or {})})
+            if "api.in.exotel.com" in url:
+                return FakeResp(200, {"Call": {"Sid": "sid-ok", "Status": "queued"}})
+            return FakeResp(401, {"RestException": {"Status": 401, "Message": "Authentication failed"}})
+
+    monkeypatch.setattr(exo.httpx, "AsyncClient", FakeClient)
+    cfg = {
+        "accountSid": "shubhammotors1", "subdomain": "api.exotel.com",
+        "exoPhone": "01414937655", "apiKey": "k", "apiToken": "t",
+        "flowAppId": "1361923", "webhookSecret": "",
+    }
+    res = await exo._place_call_http(cfg, "9667991287", "LD26EXO1")
+    assert res["ok"] is True
+    assert res["callSid"] == "sid-ok"
+    assert "Record" not in posts[0]["data"]
+    assert posts[0]["data"]["From"] == "09667991287"
+    assert any("api.in.exotel.com" in p["url"] for p in posts)
+
+
 def test_connect_url_uses_app_bazaar_id():
     cfg = {
         "accountSid": "shubhammotors1",
