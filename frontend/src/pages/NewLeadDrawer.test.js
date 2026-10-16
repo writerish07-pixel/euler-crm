@@ -137,15 +137,16 @@ test("executive can create a walk-in enquiry without Cx Demand", async () => {
   await act(async () => { root.unmount(); });
 });
 
-test("executive create form is name, mobile, model — no deal or KYC", async () => {
+test("executive create form is name, mobile, model until Cx Demand needs approval", async () => {
   const { root } = await renderDrawer();
   expect(document.querySelector('[data-testid="lead-name"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="lead-mobile"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="lead-model"]')).toBeTruthy();
-  expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeFalsy();
-  expect(document.querySelector('[data-testid="deal-format-card"]')).toBeFalsy();
-  expect(document.querySelector('[data-testid="kyc-block"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="deal-format-card"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="kyc-block"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeFalsy();
   expect(document.querySelector('[data-testid="same-order-check"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="save-lead-btn"]').textContent).toMatch(/Create Lead/);
   await act(async () => { root.unmount(); });
 });
 
@@ -154,8 +155,7 @@ test("TL create form includes own name on the executive dropdown", async () => {
   mockAuth.isTeamLead = true;
   mockAuth.user = { name: "Create TL" };
   const { root } = await renderDrawer();
-  expect(document.querySelector('[data-testid="lead-oem-extra"]')).toBeFalsy();
-  expect(document.querySelector('[data-testid="deal-format-card"]')).toBeFalsy();
+  expect(document.querySelector('[data-testid="deal-format-card"]')).toBeTruthy();
   const exec = document.querySelector('[data-testid="lead-executive"]');
   expect(exec).toBeTruthy();
   expect(exec.textContent).toMatch(/Create TL/);
@@ -201,6 +201,34 @@ test("another vehicle on a known mobile still creates without deal or KYC", asyn
     customerName: "Ramesh",
     mobile: "9876543210",
   }));
+  await act(async () => { root.unmount(); });
+});
+
+test("executive discounted create shows print and upload deal sheet", async () => {
+  const { root } = await renderDrawer();
+  await act(async () => {
+    setInput(document.querySelector('[data-testid="lead-name"]'), "Storm Buyer");
+    setInput(document.querySelector('[data-testid="lead-mobile"]'), "9928700255");
+    const model = document.querySelector('[data-testid="lead-model"]');
+    model.value = "Turbo Max";
+    model.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  await act(async () => {
+    const variant = document.querySelector('[data-testid="lead-variant"]');
+    variant.value = "Maxx (PV)";
+    variant.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  await act(async () => {
+    setInput(document.querySelector('[data-testid="lead-budget"]'), "945000");
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="print-deal-sheet-btn"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="save-lead-btn"]').textContent).toMatch(/Send for approval/);
+  expect(document.body.textContent).toMatch(/Request a lead/);
+  expect(document.body.textContent).toMatch(/Sent for owner or GM approval/);
   await act(async () => { root.unmount(); });
 });
 

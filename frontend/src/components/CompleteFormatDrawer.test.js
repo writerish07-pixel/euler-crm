@@ -147,7 +147,7 @@ test("team leader approval drawer hides OEM scheme offers and pass-on radios", a
   expect(drawer.querySelector('[data-testid="deal-format-card"]')).toBeTruthy();
   expect(drawer.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
   expect(drawer.textContent).not.toMatch(/Loyalty Bonus/i);
-  expect(drawer.textContent).not.toMatch(/OEM scheme/i);
+  expect(drawer.querySelector('[data-testid="deal-additional"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
   host.remove();
 });

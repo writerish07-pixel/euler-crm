@@ -134,7 +134,6 @@ export default function DealFormatCard({
           />
         </Field>
       )}
-      {!hideScheme && (
       <div className={`rounded-md px-2 py-1.5 ${additional > 0 ? "bg-amber-50" : "bg-paper"}`}>
         <Line
           k="Additional (Dealer)"
@@ -144,8 +143,7 @@ export default function DealFormatCard({
           tone={additional > 0 ? "text-amber-800" : ""}
         />
       </div>
-      )}
-      {!hideScheme && ownerOnly && Number(demand) > 0 && (
+      {ownerOnly && Number(demand) > 0 && (
         <p className="text-[11px] text-rose-700" data-testid="deal-owner-only">
           Deal differs from my total after OEM scheme — only Owner can approve.
         </p>
@@ -162,7 +160,7 @@ export default function DealFormatCard({
       </div>
       )}
       <p className="text-[11px] text-ink-faint">
-        {hideScheme
+        {hideScheme && !(ownerOnly && Number(demand) > 0)
           ? "Enter Cx Demand — the amount the customer will pay. Commercials are completed by the Team Leader."
           : offers.length
           ? "Pass on Yes gives the full OEM amount to the customer and recuts Additional (Dealer)."
