@@ -3,7 +3,7 @@
  */
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, LocalKycBlock, acceptForKind, hintForKind, fitImageForUpload, DOC_MAX_BYTES } from "./LeadDocuments";
+import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, LocalKycBlock, acceptForKind, hintForKind, fitImageForUpload, DOC_MAX_BYTES, docMatchesUnit } from "./LeadDocuments";
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -54,6 +54,14 @@ test("KYC slots show files already on the lead instead of No file", async () => 
   expect(host.textContent).not.toMatch(/No file/);
   await act(async () => { root.unmount(); });
   host.remove();
+});
+
+test("docMatchesUnit treats a legacy file as unit 1 only", () => {
+  expect(docMatchesUnit({ kind: "delivery_insurance" }, 1)).toBe(true);
+  expect(docMatchesUnit({ kind: "delivery_insurance" }, 2)).toBe(false);
+  expect(docMatchesUnit({ kind: "delivery_insurance", unitSno: 2 }, 2)).toBe(true);
+  expect(docMatchesUnit({ kind: "delivery_insurance", unitSno: 2 }, 1)).toBe(false);
+  expect(docMatchesUnit({ kind: "kyc_pan" }, 0)).toBe(true);
 });
 
 test("dealSheetReady is required unless the file or an existing scan is present", () => {

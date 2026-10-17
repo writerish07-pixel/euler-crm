@@ -430,8 +430,108 @@ def _is_booked(lead):
             or bool(lead.get("bookingDate")) or ce.num(lead.get("bookingAmount")) > 0)
 
 
+def _is_lead_flag_delivered(lead):
+    return ((lead or {}).get("deliveryStatus") or "").lower() == "delivered" or (
+        (lead or {}).get("currentStatus") or "").lower() == "delivered"
+
+
+def _pack_unit_rows(lead):
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    if oem_sync.is_same_order_pack(lead or {}) and len(units) > 1:
+        return units
+    return []
+
+
+def _unit_delivery_flag(unit) -> bool:
+    if not isinstance(unit, dict):
+        return False
+    st = str(unit.get("deliveryStatus") or "").strip().lower()
+    if st == "delivered":
+        return True
+    return str(unit.get("delivered") or "").strip().lower() in (
+        "yes", "y", "true", "1", "done")
+
+
 def _is_delivered(lead):
-    return (lead.get("deliveryStatus") or "").lower() == "delivered" or (lead.get("currentStatus") or "").lower() == "delivered"
+    """Whole-file delivered: every pack unit is delivered, else the lead flag.
+
+    A pack with only some vehicles marked delivered stays open so the desk can
+    finish insurance / RTO / payments on the rest. Extra units never inherit
+    the lead Delivered flag — that mark belongs to unit 1 until each sibling
+    is marked on its own.
+    """
+    units = _pack_unit_rows(lead)
+    if units:
+        return all(_unit_is_delivered(lead, u, i) for i, u in enumerate(units))
+    return _is_lead_flag_delivered(lead)
+
+
+def _unit_is_delivered(lead, unit, index=0) -> bool:
+    if _unit_delivery_flag(unit):
+        return True
+    units = _pack_unit_rows(lead)
+    if units:
+        if any(_unit_delivery_flag(u) for u in units):
+            return False
+        if index > 0:
+            return False
+    return _is_lead_flag_delivered(lead)
+
+
+def _yes_or_done_field(v) -> bool:
+    return str(v or "").strip().lower() in ("yes", "y", "done", "true", "1")
+
+
+def _unit_desk_delivery_complete(unit, lead=None, index=0) -> bool:
+    if _yes_or_done_field((unit or {}).get("insurance")) and _yes_or_done_field(
+            (unit or {}).get("registration")):
+        return True
+    if index == 0 and not _pack_unit_rows(lead):
+        return (
+            _yes_or_done_field((lead or {}).get("insuranceStatus") or (lead or {}).get("insurance"))
+            and _yes_or_done_field(
+                (lead or {}).get("registrationStatus") or (lead or {}).get("registration"))
+        )
+    return False
+
+
+def _desk_completed_delivery(lead) -> bool:
+    """Staff finished insurance/RTO — not merely OEM billed the chassis."""
+    if _yes_or_done_field((lead or {}).get("insuranceStatus") or (lead or {}).get("insurance")) and (
+            _yes_or_done_field(
+                (lead or {}).get("registrationStatus") or (lead or {}).get("registration"))):
+        return True
+    return any(
+        _unit_desk_delivery_complete(u, lead, i)
+        for i, u in enumerate(_pack_unit_rows(lead) or [])
+    )
+
+
+def _pack_has_empty_chassis(lead) -> bool:
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    if units:
+        return any(not oem_sync._norm_chassis(u.get("chassisNumber")) for u in units)
+    return not oem_sync._norm_chassis((lead or {}).get("chassisNumber"))
+
+
+def _can_append_sold_unit(lead) -> bool:
+    """Same-order chassis may join an open file. Repeat purchase must not.
+
+    Empty chassis slots are always filled. A file the desk already finished
+    (insurance + RTO, or Close Won) is a completed vehicle — the next billed
+    chassis is a new lead with KYC copied.
+    """
+    if not lead:
+        return False
+    if (lead or {}).get("dealCancelled") or _acct(lead) != "Active":
+        return False
+    if oem_sync._lead_is_cancelled(lead) or oem_sync._lead_is_close_won(lead):
+        return False
+    if _pack_has_empty_chassis(lead):
+        return True
+    if _desk_completed_delivery(lead):
+        return False
+    return True
 
 
 def _acct(lead):
@@ -629,11 +729,28 @@ def _require_mutable_lead(lead, verb="edits", act=None):
         )
 
 
+def _require_unit_mutable(lead, unit, verb="edits", act=None, index=0):
+    """Freeze one pack unit after that vehicle is delivered. Siblings stay open."""
+    role = ((act or {}).get("role") or "").strip().lower()
+    if role == "owner":
+        return
+    if (lead or {}).get("oemAutoDelivered") and not _unit_desk_delivery_complete(unit, lead, index):
+        return
+    if _unit_is_delivered(lead, unit, index):
+        sno = int((unit or {}).get("sno") or index + 1)
+        raise HTTPException(
+            409,
+            f"Unit {sno} is locked for {verb} after delivery. "
+            "Owner may edit until the file is closed.",
+        )
+
+
 def _yes_or_done(v):
     return str(v or "").strip().lower() in ("yes", "y", "done", "true", "1")
 
 
-def _validate_delivery_ready(lead, body):
+def _validate_delivery_ready(lead, body, *, outstanding=None, arranged_by=None,
+                             insurance_agent_id=None):
     """Port of validateDeliveryReady_ + isDeliveryEligible_ (outstanding must be cleared)."""
     errs = []
     if not _yes_or_done(body.insurance):
@@ -643,9 +760,11 @@ def _validate_delivery_ready(lead, body):
     # The agent decides the payout slab. Without it the entry silently falls back
     # to the default agent, which books the wrong rate on a real delivery.
     # Self-arranged insurance earns no payout, so no agent is needed there.
-    if (ce.normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) != "self"
-            and not str(body.insuranceAgentId or "").strip()
-            and not str(lead.get("insuranceAgentId") or "").strip()):
+    arranged = ce.normalize_insurance_arranged_by(
+        arranged_by if arranged_by is not None else lead.get("insuranceArrangedBy"))
+    agent = str(insurance_agent_id if insurance_agent_id is not None else (
+        body.insuranceAgentId or lead.get("insuranceAgentId") or "")).strip()
+    if arranged != "self" and not agent:
         errs.append("Select the insurance agent before delivery.")
     if not _yes_or_done(body.registration):
         errs.append("Set Registration to Yes before marking delivered.")
@@ -653,8 +772,10 @@ def _validate_delivery_ready(lead, body):
         errs.append("Set Invoice to Yes before marking delivered.")
     if not _yes_or_done(body.pdi):
         errs.append("Set PDI to Yes before marking delivered.")
-    if ce.num(lead.get("customerOutstanding")) > 0.01:
-        errs.append(f"Customer outstanding must be cleared (₹{ce.round2(ce.num(lead.get('customerOutstanding')))}) before delivery.")
+    os_amt = ce.num(lead.get("customerOutstanding") if outstanding is None else outstanding)
+    if os_amt > 0.01:
+        errs.append(
+            f"Customer outstanding must be cleared (₹{ce.round2(os_amt)}) before delivery.")
     return errs
 
 
@@ -1405,12 +1526,21 @@ async def recompute_lead(lead_id):
         pack_total, pack_units, pack_filled, pack_pending = _refresh_unit_payables(
             {**lead, **updates}, scheme_rows)
         if pack_units:
+            pay_rows = [p async for p in db.payments.find({"leadId": lead_id}).sort(
+                [("date", 1), ("recordedAt", 1), ("receiptNumber", 1)])]
+            received_by, payables_by = _unit_money_from_payments(
+                {**lead, **updates, "units": pack_units}, pay_rows)
+            pack_units = _apply_unit_money(
+                {**lead, **updates}, pack_units, received_by, payables_by)
             updates["units"] = pack_units
             updates["packUnitsFilled"] = pack_filled
             updates["packUnitsPending"] = pack_pending
             updates["packUnitsTotal"] = len(pack_units)
             u0 = pack_units[0] or {}
-            if u0.get("useDealPrice") and "additionalDiscount" in u0:
+            # Pack leftover additional lives on the lead. Only fold unit 1's
+            # recut back when this file already has a Cx Demand deal lock.
+            if (u0.get("useDealPrice") and "additionalDiscount" in u0
+                    and lead.get("useDealPrice")):
                 updates["additionalDiscount"] = u0["additionalDiscount"]
         if pack_total is not None:
             updates["customerPayable"] = pack_total
@@ -1817,6 +1947,10 @@ class PaymentIn(BaseModel):
     # caught; the UI asks for confirmation and re-sends with this set. The surplus is
     # then visible as Excess Received and can be refunded.
     allowExcess: bool = False
+    unitSno: Optional[int] = None
+    unitSnos: Optional[List[int]] = None
+    allocation: str = ""
+    splits: Optional[List[Dict[str, Any]]] = None
 
 
 class RefundIn(BaseModel):
@@ -1845,6 +1979,7 @@ class DeliveryIn(BaseModel):
     insuranceAgentId: str = ""     # broker paying the payout; picked at delivery
     feedback: str = ""
     units: Optional[List[Dict[str, Any]]] = None
+    unitSno: Optional[int] = None
 
 
 class CloseIn(BaseModel):
@@ -2213,6 +2348,19 @@ def _pack_delivery_dates(lead):
 
 
 def _delivered_vehicle_count_in_period(lead, period):
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    pack = oem_sync.is_same_order_pack(lead or {}) and len(units) > 1
+    if pack:
+        n = 0
+        any_flag = any(_unit_delivery_flag(u) for u in units)
+        for i, u in enumerate(units):
+            if any_flag and not _unit_delivery_flag(u):
+                continue
+            if not any_flag and not _is_delivered_lead(lead):
+                continue
+            if periodmod.in_period(_unit_delivery_date(lead, u), period):
+                n += 1
+        return n
     if not _is_delivered_lead(lead):
         return 0
     return sum(1 for d in _pack_delivery_dates(lead) if periodmod.in_period(d, period))
@@ -2255,7 +2403,8 @@ def _delivery_tracker_rows(lead, delivery=None):
             sno = int(u.get("sno") or i + 1)
         except (TypeError, ValueError):
             sno = i + 1
-        date = _unit_delivery_date(lead, u) if done else _iso_day(u.get("deliveryDate"))
+        unit_done = _unit_is_delivered(lead, u, i)
+        date = _unit_delivery_date(lead, u) if (done or unit_done) else _iso_day(u.get("deliveryDate"))
         rows.append({
             **shared,
             "rowId": f"{(lead or {}).get('leadId')}::u{sno}",
@@ -2265,15 +2414,33 @@ def _delivery_tracker_rows(lead, delivery=None):
             "deliveryDate": date,
             "chassisNumber": u.get("chassisNumber") or "",
             "numberPlate": u.get("numberPlate") or "",
+            "delivered": "Yes" if unit_done else (shared.get("delivered") or ""),
+            "insurance": u.get("insurance") or shared.get("insurance") or "",
+            "registration": u.get("registration") or shared.get("registration") or "",
+            "invoice": u.get("invoice") or shared.get("invoice") or "",
+            "pdi": u.get("pdi") or shared.get("pdi") or "",
         })
     return rows
 
 
 def _delivered_vehicle_count_on_day(lead, day):
-    if not _is_delivered_lead(lead):
-        return 0
     want = _iso_day(day)
     if not want:
+        return 0
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    pack = oem_sync.is_same_order_pack(lead or {}) and len(units) > 1
+    if pack:
+        n = 0
+        any_flag = any(_unit_delivery_flag(u) for u in units)
+        for u in units:
+            if any_flag and not _unit_delivery_flag(u):
+                continue
+            if not any_flag and not _is_delivered_lead(lead):
+                continue
+            if _unit_delivery_date(lead, u) == want:
+                n += 1
+        return n
+    if not _is_delivered_lead(lead):
         return 0
     return sum(1 for d in _pack_delivery_dates(lead) if d == want)
 
@@ -5186,8 +5353,8 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
     if not str(body.model or "").strip():
         raise HTTPException(422, "Pick a model for the extra unit.")
     lead = await get_lead_or_404(lead_id)
-    if _is_delivered_lead(lead) or lead.get("dealCancelled"):
-        raise HTTPException(422, "Cannot add a unit on a delivered or cancelled file.")
+    if _is_delivered(lead) or _is_delivered_lead(lead) or lead.get("dealCancelled"):
+        raise HTTPException(422, "Cannot add a unit on a delivered or cancelled file. Add another vehicle as a new lead so KYC copies and this unit stays editable.")
     units = _ensure_lead_units(lead)
     billed = _parse_iso_date(body.soldDate, field="Billed date") if str(body.soldDate or "").strip() else ""
     as_of = billed or today()
@@ -6183,6 +6350,7 @@ async def list_lead_documents(lead_id: str, user=Depends(current_user)):
 @api.post("/leads/{lead_id}/documents")
 async def upload_lead_document(lead_id: str, kind: str = Form(...),
                                file: UploadFile = File(...),
+                               unitSno: Optional[str] = Form(None),
                                user=Depends(current_user), act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
@@ -6193,9 +6361,11 @@ async def upload_lead_document(lead_id: str, kind: str = Form(...),
     data, ctype, filename = await lead_docs.read_upload(file, kind=kind)
     row = await lead_docs.save_doc(
         db, next_id=next_id, user=user, kind=kind, data=data,
-        content_type=ctype, filename=filename, lead_id=lead_id)
+        content_type=ctype, filename=filename, lead_id=lead_id,
+        unit_sno=unitSno)
     await write_audit(act, "upload", "document", leadId=lead_id,
-                      new={"kind": kind, "documentId": row.get("documentId")})
+                      new={"kind": kind, "documentId": row.get("documentId"),
+                           "unitSno": row.get("unitSno")})
     if kind == lead_docs.TALLY_KIND and str((user or {}).get("role") or "") in authmod.MONEY_ROLES:
         try:
             await _run_tally_pack_check(lead_id, user)
@@ -6207,6 +6377,7 @@ async def upload_lead_document(lead_id: str, kind: str = Form(...),
 @api.post("/lead-requests/{request_id}/documents")
 async def upload_request_document(request_id: str, kind: str = Form(...),
                                   file: UploadFile = File(...),
+                                  unitSno: Optional[str] = Form(None),
                                   user=Depends(current_user)):
     req = await db.lead_requests.find_one({"requestId": request_id})
     if not req:
@@ -6224,7 +6395,8 @@ async def upload_request_document(request_id: str, kind: str = Form(...),
     data, ctype, filename = await lead_docs.read_upload(file, kind=kind)
     return await lead_docs.save_doc(
         db, next_id=next_id, user=user, kind=kind, data=data,
-        content_type=ctype, filename=filename, request_id=request_id)
+        content_type=ctype, filename=filename, request_id=request_id,
+        unit_sno=unitSno)
 
 
 @api.get("/lead-requests/{request_id}/documents")
@@ -6936,6 +7108,14 @@ UNIT_SCHEME_KEYS = (
 
 UNIT_COMMERCIAL_KEYS = UNIT_MONEY_KEYS + UNIT_SCHEME_KEYS
 
+# Delivery checklist, lock, and money on the unit itself — not used to price.
+UNIT_RUNTIME_KEYS = (
+    "insurance", "registration", "invoice", "accessories", "rc", "pdi",
+    "delivered", "deliveryStatus", "insurerName", "insuranceAgentId",
+    "insuranceAgentName", "totalReceived", "customerOutstanding", "excessReceived",
+    "bookingAmount",
+)
+
 
 def _pack_uses_unit_structures(lead):
     """True once any pack unit (or lead-level unit 1) has a saved Price / Scheme."""
@@ -7040,6 +7220,9 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
             if u.get(k):
                 rec[k] = u.get(k)
         _copy_unit_commercials(u, rec)
+        for k in UNIT_RUNTIME_KEYS:
+            if k in u and u.get(k) not in (None, ""):
+                rec[k] = u[k]
         if rec["model"] or rec["variant"] or rec["chassisNumber"]:
             units.append(rec)
     if units and not units[0].get("model") and model:
@@ -7449,6 +7632,153 @@ def _receipt_payable(lead, scheme_rows=None):
         else:
             payable = ce.compute_commercial_totals(lead_to_snapshot(lead)).get("customerPayable")
     return ce.round2(ce.num(payable))
+
+
+def _pack_unit_sno_list(lead):
+    units = _pack_unit_rows(lead) or _ensure_lead_units(lead)
+    out = []
+    for i, u in enumerate(units or []):
+        try:
+            sno = int((u or {}).get("sno") or i + 1)
+        except (TypeError, ValueError):
+            sno = i + 1
+        if sno not in out:
+            out.append(sno)
+    return out or [1]
+
+
+def _payment_target_snos(lead, body):
+    """Units this receipt applies to. Pack without a selection clubs every unit."""
+    pack = oem_sync.is_same_order_pack(lead)
+    valid = set(_pack_unit_sno_list(lead)) if pack else {1}
+    snos = []
+    raw = list(getattr(body, "unitSnos", None) or [])
+    one = getattr(body, "unitSno", None)
+    if one:
+        raw.append(one)
+    for x in raw:
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n in valid and n not in snos:
+            snos.append(n)
+    if not snos:
+        return sorted(valid)
+    return snos
+
+
+def _unit_money_from_payments(lead, payments):
+    """Rebuild per-unit received from stored splits; legacy receipts fill FIFO."""
+    snos = _pack_unit_sno_list(lead)
+    received = {s: 0.0 for s in snos}
+    units = {int(u.get("sno") or i + 1): u
+             for i, u in enumerate((lead or {}).get("units") or []) if isinstance(u, dict)}
+    payables = {s: ce.round2(ce.num((units.get(s) or {}).get("customerPayable"))) for s in snos}
+    if not oem_sync.is_same_order_pack(lead) or len(snos) <= 1:
+        total = ce.round2(sum(ce.num(p.get("amount")) for p in (payments or [])))
+        received[snos[0]] = total
+        return received, payables
+    for p in payments or []:
+        amt = ce.round2(ce.num(p.get("amount")))
+        splits = p.get("unitSplits") or []
+        if splits:
+            for s in splits:
+                try:
+                    sno = int(s.get("unitSno") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if sno in received:
+                    received[sno] = ce.round2(received[sno] + ce.num(s.get("amount")))
+            continue
+        named = []
+        for x in list(p.get("unitSnos") or []) + ([p.get("unitSno")] if p.get("unitSno") else []):
+            try:
+                n = int(x)
+            except (TypeError, ValueError):
+                continue
+            if n in received and n not in named:
+                named.append(n)
+        if not named:
+            named = list(snos)
+        remaining = amt
+        for i, sno in enumerate(named):
+            room = ce.round2(max(0.0, payables.get(sno, 0) - received[sno]))
+            if i == len(named) - 1:
+                take = remaining
+            else:
+                take = ce.round2(min(remaining, room)) if payables.get(sno, 0) > 0 else 0.0
+            received[sno] = ce.round2(received[sno] + take)
+            remaining = ce.round2(remaining - take)
+        if remaining > 0.01:
+            received[named[-1]] = ce.round2(received[named[-1]] + remaining)
+    return received, payables
+
+
+def _allocate_payment_splits(lead, amount, snos, allocation, manual_splits, payables, received):
+    amount = ce.round2(ce.num(amount))
+    mode = str(allocation or "").strip().lower()
+    if mode in ("separate", "unit") or (not mode and len(snos) == 1):
+        if len(snos) != 1:
+            raise HTTPException(422, "Separate payment must name one unit.")
+        return [{"unitSno": snos[0], "amount": amount}], "separate"
+    if manual_splits:
+        out = []
+        total = 0.0
+        seen = set()
+        for s in manual_splits:
+            row = s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else {})
+            try:
+                sno = int(row.get("unitSno") or 0)
+            except (TypeError, ValueError):
+                sno = 0
+            amt = ce.round2(ce.num(row.get("amount")))
+            if sno not in snos:
+                raise HTTPException(422, f"Split names unit {sno} which was not selected.")
+            if sno in seen:
+                raise HTTPException(422, f"Unit {sno} is listed twice in the split.")
+            if amt < 0:
+                raise HTTPException(422, "Split amounts cannot be negative.")
+            seen.add(sno)
+            out.append({"unitSno": sno, "amount": amt})
+            total += amt
+        if abs(ce.round2(total) - amount) > 0.01:
+            raise HTTPException(422, "Club split must equal the receipt amount.")
+        return out, "club"
+    remaining = amount
+    out = []
+    for i, sno in enumerate(snos):
+        pay = ce.round2(ce.num(payables.get(sno)))
+        rec = ce.round2(ce.num(received.get(sno)))
+        room = ce.round2(max(0.0, pay - rec)) if pay > 0 else remaining
+        if i == len(snos) - 1:
+            take = remaining
+        else:
+            take = ce.round2(min(remaining, room))
+        out.append({"unitSno": sno, "amount": take})
+        remaining = ce.round2(remaining - take)
+    return [s for s in out if s["amount"] > 0] or [{"unitSno": snos[-1], "amount": amount}], "club"
+
+
+def _apply_unit_money(lead, units, received, payables):
+    out = []
+    for i, raw in enumerate(units or []):
+        u = dict(raw or {})
+        try:
+            sno = int(u.get("sno") or i + 1)
+        except (TypeError, ValueError):
+            sno = i + 1
+        rec = ce.round2(ce.num(received.get(sno)))
+        pay = ce.round2(ce.num(payables.get(sno, u.get("customerPayable"))))
+        u["totalReceived"] = rec
+        if (lead or {}).get("dealCancelled"):
+            u["customerOutstanding"] = 0.0
+            u["excessReceived"] = rec
+        else:
+            u["customerOutstanding"] = ce.round2(max(0.0, pay - rec)) if pay > 0 else 0.0
+            u["excessReceived"] = ce.round2(max(0.0, rec - pay)) if pay > 0 else 0.0
+        out.append(u)
+    return out
 
 
 async def _hydrate_pack_unit_prices(lead):
@@ -8257,6 +8587,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     unit_sno = payload.pop("unitSno", None)
     idx, units = _resolve_unit_index(lead, unit_sno)
     chosen = units[idx] if units else {}
+    _require_unit_mutable(lead, chosen, "price-structure edits", act, idx)
     _require_price_reedit(act, _unit_is_priced(lead, chosen, idx))
     payload["insuranceArrangedBy"] = ce.normalize_insurance_arranged_by(
         payload.get("insuranceArrangedBy"))
@@ -8350,6 +8681,7 @@ async def set_scheme(lead_id: str, body: SchemeIn, act=Depends(actor), _desk=Dep
     extra_apply_raw = payload.pop("extraApplyUnitSnos", None) or []
     idx, units = _resolve_unit_index(lead, unit_sno)
     chosen = units[idx] if units else {}
+    _require_unit_mutable(lead, chosen, "scheme edits", act, idx)
     _require_owner_reedit(act, _unit_has_scheme(lead, chosen, idx), "Scheme")
     scheme_date = payload.pop("schemeDate", None)
     as_of = _scheme_as_of(lead, scheme_date, unit=chosen)
@@ -9897,20 +10229,28 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         except Exception:
             pass
     receipt = await next_id("receipt", "RC26")
-    prior = await db.payments.aggregate([
-        {"$match": {"leadId": lead_id}}, {"$group": {"_id": None, "t": {"$sum": "$amount"}}}
-    ]).to_list(1)
-    running = ce.round2((prior[0]["t"] if prior else 0) + body.amount)
+    prior_rows = [p async for p in db.payments.find({"leadId": lead_id}).sort(
+        [("date", 1), ("recordedAt", 1), ("receiptNumber", 1)])]
+    prior_total = ce.round2(sum(ce.num(p.get("amount")) for p in prior_rows))
+    running = ce.round2(prior_total + body.amount)
     payable = _receipt_payable(lead) if lead else 0
+    snos = _payment_target_snos(lead, body) if lead else [1]
+    received_by, payables_by = _unit_money_from_payments(lead or {}, prior_rows)
+    selected_pay = ce.round2(sum(ce.num(payables_by.get(s)) for s in snos)) if oem_sync.is_same_order_pack(lead) else payable
+    selected_recv = ce.round2(sum(ce.num(received_by.get(s)) for s in snos)) if oem_sync.is_same_order_pack(lead) else prior_total
+    gate_pay = selected_pay if selected_pay > 0 else payable
+    gate_run = ce.round2(selected_recv + body.amount) if selected_pay > 0 else running
     # Over-payment guard (port of BusinessRulesService.validatePaymentAmount_): a receipt may
     # never push total received above Customer Payable *by accident*. Provisional allowed only
     # when payable is still ₹0 (slim booking, price deferred to Price Structure). Staff can
     # deliberately record a surplus with allowExcess — it lands in Excess Received and is
     # refundable, including after delivery or closure.
-    if payable > 0 and running > payable + 0.01 and not body.allowExcess:
-        room = ce.round2(max(0.0, payable - (running - body.amount)))
-        raise HTTPException(422, f"Amount ₹{ce.round2(body.amount)} exceeds the balance. Customer payable is ₹{payable}; "
+    if gate_pay > 0 and gate_run > gate_pay + 0.01 and not body.allowExcess:
+        room = ce.round2(max(0.0, gate_pay - selected_recv if selected_pay > 0 else payable - prior_total))
+        raise HTTPException(422, f"Amount ₹{ce.round2(body.amount)} exceeds the balance. Customer payable is ₹{gate_pay}; "
                                  f"only ₹{room} can still be collected. Confirm it as an excess payment to record the surplus.")
+    splits, alloc_mode = _allocate_payment_splits(
+        lead or {}, body.amount, snos, body.allocation, body.splits, payables_by, received_by)
     outstanding = ce.round2(max(0.0, payable - running)) if payable > 0 else 0.0
     finance_file_number = body.financeFileNumber
     if body.paymentMode == "Finance":
@@ -9923,6 +10263,9 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
         "financeFileNumber": finance_file_number,
         "paymentReference": pay_ref,
         "recordedAt": now_iso(),
+        "unitSnos": snos,
+        "allocation": alloc_mode,
+        "unitSplits": splits,
     }
     try:
         await db.payments.insert_one(doc)
@@ -10747,12 +11090,15 @@ def _pack_target_for_sold(row, leads, sold_rows, *, allow_delivered=False):
                and not oem_sync.is_oem_billing_stub(l)]
     if keepers:
         same = keepers
-    packs = [l for l in same if oem_sync.is_same_order_pack(l)]
+    open_same = [l for l in same if _can_append_sold_unit(l)]
+    if not open_same:
+        return None
+    packs = [l for l in open_same if oem_sync.is_same_order_pack(l)]
     if packs:
         return packs[0]
-    if len(same) > 1:
+    if len(open_same) > 1:
         return _PACK_DO_NOT_CREATE
-    return same[0]
+    return open_same[0]
 
 
 def _family_sold_for_pack(row, sold_rows, leads, target):
@@ -10804,6 +11150,8 @@ async def _connect_oem_sold(lead, row):
         return lead
     if chassis in set(oem_sync.lead_chassis_list(lead)):
         return await _refresh_pack_unit_skus(lead, [row])
+    if not _can_append_sold_unit(lead):
+        return None
     have = set(oem_sync.lead_chassis_list(lead))
     if have or oem_sync.is_same_order_pack(lead):
         return await _append_oem_unit(lead, row)
@@ -10842,6 +11190,8 @@ async def _append_oem_unit(lead, row):
         return lead
     if chassis in set(oem_sync.lead_chassis_list(lead)):
         return await _refresh_pack_unit_skus(lead, [row])
+    if not _can_append_sold_unit(lead):
+        return None
     invoice = str((row or {}).get("invoiceNumber") or "").strip()
     plate = str((row or {}).get("numberPlate") or "").strip()
     picked = oem_sync.resolved_unit_sku(lead, row) or {}
@@ -10976,7 +11326,9 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     }
     await db.activities.insert_one(dict(act_doc))
     await sheet_sync("activities", act_doc)
-    await _copy_create_docs_from_sibling(lead_id, mobile=mobile, name=name)
+    await _copy_create_docs_from_sibling(
+        lead_id, mobile=mobile, name=name,
+        kinds=list(lead_docs.KYC_INDIVIDUAL + lead_docs.KYC_B2B + lead_docs.KYC_B2B_OPTIONAL))
     updated = await _apply_list_price_and_scheme(lead_id, model, variant, sold_date)
     live = await db.leads.find_one({"leadId": lead_id}) or updated
     await _mark_oem_auto_delivered(live, sold_rows)
@@ -11016,12 +11368,16 @@ async def _create_leads_from_unmatched_oem_sold(*, mint_new=False):
                     if ch in set(oem_sync.lead_chassis_list(live)):
                         consumed.add(ch)
                         continue
-                    live = await _append_oem_unit(live, sold_row) or live
-                    consumed.add(ch)
+                    appended = await _append_oem_unit(live, sold_row)
+                    if appended:
+                        live = appended
+                        consumed.add(ch)
                 live = await _refresh_pack_unit_skus(live, family) or live
             else:
-                live = await _connect_oem_sold(target, row) or live
-                consumed.add(chassis)
+                connected = await _connect_oem_sold(target, row)
+                if connected:
+                    live = connected
+                    consumed.add(chassis)
             leads = [live if (l or {}).get("leadId") == (target or {}).get("leadId") else l
                      for l in leads]
             continue
@@ -11294,10 +11650,11 @@ async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
         raise HTTPException(409, "This customer already has split files — do not mint another")
     if target:
         live = await _connect_oem_sold(target, row)
-        await write_audit(act, "append", "oem-billing", leadId=(live or {}).get("leadId"),
-                          new={"chassis": chassis})
-        return {"ok": True, "appended": True, "connected": True,
-                "leadId": (live or {}).get("leadId"), "chassis": chassis}
+        if live and chassis in set(oem_sync.lead_chassis_list(live)):
+            await write_audit(act, "append", "oem-billing", leadId=live.get("leadId"),
+                              new={"chassis": chassis})
+            return {"ok": True, "appended": True, "connected": True,
+                    "leadId": live.get("leadId"), "chassis": chassis}
     lead = await _insert_oem_billing_lead(row, sold)
     await write_audit(act, "create", "oem-billing", leadId=(lead or {}).get("leadId"),
                       new={"chassis": chassis})
@@ -11321,6 +11678,9 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             f"(status: {lead.get('currentStatus') or 'New'} / {_acct(lead)}). "
             f"Closed leads cannot be changed.",
         )
+    target_sno = body.unitSno
+    pack_now = oem_sync.is_same_order_pack(lead)
+    await _refresh_sold_then_fill_delivery(lead, body)
     if _is_delivered(lead) and role != "owner":
         raise HTTPException(
             409,
@@ -11329,14 +11689,6 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
             f"Delivered leads cannot be changed (owner may edit until closed).",
         )
     first_delivery = delivered and not _is_delivered(lead)
-    if first_delivery:
-        _require_action(lead, "canDeliver", "delivery (not booked/active)", act)
-        await _refresh_sold_then_fill_delivery(lead, body)
-        errs = _validate_delivery_ready(lead, body)
-        if errs:
-            raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
-    else:
-        await _refresh_sold_then_fill_delivery(lead, body)
     sold_body_patch, sold_body_adopted = await _sold_body_updates_for_lead(lead)
     if sold_body_patch:
         lead.update(sold_body_patch)
@@ -11348,11 +11700,65 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         invoice=body.invoiceNumber or (lead or {}).get("invoiceNumber") or "",
         plate=body.numberPlate or (lead or {}).get("numberPlate") or "",
     )
-    if oem_sync.is_same_order_pack(lead) or len(unit_docs) > 1:
+    # Keep runtime delivery fields that normalize drops when the PUT body omits them.
+    live_units = _ensure_lead_units(lead)
+    by_live = {int(u.get("sno") or i + 1): u for i, u in enumerate(live_units)}
+    for i, rec in enumerate(unit_docs):
+        prev = by_live.get(int(rec.get("sno") or i + 1)) or {}
+        for k in UNIT_RUNTIME_KEYS:
+            if k not in rec and prev.get(k) not in (None, ""):
+                rec[k] = prev[k]
+    if pack_now or len(unit_docs) > 1:
         if unit_docs:
             body.chassisNumber = body.chassisNumber or unit_docs[0].get("chassisNumber") or ""
             body.invoiceNumber = body.invoiceNumber or unit_docs[0].get("invoiceNumber") or ""
             body.numberPlate = body.numberPlate or unit_docs[0].get("numberPlate") or ""
+    focus_idx = None
+    if target_sno and unit_docs:
+        focus_idx, unit_docs_resolved = _resolve_unit_index(
+            {**(lead or {}), "units": unit_docs}, target_sno)
+        unit_docs = unit_docs_resolved
+        _require_unit_mutable(lead, unit_docs[focus_idx], "delivery edits", act, focus_idx)
+    if first_delivery:
+        _require_action(lead, "canDeliver", "delivery (not booked/active)", act)
+        targets = [focus_idx] if focus_idx is not None else list(range(len(unit_docs) or 1))
+        for idx in targets:
+            u = unit_docs[idx] if unit_docs else {}
+            outstanding = u.get("customerOutstanding")
+            if outstanding is None:
+                outstanding = lead.get("customerOutstanding") if not pack_now else u.get("customerPayable")
+            arranged = u.get("insuranceArrangedBy") or lead.get("insuranceArrangedBy")
+            errs = _validate_delivery_ready(
+                lead, body, outstanding=outstanding, arranged_by=arranged,
+                insurance_agent_id=body.insuranceAgentId or u.get("insuranceAgentId")
+                or lead.get("insuranceAgentId"))
+            if errs:
+                raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
+    def _stamp_unit(rec, *, mark):
+        rec = dict(rec)
+        rec["insurance"] = body.insurance or rec.get("insurance") or ""
+        rec["registration"] = body.registration or rec.get("registration") or ""
+        rec["invoice"] = body.invoice or rec.get("invoice") or ""
+        rec["accessories"] = body.accessories or rec.get("accessories") or ""
+        rec["rc"] = body.rc or rec.get("rc") or ""
+        rec["pdi"] = body.pdi or rec.get("pdi") or ""
+        if body.insurerName:
+            rec["insurerName"] = body.insurerName
+        if (body.insuranceAgentId or "").strip():
+            rec["insuranceAgentId"] = body.insuranceAgentId
+        if mark:
+            rec["delivered"] = "Yes"
+            rec["deliveryStatus"] = "Delivered"
+            if not _iso_day(rec.get("deliveryDate")):
+                rec["deliveryDate"] = _iso_day(body.deliveryDate) or _iso_day(rec.get("soldDate")) or today()
+        return rec
+    if unit_docs and (pack_now or len(unit_docs) > 1):
+        if focus_idx is not None:
+            unit_docs[focus_idx] = _stamp_unit(unit_docs[focus_idx], mark=delivered)
+        elif delivered:
+            unit_docs = [_stamp_unit(u, mark=True) for u in unit_docs]
+        else:
+            unit_docs = [_stamp_unit(u, mark=False) for u in unit_docs]
     if delivered and unit_docs:
         default_d = _iso_day(body.deliveryDate) or today()
         for rec in unit_docs:
@@ -11362,6 +11768,8 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         dates = [d for d in dates if d]
         if dates:
             body.deliveryDate = max(dates)
+    all_units_delivered = bool(unit_docs) and all(_unit_delivery_flag(u) for u in unit_docs)
+    file_delivered = delivered if not (pack_now and len(unit_docs) > 1) else all_units_delivered
     await _assert_unique_vehicle_identifiers(
         lead_id,
         invoice_number=body.invoiceNumber,
@@ -11394,24 +11802,25 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         lead_updates["insuranceAgentName"] = _agent.get("agentName", "")
     if sold_body_patch:
         lead_updates.update(sold_body_patch)
-    if delivered:
+    if file_delivered:
         lead_updates.update({"deliveryStatus": "Delivered", "currentStatus": "Delivered",
                              "deliveryDate": body.deliveryDate or today()})
     await db.leads.update_one({"leadId": lead_id}, {"$set": lead_updates})
     if sold_body_adopted:
         await _reprice_after_sold_body(lead_id)
     if delivered:
-        await sheet_sync("deliveries", {
-            "leadId": lead_id, "customerName": lead.get("customerName"),
-            "deliveryDate": body.deliveryDate or today(), "delivered": "Yes",
-            "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
-        })
-        await _upsert_incentive_register_on_delivery(lead_id, body.deliveryDate or today())
+        if file_delivered:
+            await sheet_sync("deliveries", {
+                "leadId": lead_id, "customerName": lead.get("customerName"),
+                "deliveryDate": body.deliveryDate or today(), "delivered": "Yes",
+                "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
+            })
+            await _upsert_incentive_register_on_delivery(lead_id, body.deliveryDate or today())
         await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
         await rebuild_finance_views()
         await recompute_lead(lead_id)
         await _upsert_delivery_billing_summary(lead_id)
-        if first_delivery:
+        if file_delivered and first_delivery:
             # WhatsApp delivery + review is fire-and-forget — must never fail this save.
             wa.schedule(wa.notify_delivery(lead_id))
             try:
@@ -11428,6 +11837,8 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
                 await _apply_sold_vehicle_ids()
             except Exception:
                 logging.exception("Could not backfill chassis/invoice from OEM Sold")
+    elif unit_docs and (pack_now or len(unit_docs) > 1):
+        await recompute_lead(lead_id)
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
 
 

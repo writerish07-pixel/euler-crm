@@ -38,6 +38,12 @@ function packUnitList(lead) {
   return null;
 }
 
+function unitIsDelivered(u) {
+  const st = String(u?.deliveryStatus || "").toLowerCase();
+  if (st === "delivered") return true;
+  return ["yes", "y", "true", "1", "done"].includes(String(u?.delivered || "").toLowerCase());
+}
+
 function unitBilledDate(u, lead) {
   const billed = String((u && u.soldDate) || "").slice(0, 10);
   if (billed.length === 10) return billed;
@@ -137,7 +143,7 @@ function PackUnitPicker({ lead, value, onChange, onOpenPrice, onOpenScheme }) {
         </Button>
       </div>
       <p className="text-xs text-ink-soft mt-2">
-        Every added unit has its own Price Structure and Scheme. Outstanding is the sum of unit payables minus receipts.
+        Every unit has its own Price, Scheme, Deal sheet, Insurance, RTO and payments. Only KYC is shared. Club a receipt across ticked units or post a separate one.
       </p>
     </div>
   );
@@ -547,7 +553,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             canEditBilledDate={!leadLocked && canEditCommercials} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("scheme")} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} documents={data.documents} onSaved={() => advance("payments")} onRefresh={refresh} />}
-      {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} onSaved={refresh} />}
+      {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} unitSno={activeUnit} onSaved={refresh} />}
       {tab === "delivery" && (
         fieldView
           ? <FieldDeliveryReadOnly delivery={data.delivery} lead={lead} />
@@ -562,6 +568,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
               billingSummary={data.billingSummary}
               oemSold={data.oemSold}
               documents={data.documents}
+              unitSno={activeUnit}
               onSaved={refresh}
             />
           )
@@ -910,6 +917,8 @@ export function OverviewUnits({
                 {(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}
                 {(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
                 {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
+                {Number(u.customerOutstanding) > 0.01 ? ` · due ${inr(u.customerOutstanding)}` : (Number(u.totalReceived) > 0 ? " · paid" : "")}
+                {unitIsDelivered(u) ? " · delivered" : ""}
                 {unitBodyNote(u) ? ` · ${unitBodyNote(u)}` : ""}
                 {priced && schemed ? " · filled" : (hideExecScheme ? "" : " · Price / Scheme open")}
               </span>
@@ -1156,15 +1165,21 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
               <B2bGstinField leadId={lead.leadId} gstin={lead.gstin || ""} canEdit={canUploadKyc} onSaved={onSaved} />
             </div>
           )}
-          {Number(lead.oemExtraSupportReceived) > 0 && (
-            <LeadDocsStrip
-              leadId={lead.leadId}
-              kinds={["oem_extra_support"]}
-              canUploadKinds={canUploadKyc ? ["oem_extra_support"] : []}
-              title="OEM Extra Support proof"
-              documents={documents}
-              onChanged={onSaved}
-            />
+          {(packUnits || [lead]).some((u) => Number((u && u.oemExtraSupportReceived) || lead.oemExtraSupportReceived) > 0) && (
+            (packUnits || [{ sno: 1, oemExtraSupportReceived: lead.oemExtraSupportReceived }])
+              .filter((u) => Number(u.oemExtraSupportReceived || (u.sno === 1 ? lead.oemExtraSupportReceived : 0)) > 0)
+              .map((u, i) => (
+                <LeadDocsStrip
+                  key={`oem-extra-${u.sno || i + 1}`}
+                  leadId={lead.leadId}
+                  kinds={["oem_extra_support"]}
+                  canUploadKinds={canUploadKyc ? ["oem_extra_support"] : []}
+                  title={packUnits ? `OEM Extra Support proof · Unit ${u.sno || i + 1}` : "OEM Extra Support proof"}
+                  documents={documents}
+                  unitSno={packUnits ? (u.sno || i + 1) : undefined}
+                  onChanged={onSaved}
+                />
+              ))
           )}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
             <h4 className="font-heading font-bold text-ink text-sm">Deal sheet</h4>
@@ -1181,14 +1196,22 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
               }}
             />
           </div>
-          <p className="text-[11px] text-ink-faint mt-1">Print, get the customer to sign, then upload the signed sheet.</p>
-          <LeadDocsStrip
-            leadId={lead.leadId}
-            kinds={["deal_sheet"]}
-            canUploadKinds={canUploadKyc ? ["deal_sheet"] : []}
-            documents={documents}
-            onChanged={onSaved}
-          />
+          <p className="text-[11px] text-ink-faint mt-1">Print, get the customer to sign, then upload the signed sheet{packUnits ? " for each unit" : ""}.</p>
+          {(packUnits || [{ sno: 1 }]).map((u, i) => {
+            const sno = u.sno || i + 1;
+            return (
+              <LeadDocsStrip
+                key={`deal-${sno}`}
+                leadId={lead.leadId}
+                kinds={["deal_sheet"]}
+                canUploadKinds={canUploadKyc ? ["deal_sheet"] : []}
+                title={packUnits ? `Deal sheet · Unit ${sno}` : undefined}
+                documents={documents}
+                unitSno={packUnits ? sno : undefined}
+                onChanged={onSaved}
+              />
+            );
+          })}
         </div>
       )}
       {booked && (
@@ -1766,8 +1789,9 @@ export function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onS
             leadId={lead.leadId}
             kinds={["oem_extra_support"]}
             canUploadKinds={["oem_extra_support"]}
-            title="OEM Extra Support proof"
+            title={units ? `OEM Extra Support proof · Unit ${unitSno}` : "OEM Extra Support proof"}
             documents={documents}
+            unitSno={units ? unitSno : undefined}
             onChanged={onRefresh || onSaved}
           />
         </div>
@@ -1836,9 +1860,22 @@ export function receiptPaymentModes(masters) {
   return [...raw, "Finance"];
 }
 
-export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, onSaved }) {
+function unitPaymentLine(u, i = 0) {
+  const sno = u?.sno || i + 1;
+  const payable = Number(u?.customerPayable || 0);
+  const received = Number(u?.totalReceived || 0);
+  const outstanding = u?.customerOutstanding != null
+    ? Number(u.customerOutstanding)
+    : Math.max(0, payable - received);
+  return { sno, payable, received, outstanding, model: u?.model || "", variant: u?.variant || "" };
+}
+
+export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, unitSno, onSaved }) {
   const { isExecutive } = useAuth();
+  const units = packUnitList(lead);
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
+  const [paySnos, setPaySnos] = useState(() => (unitSno ? [unitSno] : (units ? units.map((u, i) => u.sno || i + 1) : [])));
+  const [allocation, setAllocation] = useState("club");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
@@ -1846,6 +1883,9 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
   const packPayable = +(lead.customerPayable || 0);
   const packReceived = +(lead.totalReceived || 0);
   const packRoom = Math.max(0, packPayable - packReceived);
+  const unitLines = (units || []).map((u, i) => unitPaymentLine(u, i));
+  const selectedLines = unitLines.filter((u) => paySnos.includes(u.sno));
+  const selectedRoom = selectedLines.reduce((s, u) => s + Math.max(0, u.outstanding), 0);
   const excess = +(lead.excessReceived || 0);
   const refunded = +(lead.refundedAmount || 0);
   const dealCancelled = !!lead.dealCancelled;
@@ -1859,7 +1899,18 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
       return toast.error(`Enter the ${paymentRefLabel(form.paymentMode).toLowerCase()}`);
     }
     try {
-      const saved = await post(`/leads/${lead.leadId}/payments`, { ...form, amount: +form.amount, allowExcess });
+      const body = { ...form, amount: +form.amount, allowExcess };
+      if (units) {
+        const snos = paySnos.length ? paySnos : [units[0]?.sno || 1];
+        if (allocation === "separate" && snos.length !== 1) {
+          toast.error("Separate payment must tick one unit.");
+          return undefined;
+        }
+        body.unitSnos = snos;
+        body.unitSno = snos[0];
+        body.allocation = allocation === "separate" || snos.length === 1 ? "separate" : "club";
+      }
+      const saved = await post(`/leads/${lead.leadId}/payments`, body);
       const file = saved?.financeFileNumber ? ` · Finance File ${saved.financeFileNumber}` : "";
       toast.success(`Receipt added · ${inr(+form.amount)}${file}`);
       setForm({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
@@ -1921,12 +1972,46 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
       <Card className="p-4 mb-4">
         {packPayable > 0 && (
           <p className="text-xs text-ink-soft mb-3" data-testid="payments-pack-room">
-            {packUnitList(lead)
+            {units
               ? `Pack payable ${inr(packPayable)}`
               : `Customer payable ${inr(packPayable)}`}
             {` · received ${inr(packReceived)} · still collect ${inr(packRoom)}`}
             {Number(lead.bookingAmount) > 0 ? ` · booking amount ${inr(lead.bookingAmount)}` : ""}
           </p>
+        )}
+        {units && (
+          <div className="mb-3" data-testid="payment-unit-picker">
+            <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Apply this receipt to</div>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {unitLines.map((u) => {
+                const checked = paySnos.includes(u.sno);
+                return (
+                  <label key={u.sno} className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] ring-1 ring-inset ${checked ? "bg-cobalt-tint text-ink ring-cobalt/30" : "bg-white text-ink-soft ring-line"}`}>
+                    <input type="checkbox" data-testid={`pay-unit-${u.sno}`} checked={checked}
+                      onChange={() => setPaySnos((cur) => (cur.includes(u.sno) ? cur.filter((n) => n !== u.sno) : [...cur, u.sno].sort((a, b) => a - b)))} />
+                    Unit {u.sno}{u.model ? ` · ${u.model}` : ""} · due {inr(u.outstanding)}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap gap-4 text-xs" data-testid="payment-allocation">
+              <label className="inline-flex items-center gap-1.5">
+                <input type="radio" name="pay-alloc" value="club" checked={allocation === "club"}
+                  onChange={() => setAllocation("club")} />
+                Club across selected units
+              </label>
+              <label className="inline-flex items-center gap-1.5">
+                <input type="radio" name="pay-alloc" value="separate" checked={allocation === "separate"}
+                  onChange={() => setAllocation("separate")} />
+                Separate — one unit
+              </label>
+            </div>
+            <p className="text-[11px] text-ink-faint mt-1">
+              {allocation === "separate"
+                ? "The receipt posts only to the ticked unit."
+                : `Club fills outstanding in unit order. Selected still collect ${inr(selectedRoom)}.`}
+            </p>
+          </div>
         )}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 items-end">
           <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
@@ -1964,6 +2049,9 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
                   {" · "}{fmtDate(p.date)}
                   {" · "}{p.narration || "—"}
                   {p.financeFileNumber ? ` · ${p.financeFileNumber}` : ""}
+                  {Array.isArray(p.unitSnos) && p.unitSnos.length
+                    ? ` · ${p.allocation === "club" ? "Club" : "Unit"} ${p.unitSnos.map((n) => `U${n}`).join(", ")}`
+                    : ""}
                 </div>
               </div>
               <div className="text-right text-xs text-ink-soft">
@@ -2189,12 +2277,16 @@ function OemClaimStrip({ leadId }) {
   );
 }
 
-export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], onSaved }) {
+export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], unitSno, onSaved }) {
+  const packList = packUnitList(lead);
+  const focusSno = packList ? (unitSno || packList[0]?.sno || 1) : 1;
+  const focusUnit = (packList || []).find((u) => (u.sno || 0) === focusSno) || (lead.units || [])[focusSno - 1] || {};
+  const unitDelivered = packList ? unitIsDelivered(focusUnit) : !!actions.isDelivered;
   const alreadyDelivered = actions.isDelivered;
   const closedOrInactive = !actions.isActive;
-  // Staff freeze after Mark Delivered; owner may edit delivery paperwork until closed.
-  const locked = closedOrInactive || (alreadyDelivered && !isOwner);
-  const canMarkDelivered = actions.canDeliver;   // active + booked + not delivered
+  // Staff freeze after this vehicle is delivered; siblings stay open. Owner until closed.
+  const locked = closedOrInactive || (unitDelivered && !isOwner);
+  const canMarkDelivered = actions.canDeliver || (packList && actions.isBooked && actions.isActive && !alreadyDelivered);
   const [form, setForm] = useState(() => {
     const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", insuranceAgentId: lead.insuranceAgentId || "", deliveryDate: delivery.deliveryDate || todayISO() };
     DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
@@ -2219,6 +2311,15 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         deliveryDate: u.deliveryDate || u.soldDate || "",
         availableBodyType: u.availableBodyType || "",
         oemBilledBodyType: u.oemBilledBodyType || u.bodyType || "",
+        delivered: u.delivered || "",
+        deliveryStatus: u.deliveryStatus || "",
+        insurance: u.insurance || "",
+        registration: u.registration || "",
+        insurerName: u.insurerName || "",
+        insuranceAgentId: u.insuranceAgentId || "",
+        customerPayable: u.customerPayable,
+        totalReceived: u.totalReceived,
+        customerOutstanding: u.customerOutstanding,
       }))
       : []
   ));
@@ -2226,6 +2327,22 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   const selfArranged = String(lead.insuranceArrangedBy || "dealer").toLowerCase() === "self";
 
   useEffect(() => { setSummary(billingSummary || null); }, [billingSummary]);
+  useEffect(() => {
+    if (!packList) return undefined;
+    const u = (lead.units || []).find((x) => (x.sno || 0) === focusSno) || {};
+    setForm((f) => {
+      const next = { ...f };
+      DELIV_STEPS.forEach(([k]) => {
+        if (u[k]) next[k] = u[k];
+      });
+      if (u.insurerName) next.insurerName = u.insurerName;
+      if (u.insuranceAgentId) next.insuranceAgentId = u.insuranceAgentId;
+      next.delivered = unitIsDelivered(u) ? "Yes" : "";
+      if (u.deliveryDate) next.deliveryDate = u.deliveryDate;
+      return next;
+    });
+    return undefined;
+  }, [focusSno, lead.leadId]);
 
   useEffect(() => { get("/insurance-agents").then(setAgents).catch(() => setAgents([])); }, []);
   useEffect(() => {
@@ -2318,19 +2435,21 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   }, [alreadyDelivered, lead.leadId, billingSummary]);
 
   const soldChassis = sold?.chassis || "";
-  const outstandingCleared = Number(lead.customerOutstanding || 0) <= 0.01;
+  const unitOutstanding = packList
+    ? Number(focusUnit.customerOutstanding != null ? focusUnit.customerOutstanding : Math.max(0, Number(focusUnit.customerPayable || 0) - Number(focusUnit.totalReceived || 0)))
+    : Number(lead.customerOutstanding || 0);
+  const outstandingCleared = unitOutstanding <= 0.01;
   const oemIdsLocked = locked || !isOwner;
   const toggle = (k) => { if (!locked) setForm((f) => ({ ...f, [k]: f[k] === "Done" ? "" : "Done" })); };
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const save = async () => {
-    const packLatest = packUnits.length > 1
-      ? packUnits.map((u) => String(u.deliveryDate || "").slice(0, 10)).filter(Boolean).sort().slice(-1)[0]
+    const focusDate = packUnits.length > 1
+      ? (packUnits.find((u) => (u.sno || 0) === focusSno)?.deliveryDate || form.deliveryDate)
       : form.deliveryDate;
-    if (form.delivered === "Yes" && packUnits.length > 1
-        && packUnits.some((u) => !String(u.deliveryDate || "").trim())) {
-      return toast.error("Enter a delivery date for each unit");
+    if (form.delivered === "Yes" && packUnits.length > 1 && !String(focusDate || "").trim()) {
+      return toast.error(`Enter a delivery date for unit ${focusSno}`);
     }
-    if (form.delivered === "Yes" && !packLatest) return toast.error("Delivery date is required");
+    if (form.delivered === "Yes" && !focusDate) return toast.error("Delivery date is required");
     // The agent decides the payout slab; the server rejects a blank one too.
     if (form.delivered === "Yes" && !form.insuranceAgentId && !selfArranged) {
       return toast.error("Select the insurance agent before marking delivered");
@@ -2338,11 +2457,11 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
     try {
       await put(`/leads/${lead.leadId}/delivery`, {
         ...form,
-        deliveryDate: packLatest || form.deliveryDate,
-        ...(packUnits.length > 1 ? { units: packUnits } : {}),
+        deliveryDate: focusDate || form.deliveryDate,
+        ...(packUnits.length > 1 ? { units: packUnits, unitSno: focusSno } : {}),
       });
       toast.success(form.delivered === "Yes"
-        ? "Delivered — billing summary ready for Tally cross-check"
+        ? (packList ? `Unit ${focusSno} delivered` : "Delivered — billing summary ready for Tally cross-check")
         : "Delivery status updated");
       onSaved();
     } catch (e) {
@@ -2351,10 +2470,17 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   };
   return (
     <div>
-      {alreadyDelivered && !isOwner && <StepLock text="Vehicle delivered — this lead is locked. No further delivery or commercial edits." />}
-      {alreadyDelivered && isOwner && !closedOrInactive && <StepLock text="Delivered — owner may still edit until the lead is closed." />}
-      {!alreadyDelivered && closedOrInactive && <StepLock text="This lead is Closed — delivery cannot be changed." />}
-      {!alreadyDelivered && !closedOrInactive && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
+      {unitDelivered && !isOwner && <StepLock text={packList ? `Unit ${focusSno} is delivered — this vehicle is locked. Other units stay editable.` : "Vehicle delivered — this lead is locked. No further delivery or commercial edits."} />}
+      {unitDelivered && isOwner && !closedOrInactive && <StepLock text="Delivered — owner may still edit until the lead is closed." />}
+      {!unitDelivered && closedOrInactive && <StepLock text="This lead is Closed — delivery cannot be changed." />}
+      {!unitDelivered && !closedOrInactive && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
+      {packList && (
+        <p className="text-xs text-ink-soft mb-3" data-testid="delivery-unit-focus">
+          Completing Insurance, RTO and Mark Delivered for <b>Unit {focusSno}</b>
+          {focusUnit.model ? ` · ${focusUnit.model}` : ""}. Outstanding {inr(unitOutstanding)}.
+          Use the unit picker above to switch vehicles.
+        </p>
+      )}
       <div className="flex flex-wrap gap-2 mb-4">
         {DELIV_STEPS.map(([k, label]) => (
           <button key={k} data-testid={`deliv-${k}`} onClick={() => toggle(k)} disabled={locked}
@@ -2368,8 +2494,9 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           leadId={lead.leadId}
           kinds={["delivery_insurance", "delivery_rto"]}
           canUploadKinds={(!locked || isOwner) ? ["delivery_insurance", "delivery_rto"] : []}
-          title="Insurance & RTO copies"
+          title={packList ? `Insurance & RTO copies · Unit ${focusSno}` : "Insurance & RTO copies"}
           documents={documents}
+          unitSno={packList ? focusSno : undefined}
           onChanged={onSaved}
         />
       )}
@@ -2513,12 +2640,12 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         </Field>
         )}
         <Field label="Mark Delivered?">
-          <Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")} disabled={locked || alreadyDelivered || !canMarkDelivered}>
+          <Select data-testid="delivered-select" value={form.delivered} onChange={set("delivered")} disabled={locked || unitDelivered || !canMarkDelivered}>
             <option value="">Not yet</option><option value="Yes">Yes — Delivered</option>
           </Select>
         </Field>
       </div>
-      <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save} disabled={locked || (!alreadyDelivered && !canMarkDelivered)}>Save Delivery</Button></div>
+      <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save} disabled={locked || (!unitDelivered && !canMarkDelivered && !alreadyDelivered)}>Save Delivery</Button></div>
 
       {alreadyDelivered && (
         <GoogleReviewSend leadId={lead.leadId} already={!!lead.whatsappDeliverySentAt} onSent={onSaved} />

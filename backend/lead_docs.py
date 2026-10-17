@@ -61,6 +61,14 @@ KYC_B2B = ("kyc_pan", "kyc_gst")
 KYC_B2B_OPTIONAL = ("kyc_aadhaar_front", "kyc_aadhaar_back")
 EXTRA_SUPPORT_KIND = "oem_extra_support"
 DEAL_SHEET_KIND = "deal_sheet"
+# Vehicle paperwork is per unit on a same-order pack. KYC stays lead-level.
+UNIT_SCOPED_KINDS = {
+    "delivery_insurance",
+    "delivery_rto",
+    "deal_sheet",
+    "tally_invoice",
+    "oem_extra_support",
+}
 
 ALLOWED_TYPES = {
     "image/jpeg", "image/jpg", "image/pjpeg", "image/png", "image/webp",
@@ -151,6 +159,56 @@ def can_upload_kind(user, kind: str, *, own: bool = False) -> bool:
     return False
 
 
+def parse_unit_sno(kind: str, unit_sno) -> int | None:
+    """KYC is always lead-level. Unit-scoped kinds keep a 1-based sno or None."""
+    if kind not in UNIT_SCOPED_KINDS:
+        return None
+    if unit_sno in (None, "", 0, "0"):
+        return None
+    try:
+        sno = int(unit_sno)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "unitSno must be a unit number.")
+    if sno < 1:
+        raise HTTPException(422, "unitSno must be a unit number.")
+    return sno
+
+
+def doc_matches_unit(doc, unit_sno) -> bool:
+    """True when this scan belongs to unit_sno. Unit 1 also matches legacy (no sno)."""
+    try:
+        sno = int((doc or {}).get("unitSno") or 0)
+    except (TypeError, ValueError):
+        sno = 0
+    try:
+        want = int(unit_sno or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if want <= 0:
+        return sno <= 0
+    if sno == want:
+        return True
+    return want == 1 and sno <= 0
+
+
+def unique_doc_filter(kind: str, *, lead_id: str = "", request_id: str = "",
+                      unit_sno=None) -> dict:
+    q = {"kind": kind}
+    if lead_id:
+        q["leadId"] = lead_id
+    if request_id:
+        q["requestId"] = request_id
+    if kind in UNIT_SCOPED_KINDS:
+        if unit_sno:
+            q["unitSno"] = unit_sno
+        else:
+            q["$or"] = [
+                {"unitSno": {"$in": [None, 0, ""]}},
+                {"unitSno": {"$exists": False}},
+            ]
+    return q
+
+
 def public_row(doc) -> dict:
     if not doc:
         return doc
@@ -158,6 +216,11 @@ def public_row(doc) -> dict:
     info = KINDS.get(row.get("kind") or "", {})
     row["label"] = info.get("label") or row.get("kind")
     row["group"] = info.get("group") or ""
+    sno = parse_unit_sno(row.get("kind") or "", row.get("unitSno"))
+    if sno:
+        row["unitSno"] = sno
+    elif "unitSno" in row and not row.get("unitSno"):
+        row.pop("unitSno", None)
     return row
 
 
@@ -366,17 +429,15 @@ async def get_meta(db, document_id: str):
 
 
 async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: str,
-                   filename: str, lead_id: str = "", request_id: str = "") -> dict:
+                   filename: str, lead_id: str = "", request_id: str = "",
+                   unit_sno=None) -> dict:
     if kind not in KINDS:
         raise HTTPException(422, f"Unknown document kind '{kind}'.")
     info = KINDS[kind]
+    sno = parse_unit_sno(kind, unit_sno)
     if info["unique"]:
-        q = {"kind": kind}
-        if lead_id:
-            q["leadId"] = lead_id
-        if request_id:
-            q["requestId"] = request_id
-        await db[COLLECTION].delete_many(q)
+        await db[COLLECTION].delete_many(unique_doc_filter(
+            kind, lead_id=lead_id, request_id=request_id, unit_sno=sno))
     doc = {
         "documentId": await next_id("lead_document", "DC26"),
         "leadId": lead_id or "",
@@ -391,6 +452,8 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
         "refundReceiptNumber": "",
         "data": Binary(data),
     }
+    if sno:
+        doc["unitSno"] = sno
     await db[COLLECTION].insert_one(dict(doc))
     return public_row(doc)
 
@@ -438,12 +501,8 @@ async def copy_create_docs(db, *, next_id, from_lead_id: str, to_lead_id: str = 
         if not raw:
             continue
         if KINDS.get(kind, {}).get("unique"):
-            q = {"kind": kind}
-            if to_lead_id:
-                q["leadId"] = to_lead_id
-            if to_request_id:
-                q["requestId"] = to_request_id
-            await db[COLLECTION].delete_many(q)
+            await db[COLLECTION].delete_many(unique_doc_filter(
+                kind, lead_id=to_lead_id, request_id=to_request_id, unit_sno=None))
         doc = {
             "documentId": await next_id("lead_document", "DC26"),
             "leadId": to_lead_id or "",
