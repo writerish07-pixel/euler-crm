@@ -145,6 +145,15 @@ function DocThumb({ doc }) {
   );
 }
 
+/** Unit-scoped scans (insurance, RTO, deal sheet). Unit 1 also matches a legacy file with no sno. */
+export function docMatchesUnit(doc, unitSno) {
+  const sno = Number(doc?.unitSno || 0);
+  const want = Number(unitSno || 0);
+  if (!want) return sno === 0;
+  if (sno === want) return true;
+  return want === 1 && sno === 0;
+}
+
 export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUpload, canDownload = true, onChanged, extraFields, pickId }) {
   const [busy, setBusy] = useState(false);
   const label = DOC_LABELS[kind] || kind;
@@ -210,7 +219,7 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
   );
 }
 
-export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onChanged, documents, refreshKey }) {
+export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onChanged, documents, refreshKey, unitSno }) {
   const [rows, setRows] = useState(documents || []);
   useEffect(() => { if (documents) setRows(documents); }, [documents]);
   useEffect(() => {
@@ -220,19 +229,25 @@ export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onCha
     return () => { live = false; };
   }, [leadId, refreshKey]);
   const byKind = {};
-  (rows || []).forEach((d) => { byKind[d.kind] = d; });
+  (rows || []).forEach((d) => {
+    if (unitSno && !docMatchesUnit(d, unitSno)) return;
+    if (!unitSno && Number(d?.unitSno || 0) > 1) return;
+    byKind[d.kind] = d;
+  });
   const shown = kinds || Object.keys(DOC_LABELS);
+  const extraFields = unitSno ? { unitSno } : {};
   return (
-    <div className="mt-4" data-testid="lead-docs-strip">
+    <div className="mt-4" data-testid={unitSno ? `lead-docs-strip-u${unitSno}` : "lead-docs-strip"}>
       {title && <h4 className="font-heading font-bold text-ink text-sm mb-2">{title}</h4>}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {shown.map((kind) => (
           <DocSlot
-            key={kind}
+            key={`${kind}-${unitSno || 0}`}
             kind={kind}
             doc={byKind[kind]}
+            extraFields={extraFields}
             uploadUrl={leadId ? `/leads/${leadId}/documents` : ""}
-            pickId={`lead-${kind}`}
+            pickId={`lead-${kind}${unitSno ? `-u${unitSno}` : ""}`}
             canUpload={canUploadKinds.includes(kind)}
             onChanged={() => {
               get(`/leads/${leadId}/documents`).then(setRows).catch(() => {});

@@ -110,6 +110,7 @@ test("same-order pack shows S.No. chassis table from OEM Sold", async () => {
   expect(host.querySelector('[data-testid="delivery-unit-date-2"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="delivery-unit-date-3"]')).toBeTruthy();
   expect(host.textContent).not.toMatch(/File delivery date/i);
+  expect(host.textContent).toMatch(/Completing Insurance, RTO and Mark Delivered for/);
   await act(async () => { root.unmount(); });
   host.remove();
 });

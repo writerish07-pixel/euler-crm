@@ -62,3 +62,37 @@ test("executive payments tab lists Finance in the mode dropdown", async () => {
   await act(async () => { root.unmount(); });
   host.remove();
 });
+
+test("pack payments tab clubs selected units or takes a separate unit", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <PaymentsTab
+        lead={{
+          leadId: "LD-PACK-PAY",
+          customerPayable: 200000,
+          totalReceived: 0,
+          currentStatus: "Booked",
+          sameOrderMultiUnit: true,
+          units: [
+            { sno: 1, model: "Turbo Max", customerPayable: 100000, totalReceived: 0, customerOutstanding: 100000 },
+            { sno: 2, model: "Storm", customerPayable: 100000, totalReceived: 0, customerOutstanding: 100000 },
+          ],
+        }}
+        actions={{ canPayment: true, canFinanceReceipt: true, isBooked: true }}
+        payments={[]}
+        masters={{ paymentModes: ["Cash", "NEFT"] }}
+        onSaved={() => {}}
+      />,
+    );
+  });
+  expect(host.querySelector('[data-testid="payment-unit-picker"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="pay-unit-1"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="pay-unit-2"]')).toBeTruthy();
+  expect(host.textContent).toMatch(/Club across selected units/);
+  expect(host.textContent).toMatch(/Separate/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});

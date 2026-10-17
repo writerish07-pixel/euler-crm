@@ -920,7 +920,7 @@ async def test_oem_create_connects_existing_open_lead(client):
 
 
 @pytest.mark.asyncio
-async def test_oem_create_reuses_delivered_file_instead_of_minting(client):
+async def test_oem_create_mints_new_lead_when_prior_file_is_desk_delivered(client):
     chassis = "MD9CONNECT02"
     await server.db.oem_sold.delete_many({"chassis": {"$in": [chassis, "MD9CONNECT01B"]}})
     await server.db.leads.delete_many({"mobile": "9812299008"})
@@ -934,16 +934,19 @@ async def test_oem_create_reuses_delivered_file_instead_of_minting(client):
         "accountStatus": "Active", "currentStatus": "Delivered",
         "deliveryStatus": "Delivered", "deliveryDate": "2026-09-01",
         "chassisNumber": "MD9CONNECT01B", "invoiceNumber": "CINV-OLD",
+        "insuranceStatus": "Yes", "registrationStatus": "Yes",
         "executive": "Payal",
     })
     r = await client.post("/api/oem-billing/create", json={"chassis": chassis})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["leadId"] == "LD-DEL-CONN"
-    assert await server.db.leads.count_documents({"mobile": "9812299008"}) == 1
-    live = await server.db.leads.find_one({"leadId": "LD-DEL-CONN"})
+    assert body.get("created") is True
+    assert body["leadId"] != "LD-DEL-CONN"
+    assert await server.db.leads.count_documents({"mobile": "9812299008"}) == 2
+    live = await server.db.leads.find_one({"leadId": body["leadId"]})
     assert chassis in set(oem_sync.lead_chassis_list(live))
-    assert live.get("oemBillingCreated") is not True
+    old = await server.db.leads.find_one({"leadId": "LD-DEL-CONN"})
+    assert chassis not in set(oem_sync.lead_chassis_list(old))
 
 
 @pytest.mark.asyncio
