@@ -1057,11 +1057,11 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
         <OwnerKV label="Lead Source" field="leadSource" value={lead.leadSource || ""}
           options={(masters.leadSources || []).map((s) => s)} leadId={lid} onSaved={onSaved} />
       </Card>
-      {lead.oemAutoDelivered && (
+      {(lead.oemInvoiced || lead.oemAutoDelivered) && !actions.isDelivered && (
         <Card className="p-3 sm:col-span-2 border-sky-200 bg-sky-50/70" data-testid="oem-auto-deliver-banner">
           <p className="text-sm text-sky-950">
-            OEM billed this file{lead.invoiceNumber ? ` (${lead.invoiceNumber})` : ""} and marked it Delivered.
-            Showroom Admin completes scheme and payment; the executive completes booking and payment.
+            OEM billed this file{lead.invoiceNumber ? ` (${lead.invoiceNumber})` : ""}. Chassis and invoice are filled.
+            Showroom Admin completes Insurance, RTO, copies and Mark Delivered — the file is not locked until then.
           </p>
         </Card>
       )}
@@ -2288,7 +2288,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   const locked = closedOrInactive || (unitDelivered && !isOwner);
   const canMarkDelivered = actions.canDeliver || (packList && actions.isBooked && actions.isActive && !alreadyDelivered);
   const [form, setForm] = useState(() => {
-    const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", insuranceAgentId: lead.insuranceAgentId || "", deliveryDate: delivery.deliveryDate || todayISO() };
+    const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", insuranceAgentId: lead.insuranceAgentId || "", deliveryDate: delivery.deliveryDate || lead.deliveryDate || lead.soldDate || todayISO() };
     DELIV_STEPS.forEach(([k]) => (f[k] = delivery[k] || ""));
     return f;
   });
@@ -2339,6 +2339,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
       if (u.insuranceAgentId) next.insuranceAgentId = u.insuranceAgentId;
       next.delivered = unitIsDelivered(u) ? "Yes" : "";
       if (u.deliveryDate) next.deliveryDate = u.deliveryDate;
+      else if (u.soldDate && !next.deliveryDate) next.deliveryDate = u.soldDate;
       return next;
     });
     return undefined;
