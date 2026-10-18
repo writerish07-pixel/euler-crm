@@ -141,6 +141,54 @@ async def test_accounts_can_list_payments_and_claims(client):
     assert fin.status_code == 200, fin.text
 
 
+def _delivered_active():
+    return {
+        "accountStatus": "Active",
+        "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered",
+        "bookingDate": "2026-08-01",
+        "bookingAmount": 5000,
+        "customerPayable": 100000,
+        "totalReceived": 5000,
+        "customerOutstanding": 95000,
+    }
+
+
+def test_accounts_can_collect_after_delivery():
+    lead = _delivered_active()
+    acct = server.lead_actions(lead, {"role": "accounts"})
+    assert acct["canPayment"] is True
+    assert acct["canFinanceReceipt"] is True
+    assert acct["isDelivered"] is True
+    exec_acts = server.lead_actions(lead, {"role": "executive"})
+    assert exec_acts["canPayment"] is False
+    closed = {**lead, "accountStatus": "Closed", "currentStatus": "Close Won"}
+    assert server.lead_actions(closed, {"role": "accounts"})["canPayment"] is False
+
+
+@pytest.mark.asyncio
+async def test_accounts_posts_cash_after_delivery(client):
+    lid = "LD-ACCT-PAY"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.payments.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        **_delivered_active(),
+        "leadId": lid,
+        "customerName": "Acct Pay",
+        "mobile": "9811100111",
+        "executive": "Amit",
+    })
+    await _login(client, "accounts@euler.com")
+    r = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 1000, "paymentMode": "Cash", "date": "2026-08-12",
+        "narration": "Balance after delivery",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["amount"] == 1000
+    assert body["paymentMode"] == "Cash"
+
+
 @pytest.mark.asyncio
 async def test_owner_can_create_accounts_user(client):
     await _login(client, "owner@euler.com")

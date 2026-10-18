@@ -92,7 +92,7 @@ export default function Payments() {
   return (
     <div>
       <PageHeader title="Payment Ledger" subtitle={subtitle} actions={<ReportActions onRefresh={load} />} />
-      {leadId && (
+      {leadId ? (
         <div className="flex flex-wrap items-center gap-2 mb-3 text-sm" data-testid="payments-lead-filter">
           <span className="text-ink-soft">Showing receipts for</span>
           <Badge>{lead?.customerName || leadId} · {leadId}</Badge>
@@ -101,6 +101,12 @@ export default function Payments() {
           </button>
           <Link to="/accounts" className="text-xs text-ink-faint ml-auto">Back to Accounts</Link>
         </div>
+      ) : (
+        <LeadJump onOpen={(id) => {
+          const next = new URLSearchParams(params);
+          next.set("leadId", id);
+          setParams(next, { replace: true });
+        }} />
       )}
       {leadId && <AddReceiptForm leadId={leadId} masters={masters} onSaved={load} />}
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
@@ -112,6 +118,33 @@ export default function Payments() {
       </div>
       <Table rowKey="receiptNumber" columns={columns} rows={rows} />
     </div>
+  );
+}
+
+function LeadJump({ onOpen }) {
+  const [id, setId] = useState("");
+  const go = () => {
+    const next = String(id || "").trim().toUpperCase();
+    if (!next) return toast.error("Enter a lead ID to record a receipt");
+    onOpen(next);
+  };
+  return (
+    <Card className="p-4 mb-4" data-testid="payments-lead-jump">
+      <div className="text-sm font-semibold text-ink mb-1">Record a receipt</div>
+      <p className="text-xs text-ink-soft mb-3">
+        Enter the lead ID (from Accounts Dashboard, Lead Register, or the file). Cash / UPI / cheque / NEFT / Finance all post here.
+      </p>
+      <div className="flex flex-wrap gap-2 items-end">
+        <div className="min-w-[12rem] flex-1">
+          <Field label="Lead ID">
+            <Input data-testid="payments-jump-lead" value={id} placeholder="LD2600…"
+              onChange={(e) => setId(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); go(); } }} />
+          </Field>
+        </div>
+        <Button data-testid="payments-jump-open" onClick={go}><Wallet size={15} /> Open lead</Button>
+      </div>
+    </Card>
   );
 }
 
