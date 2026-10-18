@@ -623,6 +623,10 @@ def lead_actions(lead, act=None):
     mutable = active if (role == "owner" or oem_auto) else (active and not delivered)
     price_mutable = active if (role == "owner" or is_showroom_admin or oem_auto) else (
         active and not delivered)
+    # Accounts still collects Cash / UPI / cheque / NEFT after Mark Delivered
+    # until Close Won. Owner already can; sales staff stay frozen after delivery.
+    pay_mutable = active if (role in ("owner", "accounts") or oem_auto) else (
+        active and not delivered)
     priced = _is_priced(lead)
     schemed = _has_persisted_scheme(lead)
     is_exec = role == "executive"
@@ -653,7 +657,8 @@ def lead_actions(lead, act=None):
         "canPrice": price_mutable and not is_exec,
         "canScheme": mutable and not is_exec,
         # Desk can collect on an Active file. Executives collect only after booking.
-        "canPayment": mutable and ((really_booked if oem_auto else booked) if is_exec else True),
+        # Accounts keeps collecting after delivery so Tally still matches the ledger.
+        "canPayment": pay_mutable and ((really_booked if oem_auto else booked) if is_exec else True),
         "canFinanceReceipt": not_archived,  # finance receipt allowed after close; execs post it too
         "canDeliver": active and booked and not delivered and not is_exec,
         "canClose": active and not is_exec,                # close exit path (incl. delivered)

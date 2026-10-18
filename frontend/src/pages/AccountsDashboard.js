@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Wallet, Landmark, ReceiptText, ShieldCheck, Truck, AlertCircle,
-  IndianRupee, Printer, FileText, ExternalLink, Warehouse, CalendarDays, Users, ClipboardCheck,
+  IndianRupee, Printer, FileText, Warehouse, CalendarDays, Users, ClipboardCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
@@ -144,10 +144,17 @@ export default function AccountsDashboard() {
                 <span className={Number(r.customerOutstanding) > 0 ? "text-red-600 font-semibold" : "text-emerald-600"}>{inr(r.customerOutstanding)}</span>
               ) },
               { key: "act", label: "", align: "right", render: (r) => (
-                <Button variant="secondary" className="!py-1 !px-2 text-xs" data-testid={`open-summary-${r.leadId}`}
-                  onClick={(e) => { e.stopPropagation(); openSummary(r.leadId); }}>
-                  <FileText size={13} /> Summary
-                </Button>
+                <div className="flex flex-wrap justify-end gap-1">
+                  <Button variant="secondary" className="!py-1 !px-2 text-xs" data-testid={`open-summary-${r.leadId}`}
+                    onClick={(e) => { e.stopPropagation(); openSummary(r.leadId); }}>
+                    <FileText size={13} /> Summary
+                  </Button>
+                  <Link to={`/payments?leadId=${encodeURIComponent(r.leadId)}`} onClick={(e) => e.stopPropagation()}>
+                    <Button variant="secondary" className="!py-1 !px-2 text-xs" data-testid={`record-pay-${r.leadId}`}>
+                      <Wallet size={13} /> Payment
+                    </Button>
+                  </Link>
+                </div>
               ) },
             ]}
             rows={d.tallyQueue || []}
@@ -167,12 +174,12 @@ export default function AccountsDashboard() {
             </div>
           </Card>
           <Card className="p-5">
-            <h3 className="font-heading font-bold text-ink text-sm mb-2">How to use</h3>
-            <ol className="text-xs text-ink-soft space-y-1.5 list-decimal list-inside">
-              <li>Open <b>Summary</b> for a delivered invoice</li>
-              <li>Print / check charges &amp; passed discounts only</li>
-              <li>Create one GST invoice per unit in <b>Tally</b>, then upload each scan here. Ledger can combine selected units or stay separate.</li>
-              <li>Record that lead’s money from Summary → Record payment</li>
+            <h3 className="font-heading font-bold text-ink text-sm mb-2">How Accounts uploads</h3>
+            <ol className="text-xs text-ink-soft space-y-1.5 list-decimal list-inside" data-testid="accounts-howto">
+              <li><b>Tally GST</b> — open <b>Summary</b> on a delivered file. Post one GST invoice per unit, then combine selected units on the ledger or keep them separate. Upload the scans here.</li>
+              <li><b>Customer money</b> — tap <b>Payment</b> on the row (or Summary → Record payment). Cash / UPI / cheque / NEFT / Finance go on Payment Ledger, including after delivery while the file is Active. For a pack, open the lead → Payments tab to club or split units.</li>
+              <li><b>Finance / insurance / claims</b> — use Finance Register, Insurance Payouts, and Scheme / OEM Claim Register in the sidebar. Inventory and Monthly Register stay on this desk too.</li>
+              <li>Print Summary first so Tally only has charges &amp; passed discounts — never OEM claims or retained scheme.</li>
             </ol>
           </Card>
         </div>
@@ -280,8 +287,8 @@ export default function AccountsDashboard() {
               canUpload={canTallyUpload}
               documents={summary.documents}
             />
-            <Link to={`/payments?leadId=${encodeURIComponent(summary.leadId)}`} className="inline-flex items-center gap-1 text-xs text-cobalt mt-3" data-testid="record-payment-link">
-              Record payment <ExternalLink size={12} />
+            <Link to={`/payments?leadId=${encodeURIComponent(summary.leadId)}`} data-testid="record-payment-link">
+              <Button className="mt-3 !py-1.5 !px-3 text-xs"><Wallet size={13} /> Record payment</Button>
             </Link>
           </div>
         </div>

@@ -16,6 +16,7 @@ import LeadDrawer from "../pages/LeadDrawer";
 import ExportDialog from "./ExportDialog";
 import { fmtWhen } from "../lib/format";
 import { openLeadPath } from "../lib/leadPaths";
+import { keepNavItem } from "../lib/accountsNav";
 
 const NAV = [
   { section: "Overview", items: [
@@ -125,24 +126,12 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
         {nav.map((group) => {
           if (group.ownerOnly && !isOwner) return null;
           if (group.pipeline && !isSalesStaff && !isField && !isAccounts) return null;
-          const items = group.items.filter((i) => {
-            if (isAccounts && !isSalesStaff && !isField
-                && i.to !== "/followup-leads" && i.to !== "/leads") return false;
-            if (i.ownerOnly && !isOwner) return false;
-            if (i.salesOnly && !isSalesStaff) return false;
-            if (i.moneyDesk && !isMoneyDesk) return false;
-            if (i.oemClaimDesk && !canMatchOemClaims) return false;
-            if (i.financeView && !canViewFinance) return false;
-            if (i.dealDesk && !canEditCommercials) return false;
-            if (i.showroomDesk && !canManageShowroom) return false;
-            if (i.staffDesk && !canManageStaff) return false;
-            if (i.accountsHome && !isAccounts && !isOwner) return false;
-            if (i.fieldHome && !isField && !isOwner) return false;
-            if (i.gmHome && !isSalesGm && !isOwner) return false;
-            if (i.monthly && !canViewMonthly) return false;
-            if (i.approvals && !canApproveLeads && !isExecutive && !isTeamLead) return false;
-            return true;
-          });
+          const items = group.items.filter((i) => keepNavItem(i, {
+            isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk,
+            canViewFinance, canEditCommercials, canManageShowroom, canManageStaff,
+            isSalesGm, canApproveLeads, isExecutive, isTeamLead, canViewMonthly,
+            canMatchOemClaims,
+          }));
           if (!items.length) return null;
           return (
             <div key={group.section}>
