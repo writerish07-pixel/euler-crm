@@ -3,6 +3,7 @@
  */
 import {
   extraSupportLeadOptions,
+  extraSupportMatchUnitSnos,
   looksCombinedSupport,
   matchRegisterLeadRows,
   matchableExtraUnitRows,
@@ -47,6 +48,16 @@ test("pack Extra Support units stay matchable until each one is connected", () =
   const relink = matchableExtraUnitRows(register, "LD26000554", true).map((r) => r.unitSno);
   expect(relink).toEqual([1, 2, 5, 6]);
   expect(extraSupportLeadOptions(register).map((r) => r.leadId)).toEqual(["LD26000554"]);
+});
+
+test("one leftover Extra Support unit still sends that unit sno", () => {
+  const leftover = [{ leadId: "LD26000893", unitSno: 2, claimAmount: 4000 }];
+  expect(extraSupportMatchUnitSnos(leftover, [], null)).toEqual([2]);
+  expect(extraSupportMatchUnitSnos(leftover, [2], null)).toEqual([2]);
+  expect(extraSupportMatchUnitSnos(
+    [{ unitSno: 1 }, { unitSno: 2 }], [], null)).toEqual([]);
+  expect(extraSupportMatchUnitSnos(
+    [{ unitSno: 1 }, { unitSno: 2 }], [2], null)).toEqual([2]);
 });
 
 test("invoice copy & mail is not a combined Extra Support amount", () => {

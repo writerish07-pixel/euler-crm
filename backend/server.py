@@ -12834,6 +12834,11 @@ async def lead_oem_portal_claims(lead_id: str, user=Depends(current_user)):
     they should line up with. Scoped like any other lead read."""
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
+    try:
+        await oem_claims.repair_pack_extra_support_leads(db, lead_id)
+        lead = await db.leads.find_one({"leadId": lead_id}) or lead
+    except Exception:
+        logging.exception("PACK_EXTRA_SUPPORT_REPAIR_ERROR %s", lead_id)
     pack = await oem_claims.lead_claim_crosscheck(db, lead_id, lead)
     scheme_rows = await get_scheme_rows()
     shares = ce.compute_scheme_claim_shares(lead_to_snapshot(lead), scheme_rows)
@@ -15094,12 +15099,17 @@ async def _prune_inactive_scheme_claims(lead_id, live_keys):
 async def _prune_pack_extra_unit_claims(lead_id, live_snos):
     """Drop leftover lead-level Extra Support once per-unit rows exist."""
     live_snos = {int(x) for x in (live_snos or set())}
+    if live_snos:
+        await oem_claims.rehome_pack_level_extra_support(db, lead_id)
     async for c in db.claims.find({
         "leadId": lead_id, "componentKey": ce.OEM_EXTRA_SUPPORT_KEY,
         "manual": {"$ne": True},
     }):
         sno = int(c.get("unitSno") or 0)
         if sno in live_snos:
+            continue
+        if sno == 0 and live_snos:
+            await db.claims.delete_one({"_id": c["_id"]})
             continue
         if _scheme_claim_is_dropped(c) or _scheme_claim_has_money_lifecycle(c):
             continue
@@ -15346,13 +15356,20 @@ async def list_claims(month: Optional[str] = None, year: Optional[str] = None):
     # share recomputed to 0) — Received / filed money still belongs in the register.
     # Dropped Extra Support lives only on Dropped Extra Support. Unused / Use=No
     # Pending shells are not "not claimed" work.
+    extra_unit_leads = {
+        lid for lid, lead in (lead_by_id or {}).items()
+        if lid and ce.extra_support_unit_rows(lead)
+    }
     for c in stored:
         if c.get("manual"):
             continue
         claim_id = c.get("claimId") or f"CLM-{c.get('leadId')}-{c.get('componentKey')}"
         if claim_id in seen_ids:
             continue
-        if _scheme_claim_is_dropped(c):
+        if (_scheme_claim_is_dropped(c)
+                or (c.get("componentKey") == ce.OEM_EXTRA_SUPPORT_KEY
+                    and not int(c.get("unitSno") or 0)
+                    and (c.get("leadId") or "") in extra_unit_leads)):
             continue
         received = ce.round2(ce.num(c.get("receivedAmount")))
         status = (c.get("claimStatus") or "").strip()
@@ -15577,8 +15594,6 @@ async def claim_match_options(user=Depends(current_user)):
         lid = str(c.get("leadId") or "").strip()
         key = str(c.get("componentKey") or "").strip()
         sno = int(c.get("unitSno") or 0)
-        if lid and key:
-            seen_pairs.add((lid, key, sno))
         if not lid or not key or lid in blocked_leads:
             continue
         status = str(c.get("claimStatus") or "").strip()
@@ -15586,18 +15601,21 @@ async def claim_match_options(user=Depends(current_user)):
             continue
         manual = str(c.get("manualOemClaimNumber") or "").strip()
         linked_status = dead_oem.get(manual.upper()) if manual else ""
-        relinkable = False
-        if manual and linked_status:
-            relinkable = True
-        elif manual:
+        relinkable = bool(manual and linked_status) or (not manual and status == "Cancelled")
+        if key == extra_key and not sno:
+            if relinkable:
+                extra_lead_relink[lid] = {
+                    "linkedOemClaimNumber": manual,
+                    "linkedOemStatus": linked_status,
+                }
+            elif manual:
+                seen_pairs.add((lid, key, 0))
+                continue
+            else:
+                continue
+        seen_pairs.add((lid, key, sno))
+        if manual and not relinkable:
             continue
-        elif status == "Cancelled":
-            relinkable = True
-        if (relinkable and key == extra_key and not sno):
-            extra_lead_relink[lid] = {
-                "linkedOemClaimNumber": manual if relinkable else "",
-                "linkedOemStatus": linked_status if relinkable else "",
-            }
         lead_ids.add(lid)
         rows.append({
             "leadId": lid,
@@ -15740,6 +15758,7 @@ async def match_claim_to_oem(body: OemClaimMatchIn, act=Depends(actor),
     Coulson. A debit note with several items (Extra Support) is matched one
     line at a time via `lineId`.
     """
+    body.componentKey = oem_claims.match_register_component_key(body.componentKey)
     lead_ids = _oem_match_lead_ids(body)
     if not lead_ids:
         raise HTTPException(422, "Pick at least one existing lead.")
@@ -18259,6 +18278,12 @@ async def _run_boot_maintenance():
                 logging.info("OEM_AUTO_DELIVER_REOPENED: %s", reopened)
         except Exception:
             logging.exception("OEM_AUTO_DELIVER_REOPEN_ERROR")
+        try:
+            repaired = await oem_claims.repair_pack_extra_support_leads(db)
+            if repaired:
+                logging.info("PACK_EXTRA_SUPPORT_REPAIRED: %s", repaired)
+        except Exception:
+            logging.exception("PACK_EXTRA_SUPPORT_REPAIR_ERROR")
         await _boot_step("oem_catalog", _oem_catalog_boot(), timeout=45)
         try:
             sold_stats = await _boot_step(

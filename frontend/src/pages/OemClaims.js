@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, lineChassisList, looksCombinedSupport, matchRegisterLeadRows, matchableExtraUnitRows, extraSupportLeadOptions, isOpenRegisterRow, isRelinkableRegisterRow, registerMatchKeys, rowLeadIds, rowLineItems } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, lineChassisList, looksCombinedSupport, matchRegisterLeadRows, matchableExtraUnitRows, extraSupportLeadOptions, extraSupportMatchUnitSnos, isOpenRegisterRow, isRelinkableRegisterRow, registerMatchKeys, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
@@ -603,6 +603,10 @@ function MatchRegisterModal({ row, onClose, onDone }) {
   useEffect(() => {
     if (!leadId || loading) return;
     const siblings = matchableExtraUnitRows(register, leadId, relink);
+    if (siblings.length === 1 && siblings[0]?.unitSno) {
+      setUnitSnos((cur) => (cur.length ? cur : [Number(siblings[0].unitSno)]));
+      return;
+    }
     if (siblings.length < 2) return;
     const chassis = lineChassisKey.split("|").filter(Boolean).map((c) => c.toUpperCase());
     const chassisHit = siblings
@@ -656,13 +660,13 @@ function MatchRegisterModal({ row, onClose, onDone }) {
 
   const save = async () => {
     if (!leadId || !componentKey) return toast.error("Pick a lead and a scheme component");
-    if (packUnits.length > 1 && !unitSnos.length) {
+    if (packUnits.length > 1 && !extraSupportMatchUnitSnos(packUnits, unitSnos, unitSno).length) {
       return toast.error("Select which pack units this Extra Support claim applies to");
     }
     setBusy(true);
     try {
-      const selectedUnits = packUnits.length > 1
-        ? unitSnos
+      const selectedUnits = extraPack
+        ? extraSupportMatchUnitSnos(packUnits, unitSnos, unitSno)
         : (unitSno ? [unitSno] : []);
       await post("/claims/oem-match", {
         leadId, leadIds: picked, componentKey,
@@ -687,8 +691,8 @@ function MatchRegisterModal({ row, onClose, onDone }) {
     if (!leadId || !componentKey) return toast.error("Pick the register row to unlink");
     setBusy(true);
     try {
-      const selectedUnits = packUnits.length > 1
-        ? unitSnos
+      const selectedUnits = extraPack
+        ? extraSupportMatchUnitSnos(packUnits, unitSnos, unitSno)
         : (unitSno ? [unitSno] : []);
       await post("/claims/oem-match/clear", {
         leadId, componentKey,
@@ -742,7 +746,7 @@ function MatchRegisterModal({ row, onClose, onDone }) {
               const cancelled = siblings.filter((r) => r.relinkable).map((r) => Number(r.unitSno));
               setUnitSnos(relink && cancelled.length
                 ? cancelled
-                : (chassisHit.length ? chassisHit : (nextSno ? [nextSno] : [])));
+                : extraSupportMatchUnitSnos(siblings, chassisHit, nextSno));
             }}>
             <option value="">{loading ? "Loading register…" : "— pick lead —"}</option>
             {leads.map((r) => {
