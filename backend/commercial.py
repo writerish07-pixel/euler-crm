@@ -2176,6 +2176,8 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
             "oemExtraSupportRetained": oem_extra["oemExtraSupportRetained"],
             "customerBenefitPassed": unit_benefit,
             "tcs": books["tcs"],
+            "cgst": books.get("cgst") or 0.0,
+            "sgst": books.get("sgst") or 0.0,
             "tallyBillTotal": books["tallyBillTotal"],
             "offTallyTotal": books["offTallyTotal"],
             "customerCollectTotal": books["customerCollectTotal"],
@@ -2245,6 +2247,7 @@ def _build_pack_delivery_billing_summary(lead, pack_units, rate):
         "disclaimer": (
             BILLING_SUMMARY_DISCLAIMER
             + " Each unit keeps its own dealer-funded additional and OEM Extra passed."
+            + " Post one Tally GST invoice per unit. Ledger may be combined across selected units or posted separately."
         ),
         "summaryId": f"BILL-{lead.get('leadId') or 'UNKNOWN'}",
         "leadId": lead.get("leadId") or "",

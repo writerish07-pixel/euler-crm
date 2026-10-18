@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
 import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
-import { get, post, put, del, apiErrorMessage, apiErrorDetail, downloadFile } from "../lib/api";
+import { get, post, put, patch, del, apiErrorMessage, apiErrorDetail, downloadFile } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileClashDialog } from "../components/ui";
@@ -10,6 +10,7 @@ import { useAuth } from "../context/AuthContext";
 import LeadWhatsApp from "./LeadWhatsApp";
 import { LeadDocsStrip, RefundChequePick, kycKinds, extraSupportReady, B2bGstinField, PrintDealSheetButton } from "../components/LeadDocuments";
 import TallyPackCheck from "../components/TallyPackCheck";
+import TallyUnitBooks, { TallyPackInvoiceSections } from "../components/TallyUnitBooks";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import NewLeadDrawer from "./NewLeadDrawer";
@@ -2282,6 +2283,7 @@ function OemClaimStrip({ leadId, unitSno }) {
 }
 
 export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], unitSno, onSaved }) {
+  const { isShowroomAdmin } = useAuth();
   const packList = packUnitList(lead);
   const focusSno = packList ? (unitSno || packList[0]?.sno || 1) : 1;
   const focusUnit = (packList || []).find((u) => (u.sno || 0) === focusSno) || (lead.units || [])[focusSno - 1] || {};
@@ -2290,6 +2292,9 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
   const closedOrInactive = !actions.isActive;
   // Staff freeze after this vehicle is delivered; siblings stay open. Owner until closed.
   const locked = closedOrInactive || (unitDelivered && !isOwner);
+  const account = String(lead.accountStatus || "Active");
+  const plateEditable = (isOwner || isShowroomAdmin) && !lead.dealCancelled && account !== "Archived";
+  const plateLocked = locked && !plateEditable;
   const canMarkDelivered = actions.canDeliver || (packList && actions.isBooked && actions.isActive && !alreadyDelivered);
   const [form, setForm] = useState(() => {
     const f = { delivered: delivery.delivered || "", invoiceNumber: delivery.invoiceNumber || lead.invoiceNumber || "", chassisNumber: delivery.chassisNumber || "", numberPlate: delivery.numberPlate || "", insurerName: delivery.insurerName || "", insuranceAgentId: lead.insuranceAgentId || "", deliveryDate: delivery.deliveryDate || lead.deliveryDate || lead.soldDate || todayISO() };
@@ -2473,11 +2478,28 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
       toast.error(apiErrorMessage(e, "Delivery update failed"));
     }
   };
+  const savePlates = async () => {
+    try {
+      const body = packUnits.length > 1
+        ? { units: packUnits.map((u, i) => ({ sno: u.sno || i + 1, numberPlate: u.numberPlate || "" })) }
+        : { numberPlate: form.numberPlate || "" };
+      await patch(`/leads/${lead.leadId}/number-plate`, body);
+      toast.success("Number plate saved");
+      onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not save the number plate"));
+    }
+  };
   return (
     <div>
       {unitDelivered && !isOwner && <StepLock text={packList ? `Unit ${focusSno} is delivered — this vehicle is locked. Other units stay editable.` : "Vehicle delivered — this lead is locked. No further delivery or commercial edits."} />}
       {unitDelivered && isOwner && !closedOrInactive && <StepLock text="Delivered — owner may still edit until the lead is closed." />}
       {!unitDelivered && closedOrInactive && <StepLock text="This lead is Closed — delivery cannot be changed." />}
+      {locked && plateEditable && (
+        <p className="text-xs text-ink-soft mb-3" data-testid="delivery-plate-closed-hint">
+          Showroom Admin / Owner may still correct the number plate on this closed or delivered file.
+        </p>
+      )}
       {!unitDelivered && !closedOrInactive && !canMarkDelivered && <StepLock text="Convert this lead to a Booking before it can be delivered." />}
       {packList && (
         <p className="text-xs text-ink-soft mb-3" data-testid="delivery-unit-focus">
@@ -2505,14 +2527,26 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           onChanged={onSaved}
         />
       )}
-      {(isOwner || isAccounts || canEditCommercials) && (
-        <TallyPackCheck
-          leadId={lead.leadId}
-          canUpload={isOwner || isAccounts}
-          canCheck={isOwner || isAccounts || canEditCommercials}
-          documents={documents}
-          onChanged={onSaved}
-        />
+      {!alreadyDelivered && (isOwner || isAccounts || canEditCommercials) && (
+        packList
+          ? (
+            <TallyUnitBooks
+              leadId={lead.leadId}
+              units={packUnits}
+              canUpload={isOwner || isAccounts}
+              documents={documents}
+              onChanged={onSaved}
+            />
+          )
+          : (
+            <TallyPackCheck
+              leadId={lead.leadId}
+              canUpload={isOwner || isAccounts}
+              canCheck={isOwner || isAccounts || canEditCommercials}
+              documents={documents}
+              onChanged={onSaved}
+            />
+          )
       )}
       <p className="text-xs text-ink-soft mb-3" data-testid="delivery-oem-ids-hint">
         Chassis and invoice come from the OEM Sold list, matched on this customer’s unique mobile.
@@ -2577,7 +2611,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
                   </td>
                   <td className="py-1 pr-2">
                     <Input data-testid={`delivery-unit-plate-${i + 1}`}
-                      value={u.numberPlate || ""} disabled={locked} placeholder="This unit’s plate"
+                      value={u.numberPlate || ""} disabled={plateLocked} placeholder="This unit’s plate"
                       onChange={(e) => {
                         const v = e.target.value;
                         setPackUnits((rows) => rows.map((row, idx) => (idx === i ? { ...row, numberPlate: v } : row)));
@@ -2628,7 +2662,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           </>
         )}
         {packUnits.length <= 1 && (
-        <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={locked} /></Field>
+        <Field label="Number Plate"><Input data-testid="delivery-plate" value={form.numberPlate} onChange={set("numberPlate")} disabled={plateLocked} /></Field>
         )}
         <Field label="Insurer Name"><Input value={form.insurerName} onChange={set("insurerName")} disabled={locked} /></Field>
         <Field label="Insurance Agent *">
@@ -2650,7 +2684,12 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           </Select>
         </Field>
       </div>
-      <div className="flex justify-end mt-4"><Button data-testid="save-delivery-btn" onClick={save} disabled={locked || (!unitDelivered && !canMarkDelivered && !alreadyDelivered)}>Save Delivery</Button></div>
+      <div className="flex justify-end gap-2 mt-4">
+        {locked && plateEditable && (
+          <Button data-testid="save-plates-btn" variant="secondary" onClick={savePlates}>Save plates</Button>
+        )}
+        <Button data-testid="save-delivery-btn" onClick={save} disabled={locked || (!unitDelivered && !canMarkDelivered && !alreadyDelivered)}>Save Delivery</Button>
+      </div>
 
       {alreadyDelivered && (
         <GoogleReviewSend leadId={lead.leadId} already={!!lead.whatsappDeliverySentAt} onSent={onSaved} />
@@ -2779,21 +2818,7 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
           </div>
         )}
 
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">A. Tally GST invoice (vehicle without GST → discount → GST)</h2>
-        <table className="w-full text-sm">
-          <tbody>
-            {(summary.tallyInvoiceLines || []).map((ln) => (
-              <tr key={ln.code + ln.label} className={ln.code === "taxableValue" ? "font-semibold" : ""}>
-                <td>{ln.label}{ln.fundHint ? <span className="text-ink-faint text-xs ml-1">({ln.fundHint})</span> : null}</td>
-                <td className="text-right font-mono">{inr(ln.amount)}</td>
-              </tr>
-            ))}
-            <tr className="font-semibold">
-              <td>Tally GST invoice</td>
-              <td className="text-right font-mono">{inr(t.tallyBillTotal ?? t.netVehicleInclGst)}</td>
-            </tr>
-          </tbody>
-        </table>
+        <TallyPackInvoiceSections summary={summary} />
         <p className="text-[11px] text-ink-faint mt-1">{gst.note}</p>
 
         <h2 className="text-[11px] font-semibold uppercase tracking-wide text-ink-soft mt-4 mb-1">B. Other heads — not on Tally (no GST)</h2>
@@ -2846,12 +2871,12 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
         )}
       </div>
       {leadId && (
-        <TallyPackCheck
+        <TallyUnitBooks
           leadId={leadId}
+          units={summary.units || []}
           canUpload={canUploadTally}
           documents={documents}
           onChanged={onDocsChanged}
-          showUpload={false}
         />
       )}
     </Card>

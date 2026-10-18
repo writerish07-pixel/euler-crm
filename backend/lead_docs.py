@@ -27,6 +27,8 @@ WEBP_RIFF = b"RIFF"
 WEBP_WEBP = b"WEBP"
 COLLECTION = "lead_documents"
 TALLY_KIND = "tally_invoice"
+LEDGER_KIND = "tally_ledger"
+TALLY_ZIP_KINDS = {TALLY_KIND, LEDGER_KIND}
 ZIP_TYPES = {
     "application/zip",
     "application/x-zip-compressed",
@@ -42,6 +44,7 @@ KINDS = {
     "delivery_insurance": {"group": "delivery", "label": "Insurance copy", "unique": True},
     "delivery_rto": {"group": "delivery", "label": "RTO / Registration", "unique": True},
     "tally_invoice": {"group": "tally", "label": "Tally GST invoice", "unique": True},
+    "tally_ledger": {"group": "tally", "label": "Tally customer ledger", "unique": True},
     "refund_cheque": {"group": "refund", "label": "Refund cheque", "unique": False},
     "oem_extra_support": {
         "group": "oem_extra",
@@ -67,6 +70,7 @@ UNIT_SCOPED_KINDS = {
     "delivery_rto",
     "deal_sheet",
     "tally_invoice",
+    "tally_ledger",
     "oem_extra_support",
 }
 
@@ -174,6 +178,47 @@ def parse_unit_sno(kind: str, unit_sno) -> int | None:
     return sno
 
 
+def parse_unit_snos(kind: str, unit_sno=None, unit_snos=None) -> list[int]:
+    """Sorted unique 1-based snos. Ledger may cover several units; invoice is one."""
+    if kind not in UNIT_SCOPED_KINDS:
+        return []
+    raw = unit_snos
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+    elif raw is None:
+        raw = []
+    else:
+        raw = list(raw)
+    out = []
+    for x in raw:
+        sno = parse_unit_sno(kind, x)
+        if sno:
+            out.append(sno)
+    one = parse_unit_sno(kind, unit_sno)
+    if one:
+        out.append(one)
+    return sorted(set(out))
+
+
+def doc_unit_snos(doc) -> list[int]:
+    """Units a Tally / delivery scan belongs to. Empty = lead-level (legacy pack)."""
+    raw = (doc or {}).get("unitSnos")
+    if isinstance(raw, str):
+        raw = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+    snos = []
+    for x in list(raw or []):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n >= 1:
+            snos.append(n)
+    if snos:
+        return sorted(set(snos))
+    one = parse_unit_sno((doc or {}).get("kind") or "", (doc or {}).get("unitSno"))
+    return [one] if one else []
+
+
 def doc_matches_unit(doc, unit_sno) -> bool:
     """True when this scan belongs to unit_sno. Unit 1 also matches legacy (no sno)."""
     try:
@@ -217,10 +262,16 @@ def public_row(doc) -> dict:
     row["label"] = info.get("label") or row.get("kind")
     row["group"] = info.get("group") or ""
     sno = parse_unit_sno(row.get("kind") or "", row.get("unitSno"))
-    if sno:
+    snos = doc_unit_snos(row)
+    if len(snos) > 1:
+        row["unitSnos"] = snos
+        row["unitSno"] = snos[0]
+    elif sno:
         row["unitSno"] = sno
+        row.pop("unitSnos", None)
     elif "unitSno" in row and not row.get("unitSno"):
         row.pop("unitSno", None)
+        row.pop("unitSnos", None)
     return row
 
 
@@ -252,7 +303,7 @@ def _sniff_content_type(data: bytes) -> str:
 def _content_type(upload: UploadFile, *, kind: str = "", data: bytes = b"") -> str:
     raw = (upload.content_type or "").split(";")[0].strip().lower()
     name = (upload.filename or "").lower()
-    if kind == TALLY_KIND and _looks_like_zip(raw, name):
+    if kind in TALLY_ZIP_KINDS and _looks_like_zip(raw, name):
         return "application/zip"
     if raw in ALLOWED_TYPES:
         return "image/jpeg" if raw in ("image/jpg", "image/pjpeg") else raw
@@ -260,17 +311,19 @@ def _content_type(upload: UploadFile, *, kind: str = "", data: bytes = b"") -> s
         if name.endswith(ext):
             return ctype
     sniffed = _sniff_content_type(data)
-    if sniffed == "application/zip" and kind == TALLY_KIND:
+    if sniffed == "application/zip" and kind in TALLY_ZIP_KINDS:
         return sniffed
     if sniffed in ALLOWED_TYPES or sniffed in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
         return sniffed
     if kind == TALLY_KIND:
         raise HTTPException(422, "Upload a photo, PDF or ZIP of the Tally GST invoice.")
+    if kind == LEDGER_KIND:
+        raise HTTPException(422, "Upload a photo, PDF or ZIP of the Tally customer ledger.")
     raise HTTPException(422, "Upload a photo or PDF (JPEG, PNG, WebP, HEIC, PDF).")
 
 
 def _max_bytes(ctype: str, kind: str) -> int:
-    if kind == TALLY_KIND and ctype == "application/zip":
+    if kind in TALLY_ZIP_KINDS and ctype == "application/zip":
         return ZIP_MAX_BYTES
     return MAX_BYTES
 
@@ -428,14 +481,41 @@ async def get_meta(db, document_id: str):
     return await db[COLLECTION].find_one({"documentId": document_id}, _META_PROJ)
 
 
+async def _delete_overlapping_ledgers(db, *, lead_id: str, snos: list[int]):
+    """One ledger covers a unit — combined or separate. Replacing overlaps."""
+    if not lead_id:
+        return
+    want = set(snos or [])
+    ids = []
+    async for doc in db[COLLECTION].find(
+            {"leadId": lead_id, "kind": LEDGER_KIND},
+            {"documentId": 1, "unitSno": 1, "unitSnos": 1}):
+        have = set(doc_unit_snos(doc))
+        if not want:
+            if not have:
+                ids.append(doc.get("documentId"))
+            continue
+        if not have or have & want:
+            ids.append(doc.get("documentId"))
+    ids = [i for i in ids if i]
+    if ids:
+        await db[COLLECTION].delete_many({"documentId": {"$in": ids}})
+
+
 async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: str,
                    filename: str, lead_id: str = "", request_id: str = "",
-                   unit_sno=None) -> dict:
+                   unit_sno=None, unit_snos=None) -> dict:
     if kind not in KINDS:
         raise HTTPException(422, f"Unknown document kind '{kind}'.")
     info = KINDS[kind]
-    sno = parse_unit_sno(kind, unit_sno)
-    if info["unique"]:
+    snos = parse_unit_snos(kind, unit_sno, unit_snos)
+    sno = snos[0] if len(snos) == 1 else parse_unit_sno(kind, unit_sno)
+    if kind == LEDGER_KIND:
+        await _delete_overlapping_ledgers(db, lead_id=lead_id, snos=snos)
+        if not snos and info["unique"]:
+            await db[COLLECTION].delete_many(unique_doc_filter(
+                kind, lead_id=lead_id, request_id=request_id, unit_sno=None))
+    elif info["unique"]:
         await db[COLLECTION].delete_many(unique_doc_filter(
             kind, lead_id=lead_id, request_id=request_id, unit_sno=sno))
     doc = {
@@ -452,7 +532,10 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
         "refundReceiptNumber": "",
         "data": Binary(data),
     }
-    if sno:
+    if len(snos) > 1:
+        doc["unitSno"] = snos[0]
+        doc["unitSnos"] = snos
+    elif sno:
         doc["unitSno"] = sno
     await db[COLLECTION].insert_one(dict(doc))
     return public_row(doc)
