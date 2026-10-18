@@ -151,6 +151,18 @@ export function extraSupportLeadOptions(rows) {
   return out;
 }
 
+/** Unit sno(s) to send with Extra Support Match. One leftover unit still counts. */
+export function extraSupportMatchUnitSnos(packUnits, unitSnos, unitSno) {
+  const ticked = (Array.isArray(unitSnos) ? unitSnos : []).map(Number).filter((n) => n > 0);
+  if (ticked.length) return [...new Set(ticked)];
+  const remaining = (Array.isArray(packUnits) ? packUnits : [])
+    .map((r) => Number(r?.unitSno))
+    .filter((n) => n > 0);
+  if (remaining.length === 1) return remaining;
+  const one = Number(unitSno);
+  return one > 0 ? [one] : [];
+}
+
 export function lineNeedsCreate(row, li) {
   const st = row?.registerMatch?.state || "";
   if (st === "in_register") return false;

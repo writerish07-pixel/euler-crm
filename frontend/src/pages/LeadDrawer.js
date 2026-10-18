@@ -1611,7 +1611,7 @@ export function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onS
           {unitPayable > 0 ? ` · ${inr(unitPayable)}` : ""}
         </p>
       )}
-      <OemClaimStrip leadId={lead.leadId} />
+      <OemClaimStrip leadId={lead.leadId} unitSno={units ? unitSno : undefined} />
       {inactive && <StepLock text="This lead is not Active — scheme is read-only." />}
       {!inactive && staffLocked && <StepLock text="Scheme is saved. Only the owner can edit a completed step." />}
       {rules && (
@@ -2193,7 +2193,7 @@ const DELIV_STEPS = [["insurance", "Insurance"], ["registration", "Registration"
 
 // What Euler's own claim desk is doing with this vehicle, next to the scheme
 // register rows this drawer created. Silent when both sides are empty.
-function OemClaimStrip({ leadId }) {
+function OemClaimStrip({ leadId, unitSno }) {
   const [pack, setPack] = useState(null);
   useEffect(() => {
     let cancelled = false;
@@ -2207,7 +2207,11 @@ function OemClaimStrip({ leadId }) {
     return () => { cancelled = true; };
   }, [leadId]);
   const claims = pack?.claims || [];
-  const register = pack?.schemeRegister || [];
+  const register = (pack?.schemeRegister || []).filter((row) => {
+    if (!unitSno || row.componentKey !== "oemExtraSupport") return true;
+    const sno = Number(row.unitSno || 0);
+    return sno === Number(unitSno);
+  });
   if (!pack || (!claims.length && !register.length)) return null;
   return (
     <div className="mb-3 rounded-lg ring-1 ring-line bg-zinc-50 px-3 py-2" data-testid="lead-oem-claims">
@@ -2236,8 +2240,8 @@ function OemClaimStrip({ leadId }) {
           {register.map((row) => {
             const m = oemMatchOf(row);
             return (
-              <div key={row.claimId || row.componentKey} className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="text-ink">{row.component}</span>
+              <div key={row.claimId || `${row.componentKey}-${row.unitSno || 0}`} className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="text-ink">{row.component}{row.unitSno ? ` · Unit ${row.unitSno}` : ""}</span>
                 <span className="font-mono text-ink-soft">{inr(row.eligibleClaim)}</span>
                 {m.label ? <Badge tone={m.tone}>{m.label}</Badge> : null}
                 {(row.oemMatch?.claimNumbers || []).slice(0, 2).map((n) => (
@@ -2531,7 +2535,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           Not billed in OEM Sold yet. You can still mark delivered; chassis and invoice will update from the OEM app when this mobile is billed.
         </p>
       )}
-      <OemClaimStrip leadId={lead.leadId} />
+      <OemClaimStrip leadId={lead.leadId} unitSno={packList ? focusSno : undefined} />
       {packUnits.length > 1 && (
         <div className="mb-3 overflow-x-auto" data-testid="delivery-units-table">
           <table className="w-full text-xs">

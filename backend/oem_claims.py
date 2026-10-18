@@ -1957,15 +1957,33 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
     oem = await claims_for_lead(db, lead_id)
     await attach_register_match(db, oem)
     index = await register_match_index(db, relink=False)
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    stored = [c async for c in db.claims.find({"leadId": lead_id, "manual": {"$ne": True}})]
+    has_unit_extra = any(
+        str(c.get("componentKey") or "") == "oemExtraSupport" and int(c.get("unitSno") or 0) > 0
+        for c in stored)
     register = []
-    async for c in db.claims.find({"leadId": lead_id, "manual": {"$ne": True}}):
+    for c in stored:
         key = c.get("componentKey") or ""
         if not key or str(c.get("claimStatus") or "") == "Dropped":
             continue
+        sno = int(c.get("unitSno") or 0)
+        if key == "oemExtraSupport" and not sno and has_unit_extra:
+            continue
+        unit = units[sno - 1] if sno and 0 < sno <= len(units) else {}
+        if key == "oemExtraSupport":
+            chassis = str(c.get("chassisNumber") or unit.get("chassisNumber") or "").strip()
+            invoice = str(c.get("invoiceNumber") or unit.get("invoiceNumber") or "").strip()
+        else:
+            chassis = str(c.get("chassisNumber") or unit.get("chassisNumber")
+                          or lead.get("chassisNumber") or "").strip()
+            invoice = str(c.get("invoiceNumber") or unit.get("invoiceNumber")
+                          or lead.get("invoiceNumber") or "").strip()
         register.append({
             "claimId": c.get("claimId") or f"CLM-{lead_id}-{key}",
             "componentKey": key,
             "component": c.get("component") or key,
+            "unitSno": sno or None,
             "eligibleClaim": round2(c.get("eligibleClaim") if c.get("eligibleClaim") is not None
                                     else c.get("claimAmount")),
             "claimStatus": c.get("claimStatus") or "",
@@ -1975,8 +1993,8 @@ async def lead_claim_crosscheck(db, lead_id, lead=None):
             "claimReceivedDate": c.get("claimReceivedDate") or "",
             "oemMatch": match_state(
                 index, lead_id, key,
-                chassis=lead.get("chassisNumber") or "",
-                invoice=lead.get("invoiceNumber") or "",
+                chassis=chassis,
+                invoice=invoice,
                 manual_claim_number=c.get("manualOemClaimNumber") or "",
                 manual_line_id=c.get("manualOemLineId") or ""),
         })
@@ -2214,6 +2232,12 @@ def extra_support_from_lead(lead, unit_sno=None):
     )
 
 
+def extra_support_unit_amounts(lead):
+    import commercial as ce
+    return [round2(u.get("oemExtraSupportReceived"))
+            for u in ce.extra_support_unit_rows(lead or {})]
+
+
 def _register_unit_filter(unit_sno=None):
     sno = 0
     try:
@@ -2303,7 +2327,7 @@ async def adopt_or_ensure_register_row(db, *, lead_id, lead, component_key,
     """
     import commercial as ce
     lead_id = str(lead_id or "").strip()
-    key = str(component_key or "").strip()
+    key = match_register_component_key(component_key)
     claim_number = str(claim_number or "").strip()
     line_id = str(line_id or "").strip()
     amt, chassis, invoice, sno = extra_support_from_lead(lead, unit_sno)
@@ -2357,7 +2381,15 @@ async def adopt_or_ensure_register_row(db, *, lead_id, lead, component_key,
         })
         if leftover:
             prev = str(leftover.get("manualOemClaimNumber") or "").strip()
-            if not prev or (claim_number and prev.upper() == claim_number.upper()):
+            unit_amts = extra_support_unit_amounts(lead)
+            leftover_amt = round2(leftover.get("claimAmount") if leftover.get("claimAmount") is not None
+                                  else leftover.get("eligibleClaim"))
+            pack_total = round2(sum(unit_amts))
+            # Kapoor-style: leftover ₹8,000 is both units. Do not turn it into Unit 2.
+            is_pack_total = len(unit_amts) > 1 and leftover_amt >= pack_total - 0.01
+            if is_pack_total:
+                leftover = None
+            elif not prev or (claim_number and prev.upper() == claim_number.upper()):
                 patch = {"unitSno": sno}
                 if chassis:
                     patch["chassisNumber"] = chassis
@@ -2497,8 +2529,24 @@ async def _detach_lead_from_oem_claim(db, *, number, lead_id, line_id=""):
     return oem
 
 
+def match_register_component_key(component_key):
+    """Euler 'Additional Discount Claim' is Extra Support in this app."""
+    key = str(component_key or "").strip()
+    if key == "additionalDiscount":
+        return "oemExtraSupport"
+    return key
+
+
+def _unmatched_extra_unit_rows(rows):
+    unit_rows = [c for c in (rows or []) if int(c.get("unitSno") or 0) > 0]
+    unmatched = [c for c in unit_rows
+                 if not str(c.get("manualOemClaimNumber") or "").strip()]
+    return unit_rows, unmatched
+
+
 async def find_register_row(db, *, lead_id, component_key, unit_sno=None):
     """Scheme Claim Register row for this lead + component (+ pack unit)."""
+    component_key = match_register_component_key(component_key)
     filt = {"leadId": lead_id, "componentKey": component_key, "manual": {"$ne": True}}
     rows = [c async for c in db.claims.find(filt)]
     if not rows:
@@ -2515,13 +2563,17 @@ async def find_register_row(db, *, lead_id, component_key, unit_sno=None):
         # Do not reuse another unit's row — that glued one Extra Support
         # debit note onto every vehicle on the pack.
         return None
+    unit_rows, unmatched = _unmatched_extra_unit_rows(rows)
+    if unit_rows:
+        # Never attach to the leftover pack-total row once per-unit rows exist.
+        if len(unmatched) == 1:
+            return unmatched[0]
+        if len(unit_rows) == 1:
+            return unit_rows[0]
+        raise ValueError("This lead has Extra Support on more than one unit. Pick the unit.")
     no_unit = [c for c in rows if not int(c.get("unitSno") or 0)]
     if len(rows) == 1:
         return rows[0]
-    if no_unit and not want:
-        if len(no_unit) == 1 and len(rows) == 1:
-            return no_unit[0]
-        raise ValueError("This lead has Extra Support on more than one unit. Pick the unit.")
     if len(no_unit) == 1:
         return no_unit[0]
     raise ValueError("This lead has Extra Support on more than one unit. Pick the unit.")
@@ -2547,7 +2599,7 @@ async def link_register_to_oem(db, *, lead_id, component_key, claim_number, line
     picks which vehicle's claim this debit note settles.
     """
     lead_id = str(lead_id or "").strip()
-    component_key = str(component_key or "").strip()
+    component_key = match_register_component_key(component_key)
     want_line = str(line_id or "").strip()
     oem = await find_oem_claim(db, claim_number)
     if not oem:
@@ -2669,3 +2721,137 @@ async def clear_register_oem_link(db, *, lead_id, component_key, unit_sno=None):
     rec.pop("manualOemMatchedAt", None)
     rec.pop("_id", None)
     return rec
+
+
+def _oem_amount_for_lead(oem, lead_id):
+    lead_id = str(lead_id or "").strip()
+    lines = coerce_line_items(oem or {})
+    mine = [li for li in lines if lead_id in line_lead_ids(li)]
+    if mine:
+        return round2(sum(_num(li.get("totalAmount")) for li in mine))
+    return round2((oem or {}).get("claimedAmount"))
+
+
+async def rehome_pack_level_extra_support(db, lead_id, lead=None):
+    """Move a leftover pack-total Extra Support row onto one unit, then drop it.
+
+    Matching without a unit sno glued the first ₹4,000 OEM note onto the pack
+    ₹8,000 row (Kapoor LD26000893). Unit 2 then could not take its own debit
+    note, and the drawer listed ₹8,000 as filed twice.
+    """
+    import commercial as ce
+    lead_id = str(lead_id or "").strip()
+    if not lead_id:
+        return 0
+    lead = lead or await db.leads.find_one({"leadId": lead_id}) or {}
+    unit_amts = extra_support_unit_amounts(lead)
+    if len(unit_amts) < 2:
+        return 0
+    extra_key = ce.OEM_EXTRA_SUPPORT_KEY
+    pack_rows = [c async for c in db.claims.find({
+        "leadId": lead_id, "componentKey": extra_key, "manual": {"$ne": True},
+        "$or": [{"unitSno": {"$in": [None, 0]}}, {"unitSno": {"$exists": False}}],
+    })]
+    if not pack_rows:
+        return 0
+    unit_rows = [c async for c in db.claims.find({
+        "leadId": lead_id, "componentKey": extra_key, "manual": {"$ne": True},
+        "unitSno": {"$gt": 0},
+    })]
+    moved = 0
+    for pack in pack_rows:
+        oem_no = str(pack.get("manualOemClaimNumber") or pack.get("claimReference") or "").strip()
+        already = [u for u in unit_rows
+                   if oem_no and str(u.get("manualOemClaimNumber") or "").strip().upper() == oem_no.upper()]
+        unmatched = [u for u in unit_rows
+                     if not str(u.get("manualOemClaimNumber") or "").strip()]
+        target = already[0] if already else None
+        if not target and oem_no:
+            oem = await find_oem_claim(db, oem_no)
+            oem_amt = _oem_amount_for_lead(oem, lead_id) if oem else 0
+            by_amt = [u for u in unmatched
+                      if oem_amt > 0 and abs(round2(u.get("claimAmount") or u.get("eligibleClaim")) - oem_amt) < 1]
+            pack_ch = oem_sync._norm_chassis(pack.get("chassisNumber"))
+            by_ch = [u for u in unmatched
+                     if pack_ch and oem_sync._norm_chassis(u.get("chassisNumber")) == pack_ch]
+            target = (by_ch[0] if by_ch else None) or (by_amt[0] if by_amt else None) or (
+                unmatched[0] if unmatched else None)
+        if target and oem_no and not already:
+            patch = {
+                "manualOemClaimNumber": pack.get("manualOemClaimNumber") or oem_no,
+                "manualOemLineId": pack.get("manualOemLineId") or "",
+                "claimReference": pack.get("claimReference") or oem_no,
+                "oemMatchState": pack.get("oemMatchState") or "",
+                "oemStatus": pack.get("oemStatus") or "",
+                "oemStageLabel": pack.get("oemStageLabel") or "",
+                "submittedDate": target.get("submittedDate") or pack.get("submittedDate") or "",
+                "approvedDate": target.get("approvedDate") or pack.get("approvedDate") or "",
+            }
+            if ce.num(pack.get("receivedAmount")) > 0 and ce.num(target.get("receivedAmount")) <= 0:
+                patch["receivedAmount"] = pack.get("receivedAmount")
+                patch["claimStatus"] = pack.get("claimStatus") or target.get("claimStatus")
+            elif pack.get("claimStatus") and str(target.get("claimStatus") or "") in ("", "Pending"):
+                patch["claimStatus"] = pack.get("claimStatus")
+            await db.claims.update_one({"_id": target["_id"]}, {"$set": patch})
+            target.update(patch)
+            moved += 1
+        await db.claims.delete_one({"_id": pack["_id"]})
+        moved += 1
+    return moved
+
+
+async def unlink_additional_discount_extra_support(db, lead_id=""):
+    """Additional Discount is dealer-funded. Extra Support OEM notes must not sit on it."""
+    filt = {"componentKey": "additionalDiscount", "manual": {"$ne": True}}
+    if lead_id:
+        filt["leadId"] = lead_id
+    n = 0
+    async for row in db.claims.find(filt):
+        number = str(row.get("manualOemClaimNumber") or row.get("claimReference") or "").strip()
+        if not number:
+            continue
+        oem = await find_oem_claim(db, number)
+        if not oem:
+            continue
+        extra = any(
+            map_claim_type_to_component(li.get("claimType"), li.get("description")) == "oemExtraSupport"
+            for li in coerce_line_items(oem))
+        if not extra:
+            continue
+        patch = {
+            "claimReference": "",
+            "oemMatchState": "not_filed",
+            "oemStatus": "",
+            "oemStageLabel": "",
+        }
+        unset = {"manualOemClaimNumber": "", "manualOemLineId": "", "manualOemMatchedAt": ""}
+        if str(row.get("claimStatus") or "") == "Submitted" and round2(row.get("receivedAmount")) <= 0:
+            patch["claimStatus"] = "Pending"
+            patch["submittedDate"] = ""
+        await db.claims.update_one({"_id": row["_id"]}, {"$set": patch, "$unset": unset})
+        lid = str(row.get("leadId") or "").strip()
+        keep = await db.claims.find_one({
+            "leadId": lid, "componentKey": "oemExtraSupport", "manual": {"$ne": True},
+            "manualOemClaimNumber": number,
+        }) if lid else None
+        if lid and not keep:
+            await _detach_lead_from_oem_claim(
+                db, number=number, lead_id=lid,
+                line_id=str(row.get("manualOemLineId") or ""))
+        n += 1
+    return n
+
+
+async def repair_pack_extra_support_leads(db, lead_id=""):
+    """Heal every same-order pack that still carries a glued Extra Support total."""
+    import commercial as ce
+    filt = {"units.oemExtraSupportReceived": {"$gt": 0}}
+    if lead_id:
+        filt["leadId"] = lead_id
+    n = 0
+    async for lead in db.leads.find(filt, {"leadId": 1, "units": 1, "oemExtraSupportReceived": 1}):
+        if len(ce.extra_support_unit_rows(lead)) < 2:
+            continue
+        n += await rehome_pack_level_extra_support(db, lead.get("leadId"), lead)
+    n += await unlink_additional_discount_extra_support(db, lead_id)
+    return n

@@ -2898,3 +2898,148 @@ async def test_team_lead_cannot_open_oem_claim_desk(client):
         assert blocked.status_code == 403
     finally:
         await tl.aclose()
+
+
+def test_find_register_row_uses_the_only_open_pack_unit():
+    locked = {"leadId": "LD26000893", "componentKey": "oemExtraSupport",
+              "unitSno": 1, "claimAmount": 4000, "manualOemClaimNumber": "AF-122-CL2627161"}
+    open_u2 = {"leadId": "LD26000893", "componentKey": "oemExtraSupport",
+               "unitSno": 2, "claimAmount": 4000}
+    pack = {"leadId": "LD26000893", "componentKey": "oemExtraSupport",
+            "claimAmount": 8000, "manualOemClaimNumber": "AF-122-CL2627161"}
+    unit_rows, unmatched = oem_claims._unmatched_extra_unit_rows([pack, locked, open_u2])
+    assert [int(r["unitSno"]) for r in unit_rows] == [1, 2]
+    assert unmatched == [open_u2]
+
+
+@pytest.mark.asyncio
+async def test_second_pack_extra_claim_matches_remaining_unit_without_sno(client):
+    """Kapoor: 4000 per unit, two OEM notes. After unit 1 is linked, Match
+    on unit 2 must not 422 'Pick the unit' when the desk omits unitSno."""
+    extras = (
+        (4000.0, "MD9EVDAD26J217612", "AF-122-I26270207"),
+        (4000.0, "MD9EVDAD26J217613", "AF-122-I26270208"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _register_row(lead_id, "oemExtraSupport", 8000.0)
+    await _register_row(lead_id, "oemExtraSupport", 4000.0, unit_sno=1,
+                        chassis=extras[0][1], invoice=extras[0][2])
+    await _register_row(lead_id, "oemExtraSupport", 4000.0, unit_sno=2,
+                        chassis=extras[1][1], invoice=extras[1][2])
+    await _orphan_oem("AF-122-CL2627161", line_id="u1", claimed=4000.0,
+                      chassis=extras[0][1], invoice=extras[0][2],
+                      claim_type="Additional Discount Claim",
+                      description="additional support documents invoice copy & mail approval")
+    await _orphan_oem("AF-122-CL2627167", line_id="u2", claimed=4000.0,
+                      chassis="", invoice="",
+                      claim_type="Additional Discount Claim",
+                      description="Additinol support documents invoice copy & RM mail "
+                                  "approval customer name:- Kappor fright carriers pvt ltd")
+    first = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 1,
+        "claimNumber": "AF-122-CL2627161", "lineId": "u1"})
+    assert first.status_code == 200, first.text
+    blocked = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-122-CL2627167", "lineId": "u2"})
+    assert blocked.status_code == 200, blocked.text
+    u1 = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 1})
+    u2 = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 2})
+    assert u1["manualOemClaimNumber"] == "AF-122-CL2627161"
+    assert u2["manualOemClaimNumber"] == "AF-122-CL2627167"
+
+
+@pytest.mark.asyncio
+async def test_two_open_pack_units_still_require_a_unit_pick(client):
+    extras = (
+        (4000.0, "MD9PACK26K400001", "AF-999-I2640001"),
+        (4000.0, "MD9PACK26K400002", "AF-999-I2640002"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _register_row(lead_id, "oemExtraSupport", 4000.0, unit_sno=1,
+                        chassis=extras[0][1], invoice=extras[0][2])
+    await _register_row(lead_id, "oemExtraSupport", 4000.0, unit_sno=2,
+                        chassis=extras[1][1], invoice=extras[1][2])
+    await _orphan_oem("AF-999-CLTWOPEN", line_id="p1", claimed=4000.0,
+                      claim_type="Additional Discount Claim",
+                      description="additional support documents")
+    refused = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "claimNumber": "AF-999-CLTWOPEN", "lineId": "p1"})
+    assert refused.status_code == 422
+    assert "Pick the unit" in refused.text
+
+
+@pytest.mark.asyncio
+async def test_rehome_drops_pack_8000_and_keeps_per_unit_4000(client):
+    extras = (
+        (4000.0, "MD9PACK26K400011", "AF-999-I2640011"),
+        (4000.0, "MD9PACK26K400012", "AF-999-I2640012"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _register_row(lead_id, "oemExtraSupport", 8000.0,
+                        chassis=extras[0][1], invoice=extras[0][2])
+    await server.db.claims.update_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport",
+         "$or": [{"unitSno": {"$in": [None, 0]}}, {"unitSno": {"$exists": False}}]},
+        {"$set": {"manualOemClaimNumber": "AF-122-CL2627161",
+                  "claimStatus": "Submitted", "submittedDate": "2026-10-01"}})
+    await _register_row(lead_id, "oemExtraSupport", 4000.0, unit_sno=1,
+                        chassis=extras[0][1], invoice=extras[0][2])
+    await _register_row(lead_id, "oemExtraSupport", 4000.0, unit_sno=2,
+                        chassis=extras[1][1], invoice=extras[1][2])
+    await _register_row(lead_id, "additionalDiscount", 8000.0)
+    await server.db.claims.update_one(
+        {"leadId": lead_id, "componentKey": "additionalDiscount"},
+        {"$set": {"manualOemClaimNumber": "AF-122-CL2627161",
+                  "claimStatus": "Submitted", "claimReference": "AF-122-CL2627161"}})
+    await _orphan_oem("AF-122-CL2627161", line_id="kap-1", claimed=4000.0,
+                      chassis=extras[0][1], invoice=extras[0][2], lead_id=lead_id,
+                      claim_type="Additional Discount Claim",
+                      description="additional support documents")
+    n = await oem_claims.repair_pack_extra_support_leads(server.db, lead_id)
+    assert n >= 1
+    pack = await server.db.claims.find_one({
+        "leadId": lead_id, "componentKey": "oemExtraSupport",
+        "$or": [{"unitSno": {"$in": [None, 0]}}, {"unitSno": {"$exists": False}}],
+    })
+    assert pack is None
+    u1 = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 1})
+    u2 = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 2})
+    assert u1.get("manualOemClaimNumber") == "AF-122-CL2627161"
+    assert not u2.get("manualOemClaimNumber")
+    addl = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "additionalDiscount"})
+    assert not addl.get("manualOemClaimNumber")
+    drawer = (await client.get(f"/api/leads/{lead_id}/oem-claims")).json()
+    extra = [r for r in drawer["schemeRegister"] if r["componentKey"] == "oemExtraSupport"]
+    assert sorted(int(r.get("unitSno") or 0) for r in extra) == [1, 2]
+    assert all(float(r["eligibleClaim"]) == 4000 for r in extra)
+    listed = (await client.get("/api/claims")).json()
+    mine = [r for r in listed if r["leadId"] == lead_id and r["componentKey"] == "oemExtraSupport"]
+    assert sorted(int(r.get("unitSno") or 0) for r in mine) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_additional_discount_chip_matches_extra_support_unit(client):
+    extras = (
+        (4000.0, "MD9PACK26K400021", "AF-999-I2640021"),
+        (4000.0, "MD9PACK26K400022", "AF-999-I2640022"),
+    )
+    lead_id = await _pack_extra_lead(client, extras)
+    await _register_row(lead_id, "oemExtraSupport", 4000.0, unit_sno=2,
+                        chassis=extras[1][1], invoice=extras[1][2])
+    await _orphan_oem("AF-122-CL2627167", line_id="ad-2", claimed=4000.0,
+                      claim_type="Additional Discount Claim",
+                      description="Additinol support documents")
+    r = await client.post("/api/claims/oem-match", json={
+        "leadId": lead_id, "componentKey": "additionalDiscount", "unitSno": 2,
+        "claimNumber": "AF-122-CL2627167", "lineId": "ad-2"})
+    assert r.status_code == 200, r.text
+    u2 = await server.db.claims.find_one(
+        {"leadId": lead_id, "componentKey": "oemExtraSupport", "unitSno": 2})
+    assert u2["manualOemClaimNumber"] == "AF-122-CL2627167"
