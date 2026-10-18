@@ -288,6 +288,12 @@ export const put = (url, body, opts = {}) => {
   if (!retry) return run();
   return withFallback(run);
 };
+export const patch = (url, body, opts = {}) => {
+  const { retry, timeout } = mutationOpts(url, opts);
+  const run = () => api.patch(url, body, timeout ? { timeout } : {}).then((r) => r.data);
+  if (!retry) return run();
+  return withFallback(run);
+};
 export const del = (url) => withFallback(() => api.delete(url).then((r) => r.data));
 
 /** Multipart POST. Let the browser set Content-Type with the boundary — a

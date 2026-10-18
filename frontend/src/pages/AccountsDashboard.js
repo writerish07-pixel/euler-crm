@@ -11,7 +11,7 @@ import { Card, PageHeader, StatCard, Table, Badge, Button, Portal, Field, Input,
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
 import { LeadDocsStrip, RefundChequePick } from "../components/LeadDocuments";
-import TallyPackCheck from "../components/TallyPackCheck";
+import TallyUnitBooks, { TallyPackInvoiceSections } from "../components/TallyUnitBooks";
 import { useAuth } from "../context/AuthContext";
 
 export default function AccountsDashboard() {
@@ -120,7 +120,17 @@ export default function AccountsDashboard() {
             rowKey="leadId"
             empty="No delivered leads yet"
             columns={[
-              { key: "invoiceNumber", label: "Invoice", mono: true, render: (r) => r.invoiceNumber || "—" },
+              { key: "invoiceNumber", label: "Invoice", mono: true, render: (r) => (
+                <div>
+                  <span className="font-mono">{r.invoiceNumber || "—"}</span>
+                  {Number(r.vehicleCount) > 1 ? (
+                    <div className="text-[11px] text-ink-faint" data-testid={`tally-cov-${r.leadId}`}>
+                      {r.vehicleCount} units · invoices {r.tallyInvoicesUploaded || 0}/{r.vehicleCount}
+                      {r.tallyLedgerComplete ? " · ledger ok" : " · ledger due"}
+                    </div>
+                  ) : null}
+                </div>
+              ) },
               { key: "customerName", label: "Customer", render: (r) => (
                 <div>
                   <span className="font-semibold">{r.customerName}</span>
@@ -161,7 +171,7 @@ export default function AccountsDashboard() {
             <ol className="text-xs text-ink-soft space-y-1.5 list-decimal list-inside">
               <li>Open <b>Summary</b> for a delivered invoice</li>
               <li>Print / check charges &amp; passed discounts only</li>
-              <li>Create the GST invoice in <b>Tally</b>, then upload the scan or ZIP here</li>
+              <li>Create one GST invoice per unit in <b>Tally</b>, then upload each scan here. Ledger can combine selected units or stay separate.</li>
               <li>Record that lead’s money from Summary → Record payment</li>
             </ol>
           </Card>
@@ -231,13 +241,7 @@ export default function AccountsDashboard() {
                   <div className="text-xs text-ink-soft">{fmtDate(summary.deliveryDate)}</div>
                 </div>
               </div>
-              <h2>A. Tally GST invoice (vehicle without GST → discount → GST)</h2>
-              <table>
-                {(summary.tallyInvoiceLines || []).map((ln) => (
-                  <tr key={ln.code + ln.label}><td>{ln.label}</td><td className="num">{inr(ln.amount)}</td></tr>
-                ))}
-                <tr><td><b>Tally GST invoice</b></td><td className="num"><b>{inr(summary.totals?.tallyBillTotal)}</b></td></tr>
-              </table>
+              <TallyPackInvoiceSections summary={summary} />
               <h2>B. Other heads — not on Tally (no GST)</h2>
               <table>
                 {(summary.offTallyLines || []).length === 0 && <tr><td colSpan={2}>None</td></tr>}
@@ -266,11 +270,16 @@ export default function AccountsDashboard() {
             </div>
             <LeadDocsStrip
               leadId={summary.leadId}
-              kinds={["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst", "delivery_insurance", "delivery_rto", "tally_invoice", "refund_cheque"]}
-              canUploadKinds={canTallyUpload ? ["tally_invoice"] : []}
+              kinds={["kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "kyc_gst", "delivery_insurance", "delivery_rto", "refund_cheque"]}
+              canUploadKinds={[]}
               title="Documents"
             />
-            <TallyPackCheck leadId={summary.leadId} canUpload={canTallyUpload} showUpload={false} />
+            <TallyUnitBooks
+              leadId={summary.leadId}
+              units={summary.units || []}
+              canUpload={canTallyUpload}
+              documents={summary.documents}
+            />
             <Link to={`/payments?leadId=${encodeURIComponent(summary.leadId)}`} className="inline-flex items-center gap-1 text-xs text-cobalt mt-3" data-testid="record-payment-link">
               Record payment <ExternalLink size={12} />
             </Link>

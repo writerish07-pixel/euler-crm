@@ -1,9 +1,10 @@
 """Tally pack checker — one lead, on demand, flags only.
 
-Accounts uploads a ZIP (or single PDF) on tally_invoice. This module reads
-invoice / ledger / receipt / journal pages and compares them to the CRM
-billing summary and payment list. It never writes Tally and never changes
-Price Structure or payments.
+Accounts uploads a ZIP (or single PDF) on tally_invoice (one GST invoice per
+unit on a pack) and optionally tally_ledger (separate or combined). This
+module reads invoice / ledger / receipt / journal pages and compares them to
+the CRM billing summary and payment list. It never writes Tally and never
+changes Price Structure or payments.
 """
 from __future__ import annotations
 
@@ -239,8 +240,72 @@ def _off(summary, code) -> float:
     return 0.0
 
 
-def expected_from_summary(summary, lead, payments) -> dict:
+def _payment_snos(pay) -> set:
+    snos = set()
+    for x in list((pay or {}).get("unitSnos") or []):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n >= 1:
+            snos.add(n)
+    try:
+        one = int((pay or {}).get("unitSno") or 0)
+    except (TypeError, ValueError):
+        one = 0
+    if one >= 1:
+        snos.add(one)
+    return snos
+
+
+def payments_for_snos(payments, snos) -> list:
+    want = {int(n) for n in (snos or []) if int(n) >= 1}
+    out = []
+    for p in payments or []:
+        if str(p.get("entryType") or "").lower() == "refund":
+            continue
+        amt = ce.round2(ce.num(p.get("amount")))
+        if amt <= 0.01:
+            continue
+        have = _payment_snos(p)
+        if not want or not have or have & want:
+            out.append(amt)
+    return out
+
+
+def expected_from_summary(summary, lead, payments, *, snos=None) -> dict:
     t = (summary or {}).get("totals") or {}
+    unit_rows = list((summary or {}).get("units") or [])
+    want = [int(n) for n in (snos or []) if int(n) >= 1]
+    if want and unit_rows:
+        rows = [u for u in unit_rows if int(u.get("sno") or 0) in set(want)]
+        tally = ce.round2(sum(ce.num(u.get("tallyBillTotal")) for u in rows))
+        discount = ce.round2(sum(ce.num(u.get("additionalDiscount")) for u in rows))
+        rto = ce.round2(sum(_off(u, "rto") for u in rows))
+        insurance = ce.round2(sum(_off(u, "insurance") for u in rows))
+        payable = ce.round2(sum(ce.num(u.get("customerPayable") or u.get("customerCollectTotal"))
+                                for u in rows))
+        first = rows[0] if rows else {}
+        chassis = first.get("chassisNumber") or "" if len(rows) == 1 else ""
+        invoice_number = first.get("invoiceNumber") or "" if len(rows) == 1 else ""
+        cgst = ce.round2(sum(ce.num(u.get("cgst")) for u in rows))
+        sgst = ce.round2(sum(ce.num(u.get("sgst")) for u in rows))
+        return {
+            "tallyTotal": tally,
+            "discount": discount,
+            "cgst": cgst,
+            "sgst": sgst,
+            "rto": rto,
+            "insurance": insurance,
+            "payable": payable,
+            "customerName": (lead.get("customerName") or ""),
+            "chassis": chassis,
+            "invoiceNumber": invoice_number,
+            "payments": payments_for_snos(payments, want),
+            "unitSnos": want,
+            "label": ("Unit " + str(want[0])) if len(want) == 1 else (
+                "Units " + "+".join(str(n) for n in want)),
+        }
     return {
         "tallyTotal": ce.round2(ce.num(t.get("tallyBillTotal"))),
         "discount": ce.round2(ce.num(t.get("additionalDiscount") or t.get("customerBenefitPassed")
@@ -253,11 +318,9 @@ def expected_from_summary(summary, lead, payments) -> dict:
         "customerName": (lead.get("customerName") or ""),
         "chassis": lead.get("chassisNumber") or "",
         "invoiceNumber": lead.get("invoiceNumber") or "",
-        "payments": [
-            ce.round2(ce.num(p.get("amount")))
-            for p in (payments or [])
-            if str(p.get("entryType") or "").lower() != "refund" and ce.num(p.get("amount")) > 0.01
-        ],
+        "payments": payments_for_snos(payments, want),
+        "unitSnos": want,
+        "label": "",
     }
 
 
@@ -265,7 +328,39 @@ def close(a, b) -> bool:
     return abs(ce.round2(ce.num(a)) - ce.round2(ce.num(b))) <= AMOUNT_TOL
 
 
-def compare(expected: dict, files: list, *, crm_docs: set) -> list:
+def _prefix(expected: dict, message: str) -> str:
+    label = (expected or {}).get("label") or ""
+    return f"{label}: {message}" if label else message
+
+
+def _file_snos(f) -> list:
+    raw = (f or {}).get("unitSnos") or []
+    snos = []
+    for x in list(raw):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n >= 1:
+            snos.append(n)
+    if snos:
+        return sorted(set(snos))
+    try:
+        one = int((f or {}).get("unitSno") or 0)
+    except (TypeError, ValueError):
+        one = 0
+    return [one] if one >= 1 else []
+
+
+def _file_covers(f, sno: int) -> bool:
+    have = _file_snos(f)
+    if not have:
+        return False
+    return int(sno) in have
+
+
+def compare(expected: dict, files: list, *, crm_docs: set, require_invoice: bool = True,
+            require_ledger: bool = True) -> list:
     flags = []
     by = {}
     for f in files or []:
@@ -277,58 +372,58 @@ def compare(expected: dict, files: list, *, crm_docs: set) -> list:
     ins_j = [parse_journal(f.get("text") or "") for f in by.get("journal_insurance") or []]
     rto_j = [parse_journal(f.get("text") or "") for f in by.get("journal_rto") or []]
 
-    if not files:
+    if require_invoice and not files:
         flags.append(_flag("pack", "Tally pack ZIP not uploaded"))
-    elif not invoices:
-        flags.append(_flag("invoice_missing", "Tax invoice PDF not found in the ZIP"))
-    if files and not ledgers:
-        flags.append(_flag("ledger_missing", "Customer ledger PDF not found in the ZIP", "warn"))
+    elif require_invoice and not invoices:
+        flags.append(_flag("invoice_missing", _prefix(expected, "Tax invoice PDF not found in the ZIP")))
+    if require_ledger and files and not ledgers:
+        flags.append(_flag("ledger_missing", _prefix(expected, "Customer ledger PDF not found"), "warn"))
 
     inv = invoices[0] if invoices else {}
     if inv and expected.get("tallyTotal") and not close(inv.get("total"), expected["tallyTotal"]):
         flags.append(_flag(
             "invoice_total",
-            f"Invoice ₹{inv.get('total'):,.2f} vs Tally GST invoice ₹{expected['tallyTotal']:,.2f}",
+            _prefix(expected, f"Invoice ₹{inv.get('total'):,.2f} vs Tally GST invoice ₹{expected['tallyTotal']:,.2f}"),
         ))
     if inv and expected.get("discount") and inv.get("additionalDiscount") and not close(
             inv.get("additionalDiscount"), expected["discount"]):
         flags.append(_flag(
             "invoice_ad",
-            f"A.D. on invoice ₹{inv.get('additionalDiscount'):,.2f} vs deal discount ₹{expected['discount']:,.2f}",
+            _prefix(expected, f"A.D. on invoice ₹{inv.get('additionalDiscount'):,.2f} vs deal discount ₹{expected['discount']:,.2f}"),
         ))
     if inv and expected.get("customerName") and inv.get("customerName"):
         if not names_match(inv["customerName"], expected["customerName"]):
             flags.append(_flag(
                 "invoice_name",
-                f"Invoice buyer '{inv['customerName']}' does not match {expected['customerName']}",
+                _prefix(expected, f"Invoice buyer '{inv['customerName']}' does not match {expected['customerName']}"),
             ))
     want_ch = _norm_chassis(expected.get("chassis") or "")
     got_ch = _norm_chassis(inv.get("chassis") or "")
     if want_ch and got_ch and want_ch != got_ch and not want_ch.endswith(got_ch[-6:]):
-        flags.append(_flag("invoice_chassis", f"Invoice chassis {got_ch} vs file {want_ch}"))
+        flags.append(_flag("invoice_chassis", _prefix(expected, f"Invoice chassis {got_ch} vs file {want_ch}")))
 
     led = ledgers[0] if ledgers else {}
     if led and expected.get("tallyTotal") and led.get("sales") and not close(led["sales"], expected["tallyTotal"]):
         flags.append(_flag(
             "ledger_sales",
-            f"Ledger Euler Sales ₹{led['sales']:,.2f} vs Tally invoice ₹{expected['tallyTotal']:,.2f}",
+            _prefix(expected, f"Ledger Euler Sales ₹{led['sales']:,.2f} vs Tally invoice ₹{expected['tallyTotal']:,.2f}"),
         ))
     ins_amt = max(ins_j) if ins_j else led.get("insurance") or 0.0
     if expected.get("insurance") and ins_amt and not close(ins_amt, expected["insurance"]):
         flags.append(_flag(
             "journal_ins",
-            f"Insurance journal ₹{ins_amt:,.2f} vs file ₹{expected['insurance']:,.2f}",
+            _prefix(expected, f"Insurance journal ₹{ins_amt:,.2f} vs file ₹{expected['insurance']:,.2f}"),
         ))
-    elif expected.get("insurance") and expected["insurance"] > 0.01 and not ins_amt:
-        flags.append(_flag("journal_ins_missing", "JOURNAL - INSURANCE not found in the pack"))
+    elif require_ledger and expected.get("insurance") and expected["insurance"] > 0.01 and not ins_amt:
+        flags.append(_flag("journal_ins_missing", _prefix(expected, "JOURNAL - INSURANCE not found in the pack")))
     rto_amt = max(rto_j) if rto_j else led.get("rto") or 0.0
     if expected.get("rto") and rto_amt and not close(rto_amt, expected["rto"]):
         flags.append(_flag(
             "journal_rto",
-            f"RTO journal ₹{rto_amt:,.2f} vs file ₹{expected['rto']:,.2f}",
+            _prefix(expected, f"RTO journal ₹{rto_amt:,.2f} vs file ₹{expected['rto']:,.2f}"),
         ))
-    elif expected.get("rto") and expected["rto"] > 0.01 and not rto_amt:
-        flags.append(_flag("journal_rto_missing", "JOURNAL - RTO not found in the pack"))
+    elif require_ledger and expected.get("rto") and expected["rto"] > 0.01 and not rto_amt:
+        flags.append(_flag("journal_rto_missing", _prefix(expected, "JOURNAL - RTO not found in the pack")))
 
     receipt_amts = [r["amount"] for r in receipts if r.get("amount")]
     if led.get("receipts"):
@@ -337,13 +432,86 @@ def compare(expected: dict, files: list, *, crm_docs: set) -> list:
     for pay in expected.get("payments") or []:
         hit = next((i for i, a in enumerate(leftover) if close(a, pay)), None)
         if hit is None:
-            flags.append(_flag("receipt_missing", f"Payment ₹{pay:,.2f} has no matching receipt in the ZIP"))
+            flags.append(_flag("receipt_missing", _prefix(expected, f"Payment ₹{pay:,.2f} has no matching receipt in the ZIP")))
         else:
             leftover.pop(hit)
 
     if "kyc_aadhaar_front" not in crm_docs and "kyc_pan" not in crm_docs:
         # Full KYC list is produced by lead_docs; this is a pack-side reminder.
         pass
+    return flags
+
+
+def _match_invoice_to_unit(f, unit) -> bool:
+    if _file_covers(f, int(unit.get("sno") or 0)):
+        return True
+    if _file_snos(f):
+        return False
+    want = _norm_chassis(unit.get("chassisNumber") or "")
+    parsed = parse_invoice(f.get("text") or "")
+    got = _norm_chassis(chassis_in(f.get("text") or "") or parsed.get("chassis") or "")
+    if want and got and (want == got or want.endswith(got[-6:])):
+        return True
+    return False
+
+
+def compare_pack(summary, lead, payments, files) -> list:
+    """Per-unit GST invoices; ledger groups may club selected units or stay separate."""
+    units = list((summary or {}).get("units") or [])
+    if not units:
+        return compare(expected_from_summary(summary, lead, payments), files, crm_docs=set())
+    flags = []
+    if not files:
+        flags.append(_flag("pack", "Tally pack ZIP not uploaded"))
+        return flags
+    unit_scoped = any(_file_snos(f) for f in files)
+    if not unit_scoped:
+        expected = expected_from_summary(summary, lead, payments)
+        flags.extend(compare(expected, files, crm_docs=set()))
+        flags.append(_flag(
+            "invoice_per_unit",
+            "Re-upload one GST invoice per unit. Ledger can be combined (select units) or separate.",
+            "warn",
+        ))
+        return flags
+
+    all_snos = [int(u.get("sno") or i + 1) for i, u in enumerate(units)]
+    for u in units:
+        sno = int(u.get("sno") or 0)
+        ufiles = [f for f in files if f.get("kind") == "invoice" and _match_invoice_to_unit(f, u)]
+        expected = expected_from_summary(summary, lead, payments, snos=[sno])
+        if not ufiles:
+            flags.append(_flag("invoice_missing", f"Unit {sno}: Tax invoice not uploaded"))
+            continue
+        flags.extend(compare(expected, ufiles, crm_docs=set(), require_invoice=True, require_ledger=False))
+
+    ledger_files = [f for f in files if f.get("kind") == "ledger"]
+    groups = {}
+    for f in ledger_files:
+        key = tuple(_file_snos(f) or all_snos)
+        groups.setdefault(key, []).append(f)
+    covered = set()
+    for key, gfiles in groups.items():
+        covered.update(key)
+        extra = [f for f in files if f.get("kind") in ("receipt", "journal_insurance", "journal_rto")
+                 and (not _file_snos(f) or set(_file_snos(f)) & set(key))]
+        expected = expected_from_summary(summary, lead, payments, snos=list(key))
+        flags.extend(compare(expected, gfiles + extra, crm_docs=set(),
+                             require_invoice=False, require_ledger=True))
+    missing = [n for n in all_snos if n not in covered]
+    if missing and not ledger_files:
+        flags.append(_flag(
+            "ledger_missing",
+            "Customer ledger not uploaded. Combine selected units or post one ledger per unit.",
+            "warn",
+        ))
+    elif missing:
+        flags.append(_flag(
+            "ledger_missing",
+            "No Tally ledger for unit" + ("s " if len(missing) > 1 else " ")
+            + ", ".join(str(n) for n in missing),
+            "warn",
+        ))
     return flags
 
 
@@ -370,7 +538,10 @@ def crm_doc_flags(lead, kinds: set) -> list:
 def run_check(*, lead, files, payments, summary, kinds) -> dict:
     expected = expected_from_summary(summary, lead, payments)
     flags = crm_doc_flags(lead, kinds)
-    flags.extend(compare(expected, files, crm_docs=kinds))
+    if (summary or {}).get("pack") and (summary or {}).get("units"):
+        flags.extend(compare_pack(summary, lead, payments, files))
+    else:
+        flags.extend(compare(expected, files, crm_docs=kinds))
     found = {
         "files": [{"filename": f.get("filename"), "kind": f.get("kind")} for f in files or []],
         "invoiceCount": sum(1 for f in files or [] if f.get("kind") == "invoice"),

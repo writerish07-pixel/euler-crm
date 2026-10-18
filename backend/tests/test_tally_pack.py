@@ -133,6 +133,53 @@ def test_run_check_ok_when_pack_and_docs_match():
     assert out["errorCount"] == 0
 
 
+def test_compare_pack_requires_each_unit_invoice_and_flags_combined_ledger():
+    summary = {
+        "pack": True,
+        "units": [
+            {"sno": 1, "tallyBillTotal": 783768, "additionalDiscount": 1173,
+             "chassisNumber": "MD9EVDAD26J217668", "offTallyLines": [],
+             "customerPayable": 783768},
+            {"sno": 2, "tallyBillTotal": 783768, "additionalDiscount": 1173,
+             "chassisNumber": "MD9EVDAD26J217669", "offTallyLines": [],
+             "customerPayable": 783768},
+        ],
+        "totals": {"tallyBillTotal": 1567536, "customerPayable": 1567536},
+    }
+    lead = {"customerName": "TEST RAM JAT", "customerType": "Individual"}
+    missing = tally_pack.compare_pack(summary, lead, [], [
+        {"filename": "u1.txt", "kind": "invoice", "text": INVOICE,
+         "unitSno": 1, "unitSnos": [1]},
+    ])
+    assert any(f["code"] == "invoice_missing" and "Unit 2" in f["message"] for f in missing)
+    flags = tally_pack.compare_pack(summary, lead, [], [
+        {"filename": "u1.txt", "kind": "invoice", "text": INVOICE,
+         "unitSno": 1, "unitSnos": [1]},
+        {"filename": "u2.txt", "kind": "invoice", "text": INVOICE,
+         "unitSno": 2, "unitSnos": [2]},
+        {"filename": "led.txt", "kind": "ledger", "text": LEDGER,
+         "unitSnos": [1, 2]},
+    ])
+    assert not any(f["code"] == "invoice_missing" for f in flags)
+    assert any(f["code"] == "ledger_sales" for f in flags)
+
+
+def test_compare_pack_legacy_zip_warns_to_split_invoices():
+    summary = {
+        "pack": True,
+        "units": [
+            {"sno": 1, "tallyBillTotal": 400000, "offTallyLines": []},
+            {"sno": 2, "tallyBillTotal": 383768, "offTallyLines": []},
+        ],
+        "totals": {"tallyBillTotal": 783768},
+    }
+    flags = tally_pack.compare_pack(summary, {"customerName": "TEST RAM JAT"}, [], [
+        {"filename": "bill.txt", "kind": "invoice", "text": INVOICE},
+        {"filename": "ledger.txt", "kind": "ledger", "text": LEDGER},
+    ])
+    assert any(f["code"] == "invoice_per_unit" for f in flags)
+
+
 def test_unpack_zip_reads_txt_pages():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:

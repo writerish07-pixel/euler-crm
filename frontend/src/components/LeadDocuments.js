@@ -11,6 +11,7 @@ export const DOC_LABELS = {
   delivery_insurance: "Insurance copy",
   delivery_rto: "RTO / Registration",
   tally_invoice: "Tally GST invoice",
+  tally_ledger: "Tally customer ledger",
   refund_cheque: "Refund cheque",
   oem_extra_support: "OEM Extra Support email (ASM / RM)",
   deal_sheet: "Deal sheet",
@@ -19,16 +20,18 @@ export const DOC_LABELS = {
 const ACCEPT = "image/*,application/pdf";
 const TALLY_ACCEPT = "image/*,application/pdf,.zip,application/zip,application/x-zip-compressed";
 const TALLY_KIND = "tally_invoice";
+const TALLY_LEDGER_KIND = "tally_ledger";
+const TALLY_ZIP_KINDS = new Set([TALLY_KIND, TALLY_LEDGER_KIND]);
 
 export function acceptForKind(kind) {
-  return kind === TALLY_KIND ? TALLY_ACCEPT : ACCEPT;
+  return TALLY_ZIP_KINDS.has(kind) ? TALLY_ACCEPT : ACCEPT;
 }
 
 export const DOC_MAX_BYTES = 8 * 1024 * 1024;
 const COMPRESS_FROM = 3.5 * 1024 * 1024;
 
 export function hintForKind(kind) {
-  return kind === TALLY_KIND ? "Photo, PDF or ZIP, max 12 MB" : "Photo or PDF, max 8 MB";
+  return TALLY_ZIP_KINDS.has(kind) ? "Photo, PDF or ZIP, max 12 MB" : "Photo or PDF, max 8 MB";
 }
 
 function isZipFile(file) {
@@ -150,8 +153,26 @@ export function docMatchesUnit(doc, unitSno) {
   const sno = Number(doc?.unitSno || 0);
   const want = Number(unitSno || 0);
   if (!want) return sno === 0;
+  const snos = Array.isArray(doc?.unitSnos) ? doc.unitSnos.map((n) => Number(n)) : [];
+  if (snos.length > 1) return snos.includes(want);
   if (sno === want) return true;
   return want === 1 && sno === 0;
+}
+
+export function docUnitSnos(doc) {
+  const raw = Array.isArray(doc?.unitSnos) ? doc.unitSnos : [];
+  const snos = raw.map((n) => Number(n)).filter((n) => n >= 1);
+  if (snos.length) return [...new Set(snos)].sort((a, b) => a - b);
+  const one = Number(doc?.unitSno || 0);
+  return one >= 1 ? [one] : [];
+}
+
+export function docMatchesUnitSnos(doc, unitSnos) {
+  const want = [...new Set((unitSnos || []).map((n) => Number(n)).filter((n) => n >= 1))].sort((a, b) => a - b);
+  const have = docUnitSnos(doc);
+  if (!want.length) return have.length === 0;
+  if (have.length !== want.length) return false;
+  return want.every((n, i) => n === have[i]);
 }
 
 export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUpload, canDownload = true, onChanged, extraFields, pickId }) {
@@ -167,7 +188,7 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
     setBusy(true);
     try {
       const ready = await fitImageForUpload(file);
-      const zipOk = kind === TALLY_KIND && isZipFile(ready);
+      const zipOk = TALLY_ZIP_KINDS.has(kind) && isZipFile(ready);
       if (ready.size > DOC_MAX_BYTES && !zipOk) {
         toast.error("File is over 8 MB. Compress the photo or send a smaller PDF.");
         return;
@@ -219,7 +240,7 @@ export function DocSlot({ kind, doc, onLocalFile, localFile, uploadUrl, canUploa
   );
 }
 
-export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onChanged, documents, refreshKey, unitSno }) {
+export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onChanged, documents, refreshKey, unitSno, unitSnos }) {
   const [rows, setRows] = useState(documents || []);
   useEffect(() => { if (documents) setRows(documents); }, [documents]);
   useEffect(() => {
@@ -228,26 +249,33 @@ export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onCha
     get(`/leads/${leadId}/documents`).then((d) => { if (live) setRows(Array.isArray(d) ? d : []); }).catch(() => { if (live) setRows([]); });
     return () => { live = false; };
   }, [leadId, refreshKey]);
+  const groupSnos = Array.isArray(unitSnos) ? unitSnos.map((n) => Number(n)).filter((n) => n >= 1) : [];
   const byKind = {};
   (rows || []).forEach((d) => {
-    if (unitSno && !docMatchesUnit(d, unitSno)) return;
-    if (!unitSno && Number(d?.unitSno || 0) > 1) return;
+    if (groupSnos.length) {
+      if (!docMatchesUnitSnos(d, groupSnos)) return;
+    } else if (unitSno && !docMatchesUnit(d, unitSno)) return;
+    else if (!unitSno && Number(d?.unitSno || 0) > 1) return;
     byKind[d.kind] = d;
   });
   const shown = kinds || Object.keys(DOC_LABELS);
-  const extraFields = unitSno ? { unitSno } : {};
+  const extraFields = {
+    ...(unitSno ? { unitSno } : {}),
+    ...(groupSnos.length ? { unitSnos: groupSnos.join(",") } : {}),
+  };
+  const slotKey = groupSnos.length ? groupSnos.join("-") : (unitSno || 0);
   return (
-    <div className="mt-4" data-testid={unitSno ? `lead-docs-strip-u${unitSno}` : "lead-docs-strip"}>
+    <div className="mt-4" data-testid={unitSno || groupSnos.length ? `lead-docs-strip-u${slotKey}` : "lead-docs-strip"}>
       {title && <h4 className="font-heading font-bold text-ink text-sm mb-2">{title}</h4>}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         {shown.map((kind) => (
           <DocSlot
-            key={`${kind}-${unitSno || 0}`}
+            key={`${kind}-${slotKey}`}
             kind={kind}
             doc={byKind[kind]}
             extraFields={extraFields}
             uploadUrl={leadId ? `/leads/${leadId}/documents` : ""}
-            pickId={`lead-${kind}${unitSno ? `-u${unitSno}` : ""}`}
+            pickId={`lead-${kind}${slotKey ? `-u${slotKey}` : ""}`}
             canUpload={canUploadKinds.includes(kind)}
             onChanged={() => {
               get(`/leads/${leadId}/documents`).then(setRows).catch(() => {});

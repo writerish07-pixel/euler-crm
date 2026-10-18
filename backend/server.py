@@ -734,6 +734,9 @@ def _require_unit_mutable(lead, unit, verb="edits", act=None, index=0):
     role = ((act or {}).get("role") or "").strip().lower()
     if role == "owner":
         return
+    # Showroom Admin may still correct Price Structure (Tally / insurance) after delivery.
+    if authmod.is_showroom_admin(act) and str(verb or "").startswith("price"):
+        return
     if (lead or {}).get("oemAutoDelivered") and not _unit_desk_delivery_complete(unit, lead, index):
         return
     if _unit_is_delivered(lead, unit, index):
@@ -2091,6 +2094,17 @@ class CloseIn(BaseModel):
     closedDate: Optional[str] = None
 
 
+class NumberPlateUnitIn(BaseModel):
+    sno: int
+    numberPlate: str = ""
+
+
+class NumberPlateIn(BaseModel):
+    """Plate-only correction. Showroom Admin / Owner may save this after Close Won."""
+    numberPlate: str = ""
+    units: Optional[List[NumberPlateUnitIn]] = None
+
+
 class CancelIn(BaseModel):
     """Customer walked away. The LOST exit, as opposed to CloseIn's WON exit."""
     cancelReason: str = ""
@@ -3296,6 +3310,13 @@ async def accounts_dashboard():
     tally_rows = []
     do_not_post_total_retained = 0.0
     do_not_post_claims = company_os
+    tally_docs_by = {}
+    if tally_ids:
+        async for d in db[lead_docs.COLLECTION].find(
+                {"leadId": {"$in": tally_ids},
+                 "kind": {"$in": [lead_docs.TALLY_KIND, lead_docs.LEDGER_KIND]}},
+                {"leadId": 1, "kind": 1, "unitSno": 1, "unitSnos": 1, "_id": 0}):
+            tally_docs_by.setdefault(d.get("leadId"), []).append(d)
     for l in tally_slice:
         stored = stored_by.get(l.get("leadId"))
         if stored and _billing_summary_has_vehicle_tally(stored):
@@ -3310,6 +3331,7 @@ async def accounts_dashboard():
             label = (item.get("label") or "").lower()
             if "retained" in label:
                 do_not_post_total_retained += ce.num(item.get("amount"))
+        cov = _tally_coverage(l, tally_docs_by.get(l.get("leadId")) or [])
         tally_rows.append({
             "leadId": l["leadId"],
             "customerName": l.get("customerName") or "",
@@ -3322,6 +3344,7 @@ async def accounts_dashboard():
             "totalReceived": t.get("totalReceived", ce.num(l.get("totalReceived"))),
             "customerOutstanding": t.get("customerOutstanding", ce.num(l.get("customerOutstanding"))),
             "hasSummary": True,
+            **cov,
         })
 
     cancelled_due = []
@@ -6454,6 +6477,7 @@ async def list_lead_documents(lead_id: str, user=Depends(current_user)):
 async def upload_lead_document(lead_id: str, kind: str = Form(...),
                                file: UploadFile = File(...),
                                unitSno: Optional[str] = Form(None),
+                               unitSnos: Optional[str] = Form(None),
                                user=Depends(current_user), act=Depends(actor)):
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
@@ -6461,11 +6485,25 @@ async def upload_lead_document(lead_id: str, kind: str = Form(...),
     own = _is_own_lead(lead, user)
     if not lead_docs.can_upload_kind(user, kind, own=own):
         raise HTTPException(403, "You cannot upload this kind of document.")
+    snos = lead_docs.parse_unit_snos(kind, unitSno, unitSnos)
+    pack = oem_sync.is_same_order_pack(lead) or len(_ensure_lead_units(lead) or []) > 1
+    if kind == lead_docs.TALLY_KIND and pack:
+        if len(snos) != 1:
+            raise HTTPException(
+                422,
+                "This lead has more than one unit. Pick the unit for this Tally GST invoice.",
+            )
+    if kind == lead_docs.LEDGER_KIND and pack and not snos:
+        raise HTTPException(
+            422,
+            "Select the unit(s) for this Tally ledger — combine by selecting, or one unit for a separate ledger.",
+        )
     data, ctype, filename = await lead_docs.read_upload(file, kind=kind)
     row = await lead_docs.save_doc(
         db, next_id=next_id, user=user, kind=kind, data=data,
         content_type=ctype, filename=filename, lead_id=lead_id,
-        unit_sno=unitSno)
+        unit_sno=snos[0] if len(snos) == 1 else None,
+        unit_snos=snos or None)
     await write_audit(act, "upload", "document", leadId=lead_id,
                       new={"kind": kind, "documentId": row.get("documentId"),
                            "unitSno": row.get("unitSno")})
@@ -6540,19 +6578,74 @@ async def delete_document(document_id: str, user=Depends(current_user), act=Depe
     return result
 
 
-async def _load_tally_pack_files(lead_id: str) -> list:
-    doc = await db[lead_docs.COLLECTION].find_one(
-        {"leadId": lead_id, "kind": lead_docs.TALLY_KIND})
-    if not doc:
-        return []
-    raw = doc.get("data") or b""
+def _tally_bytes(doc) -> bytes:
+    raw = (doc or {}).get("data") or b""
     try:
         from bson.binary import Binary
         if isinstance(raw, Binary):
             raw = bytes(raw)
     except Exception:
         raw = bytes(raw or b"")
-    return tally_pack.unpack(raw, doc.get("filename") or "", doc.get("contentType") or "")
+    return raw
+
+
+async def _load_tally_pack_files(lead_id: str) -> list:
+    files = []
+    q = {"leadId": lead_id, "kind": {"$in": [lead_docs.TALLY_KIND, lead_docs.LEDGER_KIND]}}
+    async for doc in db[lead_docs.COLLECTION].find(q):
+        raw = _tally_bytes(doc)
+        unpacked = tally_pack.unpack(
+            raw, doc.get("filename") or "", doc.get("contentType") or "")
+        snos = lead_docs.doc_unit_snos(doc)
+        for f in unpacked:
+            f["unitSno"] = snos[0] if len(snos) == 1 else (snos[0] if snos else None)
+            f["unitSnos"] = snos
+            f["sourceKind"] = doc.get("kind")
+            files.append(f)
+    return files
+
+
+def _tally_coverage(lead, docs) -> dict:
+    """How many pack units have a Tally GST invoice / ledger scan."""
+    units = _ensure_lead_units(lead) if (lead or {}).get("sameOrderMultiUnit") or len(
+        (lead or {}).get("units") or []) > 1 else []
+    count = len(units) if units else 1
+    all_snos = {int(u.get("sno") or i + 1) for i, u in enumerate(units)} if units else {1}
+    inv_snos, led_snos = set(), set()
+    has_legacy_invoice = False
+    has_legacy_ledger = False
+    for d in docs or []:
+        kind = d.get("kind")
+        snos = set(lead_docs.doc_unit_snos(d))
+        if kind == lead_docs.TALLY_KIND:
+            if snos:
+                inv_snos |= snos
+            else:
+                has_legacy_invoice = True
+        elif kind == lead_docs.LEDGER_KIND:
+            if snos:
+                led_snos |= snos
+            else:
+                has_legacy_ledger = True
+    if count <= 1:
+        inv_ok = bool(inv_snos or has_legacy_invoice)
+        led_ok = bool(led_snos or has_legacy_ledger or has_legacy_invoice)
+        return {
+            "vehicleCount": 1,
+            "tallyInvoicesUploaded": 1 if inv_ok else 0,
+            "tallyLedgersUploaded": 1 if led_ok else 0,
+            "tallyInvoiceComplete": inv_ok,
+            "tallyLedgerComplete": led_ok,
+        }
+    inv_n = len(inv_snos & all_snos)
+    led_n = len(led_snos & all_snos)
+    return {
+        "vehicleCount": count,
+        "tallyInvoicesUploaded": inv_n,
+        "tallyLedgersUploaded": led_n,
+        "tallyInvoiceComplete": inv_n >= count,
+        "tallyLedgerComplete": led_n >= count,
+    }
 
 
 async def _run_tally_pack_check(lead_id: str, user=None) -> dict:
@@ -9120,6 +9213,102 @@ async def close_lead(lead_id: str, body: CloseIn, act=Depends(actor), _desk=Depe
     updated = clean(await db.leads.find_one({"leadId": lead_id}))
     await sheet_sync("leads", updated)
     return updated
+
+
+def _can_edit_closed_plate(act) -> bool:
+    role = str((act or {}).get("role") or "").strip().lower()
+    return role == "owner" or authmod.is_showroom_admin(act)
+
+
+@api.patch("/leads/{lead_id}/number-plate")
+async def patch_number_plate(lead_id: str, body: NumberPlateIn, act=Depends(actor)):
+    """Showroom Admin / Owner may correct number plates after Close Won.
+
+    Chassis, OEM invoice, delivery dates and Mark Delivered stay frozen.
+    """
+    lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
+    if not _can_edit_closed_plate(act):
+        raise HTTPException(403, "Only Showroom Admin or Owner can edit the number plate on a closed lead.")
+    if lead.get("dealCancelled"):
+        raise HTTPException(409, "Cancelled leads cannot change the number plate.")
+    acct = _acct(lead)
+    if acct == "Archived":
+        raise HTTPException(409, "Archived leads cannot change the number plate.")
+    if acct not in ("Active", "Closed"):
+        raise HTTPException(
+            409,
+            f"This lead is locked for number-plate edits (status: {lead.get('currentStatus') or 'New'} / {acct}).",
+        )
+    units = [dict(u) for u in _ensure_lead_units(lead)]
+    by_sno = {}
+    for rec in list(getattr(body, "units", None) or []):
+        dump = rec.model_dump() if hasattr(rec, "model_dump") else dict(rec)
+        try:
+            sno = int(dump.get("sno") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sno < 1:
+            continue
+        by_sno[sno] = str(dump.get("numberPlate") or "").strip()
+    top = str(body.numberPlate or "").strip()
+    if by_sno:
+        for rec in units:
+            sno = int(rec.get("sno") or 0)
+            if sno in by_sno:
+                rec["numberPlate"] = by_sno[sno]
+    elif top:
+        if units:
+            units[0]["numberPlate"] = top
+        else:
+            units = [{"sno": 1, "numberPlate": top}]
+    else:
+        raise HTTPException(422, "Enter the number plate.")
+    plate = str((units[0].get("numberPlate") if units else top) or "").strip()
+    await _assert_unique_vehicle_identifiers(
+        lead_id,
+        number_plate=plate,
+        units=units if len(units) > 1 else None,
+    )
+    old = {
+        "numberPlate": lead.get("numberPlate") or "",
+        "units": [{"sno": u.get("sno"), "numberPlate": u.get("numberPlate") or ""}
+                  for u in (lead.get("units") or [])],
+    }
+    patch = {"numberPlate": plate, "lastUpdated": now_iso()}
+    if len(units) > 1 or lead.get("sameOrderMultiUnit"):
+        live = [dict(u) for u in (lead.get("units") or units)]
+        by_live = {int(u.get("sno") or i + 1): u for i, u in enumerate(live)}
+        for rec in units:
+            sno = int(rec.get("sno") or 0)
+            prev = by_live.get(sno) or rec
+            prev["numberPlate"] = rec.get("numberPlate") or ""
+            by_live[sno] = prev
+        ordered = [by_live[k] for k in sorted(by_live)]
+        patch["units"] = ordered
+        patch["sameOrderMultiUnit"] = True
+        patch["vehicleCount"] = len(ordered)
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    deliv = await db.deliveries.find_one({"leadId": lead_id})
+    if deliv:
+        dpatch = {"numberPlate": plate}
+        if patch.get("units"):
+            dunits = list(deliv.get("units") or [])
+            by_d = {int(u.get("sno") or i + 1): dict(u) for i, u in enumerate(dunits)}
+            for rec in patch["units"]:
+                sno = int(rec.get("sno") or 0)
+                prev = by_d.get(sno) or {"sno": sno}
+                prev["numberPlate"] = rec.get("numberPlate") or ""
+                by_d[sno] = prev
+            dpatch["units"] = [by_d[k] for k in sorted(by_d)] if by_d else patch["units"]
+        await db.deliveries.update_one({"leadId": lead_id}, {"$set": dpatch})
+    await write_audit(act, "update", "number-plate", leadId=lead_id, old=old,
+                      new={"numberPlate": plate, "units": [
+                          {"sno": u.get("sno"), "numberPlate": u.get("numberPlate") or ""}
+                          for u in (patch.get("units") or units)]})
+    updated = clean(await db.leads.find_one({"leadId": lead_id}))
+    await sheet_sync("leads", updated)
+    return _lead_for_viewer(updated, act)
 
 
 def _revive_updates(lead, *, anchor: str, note: str) -> dict:

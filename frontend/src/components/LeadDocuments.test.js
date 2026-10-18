@@ -3,7 +3,7 @@
  */
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, LocalKycBlock, acceptForKind, hintForKind, fitImageForUpload, DOC_MAX_BYTES, docMatchesUnit } from "./LeadDocuments";
+import { extraSupportReady, kycReady, dealSheetReady, LocalDealSheetBlock, LocalKycBlock, acceptForKind, hintForKind, fitImageForUpload, DOC_MAX_BYTES, docMatchesUnit, docMatchesUnitSnos } from "./LeadDocuments";
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -64,6 +64,12 @@ test("docMatchesUnit treats a legacy file as unit 1 only", () => {
   expect(docMatchesUnit({ kind: "kyc_pan" }, 0)).toBe(true);
 });
 
+test("docMatchesUnitSnos matches a combined ledger group exactly", () => {
+  expect(docMatchesUnitSnos({ kind: "tally_ledger", unitSnos: [1, 2] }, [2, 1])).toBe(true);
+  expect(docMatchesUnitSnos({ kind: "tally_ledger", unitSno: 1 }, [1])).toBe(true);
+  expect(docMatchesUnitSnos({ kind: "tally_ledger", unitSnos: [1, 2] }, [1])).toBe(false);
+});
+
 test("dealSheetReady is required unless the file or an existing scan is present", () => {
   expect(dealSheetReady({})).toMatch(/deal sheet/i);
   expect(dealSheetReady({ deal_sheet: { name: "sheet.pdf" } })).toBe("");
@@ -116,6 +122,8 @@ test("deal sheet block offers print then upload", async () => {
 test("tally invoice slot accepts a ZIP; KYC does not", () => {
   expect(acceptForKind("tally_invoice")).toMatch(/zip/i);
   expect(hintForKind("tally_invoice")).toMatch(/ZIP/);
+  expect(acceptForKind("tally_ledger")).toMatch(/zip/i);
+  expect(hintForKind("tally_ledger")).toMatch(/ZIP/);
   expect(acceptForKind("kyc_pan")).not.toMatch(/zip/i);
   expect(hintForKind("kyc_pan")).toMatch(/PDF/);
   expect(hintForKind("oem_extra_support")).toMatch(/8 MB/);
