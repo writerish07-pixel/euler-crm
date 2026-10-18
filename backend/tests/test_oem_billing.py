@@ -288,13 +288,14 @@ async def test_oem_billing_explicit_create_for_unmatched(client):
     lead = await server.db.leads.find_one({"chassisNumber": chassis})
     assert lead is not None
     assert lead["oemBillingCreated"] is True
-    assert lead["currentStatus"] == "Delivered"
-    assert lead.get("deliveryStatus") == "Delivered"
-    assert lead.get("oemAutoDelivered") is True
+    assert lead["currentStatus"] == "Booked"
+    assert (lead.get("deliveryStatus") or "") != "Delivered"
+    assert lead.get("oemAutoDelivered") is not True
+    assert lead.get("oemInvoiced") is True
     assert lead.get("bookingDate") == "2026-09-05"
-    assert lead.get("deliveryDate") == "2026-09-05"
     assert lead["invoiceNumber"] == "CINV-MAKE"
     assert server._is_booked_lead(lead) is True
+    assert server._is_delivered(lead) is False
     assert server._is_followup_enquiry(lead) is False
     listed = (await client.get("/api/leads")).json()
     follow = (await client.get("/api/leads", params={"followup": True})).json()
@@ -303,7 +304,10 @@ async def test_oem_billing_explicit_create_for_unmatched(client):
     billed = await client.get("/api/oem-billing?month=2026-09")
     assert billed.status_code == 200, billed.text
     hit = next(x for x in billed.json()["rows"] if x["chassis"] == chassis)
-    assert hit["bucket"] == oem_sync.BUCKET_DELIVERED
+    assert hit["bucket"] == oem_sync.BUCKET_PENDING
+    tl = server.lead_actions(lead, {"role": "tl"})
+    assert tl["canDeliver"] is True
+    assert tl["isLocked"] is False
     again = await client.post("/api/oem-billing/create", json={"chassis": chassis})
     assert again.status_code == 409
 
@@ -330,10 +334,12 @@ async def test_oem_billing_sync_does_not_duplicate_existing_lead(client):
     assert after == before
     hit = next(row for row in r.json()["rows"] if row["chassis"] == chassis)
     assert hit["leadId"] == "LD-BILL-EXIST"
-    assert hit["bucket"] == "matched_delivered"
+    assert hit["bucket"] == "pending_delivery"
     live = await server.db.leads.find_one({"leadId": "LD-BILL-EXIST"})
-    assert live["currentStatus"] == "Delivered"
-    assert live.get("oemAutoDelivered") is True
+    assert live["currentStatus"] == "Booked"
+    assert live.get("oemAutoDelivered") is not True
+    assert live.get("oemInvoiced") is True
+    assert server._is_delivered(live) is False
 
 
 @pytest.mark.asyncio
@@ -914,9 +920,11 @@ async def test_oem_create_connects_existing_open_lead(client):
     assert minted == 1
     hit = next(x for x in r.json()["rows"] if x["chassis"] == chassis)
     assert hit["leadId"] == "LD-OPEN-CONN"
-    assert hit["bucket"] == oem_sync.BUCKET_DELIVERED
-    assert live["currentStatus"] == "Delivered"
-    assert live.get("oemAutoDelivered") is True
+    assert hit["bucket"] == oem_sync.BUCKET_PENDING
+    assert live["currentStatus"] == "Booked"
+    assert live.get("oemAutoDelivered") is not True
+    assert live.get("oemInvoiced") is True
+    assert server._is_delivered(live) is False
 
 
 @pytest.mark.asyncio
@@ -1008,19 +1016,23 @@ async def test_oem_sync_attaches_unconverted_lead_and_marks_delivered(client):
     lead = await server.db.leads.find_one({"leadId": "LD-ENQ-AUTO"})
     assert lead["chassisNumber"] == chassis
     assert lead["invoiceNumber"] == "CINV-AUTO"
-    assert lead["currentStatus"] == "Delivered"
-    assert lead["deliveryStatus"] == "Delivered"
-    assert lead.get("oemAutoDelivered") is True
+    assert lead["currentStatus"] == "Booked"
+    assert (lead.get("deliveryStatus") or "") != "Delivered"
+    assert lead.get("oemAutoDelivered") is not True
+    assert lead.get("oemInvoiced") is True
+    assert lead.get("bookingDate") == "2026-09-10"
     hit = next(x for x in r.json()["rows"] if x["chassis"] == chassis)
     assert hit["leadId"] == "LD-ENQ-AUTO"
-    assert hit["bucket"] == "matched_delivered"
+    assert hit["bucket"] == "pending_delivery"
     tl = server.lead_actions(lead, {"role": "tl"})
     assert tl["canScheme"] is True
     assert tl["canPayment"] is True
+    assert tl["canDeliver"] is True
     assert tl["isLocked"] is False
+    assert tl["isDelivered"] is False
     exec_acts = server.lead_actions(lead, {"role": "executive"})
-    assert exec_acts["canBook"] is True
-    assert exec_acts["canPayment"] is False
+    assert exec_acts["canBook"] is False
+    assert exec_acts["canPayment"] is True
 
 
 @pytest.mark.asyncio
@@ -1048,10 +1060,12 @@ async def test_oem_sold_cancel_delinks_auto_delivered_then_restamps(client):
     r = await client.post("/api/oem-billing/sync?month=2026-09")
     assert r.status_code == 200, r.text
     first = await server.db.leads.find_one({"leadId": "LD-CAN-INV"})
-    assert first.get("oemAutoDelivered") is True, (
+    assert first.get("oemInvoiced") is True, (
         first, r.json().get("leadsVehicleIds"),
         [x for x in (r.json().get("rows") or []) if x.get("chassis") == chassis],
     )
+    assert first.get("oemAutoDelivered") is not True
+    assert first["currentStatus"] == "Booked"
     await server.db.oem_sold.delete_many({"chassis": chassis})
     gone = await oem_sync.delink_cancelled_sold_invoices(server.db)
     assert gone["cleared"] >= 1
@@ -1068,8 +1082,9 @@ async def test_oem_sold_cancel_delinks_auto_delivered_then_restamps(client):
     again = await server.db.leads.find_one({"leadId": "LD-CAN-INV"})
     assert again["chassisNumber"] == chassis
     assert again["invoiceNumber"] == "CINV-NEW"
-    assert again.get("oemAutoDelivered") is True
-    assert again["currentStatus"] == "Delivered"
+    assert again.get("oemInvoiced") is True
+    assert again.get("oemAutoDelivered") is not True
+    assert again["currentStatus"] == "Booked"
     assert again.get("cancelledInvoiceNumber") == "CINV-OLD"
     assert again.get("rebilledInvoiceNumber") == "CINV-NEW"
 
@@ -1114,8 +1129,10 @@ async def test_lost_lead_is_revived_when_oem_bills_that_mobile(client):
     assert lead["chassisNumber"] == chassis
     assert lead["accountStatus"] == "Active"
     assert lead.get("dealCancelled") is not True
-    assert lead.get("oemAutoDelivered") is True
-    assert lead["currentStatus"] == "Delivered"
+    assert lead.get("oemInvoiced") is True
+    assert lead.get("oemAutoDelivered") is not True
+    assert lead["currentStatus"] == "Booked"
+    assert server._is_delivered(lead) is False
 
 
 def test_clear_gone_sold_chassis_only_drops_missing_ids():
@@ -1233,11 +1250,126 @@ async def test_sync_promotes_oem_created_new_file_onto_lead_register(client):
     n = await server._auto_deliver_oem_sold_leads()
     assert n >= 1
     live = await server.db.leads.find_one({"leadId": "LD26000933"})
-    assert live["currentStatus"] == "Delivered"
-    assert live.get("oemAutoDelivered") is True
+    assert live["currentStatus"] == "Booked"
+    assert live.get("oemAutoDelivered") is not True
+    assert live.get("oemInvoiced") is True
     assert live.get("bookingDate") == "2026-10-16"
     assert server._is_followup_enquiry(live) is False
+    assert server._is_delivered(live) is False
     listed = (await client.get("/api/leads")).json()
     follow = (await client.get("/api/leads", params={"followup": True})).json()
     assert any(row.get("leadId") == "LD26000933" for row in listed)
     assert not any(row.get("leadId") == "LD26000933" for row in follow)
+
+
+def test_oem_auto_incomplete_needs_reopen():
+    locked = {
+        "leadId": "LD26000903", "accountStatus": "Active",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "oemAutoDelivered": True, "oemInvoiced": True,
+        "chassisNumber": "MD9RADHE01",
+    }
+    assert server._oem_auto_file_needs_reopen(locked) is True
+    desk_done = {**locked, "insuranceStatus": "Yes", "registrationStatus": "Yes"}
+    assert server._oem_auto_file_needs_reopen(desk_done) is False
+    closed = {**locked, "currentStatus": "Close Won", "accountStatus": "Closed"}
+    assert server._oem_auto_file_needs_reopen(closed) is False
+    staff = {
+        "leadId": "LD-STAFF", "accountStatus": "Active",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+    }
+    assert server._oem_auto_file_needs_reopen(staff) is False
+    patch = server._reopen_oem_auto_patch(locked)
+    assert patch["currentStatus"] == "Booked"
+    assert patch["deliveryStatus"] == ""
+    assert patch["oemAutoDelivered"] is False
+    assert patch["oemInvoiced"] is True
+
+
+@pytest.mark.asyncio
+async def test_reopen_oem_auto_unlocks_showroom_admin_delivery(client):
+    lid = "LD26000903"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.deliveries.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Radhe Radhe Plastic", "mobile": "9352347959",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-01",
+        "bookingDate": "2026-08-20", "oemAutoDelivered": True, "oemInvoiced": True,
+        "chassisNumber": "MD9RADHE01", "invoiceNumber": "CINV-RADHE",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "executive": "Amit",
+    })
+    await server.db.deliveries.insert_one({
+        "leadId": lid, "delivered": "Yes", "deliveryDate": "2026-09-01",
+    })
+    n = await server._reopen_incomplete_oem_auto_delivered()
+    assert n >= 1
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert live["currentStatus"] == "Booked"
+    assert (live.get("deliveryStatus") or "") != "Delivered"
+    assert live.get("oemAutoDelivered") is not True
+    assert live.get("oemInvoiced") is True
+    assert live.get("chassisNumber") == "MD9RADHE01"
+    assert server._is_delivered(live) is False
+    tl = server.lead_actions(live, {"role": "tl"})
+    assert tl["canDeliver"] is True
+    assert tl["isLocked"] is False
+    assert tl["isDelivered"] is False
+    email = "showroom.oem@euler.com"
+    await server.db.users.delete_many({"email": email})
+    created = await client.post("/api/auth/users", json={
+        "email": email, "password": "desk#441", "name": "Showroom Admin", "role": "tl"})
+    assert created.status_code == 200, created.text
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as admin:
+        login = await admin.post("/api/auth/login",
+                                 json={"email": email, "password": "desk#441"})
+        assert login.status_code == 200, login.text
+        admin.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+        saved = await admin.put(f"/api/leads/{lid}/delivery", json={
+            "insurance": "Yes", "registration": "Yes", "invoice": "",
+            "insurerName": "UIIC", "delivered": "",
+        })
+        assert saved.status_code == 200, saved.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert (after.get("insuranceStatus") or "").lower() in ("yes", "done")
+    assert server._is_delivered(after) is False
+
+
+@pytest.mark.asyncio
+async def test_360_reopens_oem_auto_file_on_open(client):
+    lid = "LD-RADHE-360"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Radhe 360", "mobile": "9352347960",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "oemAutoDelivered": True,
+        "oemBillingCreated": True, "bookingDate": "2026-09-01",
+        "chassisNumber": "MD9RADHE360", "executive": "Amit",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+    })
+    body = (await client.get(f"/api/leads/{lid}/360")).json()
+    lead = body["lead"]
+    assert lead["currentStatus"] == "Booked"
+    assert body["actions"]["isDelivered"] is False
+    assert body["actions"]["canDeliver"] is True
+    assert body["actions"]["isLocked"] is False
+
+
+@pytest.mark.asyncio
+async def test_reopen_leaves_desk_complete_delivered(client):
+    lid = "LD-DESK-DONE"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Desk Done", "mobile": "9352347961",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "oemAutoDelivered": True,
+        "insuranceStatus": "Yes", "registrationStatus": "Yes",
+        "chassisNumber": "MD9DESKDONE",
+    })
+    n = await server._reopen_incomplete_oem_auto_delivered()
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert live["currentStatus"] == "Delivered"
+    assert live.get("oemAutoDelivered") is True
+    assert n == 0 or live["currentStatus"] == "Delivered"
