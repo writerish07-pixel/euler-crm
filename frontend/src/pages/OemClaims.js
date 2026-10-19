@@ -419,7 +419,9 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                       || ""}
                   </div>
                   {lineChassisList(li).map((ch) => (
-                    <div key={ch} className="font-mono text-ink-faint">{ch}</div>
+                    <div key={ch} className="font-mono text-ink-faint">
+                      {ch}{li.unitSno ? ` · unit ${li.unitSno}` : ""}
+                    </div>
                   ))}
                   {li.sourceInvoiceNumber
                     ? <div className="font-mono text-ink-faint">{li.sourceInvoiceNumber}</div>

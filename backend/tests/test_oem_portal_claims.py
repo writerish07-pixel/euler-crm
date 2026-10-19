@@ -2878,6 +2878,106 @@ async def test_pack_unit_chassis_is_indexed_for_claim_link(client, monkeypatch):
     rows = (await client.get("/api/oem-claims", params={"leadId": lead_id})).json()
     assert rows and rows[0]["lineItems"][0]["matchedBy"] == "chassis"
     assert lead_id in (rows[0].get("leadIds") or [])
+    assert rows[0]["lineItems"][0].get("unitSno") == 2
+
+
+def test_header_linked_vehicles_fill_line_chassis():
+    """Oct 2026 Claim Settlements attach every note to Linked Vehicles on the header."""
+    line = oem_claims.normalise_line_item({
+        "id": "line-1",
+        "claim_type": "Scheme Claim",
+        "description": "Insurance Benefits Up to for Invoice AF-122-I26270231",
+        "total_amount": 10000,
+    })
+    assert not line["chassis"]
+    oem_claims.apply_linked_vehicles([line], {
+        "linked_vehicles": [{
+            "id": "veh-1",
+            "chassis_number": "MD9EMHDL2B0217011",
+            "invoice_number": "AF-122-I26270231",
+        }],
+    })
+    assert line["chassis"] == "MD9EMHDL2B0217011"
+    assert line["sourceInvoiceNumber"] == "AF-122-I26270231"
+    assert line["chassisList"] == ["MD9EMHDL2B0217011"]
+
+
+def test_merge_detail_copies_header_linked_vehicles():
+    doc = oem_claims.merge_detail({}, {
+        "header": {
+            "linked_vehicles": [{
+                "vehicle": {"chassis": "md9emhdl2b0217011",
+                            "source_invoice_number": "AF-122-I26270231"},
+            }],
+        },
+        "line_items": [{
+            "id": "line-1", "claim_type": "Scheme Claim",
+            "description": "Insurance Benefits Up to for Invoice AF-122-I26270231",
+            "total_amount": 10000, "documents": [{}],
+        }],
+        "timeline": {},
+    })
+    line = doc["lineItems"][0]
+    assert line["chassis"] == "MD9EMHDL2B0217011"
+    assert line["sourceInvoiceNumber"] == "AF-122-I26270231"
+
+
+@pytest.mark.asyncio
+async def test_claim_on_cancelled_chassis_still_finds_the_lead(client, monkeypatch):
+    """Claim filed on the old chassis after Invoice List cancel still auto-connects."""
+    live, dead = "MD9EVDAD26J217577", "MD9EVDAD26J217760"
+    lead_id = await _delivered_lead(client, chassis=live, invoice="AF-122-I26270209")
+    await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "cancelledInvoiceNumber": "AF-122-I26270204",
+        "cancelledInvoices": [{
+            "invoiceNumber": "AF-122-I26270204", "chassis": dead,
+            "replacedBy": "AF-122-I26270209",
+        }],
+    }})
+    inner = journey("cl-dead", "AF-122-CLDEADCH", chassis=dead, invoice="AF-122-I26270204")
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("cl-dead", "AF-122-CLDEADCH")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    rows = (await client.get("/api/oem-claims", params={"leadId": lead_id})).json()
+    assert rows, "claim on cancelled chassis must still join the lead"
+    assert rows[0]["lineItems"][0]["matchedBy"] == "chassis"
+    assert lead_id in (rows[0].get("leadIds") or [])
+
+
+@pytest.mark.asyncio
+async def test_header_linked_vehicle_auto_matches_without_line_chassis(client, monkeypatch):
+    chassis = "MD9EMHDL2B0217011"
+    invoice = "AF-122-I26270231"
+    lead_id = await _delivered_lead(client, chassis=chassis, invoice=invoice)
+    inner = journey("cl-link", "AF-122-CL2627171", chassis="", invoice="")
+    inner["line_items"][0].pop("chassis", None)
+    inner["line_items"][0].pop("source_invoice_number", None)
+    inner["line_items"][0]["description"] = (
+        f"Insurance Benefits Up to for Invoice {invoice}")
+    inner["header"]["linked_vehicles"] = [{
+        "chassis_number": chassis, "invoice_number": invoice,
+    }]
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                        lambda t, status="", limit=100, max_rows=5000:
+                        ([list_row("cl-link", "AF-122-CL2627171")], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+    await server.db["system"].update_one(
+        {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+    await client.post("/api/integrations/coulson/sync-claims")
+    oem = (await client.get("/api/oem-claims", params={"q": "AF-122-CL2627171"})).json()
+    assert oem, oem
+    line = oem[0]["lineItems"][0]
+    assert line["chassis"] == chassis
+    assert line["matchedBy"] == "chassis"
+    assert lead_id in (line.get("leadIds") or [line.get("leadId")])
 
 
 @pytest.mark.asyncio

@@ -230,7 +230,8 @@ _CHASSIS_FIELD_KEYS = (
 )
 _VEHICLE_LIST_KEYS = (
     "vehicles", "linked_vehicles", "linkedVehicles", "vehicle_list",
-    "linked_vehicle", "linkedVehicle",
+    "linked_vehicle", "linkedVehicle", "linkedVehiclesList",
+    "vehicle_details", "vehicleDetails",
 )
 _VEHICLE_ID_KEYS = (
     "linked_vehicle_ids", "linkedVehicleIds", "vehicle_ids", "vehicleIds",
@@ -271,6 +272,9 @@ def _iter_vehicle_blobs(item):
             for v in val:
                 if isinstance(v, dict):
                     blobs.append(v)
+                    inner = v.get("vehicle")
+                    if isinstance(inner, dict):
+                        blobs.append(inner)
                 elif isinstance(v, str) and v.strip():
                     blobs.append({"chassis": v})
         elif isinstance(val, dict):
@@ -327,6 +331,134 @@ def _line_chassis(item):
     """Primary chassis from whatever key (or nested vehicle) Coulson used."""
     found = _line_chassis_list(item)
     return found[0] if found else ""
+
+
+def _direct_chassis(blob):
+    """Chassis field on this object only — not description prose, not UUIDs."""
+    if not isinstance(blob, dict):
+        return ""
+    for key in _CHASSIS_FIELD_KEYS:
+        ch = oem_sync._norm_chassis(blob.get(key))
+        if _looks_like_chassis_token(ch):
+            return ch
+    return _chassis_from_blob(blob)
+
+
+def header_linked_vehicles(blob):
+    """Coulson Claim Settlements 'Linked Vehicles' block.
+
+    Oct 2026 every debit note attaches at least one vehicle. The SPA shows that
+    on the claim header even when the line item still has only an invoice in
+    the description. Chassis + source invoice from here are how we auto-connect.
+    """
+    if not isinstance(blob, dict):
+        return []
+    out, seen = [], set()
+
+    def take(ch, inv):
+        ch = oem_sync._norm_chassis(ch) if _looks_like_chassis_token(ch) else ""
+        inv = str(inv or "").strip()
+        key = (ch, oem_sync._norm_invoice(inv))
+        if not ch and not inv:
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"chassis": ch, "invoice": inv})
+
+    for vb in _iter_vehicle_blobs(blob):
+        take(_direct_chassis(vb), _line_invoice(vb))
+    take(_direct_chassis(blob), _line_invoice(blob))
+    return out
+
+
+def apply_linked_vehicles(lines, blob):
+    """Copy header Linked Vehicles onto claim lines that still lack a chassis."""
+    vehicles = header_linked_vehicles(blob)
+    if not vehicles:
+        return lines
+    by_inv = {}
+    for v in vehicles:
+        if v.get("invoice"):
+            by_inv.setdefault(oem_sync._norm_invoice(v["invoice"]), []).append(v)
+
+    def stamp(line, hits):
+        chassis_list = line_chassis_list(line)
+        for v in hits or []:
+            ch = v.get("chassis") or ""
+            if ch and ch not in chassis_list:
+                chassis_list.append(ch)
+            if v.get("invoice") and not str(line.get("sourceInvoiceNumber") or "").strip():
+                line["sourceInvoiceNumber"] = v["invoice"]
+        if chassis_list:
+            line["chassisList"] = chassis_list
+            primary = oem_sync._norm_chassis(line.get("chassis"))
+            line["chassis"] = primary if _looks_like_chassis_token(primary) else chassis_list[0]
+        return line
+
+    for line in lines or []:
+        if not isinstance(line, dict):
+            continue
+        have = line_chassis_list(line)
+        inv = oem_sync._norm_invoice(line.get("sourceInvoiceNumber"))
+        if not inv:
+            hay = f"{line.get('description') or ''} {line.get('claimType') or ''}"
+            m = re.search(r"\bAF-\d+-I\d+\b", hay, re.I)
+            if m:
+                inv = oem_sync._norm_invoice(m.group(0))
+                if inv and not str(line.get("sourceInvoiceNumber") or "").strip():
+                    line["sourceInvoiceNumber"] = m.group(0)
+        hits = by_inv.get(inv) if inv else []
+        if not hits and len(vehicles) == 1:
+            hits = vehicles
+        if not hits and not have:
+            hits = vehicles
+        if hits:
+            stamp(line, hits)
+    return lines
+
+
+def unit_sno_for_chassis(lead, chassis):
+    """1-based pack unit that holds this chassis, or 0 on a single file."""
+    ch = oem_sync._norm_chassis(chassis)
+    if not ch:
+        return 0
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    for i, u in enumerate(units):
+        if oem_sync._norm_chassis(u.get("chassisNumber")) != ch:
+            continue
+        try:
+            return int(u.get("sno") or u.get("unitSno") or i + 1)
+        except (TypeError, ValueError):
+            return i + 1
+    return 0
+
+
+def lead_claim_chassis_keys(lead):
+    """Live chassis plus cancelled/rebilled ids still on the file.
+
+    A claim filed on the old chassis must still find the lead after Invoice List
+    CANCELLED dropped that id from the pack.
+    """
+    out = list(oem_sync.lead_chassis_list(lead))
+    seen = set(out)
+
+    def add(raw):
+        ch = oem_sync._norm_chassis(raw)
+        if ch and ch not in seen:
+            seen.add(ch)
+            out.append(ch)
+
+    for row in ((lead or {}).get("cancelledInvoices") or []):
+        if isinstance(row, dict):
+            add(row.get("chassis"))
+    for u in ((lead or {}).get("units") or []):
+        if not isinstance(u, dict):
+            continue
+        for row in (u.get("cancelledInvoices") or []):
+            if isinstance(row, dict):
+                add(row.get("chassis"))
+    return out
 
 
 def line_chassis_list(line):
@@ -487,6 +619,8 @@ def normalise_line_item(item):
         "leadCustomers": [str(x) for x in _as_id_list(item.get("leadCustomers"))],
         "matchedBy": str(item.get("matchedBy") or ""),
         "componentKey": map_claim_type_to_component(claim_type, description),
+        "unitSno": _as_int(item.get("unitSno") or item.get("unit_sno")),
+        "unitSnos": [_as_int(x) for x in _as_id_list(item.get("unitSnos")) if _as_int(x)],
     }
 
 
@@ -725,6 +859,9 @@ def claim_doc_from_row(row):
         "syncedAt": now_iso(),
     }
     lines = _normalise_lines(coulson_client.pick_line_items(row if isinstance(row, dict) else {}))
+    if not lines:
+        lines = []
+    apply_linked_vehicles(lines, row if isinstance(row, dict) else {})
     if lines:
         doc["lineItems"] = lines
     return stamp_document_flag(doc)
@@ -744,6 +881,8 @@ def merge_detail(doc, detail):
     header = detail.get("header") if isinstance(detail.get("header"), dict) else {}
     lines = _normalise_lines(coulson_client.pick_line_items(detail))
     if lines:
+        apply_linked_vehicles(lines, header)
+        apply_linked_vehicles(lines, detail)
         doc["lineItems"] = lines
         # Journey is where the SPA reads `documents[]` for the Docs column.
         doc["docsCheckedAt"] = now_iso()
@@ -904,7 +1043,7 @@ async def build_lead_index(db):
                 {"units.chassisNumber": {"$nin": ["", None]}},
                 {"units.invoiceNumber": {"$nin": ["", None]}}],
     }):
-        for ch in oem_sync.lead_chassis_list(lead):
+        for ch in lead_claim_chassis_keys(lead):
             by_chassis.setdefault(ch, lead)
         for inv in oem_sync.lead_invoice_list(lead):
             if inv:
@@ -922,7 +1061,7 @@ async def _lead_for_chassis(db, chassis, index=None):
         "$or": [{"chassisNumber": {"$nin": ["", None]}},
                 {"units.chassisNumber": {"$nin": ["", None]}}],
     }):
-        if ch in set(oem_sync.lead_chassis_list(lead)):
+        if ch in set(lead_claim_chassis_keys(lead)):
             return lead
     return None
 
@@ -1008,6 +1147,14 @@ async def link_claim_lines(db, doc, index=None):
                     pairs.append((lid, name))
         stamp_line_leads(line, pairs)
         line["matchedBy"] = matched_by
+        snos = []
+        for ch, lead in auto_leads:
+            sno = unit_sno_for_chassis(lead, ch)
+            if sno and sno not in snos:
+                snos.append(sno)
+        if snos:
+            line["unitSno"] = snos[0]
+            line["unitSnos"] = snos
         want_inv = str(line.get("sourceInvoiceNumber") or "").strip()
         mismatch = False
         for ch, lead in auto_leads:

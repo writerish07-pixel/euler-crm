@@ -1206,6 +1206,11 @@ def test_drop_cancelled_empty_units_shrinks_pack_keeps_never_billed():
     assert shrunk["sameOrderMultiUnit"] is False
     assert len(shrunk["units"]) == 1
     assert shrunk["units"][0]["chassisNumber"] == "MD9EVDAD26J217577"
+    assert oem_sync._norm_invoice(shrunk["cancelledInvoiceNumber"]) == "AF-122-I26270204"
+    assert any(
+        oem_sync._norm_invoice((x or {}).get("invoiceNumber")) == "AF-122-I26270204"
+        for x in (shrunk.get("cancelledInvoices") or []) if isinstance(x, dict)
+    )
     kept = oem_sync.drop_cancelled_empty_units({
         "sameOrderMultiUnit": True, "vehicleCount": 2,
         "units": [

@@ -2302,9 +2302,36 @@ def drop_cancelled_empty_units(lead):
         # Every billed slot was cancelled. Keep the empty pack so a same-order
         # rebill can stamp into the same rows instead of collapsing to 1 unit.
         return None
+    hist = [dict(x) for x in ((lead or {}).get("cancelledInvoices") or []) if isinstance(x, dict)]
+    seen_inv = {_norm_invoice(x.get("invoiceNumber")) for x in hist}
+    kept_ids = {id(u) for u in kept}
+
+    def take_hist(row):
+        if not isinstance(row, dict):
+            return
+        key = _norm_invoice(row.get("invoiceNumber"))
+        if not key or key in seen_inv:
+            return
+        hist.append(dict(row))
+        seen_inv.add(key)
+
+    for u in units:
+        if id(u) in kept_ids:
+            continue
+        last = (u.get("cancelledInvoices") or [None])[-1]
+        last_ch = last.get("chassis") if isinstance(last, dict) else ""
+        if u.get("cancelledInvoiceNumber"):
+            take_hist(_cancelled_invoice_entry(
+                u.get("cancelledInvoiceNumber"), "", last_ch))
+        for row in (u.get("cancelledInvoices") or []):
+            take_hist(row)
     for i, u in enumerate(kept, 1):
         u["sno"] = i
     patch = {"units": kept, "vehicleCount": max(len(kept), 1)}
+    if hist:
+        patch["cancelledInvoices"] = hist[-8:]
+        if not str((lead or {}).get("cancelledInvoiceNumber") or "").strip():
+            patch["cancelledInvoiceNumber"] = hist[-1].get("invoiceNumber") or ""
     if len(kept) <= 1:
         patch["sameOrderMultiUnit"] = False
         patch["vehicleCount"] = 1
