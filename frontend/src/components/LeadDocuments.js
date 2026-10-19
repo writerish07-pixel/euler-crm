@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Camera, FileUp, Download, Trash2, FileText, Image as ImageIcon, Printer, Archive } from "lucide-react";
 import { toast } from "sonner";
-import { api, del, get, put, uploadFile, apiErrorMessage } from "../lib/api";
+import { api, del, get, put, uploadFile, apiErrorMessage, downloadFile, DOC_UPLOAD_TIMEOUT_MS } from "../lib/api";
 
 export const DOC_LABELS = {
   kyc_aadhaar_front: "Aadhaar front",
@@ -112,16 +112,8 @@ export function CameraFilePick({ onFile, disabled, testId, accept = ACCEPT }) {
 }
 
 export async function openDocumentFile(documentId, filename) {
-  const res = await api.get(`/documents/${documentId}/file`, { responseType: "blob" });
-  const blob = new Blob([res.data], { type: res.headers["content-type"] || "application/octet-stream" });
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename || "document";
-  a.target = "_blank";
-  a.rel = "noopener";
-  a.click();
-  setTimeout(() => window.URL.revokeObjectURL(url), 4000);
+  if (!documentId) throw new Error("Document is missing");
+  await downloadFile(`/documents/${documentId}/file`, filename || "document");
 }
 
 function DocThumb({ doc }) {
@@ -131,8 +123,11 @@ function DocThumb({ doc }) {
     const ctype = String(doc.contentType || "");
     if (!ctype.startsWith("image/")) return undefined;
     let revoke = "";
-    api.get(`/documents/${doc.documentId}/file`, { responseType: "blob" })
+    api.get(`/documents/${doc.documentId}/file`, { responseType: "blob", timeout: DOC_UPLOAD_TIMEOUT_MS })
       .then((res) => {
+        const type = String((res.data && res.data.type) || (res.headers && res.headers["content-type"]) || "");
+        if (type.includes("application/json") || type.includes("text/html")) return;
+        if (!res.data || !window.URL || !window.URL.createObjectURL) return;
         revoke = window.URL.createObjectURL(res.data);
         setUrl(revoke);
       })

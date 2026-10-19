@@ -1107,6 +1107,92 @@ async def test_staff_delivered_missing_sold_is_flagged_not_cleared(client):
     assert lead.get("oemInvoiceMissing") is True
 
 
+def test_sold_rows_replacing_gone_returns_rebill_not_held():
+    lead = {
+        "customerName": "Hrithik Chopra", "mobile": "7297021177",
+        "sameOrderMultiUnit": True,
+        "chassisNumber": "MD9WRONG01",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9WRONG01", "invoiceNumber": "OLD-1"},
+            {"sno": 2, "chassisNumber": "MD9WRONG02", "invoiceNumber": "OLD-2"},
+        ],
+    }
+    sold = [
+        {"chassis": "MD9RIGHT01", "mobile": "7297021177", "invoiceNumber": "NEW-1",
+         "customerName": "Hrithik Chopra"},
+        {"chassis": "MD9RIGHT02", "mobile": "7297021177", "invoiceNumber": "NEW-2",
+         "customerName": "Hrithik Chopra"},
+    ]
+    rows = oem_sync.sold_rows_replacing_gone(lead, sold)
+    got = {oem_sync._norm_chassis(r.get("chassis")) for r in rows}
+    assert got == {"MD9RIGHT01", "MD9RIGHT02"}
+
+
+def test_stamp_family_fills_empty_pack_slots_without_growing():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (FB)"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (FB)"},
+        ],
+    }
+    family = [
+        {"chassis": "MD9RIGHT01", "invoiceNumber": "NEW-1", "soldDate": "2026-10-05"},
+        {"chassis": "MD9RIGHT02", "invoiceNumber": "NEW-2", "soldDate": "2026-10-05"},
+    ]
+    units = oem_sync.stamp_family_vehicle_ids(lead, family)
+    assert len(units) == 2
+    assert {oem_sync._norm_chassis(u.get("chassisNumber")) for u in units} == {
+        "MD9RIGHT01", "MD9RIGHT02"}
+
+
+@pytest.mark.asyncio
+async def test_staff_delivered_rebill_replaces_cancelled_pack_chassis(client):
+    """Wrong chassis cancelled next month, correct ones billed — keep the pack size."""
+    old = ["MD9HRITHIKOLD1", "MD9HRITHIKOLD2"]
+    new = ["MD9HRITHIKNEW1", "MD9HRITHIKNEW2"]
+    mobile = "7297021177"
+    lid = "LD26000068"
+    await server.db.oem_sold.delete_many({
+        "$or": [{"chassis": {"$in": old + new}}, {"mobile": mobile}],
+    })
+    await server.db.leads.delete_many({"$or": [{"leadId": lid}, {"mobile": mobile}]})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Hrithik Chopra", "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-05",
+        "insuranceStatus": "Yes", "registrationStatus": "Yes",
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "chassisNumber": old[0], "invoiceNumber": "OLD-1",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (FB)",
+             "chassisNumber": old[0], "invoiceNumber": "OLD-1"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (FB)",
+             "chassisNumber": old[1], "invoiceNumber": "OLD-2"},
+        ],
+    })
+    for ch, inv in zip(new, ("NEW-1", "NEW-2")):
+        await server.db.oem_sold.insert_one({
+            "chassis": ch, "mobile": mobile, "invoiceNumber": inv,
+            "customerName": "Hrithik Chopra", "soldDate": "2026-10-05",
+            "model": "Turbo Max", "variant": "Maxx (FB)", "coulsonStatus": "SOLD",
+        })
+    gone = await oem_sync.delink_cancelled_sold_invoices(server.db)
+    assert gone["cleared"] >= 1
+    assert lid in (gone.get("clearedIds") or [])
+    cleared = await server.db.leads.find_one({"leadId": lid})
+    assert oem_sync.lead_chassis_list(cleared) == []
+    assert cleared["currentStatus"] == "Delivered"
+    await server._apply_sold_vehicle_ids()
+    live = await server.db.leads.find_one({"leadId": lid})
+    held = set(oem_sync.lead_chassis_list(live))
+    assert held == set(new)
+    assert len(live.get("units") or []) == 2
+    assert live["currentStatus"] == "Delivered"
+    assert live.get("oemInvoiceMissing") is not True
+
+
 @pytest.mark.asyncio
 async def test_lost_lead_is_revived_when_oem_bills_that_mobile(client):
     chassis = "MD9LOSTREV01"

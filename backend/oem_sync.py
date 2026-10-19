@@ -1069,6 +1069,43 @@ def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date=""):
     return units
 
 
+def stamp_family_vehicle_ids(lead, family):
+    """Stamp every Sold row onto matching or empty pack units. Never grows the pack."""
+    working = dict(lead or {})
+    units = [dict(u) for u in (working.get("units") or []) if isinstance(u, dict)]
+    working["units"] = units
+    for row in family or []:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if not ch:
+            continue
+        units = stamp_unit_vehicle_ids(
+            working,
+            (row or {}).get("chassis"),
+            str((row or {}).get("invoiceNumber") or "").strip(),
+            str((row or {}).get("numberPlate") or "").strip(),
+            str((row or {}).get("soldDate") or "").strip()[:10],
+        )
+        working["units"] = units
+    return working.get("units") or units
+
+
+def promote_header_vehicle_ids(lead, units=None):
+    """Keep the lead header in sync with the first billed unit after a rebill."""
+    units = units if units is not None else list((lead or {}).get("units") or [])
+    first = next(
+        (u for u in units if isinstance(u, dict) and _norm_chassis(u.get("chassisNumber"))),
+        None,
+    )
+    if not first:
+        return {}
+    patch = {}
+    if _norm_chassis((lead or {}).get("chassisNumber")) != _norm_chassis(first.get("chassisNumber")):
+        patch["chassisNumber"] = first.get("chassisNumber") or ""
+        patch["invoiceNumber"] = first.get("invoiceNumber") or ""
+        patch["numberPlate"] = first.get("numberPlate") or ""
+    return patch
+
+
 def _fold_sku(value):
     return re.sub(r"\s+", " ", str(value or "").strip()).lower()
 
@@ -1921,6 +1958,12 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         family = sold_rows_for_lead(
             {**lead, "units": working_units}, sold,
             occupied - set(lead_chassis_list({**lead, "units": working_units})))
+        if family:
+            working_units = stamp_family_vehicle_ids(
+                {**lead, "units": working_units}, family) or working_units
+            if working_units != list((lead or {}).get("units") or []):
+                patch["units"] = working_units
+            patch.update(promote_header_vehicle_ids({**lead, **patch}, working_units))
         sku_patch = fill_lead_skus({**lead, "units": working_units}, family)
         units_filled = False
         if sku_patch:
@@ -1981,15 +2024,24 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
             continue
         family = sold_rows_for_lead(
             lead, sold, occupied - set(lead_chassis_list(lead)))
-        sku_patch = fill_lead_skus(lead, family)
-        if not sku_patch:
+        sku_patch = fill_lead_skus(lead, family) or {}
+        units = stamp_family_vehicle_ids(lead, family) if family else list(
+            (lead or {}).get("units") or [])
+        patch = dict(sku_patch)
+        if units and units != list((lead or {}).get("units") or []):
+            patch["units"] = units
+        patch.update(promote_header_vehicle_ids({**lead, **patch}, units))
+        if not patch:
             continue
-        sku_patch["lastUpdated"] = now_iso()
-        sku_patch["oemSoldSyncedAt"] = now_iso()
-        await db.leads.update_one({"leadId": lid}, {"$set": sku_patch})
-        lead.update(sku_patch)
+        patch["lastUpdated"] = now_iso()
+        patch["oemSoldSyncedAt"] = now_iso()
+        await db.leads.update_one({"leadId": lid}, {"$set": patch})
+        lead.update(patch)
+        occupied.update(lead_chassis_list(lead))
+        filled_ids.add(lid)
         stats["updated"] += 1
-        stats["bodyUnitsFilled"] += 1
+        if sku_patch:
+            stats["bodyUnitsFilled"] += 1
     return stats
 
 
@@ -2002,12 +2054,49 @@ def sold_chassis_set(sold_rows):
 
 
 def _staff_delivery_locked(lead):
-    """A desk-completed delivery / Close Won is not auto-delinked."""
+    """A desk-completed delivery / Close Won is not auto-un-delivered."""
     if _lead_is_close_won(lead):
         return True
     if _lead_is_delivered(lead) and not (lead or {}).get("oemAutoDelivered"):
         return True
     return False
+
+
+def sold_rows_replacing_gone(lead, sold_rows, occupied_chassis=None):
+    """Live Sold rows for this customer that can replace cancelled chassis.
+
+    Held ids that Coulson still lists stay. Cancelled ids are treated as empty
+    slots so the same-mobile / same-name rebill can attach instead of growing
+    the pack with a second set of units.
+    """
+    occupied = set(occupied_chassis or ())
+    held = set(lead_chassis_list(lead))
+    sold_ch = sold_chassis_set(sold_rows)
+    gone = held - sold_ch
+    if not gone:
+        return []
+    live_held = held & sold_ch
+    ghost = dict(lead or {})
+    units = []
+    for u in (ghost.get("units") or []):
+        if not isinstance(u, dict):
+            continue
+        rec = dict(u)
+        if _norm_chassis(rec.get("chassisNumber")) in gone:
+            rec["chassisNumber"] = ""
+            rec["invoiceNumber"] = ""
+            rec["numberPlate"] = ""
+        units.append(rec)
+    ghost["units"] = units
+    if _norm_chassis(ghost.get("chassisNumber")) in gone:
+        ghost["chassisNumber"] = next(iter(live_held), "")
+        ghost["invoiceNumber"] = ""
+        ghost["numberPlate"] = ""
+    family = sold_rows_for_lead(ghost, sold_rows, occupied - gone)
+    return [
+        r for r in family
+        if _norm_chassis((r or {}).get("chassis")) not in live_held
+    ]
 
 
 def clear_gone_sold_chassis(lead, sold_chassis):
@@ -2086,14 +2175,19 @@ def oem_auto_deliver_revert_patch(lead):
 async def delink_cancelled_sold_invoices(db):
     """When Coulson drops a billed chassis, free that id on the CRM file.
 
-    Staff-completed Delivered / Close Won files are only flagged. OEM-auto
-    delivered enquiries lose the chassis and, if nothing remains, the
-    auto-delivery stamp so a rebill can attach again.
+    Staff-completed Delivered / Close Won files keep their delivery status.
+    They still drop cancelled chassis when Sold has a replacement for the
+    same customer, so a rebill does not leave both ids on the pack. With no
+    replacement they are only flagged. OEM-auto delivered enquiries lose the
+    chassis and, if nothing remains, the auto-delivery stamp so a rebill can
+    attach again.
     """
     sold = [r async for r in db.oem_sold.find({})]
     sold_ch = sold_chassis_set(sold)
+    leads = await load_oem_billing_leads(db)
+    occupied = occupied_chassis_numbers(leads)
     stats = {"cleared": 0, "flagged": 0, "reverted": 0, "clearedIds": []}
-    async for lead in db.leads.find({}, OEM_BILLING_LEAD_PROJ):
+    for lead in leads:
         if _lead_is_cancelled(lead):
             continue
         held = lead_chassis_list(lead)
@@ -2107,7 +2201,9 @@ async def delink_cancelled_sold_invoices(db):
         lid = lead.get("leadId")
         if not lid:
             continue
-        if _staff_delivery_locked(lead):
+        replacements = sold_rows_replacing_gone(
+            lead, sold, occupied - set(held))
+        if _staff_delivery_locked(lead) and not replacements:
             if not lead.get("oemInvoiceMissing"):
                 await db.leads.update_one(
                     {"leadId": lid},
@@ -2116,15 +2212,18 @@ async def delink_cancelled_sold_invoices(db):
             continue
         patch = clear_gone_sold_chassis(lead, sold_ch) or {}
         merged = {**lead, **patch}
-        revert = oem_auto_deliver_revert_patch(merged)
-        patch.update(revert)
+        revert = {}
+        if not _staff_delivery_locked(lead):
+            revert = oem_auto_deliver_revert_patch(merged)
+            patch.update(revert)
         if not patch:
             continue
         patch["oemSoldSyncedAt"] = now_iso()
         unset = {}
-        if revert:
+        if revert or replacements:
             unset["oemInvoiceMissing"] = ""
-            stats["reverted"] += 1
+            if revert:
+                stats["reverted"] += 1
         op = {"$set": patch}
         if unset:
             op["$unset"] = unset
@@ -2138,6 +2237,7 @@ async def delink_cancelled_sold_invoices(db):
                                                                      "invoiceNumber": "",
                                                                      "numberPlate": ""}},
             )
+        lead.update(patch)
         stats["cleared"] += 1
         stats["clearedIds"].append(lid)
     return stats

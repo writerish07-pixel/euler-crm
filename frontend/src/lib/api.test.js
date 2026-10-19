@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowOemMatchPath, isSlowLead360Path, isDocumentUploadPath, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowOemMatchPath, isSlowLead360Path, isDocumentUploadPath, isDocumentFilePath, downloadFile, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -151,6 +151,31 @@ describe("bulk mutations", () => {
     expect(isDocumentUploadPath("/leads/LD26000926/documents")).toBe(true);
     expect(isDocumentUploadPath("/lead-requests/RQ1/documents")).toBe(true);
     expect(isDocumentUploadPath("/leads")).toBe(false);
+    expect(isDocumentFilePath("/documents/DC1/file")).toBe(true);
+    expect(isDocumentFilePath("/lead-requests/RQ1/deal-sheet.pdf")).toBe(true);
+    expect(isDocumentFilePath("/leads/LD1/deal-sheet.pdf")).toBe(true);
+    expect(isDocumentFilePath("/leads/LD1/documents")).toBe(false);
+  });
+
+  test("opening a stored document uses a 90s timeout", async () => {
+    const origCreate = URL.createObjectURL;
+    const origRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = jest.fn(() => "blob:doc");
+    URL.revokeObjectURL = jest.fn();
+    const spy = jest.spyOn(api, "get").mockResolvedValue({
+      data: new Blob(["x"], { type: "image/png" }),
+    });
+    try {
+      await downloadFile("/documents/DC1/file", "sheet.png");
+      expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({
+        responseType: "blob",
+        timeout: 90000,
+      }));
+    } finally {
+      spy.mockRestore();
+      URL.createObjectURL = origCreate;
+      URL.revokeObjectURL = origRevoke;
+    }
   });
 
   test("document upload uses 90s and does not retry", async () => {
