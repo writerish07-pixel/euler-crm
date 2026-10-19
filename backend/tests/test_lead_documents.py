@@ -181,6 +181,58 @@ async def test_kyc_then_approve_copies_docs_onto_the_lead(exec_client, client):
 
 
 @pytest.mark.asyncio
+async def test_owner_opens_exec_uploaded_request_deal_sheet(exec_client, client):
+    seeded = await seed_pending({
+        "customerName": "Sheet Open", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Executive", "budget": 185000, "customerType": "Individual"})
+    rid = seeded["requestId"]
+    up = await upload(exec_client, f"/api/lead-requests/{rid}/documents", "deal_sheet", "sheet.png")
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["documentId"]
+    raw = await client.get(f"/api/documents/{doc_id}/file")
+    assert raw.status_code == 200, raw.text
+    assert raw.content == PNG
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == rid)
+    kinds = {d["kind"] for d in row["documents"]}
+    assert "deal_sheet" in kinds
+    assert any(d.get("documentId") == doc_id for d in row["documents"])
+
+
+@pytest.mark.asyncio
+async def test_approvals_list_includes_deal_sheet_already_on_the_lead(exec_client, client):
+    r = await client.post("/api/leads", json={
+        "customerName": "Lead Sheet", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Executive", "budget": 185000})
+    assert r.status_code == 200, r.text
+    lid = r.json()["leadId"]
+    sheet = await upload(client, f"/api/leads/{lid}/documents", "deal_sheet", "signed.png")
+    assert sheet.status_code == 200, sheet.text
+    doc_id = sheet.json()["documentId"]
+    await server.db.lead_requests.insert_one({
+        "requestId": "LR-LEAD-SHEET", "status": "pending",
+        "existingLeadId": lid, "requestKind": "booking_deal",
+        "submittedBy": "executive@euler.com",
+        "payload": {
+            "customerName": "Lead Sheet", "mobile": "",
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "budget": 185000, "executive": "Executive",
+        },
+        "createdAt": "2026-10-17T10:00:00+00:00",
+    })
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == "LR-LEAD-SHEET")
+    assert row["dealSheetMissing"] is False
+    assert any(d.get("documentId") == doc_id and d.get("kind") == "deal_sheet"
+               for d in row["documents"])
+    raw = await client.get(f"/api/documents/{doc_id}/file")
+    assert raw.status_code == 200
+    assert raw.content == PNG
+
+
+@pytest.mark.asyncio
 async def test_b2b_aadhaar_is_optional(exec_client, client):
     seeded = await seed_pending({
         "customerName": "B2B No Aadhaar", "mobile": next_mobile(),

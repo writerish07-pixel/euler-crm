@@ -7,7 +7,7 @@ import { PageHeader, Table, Badge, Button, Field, Input } from "../components/ui
 import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
 import { enableApproverPush } from "../lib/pwa";
-import { RequestKycPreview, RequestOemExtraPreview, RequestDealSheetPreview, RequestMissingUploads, PrintDealSheetButton } from "../components/LeadDocuments";
+import { RequestKycPreview, RequestOemExtraPreview, RequestDealSheetPreview, RequestMissingUploads, PrintDealSheetButton, openDocumentFile } from "../components/LeadDocuments";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
 import CallLink from "../components/CallLink";
 
@@ -178,13 +178,18 @@ export default function Approvals() {
               <RequestDealSheetPreview documents={r.documents || []} />
               <PrintDealSheetButton
                 onPrint={async () => {
+                  const uploaded = (r.documents || []).find((d) => d.kind === "deal_sheet" && d.documentId);
                   try {
+                    if (uploaded) {
+                      await openDocumentFile(uploaded.documentId, uploaded.filename);
+                      return;
+                    }
                     await downloadFile(
                       `/lead-requests/${r.requestId}/deal-sheet.pdf`,
                       `deal-sheet-${r.requestId}.pdf`,
                     );
                   } catch (e) {
-                    toast.error(apiErrorMessage(e, "Could not print the deal sheet"));
+                    toast.error(apiErrorMessage(e, uploaded ? "Could not open" : "Could not print the deal sheet"));
                   }
                 }}
               />

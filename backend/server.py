@@ -5750,6 +5750,54 @@ async def lead_request_summary(user=Depends(current_user)):
     return {"pending": 0, "mine": 0, "canApprove": False}
 
 
+def _request_doc_preview_key(doc) -> tuple:
+    kind = (doc or {}).get("kind") or ""
+    sno = 0
+    if kind in lead_docs.UNIT_SCOPED_KINDS:
+        try:
+            sno = int((doc or {}).get("unitSno") or 0)
+        except (TypeError, ValueError):
+            sno = 0
+    return (kind, sno)
+
+
+def _merge_lead_docs_into_request_row(row, lead_doc_rows, user, *, own: bool):
+    """Show KYC / deal sheet already on the live file, not only request uploads."""
+    have = {_request_doc_preview_key(d) for d in (row.get("documents") or [])}
+    extra = []
+    for d in lead_doc_rows or []:
+        kind = (d or {}).get("kind") or ""
+        if not lead_docs.can_read_kind(user, kind, own=own):
+            continue
+        key = _request_doc_preview_key(d)
+        if key in have:
+            continue
+        extra.append(lead_docs.public_row(d))
+        have.add(key)
+    if extra:
+        row["documents"] = list(row.get("documents") or []) + extra
+    return row
+
+
+async def _overlay_existing_lead_docs(out, user):
+    lids = [r.get("existingLeadId") for r in (out or []) if r.get("existingLeadId")]
+    if not lids:
+        return out
+    kinds = list(lead_docs.KYC_INDIVIDUAL + lead_docs.KYC_B2B + lead_docs.KYC_B2B_OPTIONAL) + [
+        lead_docs.DEAL_SHEET_KIND, lead_docs.EXTRA_SUPPORT_KIND]
+    by_lead = {}
+    for d in await db[lead_docs.COLLECTION].find(
+            {"leadId": {"$in": lids}, "kind": {"$in": kinds}}, {"data": 0}).to_list(2000):
+        by_lead.setdefault(d.get("leadId"), []).append(d)
+    for row in out:
+        lid = row.get("existingLeadId") or ""
+        if not lid:
+            continue
+        own = True
+        _merge_lead_docs_into_request_row(row, by_lead.get(lid) or [], user, own=own)
+    return out
+
+
 @api.get("/lead-requests")
 async def list_lead_requests(status: Optional[str] = None, user=Depends(current_user)):
     st = (status or "pending").strip().lower()
@@ -5787,6 +5835,7 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
         row["kycMissing"] = missing
         row["kycComplete"] = not missing
         out.append(row)
+    out = await _overlay_existing_lead_docs(out, user)
     out = await _attach_oem_extra_to_requests(out)
     need_lead_proof = [
         r.get("existingLeadId") for r in out
@@ -6213,6 +6262,7 @@ async def _request_public(req, user):
         docs = [lead_docs.public_row(d) for d in found
                 if lead_docs.can_read_kind(user, d.get("kind") or "", own=own)]
     row["documents"] = docs
+    await _overlay_existing_lead_docs([row], user)
     missing = await lead_docs.missing_kyc(
         db, request_id=rid or "",
         customer_type=row.get("customerType"), gstin=row.get("gstin"))
@@ -6476,6 +6526,8 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
 
 
 async def _document_own(doc, user) -> bool:
+    if _can_approve_leads(user) or authmod.is_showroom_desk(user):
+        return True
     if doc.get("leadId"):
         lead = await db.leads.find_one({"leadId": doc["leadId"]}) or {}
         return _is_own_lead(lead, user)
@@ -11512,18 +11564,24 @@ async def _append_oem_unit(lead, row):
     variant = picked.get("variant") or (row or {}).get("variant") or ""
     sold_date = str((row or {}).get("soldDate") or "")[:10] or today()
     units = _ensure_lead_units(lead)
-    if units and not oem_sync._norm_chassis(units[0].get("chassisNumber")):
-        units[0]["chassisNumber"] = chassis
-        units[0]["invoiceNumber"] = invoice or units[0].get("invoiceNumber") or ""
-        units[0]["numberPlate"] = plate or units[0].get("numberPlate") or ""
+    empty_i = next(
+        (i for i, u in enumerate(units)
+         if not oem_sync._norm_chassis((u or {}).get("chassisNumber"))),
+        None,
+    )
+    if empty_i is not None:
+        target = units[empty_i]
+        target["chassisNumber"] = chassis
+        target["invoiceNumber"] = invoice or target.get("invoiceNumber") or ""
+        target["numberPlate"] = plate or target.get("numberPlate") or ""
         if sold_date:
-            units[0]["soldDate"] = sold_date
-            if oem_sync._lead_is_delivered(lead) and not units[0].get("deliveryDate"):
-                units[0]["deliveryDate"] = sold_date
-        if not units[0].get("model"):
-            units[0]["model"] = model
-            units[0]["variant"] = variant
-        oem_sync.stamp_available_billed_bodies(units[0], row)
+            target["soldDate"] = sold_date
+            if oem_sync._lead_is_delivered(lead) and not target.get("deliveryDate"):
+                target["deliveryDate"] = sold_date
+        if not target.get("model"):
+            target["model"] = model
+            target["variant"] = variant
+        oem_sync.stamp_available_billed_bodies(target, row)
     else:
         priced = await _price_unit_from_master(model, variant, sold_date)
         rec = {

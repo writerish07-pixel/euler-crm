@@ -160,6 +160,12 @@ export function isDocumentUploadPath(url) {
   return /\/documents$/.test(p);
 }
 
+/** Opening a stored scan / PDF. Camera photos are often several MB. */
+export function isDocumentFilePath(url) {
+  const p = String(url || "").split("?")[0];
+  return /\/documents\/[^/]+\/file$/.test(p) || p.endsWith("/deal-sheet.pdf");
+}
+
 function mutationOpts(url, opts = {}) {
   const bulk = isBulkMutationPath(url);
   const docUpload = isDocumentUploadPath(url);
@@ -266,6 +272,7 @@ function getTimeout(url, opts = {}) {
   if (isSlowLead360Path(url)) return 60000;
   if (isSlowIntegrationPath(url)) return 45000;
   if (isSlowOemMatchPath(url)) return BULK_TIMEOUT_MS;
+  if (isDocumentFilePath(url) || isDocumentUploadPath(url)) return DOC_UPLOAD_TIMEOUT_MS;
   return undefined;
 }
 
@@ -401,7 +408,12 @@ async function rejectIfJsonBlob(data, fallback) {
 
 export async function downloadFile(url, filename, params) {
   try {
-    const data = await withFallback(() => api.get(url, { responseType: "blob", params }).then((r) => r.data));
+    const timeout = getTimeout(url);
+    const data = await withFallback(() => api.get(url, {
+      responseType: "blob",
+      params,
+      ...(timeout ? { timeout } : {}),
+    }).then((r) => r.data));
     await rejectIfJsonBlob(data, "Could not download file");
     saveBlob(data, filename);
   } catch (err) {

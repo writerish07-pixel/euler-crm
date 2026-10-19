@@ -1450,6 +1450,36 @@ async def test_append_oem_unit_fills_model_from_pack_sibling(client):
 
 
 @pytest.mark.asyncio
+async def test_append_oem_unit_fills_empty_second_unit_not_grows(client):
+    lid = "LD-EMPTY-U2"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Rebill Pack", "mobile": "7297021188",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered",
+        "sameOrderMultiUnit": True,
+        "chassisNumber": "MD9KEEP01",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (FB)",
+             "chassisNumber": "MD9KEEP01", "invoiceNumber": "KEEP"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (FB)",
+             "chassisNumber": "", "invoiceNumber": ""},
+        ],
+    })
+    updated = await server._append_oem_unit(
+        await server.db.leads.find_one({"leadId": lid}),
+        {"chassis": "MD9REPL02", "invoiceNumber": "NEW-2",
+         "model": "Turbo Max", "variant": "Maxx (FB)", "soldDate": "2026-10-05"},
+    )
+    units = (updated or {}).get("units") or []
+    assert len(units) == 2
+    assert oem_sync._norm_chassis(units[0]["chassisNumber"]) == "MD9KEEP01"
+    assert oem_sync._norm_chassis(units[1]["chassisNumber"]) == "MD9REPL02"
+    assert units[1]["invoiceNumber"] == "NEW-2"
+
+
+@pytest.mark.asyncio
 async def test_add_unit_keeps_own_billed_date(client):
     mobile = "9813301888"
     await server.db.leads.delete_many({"mobile": mobile})
