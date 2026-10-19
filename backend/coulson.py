@@ -443,11 +443,26 @@ def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
 
 # Billed vehicles leave PRESENT immediately. The dealer Sold tab is
 # vehicle-inventory/transfer?vehicle_status=SOLD. Chassis billed today also
-# land on Vehicle Invoices (SPA `#/dealer-inventory-list` panel "Vehicle
-# Invoices") before Sold catches up. Oct 2026 Coulson app: that list is
-# GET /api/v1/dealer/invoice/vehicle — not vehicle-inventory/transfer.
+# land on Vehicle Invoices (SPA `#/dealer-inventory-list` → ⋮ → Invoice List)
+# before Sold catches up. Oct 2026 Coulson app: that list is
+# GET /api/v1/dealer/invoice/vehicle — Created and Cancelled rows together.
+#
+# Oct 2026 Coulson SPA (dealer login) vs Euler:
+#   CONNECTED — sap-vehicle-models (Price Master), PRESENT (Yard),
+#     IN_TRANSIT, SOLD + Invoice List Created, debit-note claims.
+#   THIS SYNC — Invoice List CANCELLED (drop those chassis from leads),
+#     BOOKED / PILOT / DEMO as held (not sellable yard).
+#   NOT YET — Create Quotation, Quotation List, Stock Transfer, Vehicle
+#     E-POD, Vehicle Orders, KYC amendments, Inbound/Prime tickets,
+#     Euler Assured, AMC/EW offers, Warranty Parts, Analytics,
+#     Announcements, Complaint Management, Downloads.
 SOLD_INVENTORY_STATUSES = ("SOLD",)
 TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT", "IN TRANSIT", "TRANSIT")
+HELD_INVENTORY_STATUSES = (
+    "BOOKED",
+    "PILOT", "PILOT_VEHICLE", "PILOT VEHICLE",
+    "DEMO", "DEMO_VEHICLE", "DEMO VEHICLE",
+)
 INVOICE_LIST_PATH = "dealer/invoice/vehicle"
 VEHICLE_INVOICE_PATHS = (
     INVOICE_LIST_PATH,
@@ -466,6 +481,7 @@ _INVOICE_SORTS = (
     json.dumps(["created_at", "DESC"]),
 )
 _CANCELLED_INVOICE = {"CANCELLED", "CANCELED", "DELETED"}
+_LIVE_INVOICE = {"CREATED", "ACTIVE", "POSTED", "CONFIRMED", ""}
 
 
 def _vehicle_key(v):
@@ -526,13 +542,83 @@ def fetch_transit_inventory(token: str, limit=INVENTORY_PAGE):
     return rows
 
 
+def _held_status_label(status: str) -> str:
+    s = str(status or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if "BOOK" in s:
+        return "BOOKED"
+    if "PILOT" in s:
+        return "PILOT"
+    if "DEMO" in s:
+        return "DEMO"
+    return s or "HELD"
+
+
+def fetch_held_inventory(token: str, limit=INVENTORY_PAGE):
+    """Booked / Pilot / Demo — on the lot, not sellable Present yard.
+
+    Vehicle Inventory left filter: Present, In Transit, Sold, Booked,
+    Pilot Vehicle, Demo Vehicle. Euler yard is Present only; these sit
+    on a Held tab so matching does not treat them as available stock.
+    """
+    rows = []
+    seen_labels = set()
+    for status in HELD_INVENTORY_STATUSES:
+        label = _held_status_label(status)
+        if label in seen_labels:
+            continue
+        try:
+            chunk = fetch_inventory_by_status(token, status, limit=limit)
+        except CoulsonError as e:
+            log.info("Coulson %s inventory skipped: %s", status, e)
+            continue
+        if not chunk:
+            continue
+        seen_labels.add(label)
+        _merge_vehicle_rows(rows, chunk, label)
+    return rows
+
+
 def _invoice_status(row) -> str:
-    return str((row or {}).get("status") or (row or {}).get("invoice_status") or "").strip().upper()
+    return str(
+        (row or {}).get("status")
+        or (row or {}).get("invoice_status")
+        or (row or {}).get("invoiceStatus")
+        or ""
+    ).strip().upper()
+
+
+def _is_cancelled_invoice(row) -> bool:
+    return _invoice_status(row) in _CANCELLED_INVOICE
 
 
 def _live_invoices(rows):
-    """Drop cancelled tax invoices so a rebill is not hidden by the old row."""
-    return [r for r in (rows or []) if _invoice_status(r) not in _CANCELLED_INVOICE]
+    """Keep Created invoices. Cancelled stay in a side list for delink."""
+    return [r for r in (rows or []) if not _is_cancelled_invoice(r)]
+
+
+def _cancelled_invoices(rows):
+    return [r for r in (rows or []) if _is_cancelled_invoice(r)]
+
+
+def cancelled_chassis_set(rows):
+    """Chassis whose Vehicle Invoice List row is Cancelled — even if Sold still shows them."""
+    out = set()
+    for r in rows or []:
+        ch = _vehicle_key(r)
+        if ch:
+            out.add(ch)
+    return out
+
+
+def _invoice_row_key(v):
+    """Invoice list can have Created + Cancelled rows for different chassis of one customer."""
+    if not isinstance(v, dict):
+        return ""
+    return (
+        str(v.get("invoice_number") or v.get("invoiceNumber") or "").strip().upper()
+        or _vehicle_key(v)
+        or str(v.get("id") or "")
+    )
 
 
 def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE):
@@ -570,7 +656,7 @@ def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE):
         for v in chunk:
             if not isinstance(v, dict):
                 continue
-            key = _vehicle_key(v) or str(v.get("id") or v.get("invoice_number") or "")
+            key = _invoice_row_key(v)
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -619,22 +705,23 @@ def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE):
     return rows
 
 
-def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
-    """Coulson Vehicle Invoices list — billed today even when Sold is yesterday.
+def fetch_raw_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
+    """Every Vehicle Invoice List row — Created and Cancelled.
 
-    Live path (Oct 2026 Coulson app): GET dealer/invoice/vehicle.
-    Guessed leftovers stay as fallbacks. A 404/400 on one path is not fatal;
-    a timeout on a guessed path must not skip the real one.
+    Coulson Vehicle Inventory → ⋮ menu → Invoice List. Status filter is
+    Created / Cancelled. Unfiltered list is ~all dealer invoices.
+
+    Returns (rows, ok). ok is False when every path 404'd / failed so callers
+    must not wipe a previously synced cancelled list.
     """
     last_error = None
     try:
-        chunk = _page_dealer_invoices(token, limit=limit)
-        return _merge_vehicle_rows([], _live_invoices(chunk), "INVOICED")
+        return _page_dealer_invoices(token, limit=limit), True
     except CoulsonError as e:
         last_error = e
         if e.status not in (404, 405, 400):
             log.info("Coulson %s failed: %s", INVOICE_LIST_PATH, e)
-            return []
+            return [], False
 
     for path in VEHICLE_INVOICE_PATHS:
         if path == INVOICE_LIST_PATH:
@@ -649,15 +736,26 @@ def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
                 log.info("Coulson vehicle invoices %s failed: %s", path, e)
                 break
             if chunk:
-                return _merge_vehicle_rows([], _live_invoices(chunk), "INVOICED")
+                return chunk, True
     if last_error and last_error.status not in (404, 405, 400):
         log.info("Coulson vehicle invoices empty: %s", last_error)
-    return []
+    return [], False
+
+
+def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
+    """Live (Created) invoices only — billed today even when Sold is yesterday."""
+    chunk, ok = fetch_raw_vehicle_invoices(token, limit=limit)
+    live = _SoldPull(_merge_vehicle_rows([], _live_invoices(chunk), "INVOICED"))
+    live.cancelled = tuple(_cancelled_invoices(chunk))
+    live.invoice_list_ok = ok
+    return live
 
 
 class _SoldPull(list):
     """List of Sold/invoice rows plus whether the Sold tab was fully paged."""
     complete = True
+    cancelled = ()
+    invoice_list_ok = False
 
 
 _MODEL_COPY_KEYS = (
@@ -734,10 +832,16 @@ def fill_missing_sold_models(token: str, rows, *, limit=40):
 
 
 def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
-    """Vehicles billed / sold — Sold tab PLUS Vehicle Invoices."""
+    """Vehicles billed / sold — Sold tab PLUS Created invoices, minus Cancelled.
+
+    The Sold tab often still shows a chassis after its tax invoice is Cancelled
+    in Vehicle Inventory → Invoice List. Those ids must not stay on CRM leads.
+    """
     rows = _SoldPull()
     errors = []
     complete = True
+    cancelled = []
+    invoice_list_ok = False
     for status in SOLD_INVENTORY_STATUSES:
         meta = {}
         try:
@@ -751,10 +855,18 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
         if meta.get("complete") is False:
             complete = False
     try:
-        _merge_vehicle_rows(rows, fetch_vehicle_invoices(token, limit=limit), "INVOICED")
+        invoices = fetch_vehicle_invoices(token, limit=limit)
+        cancelled = list(getattr(invoices, "cancelled", ()) or ())
+        invoice_list_ok = bool(getattr(invoices, "invoice_list_ok", False))
+        _merge_vehicle_rows(rows, invoices, "INVOICED")
     except CoulsonError as e:
         log.info("Coulson vehicle invoices skipped: %s", e)
         errors.append(e)
+    drop = cancelled_chassis_set(cancelled)
+    if drop:
+        kept = [r for r in rows if _vehicle_key(r) not in drop]
+        rows.clear()
+        rows.extend(kept)
     try:
         fill_missing_sold_models(token, rows)
     except CoulsonError as e:
@@ -764,6 +876,8 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
     if not rows and errors:
         raise errors[0]
     rows.complete = complete
+    rows.cancelled = tuple(cancelled)
+    rows.invoice_list_ok = invoice_list_ok
     return rows
 
 

@@ -352,6 +352,13 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         log.warning("Coulson transit inventory skipped: %s", e)
     except Exception:
         log.exception("Coulson transit inventory failed")
+    held_vehicles = []
+    try:
+        held_vehicles = await asyncio.to_thread(coulson_client.fetch_held_inventory, token) or []
+    except coulson_client.CoulsonError as e:
+        log.warning("Coulson booked/pilot/demo inventory skipped: %s", e)
+    except Exception:
+        log.exception("Coulson booked/pilot/demo inventory failed")
 
     # Index OEM rows by catalog sku key (multiple SAP ids can share a SKU).
     by_key = {s.key: [] for s in cat.CATALOG}
@@ -442,12 +449,26 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
     if transit_docs:
         await db.oem_inventory_transit.insert_many(transit_docs)
     transit_count = len(transit_docs)
+    held_count = await replace_held_inventory(db, held_vehicles, oem_by_id, by_key)
+    cancelled_count = await replace_cancelled_invoices(
+        db, getattr(sold_vehicles, "cancelled", ()) or (),
+        ok=getattr(sold_vehicles, "invoice_list_ok", False))
+    delinked = {}
+    try:
+        delinked = await delink_cancelled_sold_invoices(db)
+    except Exception:
+        log.exception("OEM cancelled-invoice delink failed")
+        delinked = {}
     leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(db, on_body_adopted=on_body_adopted)
+    leads_vehicle_ids["delinkedCount"] = (delinked or {}).get("cleared") or 0
+    leads_vehicle_ids["delinkedIds"] = (delinked or {}).get("clearedIds") or []
 
     extra = {
         "inventoryCount": yard_count,
         "transitCount": transit_count,
+        "heldCount": held_count,
         "soldCount": sold_count,
+        "cancelledInvoiceCount": cancelled_count,
         "leadsVehicleIds": leads_vehicle_ids,
         "deliveredDropped": dropped,
         "oemModelCount": len(oem_models),
@@ -882,6 +903,81 @@ async def replace_sold_inventory(db, vehicles, oem_by_id, by_key, *, complete=Tr
     return len(docs)
 
 
+def _cancelled_invoice_doc(vehicle):
+    ch = vehicle_chassis(vehicle) or _norm_chassis((vehicle or {}).get("chassis"))
+    return {
+        "chassis": ch,
+        "mobile": vehicle_mobile(vehicle),
+        "invoiceNumber": vehicle_invoice(vehicle),
+        "numberPlate": vehicle_plate(vehicle),
+        "customerName": vehicle_customer_name(vehicle),
+        "soldDate": vehicle_sold_date(vehicle),
+        "invoiceStatus": "CANCELLED",
+        "coulsonStatus": "CANCELLED",
+        "source": "coulson_invoice_list",
+        "syncedAt": now_iso(),
+    }
+
+
+async def replace_cancelled_invoices(db, vehicles, *, ok=False):
+    """Invoice List CANCELLED is the source of truth for gone chassis.
+
+    Sold often still lists a chassis after its tax invoice is Cancelled.
+    Store those rows and strip them from oem_sold so matching cannot
+    re-attach them.
+    """
+    if not ok:
+        return await db.oem_cancelled_invoices.count_documents({})
+    docs, seen = [], set()
+    for v in vehicles or []:
+        doc = _cancelled_invoice_doc(v)
+        ch = _norm_chassis(doc.get("chassis"))
+        if not ch or ch in seen:
+            continue
+        seen.add(ch)
+        docs.append(doc)
+    await db.oem_cancelled_invoices.delete_many({})
+    if docs:
+        await db.oem_cancelled_invoices.insert_many(docs)
+        await db.oem_sold.delete_many({"chassis": {"$in": [d["chassis"] for d in docs]}})
+    return len(docs)
+
+
+async def replace_held_inventory(db, vehicles, oem_by_id, by_key):
+    """Booked / Pilot / Demo — not Present yard, not Sold.
+
+    If Coulson ignores an unknown vehicle_status and echoes Present stock,
+    skip those chassis so the Held tab cannot duplicate or empty the yard.
+    """
+    present = {
+        _norm_chassis(r.get("chassis"))
+        async for r in db.oem_inventory.find({}, {"chassis": 1})
+        if _norm_chassis(r.get("chassis"))
+    }
+    docs, seen = [], set()
+    for v in vehicles or []:
+        sku = sku_for_sold_vehicle(v, oem_by_id) if oem_by_id else cat.sku_for_oem_row(
+            oem_stub_from_vehicle(v))
+        price = 0.0
+        oem_full = oem_by_id.get(v.get("sap_vehicle_model_id")) if oem_by_id else None
+        if sku and oem_full:
+            price = cat.jaipur_price(oem_full)
+        elif sku and by_key and by_key.get(sku.key):
+            price = cat.jaipur_price(by_key[sku.key][0])
+        doc = _inventory_doc(v, sku, price)
+        doc["stockStatus"] = str(v.get("_coulsonStatus") or "HELD").lower()
+        doc["coulsonStatus"] = v.get("_coulsonStatus") or "HELD"
+        ch = _norm_chassis(doc.get("chassis"))
+        if not ch or ch in seen or ch in present:
+            continue
+        seen.add(ch)
+        docs.append(doc)
+    await db.oem_inventory_held.delete_many({})
+    if docs:
+        await db.oem_inventory_held.insert_many(docs)
+    return len(docs)
+
+
 async def refresh_sold_inventory(db):
     """Live Sold + Vehicle Invoices pull without rewriting yard PRESENT stock."""
     token, _src = await _access_token(db)
@@ -901,9 +997,13 @@ async def refresh_sold_inventory(db):
         sku = cat.sku_for_oem_row(oem)
         if sku:
             by_key[sku.key].append(oem)
-    return await replace_sold_inventory(
+    n = await replace_sold_inventory(
         db, sold_vehicles, oem_by_id, by_key,
         complete=getattr(sold_vehicles, "complete", True))
+    await replace_cancelled_invoices(
+        db, getattr(sold_vehicles, "cancelled", ()) or (),
+        ok=getattr(sold_vehicles, "invoice_list_ok", False))
+    return n
 
 
 def sold_match_score(row, lead):
@@ -2172,46 +2272,100 @@ def oem_auto_deliver_revert_patch(lead):
     }
 
 
+def unit_was_cancelled(unit):
+    if not isinstance(unit, dict):
+        return False
+    if str(unit.get("cancelledInvoiceNumber") or "").strip():
+        return True
+    for row in (unit.get("cancelledInvoices") or []):
+        if isinstance(row, dict) and str(row.get("invoiceNumber") or "").strip():
+            return True
+        if not isinstance(row, dict) and str(row or "").strip():
+            return True
+    return False
+
+
+def drop_cancelled_empty_units(lead):
+    """Remove pack slots that were billed then cancelled. Keep never-billed empties."""
+    units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    if len(units) <= 1:
+        return None
+    kept, dropped = [], 0
+    for u in units:
+        if not _norm_chassis(u.get("chassisNumber")) and unit_was_cancelled(u):
+            dropped += 1
+            continue
+        kept.append(u)
+    if not dropped:
+        return None
+    if not kept:
+        # Every billed slot was cancelled. Keep the empty pack so a same-order
+        # rebill can stamp into the same rows instead of collapsing to 1 unit.
+        return None
+    for i, u in enumerate(kept, 1):
+        u["sno"] = i
+    patch = {"units": kept, "vehicleCount": max(len(kept), 1)}
+    if len(kept) <= 1:
+        patch["sameOrderMultiUnit"] = False
+        patch["vehicleCount"] = 1
+    return patch
+
+
 async def delink_cancelled_sold_invoices(db):
-    """When Coulson drops a billed chassis, free that id on the CRM file.
+    """Drop chassis whose Invoice List row is Cancelled, even if Sold still lists them.
 
     Staff-completed Delivered / Close Won files keep their delivery status.
-    They still drop cancelled chassis when Sold has a replacement for the
-    same customer, so a rebill does not leave both ids on the pack. With no
-    replacement they are only flagged. OEM-auto delivered enquiries lose the
-    chassis and, if nothing remains, the auto-delivery stamp so a rebill can
-    attach again.
+    A cancelled Invoice List chassis is always cleared (and an empty cancelled
+    pack unit is dropped). Chassis that merely vanished from Sold — with no
+    Invoice List cancel — stay on staff-delivered files and are flagged, unless
+    Sold already has a replacement for the same customer.
     """
     sold = [r async for r in db.oem_sold.find({})]
+    cancelled_rows = [r async for r in db.oem_cancelled_invoices.find({})]
+    cancelled_ch = sold_chassis_set(cancelled_rows)
+    if cancelled_ch:
+        await db.oem_sold.delete_many({"chassis": {"$in": list(cancelled_ch)}})
+        sold = [r for r in sold if _norm_chassis((r or {}).get("chassis")) not in cancelled_ch]
     sold_ch = sold_chassis_set(sold)
     leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads)
-    stats = {"cleared": 0, "flagged": 0, "reverted": 0, "clearedIds": []}
+    stats = {"cleared": 0, "flagged": 0, "reverted": 0, "droppedUnits": 0, "clearedIds": []}
     for lead in leads:
         if _lead_is_cancelled(lead):
             continue
         held = lead_chassis_list(lead)
-        gone = [c for c in held if c not in sold_ch]
-        if not gone:
-            if lead.get("oemInvoiceMissing"):
-                await db.leads.update_one(
-                    {"leadId": lead.get("leadId")},
-                    {"$unset": {"oemInvoiceMissing": ""}})
-            continue
+        cancelled_held = [c for c in held if c in cancelled_ch]
+        missing = [c for c in held if c not in sold_ch and c not in cancelled_ch]
         lid = lead.get("leadId")
         if not lid:
             continue
         replacements = sold_rows_replacing_gone(
             lead, sold, occupied - set(held))
-        if _staff_delivery_locked(lead) and not replacements:
-            if not lead.get("oemInvoiceMissing"):
+        drop = set(cancelled_held)
+        if missing:
+            if replacements or not _staff_delivery_locked(lead):
+                drop.update(missing)
+            elif not cancelled_held:
+                if not lead.get("oemInvoiceMissing"):
+                    await db.leads.update_one(
+                        {"leadId": lid},
+                        {"$set": {"oemInvoiceMissing": True}})
+                    stats["flagged"] += 1
+                continue
+        if not drop:
+            if lead.get("oemInvoiceMissing"):
                 await db.leads.update_one(
                     {"leadId": lid},
-                    {"$set": {"oemInvoiceMissing": True}})
-                stats["flagged"] += 1
+                    {"$unset": {"oemInvoiceMissing": ""}})
             continue
-        patch = clear_gone_sold_chassis(lead, sold_ch) or {}
+        keep = set(held) - drop
+        patch = clear_gone_sold_chassis(lead, keep) or {}
         merged = {**lead, **patch}
+        empty_drop = drop_cancelled_empty_units(merged)
+        if empty_drop:
+            patch.update(empty_drop)
+            merged.update(empty_drop)
+            stats["droppedUnits"] += 1
         revert = {}
         if not _staff_delivery_locked(lead):
             revert = oem_auto_deliver_revert_patch(merged)
@@ -2219,11 +2373,16 @@ async def delink_cancelled_sold_invoices(db):
         if not patch:
             continue
         patch["oemSoldSyncedAt"] = now_iso()
+        remaining = lead_chassis_list(merged)
         unset = {}
-        if revert or replacements:
+        if remaining or revert or replacements:
             unset["oemInvoiceMissing"] = ""
-            if revert:
-                stats["reverted"] += 1
+        if revert:
+            stats["reverted"] += 1
+        if _staff_delivery_locked(lead) and not remaining and not replacements:
+            patch["oemInvoiceMissing"] = True
+            stats["flagged"] += 1
+            unset.pop("oemInvoiceMissing", None)
         op = {"$set": patch}
         if unset:
             op["$unset"] = unset
@@ -2976,6 +3135,14 @@ async def list_inventory(db, model=None, variant=None, *, family=False):
 
 async def list_transit_inventory(db, model=None):
     rows = [r async for r in db.oem_inventory_transit.find({}).sort("model", 1)]
+    if not model:
+        return rows
+    return [r for r in rows if str(r.get("model") or "") == str(model)]
+
+
+async def list_held_inventory(db, model=None):
+    """Booked / Pilot / Demo chassis — in dealer stock, not Present yard."""
+    rows = [r async for r in db.oem_inventory_held.find({}).sort("model", 1)]
     if not model:
         return rows
     return [r for r in rows if str(r.get("model") or "") == str(model)]
