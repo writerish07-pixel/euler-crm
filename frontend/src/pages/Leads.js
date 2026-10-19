@@ -20,7 +20,7 @@ const REGISTER_STATUS_FILTERS = ["all", "Booked", "Finance Process", "Delivered"
 const FOLLOWUP_STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Lost"];
 
 export default function Leads({ followup = false }) {
-  const { isField, isExecutive, isShowroomAdmin } = useAuth();
+  const { isField, isExecutive, isShowroomAdmin, canManageShowroom } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [leads, setLeads] = useState([]);
@@ -109,7 +109,7 @@ export default function Leads({ followup = false }) {
             {Number(r.cancelCount) === 1 ? "Cancelled once" : `Cancelled ${r.cancelCount}×`}
           </Badge>
         )}
-        {r.dealVerifyMismatch && (
+        {canManageShowroom && r.dealVerifyMismatch && (
           <Badge tone="bg-rose-50 text-rose-800 ring-rose-600/20" data-testid={`deal-verify-flag-${r.leadId}`}>
             Deal mismatch
           </Badge>

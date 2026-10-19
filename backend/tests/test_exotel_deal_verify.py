@@ -427,3 +427,69 @@ async def test_recompute_refreshes_mismatch(client):
     lead = await server.db.leads.find_one({"leadId": "LD26EXO5"})
     assert lead["dealVerifyMismatch"] is False
     assert lead["dealVerifyMismatchKind"] == ""
+
+
+def test_lead_for_viewer_hides_deal_verify_from_executive():
+    lead = {
+        "leadId": "LD-HIDE", "customerName": "Cx",
+        "dealVerifyMismatch": True, "dealVerifyMismatchKind": "over",
+        "dealVerifyAmount": 500000, "dealVerifyStatus": "answered",
+        "dealVerifyRecordingUrl": "https://example/a.mp3",
+        "totalReceived": 10000,
+    }
+    exec_row = server._lead_for_viewer(lead, {"role": "executive"})
+    assert "dealVerifyMismatch" not in exec_row
+    assert "dealVerifyAmount" not in exec_row
+    assert "dealVerifyRecordingUrl" not in exec_row
+    team = server._lead_for_viewer(lead, {"role": "team_lead"})
+    assert "dealVerifyMismatch" not in team
+    accounts = server._lead_for_viewer(lead, {"role": "accounts"})
+    assert "dealVerifyMismatch" not in accounts
+    owner = server._lead_for_viewer(lead, {"role": "owner"})
+    assert owner["dealVerifyMismatch"] is True
+    assert owner["dealVerifyAmount"] == 500000
+    tl = server._lead_for_viewer(lead, {"role": "tl"})
+    assert tl["dealVerifyMismatch"] is True
+    gm = server._lead_for_viewer(lead, {"role": "sales_gm"})
+    assert gm["dealVerifyMismatch"] is True
+
+
+@pytest.mark.asyncio
+async def test_executive_360_hides_deal_verify_mismatch(client):
+    lid = "LD26EXO-HIDE"
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Hidden Mismatch", "mobile": "9876500099",
+        "currentStatus": "Booked", "bookingDate": "2026-10-16",
+        "accountStatus": "Active", "executive": "Ravi",
+        "dealVerifyMismatch": True, "dealVerifyMismatchKind": "over",
+        "dealVerifyAmount": 500000, "dealVerifyStatus": "answered",
+        "totalReceived": 10000, "customerPayable": 486933,
+    })
+    owner_list = await client.get("/api/leads")
+    assert owner_list.status_code == 200, owner_list.text
+    owner_row = next(r for r in owner_list.json() if r["leadId"] == lid)
+    assert owner_row.get("dealVerifyMismatch") is True
+
+    email = "ravi-exec-hide@euler.com"
+    await AUTH_DB.users.delete_many({"email": email})
+    created = await client.post("/api/auth/users", json={
+        "email": email, "password": "desk#441", "name": "Ravi", "role": "executive",
+    })
+    assert created.status_code == 200, created.text
+    transport = httpx.ASGITransport(app=server.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as exec_c:
+        login = await exec_c.post("/api/auth/login", json={"email": email, "password": "desk#441"})
+        assert login.status_code == 200, login.text
+        exec_c.headers["Authorization"] = f"Bearer {login.json()['token']}"
+        listed = await exec_c.get("/api/leads")
+        assert listed.status_code == 200, listed.text
+        exec_row = next((r for r in listed.json() if r["leadId"] == lid), None)
+        if exec_row is not None:
+            assert "dealVerifyMismatch" not in exec_row
+            assert "dealVerifyAmount" not in exec_row
+        body = await exec_c.get(f"/api/leads/{lid}/360")
+        assert body.status_code == 200, body.text
+        lead = (body.json() or {}).get("lead") or {}
+        assert "dealVerifyMismatch" not in lead
+        assert "dealVerifyAmount" not in lead
+        assert "dealVerifyRecordingUrl" not in lead
