@@ -29,6 +29,7 @@ def _no_live_coulson_sold(monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
     monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "login", lambda u, p: "test-token")
 
 
@@ -1191,6 +1192,90 @@ async def test_staff_delivered_rebill_replaces_cancelled_pack_chassis(client):
     assert len(live.get("units") or []) == 2
     assert live["currentStatus"] == "Delivered"
     assert live.get("oemInvoiceMissing") is not True
+
+
+def test_drop_cancelled_empty_units_shrinks_pack_keeps_never_billed():
+    shrunk = oem_sync.drop_cancelled_empty_units({
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "chassisNumber": "", "cancelledInvoiceNumber": "AF-122-I26270204"},
+            {"sno": 2, "chassisNumber": "MD9EVDAD26J217577", "invoiceNumber": "AF-122-I26270209"},
+        ],
+    })
+    assert shrunk["vehicleCount"] == 1
+    assert shrunk["sameOrderMultiUnit"] is False
+    assert len(shrunk["units"]) == 1
+    assert shrunk["units"][0]["chassisNumber"] == "MD9EVDAD26J217577"
+    assert oem_sync._norm_invoice(shrunk["cancelledInvoiceNumber"]) == "AF-122-I26270204"
+    assert any(
+        oem_sync._norm_invoice((x or {}).get("invoiceNumber")) == "AF-122-I26270204"
+        for x in (shrunk.get("cancelledInvoices") or []) if isinstance(x, dict)
+    )
+    kept = oem_sync.drop_cancelled_empty_units({
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9LIVE01"},
+            {"sno": 2, "model": "Turbo Max"},
+        ],
+    })
+    assert kept is None
+    both = oem_sync.drop_cancelled_empty_units({
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "chassisNumber": "", "cancelledInvoiceNumber": "OLD-1"},
+            {"sno": 2, "chassisNumber": "", "cancelledInvoiceNumber": "OLD-2"},
+        ],
+    })
+    assert both is None
+
+
+@pytest.mark.asyncio
+async def test_invoice_list_cancel_drops_pack_unit_even_if_sold_still_lists_it(client):
+    """Hrithik: AF-122-I26270204 CANCELLED, 0209 CREATED — one unit remains."""
+    live = "MD9EVDAD26J217577"
+    dead = "MD9EVDAD26J217760"
+    mobile = "7297021177"
+    lid = "LD26000068"
+    await server.db.oem_sold.delete_many({
+        "$or": [{"chassis": {"$in": [live, dead]}}, {"mobile": mobile}],
+    })
+    await server.db.oem_cancelled_invoices.delete_many({"chassis": {"$in": [live, dead]}})
+    await server.db.leads.delete_many({"$or": [{"leadId": lid}, {"mobile": mobile}]})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Hrithik Chopra", "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-28",
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "chassisNumber": dead, "invoiceNumber": "AF-122-I26270204",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (FB)",
+             "chassisNumber": dead, "invoiceNumber": "AF-122-I26270204"},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (FB)",
+             "chassisNumber": live, "invoiceNumber": "AF-122-I26270209"},
+        ],
+    })
+    for ch, inv in ((dead, "AF-122-I26270204"), (live, "AF-122-I26270209")):
+        await server.db.oem_sold.insert_one({
+            "chassis": ch, "mobile": mobile, "invoiceNumber": inv,
+            "customerName": "Hrithik Chopra", "soldDate": "2026-10-05",
+            "model": "Turbo Max", "variant": "Maxx (FB)", "coulsonStatus": "SOLD",
+        })
+    await server.db.oem_cancelled_invoices.insert_one({
+        "chassis": dead, "invoiceNumber": "AF-122-I26270204",
+        "invoiceStatus": "CANCELLED", "customerName": "Hrithik Chopra",
+    })
+    gone = await oem_sync.delink_cancelled_sold_invoices(server.db)
+    assert gone["cleared"] >= 1
+    assert lid in (gone.get("clearedIds") or [])
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert oem_sync.lead_chassis_list(lead) == [live]
+    assert len(lead.get("units") or []) == 1
+    assert oem_sync._norm_chassis(lead["units"][0].get("chassisNumber")) == live
+    assert lead["invoiceNumber"] == "AF-122-I26270209"
+    assert lead["currentStatus"] == "Delivered"
+    assert lead.get("oemInvoiceMissing") is not True
+    assert await server.db.oem_sold.find_one({"chassis": dead}) is None
 
 
 @pytest.mark.asyncio

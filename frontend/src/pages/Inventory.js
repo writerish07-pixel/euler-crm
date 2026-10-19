@@ -10,6 +10,7 @@ import { useAuth } from "../context/AuthContext";
 const TABS = [
   ["yard", "In yard"],
   ["transit", "In transit"],
+  ["held", "Booked / Pilot / Demo"],
   ["order", "Need to order"],
 ];
 
@@ -18,6 +19,7 @@ export default function Inventory() {
   const [tab, setTab] = useState("yard");
   const [rows, setRows] = useState([]);
   const [transit, setTransit] = useState([]);
+  const [held, setHeld] = useState([]);
   const [need, setNeed] = useState([]);
   const [summary, setSummary] = useState(null);
   const [status, setStatus] = useState(null);
@@ -41,6 +43,7 @@ export default function Inventory() {
       });
     }).catch(() => setRows([]));
     get("/inventory/transit", q).then(setTransit).catch(() => setTransit([]));
+    get("/inventory/held", q).then((list) => setHeld(Array.isArray(list) ? list : [])).catch(() => setHeld([]));
     get("/inventory/need-to-order").then(setNeed).catch(() => setNeed([]));
     get("/inventory/summary").then(setSummary).catch(() => {});
     get("/inventory/check").then(setCheck).catch(() => {});
@@ -53,7 +56,7 @@ export default function Inventory() {
     try {
       const r = await post("/integrations/coulson/sync", {});
       if (r.ok) toast.success(
-        `Synced ${r.inventoryCount || 0} in yard · ${r.transitCount || 0} in transit · ${(r.leadsVehicleIds && r.leadsVehicleIds.updated) || 0} leads chassis/invoice`,
+        `Synced ${r.inventoryCount || 0} in yard · ${r.transitCount || 0} in transit · ${r.heldCount || 0} booked/pilot/demo · ${(r.leadsVehicleIds && r.leadsVehicleIds.updated) || 0} leads chassis/invoice`,
       );
       else toast.error(r.reason === "not_configured" ? "Save Coulson login in Settings first" : "Sync did not run");
       load();
@@ -65,10 +68,12 @@ export default function Inventory() {
   const models = [...new Set([
     ...rows.map((r) => r.model),
     ...transit.map((r) => r.model),
+    ...held.map((r) => r.model),
     ...need.map((r) => r.model),
   ].filter(Boolean))];
   const yardRows = model ? rows.filter((r) => r.model === model) : rows;
   const transitRows = model ? transit.filter((r) => r.model === model) : transit;
+  const heldRows = model ? held.filter((r) => r.model === model) : held;
   const needRows = model ? need.filter((r) => r.model === model) : need;
 
   return (
@@ -85,7 +90,7 @@ export default function Inventory() {
           )}
         </div>} />
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-5">
         <Card className="p-3" data-testid="inv-card-yard">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">In yard</div>
           <div className="text-xl font-bold tabular">{summary?.total ?? rows.length}</div>
@@ -93,6 +98,10 @@ export default function Inventory() {
         <Card className="p-3" data-testid="inv-card-transit">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">In transit</div>
           <div className="text-xl font-bold tabular">{summary?.transit ?? transit.length}</div>
+        </Card>
+        <Card className="p-3" data-testid="inv-card-held">
+          <div className="text-[11px] uppercase tracking-wide text-ink-faint">Booked / Pilot / Demo</div>
+          <div className="text-xl font-bold tabular">{summary?.held ?? held.length}</div>
         </Card>
         <Card className="p-3" data-testid="inv-card-need">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">Need to order</div>
@@ -206,6 +215,24 @@ export default function Inventory() {
             { key: "inventoryAgeing", label: "Age (days)", align: "right", mono: true },
           ]}
           rows={transitRows}
+        />
+      )}
+
+      {tab === "held" && (
+        <Table
+          rowKey="chassis"
+          empty="No booked, pilot, or demo vehicles from the last OEM sync."
+          columns={[
+            { key: "coulsonStatus", label: "OEM status", render: (r) => <Badge>{r.coulsonStatus || r.stockStatus || "Held"}</Badge> },
+            { key: "model", label: "Model", render: (r) => <span className="font-semibold">{r.model}</span> },
+            { key: "variant", label: "Variant" },
+            { key: "bodyType", label: "Body" },
+            { key: "emch", label: "EMCH", mono: true },
+            { key: "chassis", label: "Chassis", mono: true, render: (r) => <span className="text-xs">{r.chassis}</span> },
+            { key: "exShowroom", label: "Ex-Showroom", align: "right", mono: true, render: (r) => inr(r.exShowroom) },
+            { key: "inventoryAgeing", label: "Age (days)", align: "right", mono: true },
+          ]}
+          rows={heldRows}
         />
       )}
 

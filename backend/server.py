@@ -13230,6 +13230,13 @@ async def list_transit_inventory(model: Optional[str] = None, _user=Depends(curr
     return [clean(r) for r in rows]
 
 
+@api.get("/inventory/held")
+async def list_held_inventory(model: Optional[str] = None, _user=Depends(current_user)):
+    """Coulson Booked / Pilot / Demo — on the lot, not sellable Present yard."""
+    rows = await oem_sync.list_held_inventory(db, model)
+    return [clean(r) for r in rows]
+
+
 @api.get("/inventory/need-to-order")
 async def list_need_to_order(_user=Depends(current_user)):
     """Booked deals whose model/variant has no live yard stock."""
@@ -13241,6 +13248,7 @@ async def inventory_summary(_user=Depends(current_user)):
     counts = await oem_sync.inventory_counts(db)
     out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
     transit = await db.oem_inventory_transit.count_documents({})
+    held = await db.oem_inventory_held.count_documents({})
     need = await oem_sync.need_to_order_bookings(db)
     check = inventory_check.public_check(await inventory_check.latest_check(db))
     last = await db.inventory_checks.find(
@@ -13249,6 +13257,7 @@ async def inventory_summary(_user=Depends(current_user)):
     return {
         "total": sum(c["count"] for c in out),
         "transit": transit,
+        "held": held,
         "needToOrder": len(need),
         "rows": out,
         "physicalCheck": {

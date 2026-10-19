@@ -198,6 +198,8 @@ async def test_coulson_sync_stores_sold_by_mobile(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: present)
     monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: sold)
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
     assert r.status_code == 200, r.text
@@ -240,6 +242,8 @@ async def test_coulson_sync_writes_sold_ids_onto_matching_leads(client, monkeypa
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: sold)
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
     assert r.status_code == 200, r.text

@@ -189,6 +189,8 @@ async def test_mocked_coulson_sync(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: vehicles)
     monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
 
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
@@ -239,6 +241,8 @@ async def test_sync_writes_oem_invoice_price_to_master_and_list(client, monkeypa
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
 
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
@@ -691,6 +695,8 @@ async def test_sync_uses_pasted_session_and_skips_password_login(client, monkeyp
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
 
     def boom(*a, **k):
         raise AssertionError("login must not run when a live session is stored")
@@ -818,6 +824,7 @@ async def test_expired_session_renews_with_saved_password(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
 
     renewed = _coulson_jwt(exp_offset=3600)
     monkeypatch.setattr(coulson_client, "login", lambda user, pw: renewed)
@@ -1034,6 +1041,8 @@ def test_vehicle_invoices_skip_cancelled(monkeypatch):
     monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
     rows = coulson_client.fetch_vehicle_invoices("tok")
     assert [r["chassis"] for r in rows] == ["MD9EVDAD26K217428"]
+    assert rows.invoice_list_ok is True
+    assert [r["chassis"] for r in rows.cancelled] == ["MD9CANCEL01"]
 
 
 def test_dealer_invoices_page_by_index(monkeypatch):
@@ -1094,6 +1103,7 @@ async def test_sync_empty_sold_does_not_wipe_oem_sold(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
     monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
     assert r.status_code == 200, r.text
@@ -1147,4 +1157,100 @@ async def test_replace_sold_keeps_yard_model_on_invoice_row(client):
     assert row["variant"] == "Maxx (PV)"
     await server.db.oem_sold.delete_many({"chassis": chassis})
     await server.db.oem_inventory.delete_many({"chassis": chassis})
+
+
+def test_sold_inventory_drops_cancelled_even_when_sold_tab_still_lists_it(monkeypatch):
+    """Invoice List CANCELLED wins over the Sold tab still showing the chassis."""
+    dead = "MD9EVDAD26J217760"
+    live = "MD9EVDAD26J217577"
+
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            return {"success": True, "data": [
+                {"chassis": dead, "customer_name": "Hrithik Chopra",
+                 "customer_phone": "7297021177", "invoice_number": "AF-122-I26270204"},
+                {"chassis": live, "customer_name": "Hrithik Chopra",
+                 "customer_phone": "7297021177", "invoice_number": "AF-122-I26270209"},
+            ], "extras": {"total_count": 2}}
+        if path == "dealer/invoice/vehicle":
+            return {"success": True, "data": [
+                {"chassis": dead, "invoice_number": "AF-122-I26270204",
+                 "status": "CANCELLED", "invoiceStatus": "CANCELLED",
+                 "customer_name": "HRITHIK CHOPRA", "customer_phone": "7297821177",
+                 "registration_number": "EMCS-7684",
+                 "invoice_creation_ts": "2026-09-28T15:09:38.000Z"},
+                {"chassis": live, "invoice_number": "AF-122-I26270209",
+                 "status": "CREATED",
+                 "customer_name": "HRITHIK CHOPRA", "customer_phone": "7297821177",
+                 "registration_number": "RJ14GV5082",
+                 "invoice_creation_ts": "2026-10-05T12:48:29.000Z"},
+            ], "extras": {"total_count": 2}}
+        raise coulson_client.CoulsonError("not found", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok", limit=200)
+    chassis_ids = {r["chassis"] for r in rows}
+    assert live in chassis_ids
+    assert dead not in chassis_ids
+    assert rows.invoice_list_ok is True
+    assert {r["chassis"] for r in rows.cancelled} == {dead}
+
+
+def test_held_inventory_merges_booked_pilot_demo(monkeypatch):
+    def fake_get_json(token, path, params=None):
+        assert path == "vehicle-inventory/transfer"
+        status = str((params or {}).get("vehicle_status") or "")
+        if status == "BOOKED":
+            return {"success": True, "data": [
+                {"chassis": "MD9BOOKED01", "model": "Turbo"},
+            ], "extras": {"total_count": 1}}
+        if status == "PILOT":
+            return {"success": True, "data": [
+                {"chassis": "MD9PILOT01", "model": "Storm"},
+            ], "extras": {"total_count": 1}}
+        if status == "DEMO":
+            return {"success": True, "data": [
+                {"chassis": "MD9DEMO01", "model": "HiCity"},
+            ], "extras": {"total_count": 1}}
+        return {"success": True, "data": [], "extras": {"total_count": 0}}
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_held_inventory("tok")
+    by = {r["chassis"]: r.get("_coulsonStatus") for r in rows}
+    assert by == {
+        "MD9BOOKED01": "BOOKED",
+        "MD9PILOT01": "PILOT",
+        "MD9DEMO01": "DEMO",
+    }
+
+
+@pytest.mark.asyncio
+async def test_replace_cancelled_strips_sold_and_held_sync(client):
+    dead = "MD9CANCELSTILL01"
+    booked = "MD9HELDBOOK01"
+    yard = "MD9YARDPRESENT01"
+    await server.db.oem_sold.delete_many({"chassis": dead})
+    await server.db.oem_inventory.delete_many({"chassis": {"$in": [booked, yard]}})
+    await server.db.oem_inventory.insert_one({
+        "chassis": yard, "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": dead, "invoiceNumber": "AF-DEAD", "coulsonStatus": "SOLD",
+    })
+    n = await oem_sync.replace_cancelled_invoices(server.db, [{
+        "chassis": dead, "invoice_number": "AF-DEAD", "status": "CANCELLED",
+    }], ok=True)
+    assert n == 1
+    assert await server.db.oem_sold.find_one({"chassis": dead}) is None
+    held_n = await oem_sync.replace_held_inventory(server.db, [
+        {"chassis": booked, "model": "Turbo", "variant": "Range Maxx",
+         "_coulsonStatus": "BOOKED"},
+        {"chassis": yard, "model": "Turbo", "variant": "Range Maxx",
+         "_coulsonStatus": "BOOKED"},
+    ], {}, {})
+    assert held_n == 1
+    assert await server.db.oem_inventory.find_one({"chassis": yard}) is not None
+    held = await oem_sync.list_held_inventory(server.db)
+    assert [r["chassis"] for r in held] == [booked]
+    assert held[0]["coulsonStatus"] == "BOOKED"
 
