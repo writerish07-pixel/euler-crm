@@ -3075,6 +3075,21 @@ def _staff_safe_billing(summary):
     return out
 
 
+def _strip_deal_verify_for_viewer(lead: dict, user) -> dict:
+    """Deal verify (customer said vs receipts) is owner-desk only.
+
+    Executives must not see mismatch on their own files. Owner / Sales GM /
+    Showroom Admin already have /deal-verify.
+    """
+    if not lead or authmod.is_showroom_desk(user):
+        return lead
+    out = dict(lead)
+    for k in list(out.keys()):
+        if str(k).startswith("dealVerify"):
+            out.pop(k, None)
+    return out
+
+
 def _lead_for_viewer(lead: dict, user) -> dict:
     if not lead:
         return lead
@@ -3086,8 +3101,8 @@ def _lead_for_viewer(lead: dict, user) -> dict:
     if role in authmod.FIELD_ROLES:
         return _field_safe_lead(lead)
     if role != "owner":
-        return _staff_safe_lead(lead)
-    return lead
+        lead = _staff_safe_lead(lead)
+    return _strip_deal_verify_for_viewer(lead, user)
 
 
 def _volume_slice(leads, payments, period, cancel_events, *, include_money=True):
@@ -6431,6 +6446,7 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         lead = _staff_safe_lead(lead)
         commercials = _staff_safe_commercials(commercials)
         billing_summary = _staff_safe_billing(billing_summary)
+    lead = _strip_deal_verify_for_viewer(lead, user)
     documents = []
     try:
         documents = await lead_docs.list_docs(

@@ -1107,7 +1107,9 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
             )}
         </Card>
       )}
-      <DealVerifyCard lead={lead} booked={booked} canManage={!!canManageShowroom} onSaved={onSaved} />
+      {canManageShowroom && (
+        <DealVerifyCard lead={lead} booked={booked} canManage onSaved={onSaved} />
+      )}
       <Card className="p-4 sm:col-span-2">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Details</h4>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6">

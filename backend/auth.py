@@ -51,6 +51,11 @@ def is_showroom_admin(user) -> bool:
     return str((user or {}).get("role") or "").strip().lower() == "tl"
 
 
+def is_showroom_desk(user) -> bool:
+    """Owner / Sales GM / Showroom Admin — Deal verify and other whole-showroom tools."""
+    return str((user or {}).get("role") or "").strip().lower() in SHOWROOM_DESK_ROLES
+
+
 def is_team_lead(user) -> bool:
     return str((user or {}).get("role") or "").strip().lower() == "team_lead"
 

@@ -5,7 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 
-const mockAuth = { isField: false, isExecutive: false, isShowroomAdmin: false };
+const mockAuth = { isField: false, isExecutive: false, isShowroomAdmin: false, canManageShowroom: false };
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -15,8 +15,8 @@ jest.mock("../lib/api", () => ({
     if (String(url) === "/leads" || String(url).indexOf("/leads") === 0) {
       return Promise.resolve([
         {
-          leadId: "LD26001001", customerName: "Approved Singh", currentStatus: "Contacted",
-          executive: "Amit", needsUpdate: true,
+          leadId: "LD26001001", customerName: "Approved Singh", currentStatus: "Booked",
+          executive: "Amit", needsUpdate: true, dealVerifyMismatch: true,
           updateFlags: [{ code: "kyc", message: "KYC missing: Aadhaar front" }],
         },
         { leadId: "LD26001002", customerName: "Ready Ram", currentStatus: "Contacted", executive: "Amit", needsUpdate: false, updateFlags: [] },
@@ -68,6 +68,7 @@ afterEach(() => {
   mockAuth.isShowroomAdmin = false;
   mockAuth.isExecutive = false;
   mockAuth.isField = false;
+  mockAuth.canManageShowroom = false;
 });
 
 test("owner lead register is booked files, not New enquiries", async () => {
@@ -95,6 +96,23 @@ test("showroom admin follow-up register keeps New so OEM and approved files stay
   expect(document.querySelector('[data-testid="filter-Contacted"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="filter-all"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
+});
+
+test("showroom admin sees deal mismatch; executive does not", async () => {
+  mockAuth.canManageShowroom = true;
+  mockAuth.isShowroomAdmin = true;
+  const admin = await renderLeads();
+  expect(admin.host.querySelector('[data-testid="deal-verify-flag-LD26001001"]')).toBeTruthy();
+  expect(admin.host.textContent).toMatch(/Deal mismatch/);
+  await act(async () => { admin.root.unmount(); });
+
+  mockAuth.canManageShowroom = false;
+  mockAuth.isShowroomAdmin = false;
+  mockAuth.isExecutive = true;
+  const exec = await renderLeads();
+  expect(exec.host.querySelector('[data-testid="deal-verify-flag-LD26001001"]')).toBeFalsy();
+  expect(exec.host.textContent).not.toMatch(/Deal mismatch/);
+  await act(async () => { exec.root.unmount(); });
 });
 
 test("showroom admin sees exact update gaps and can filter to those leads", async () => {
