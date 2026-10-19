@@ -449,7 +449,8 @@ def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
 #
 # Oct 2026 Coulson SPA (dealer login) vs Euler:
 #   CONNECTED — sap-vehicle-models (Price Master), PRESENT (Yard),
-#     IN_TRANSIT, SOLD + Invoice List Created, debit-note claims.
+#     IN_TRANSIT, SOLD + Invoice List Created, debit-note claims (line
+#     items + header Linked Vehicles chassis).
 #   THIS SYNC — Invoice List CANCELLED (drop those chassis from leads),
 #     BOOKED / PILOT / DEMO as held (not sellable yard).
 #   NOT YET — Create Quotation, Quotation List, Stock Transfer, Vehicle
