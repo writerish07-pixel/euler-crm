@@ -297,6 +297,11 @@ def _sniff_content_type(data: bytes) -> str:
         return "image/webp"
     if data.startswith(ZIP_MAGIC):
         return "application/zip"
+    # iPhone / Android camera often sends HEIC as octet-stream named "image".
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        brand = data[8:12].lower()
+        if brand in (b"heic", b"heix", b"heif", b"mif1", b"msf1"):
+            return "image/heic"
     return ""
 
 
@@ -361,9 +366,14 @@ def _own_request(req, user) -> bool:
 
 async def missing_kyc(db, *, request_id: str = "", lead_id: str = "",
                       customer_type: str = "Individual", gstin: str = "") -> list:
-    q = {"requestId": request_id} if request_id else {"leadId": lead_id}
-    if not (request_id or lead_id):
+    clauses = []
+    if request_id:
+        clauses.append({"requestId": request_id})
+    if lead_id:
+        clauses.append({"leadId": lead_id})
+    if not clauses:
         return list(required_kyc_kinds(customer_type))
+    q = {"$or": clauses} if len(clauses) > 1 else clauses[0]
     rows = await db[COLLECTION].find(q, _META_PROJ).to_list(50)
     have = {r.get("kind") for r in rows}
     missing = [k for k in required_kyc_kinds(customer_type) if k not in have]
@@ -466,15 +476,31 @@ async def has_oem_extra_proof(db, *, request_id: str = "", lead_id: str = "") ->
 
 
 async def list_docs(db, user, *, lead_id: str = "", request_id: str = "",
-                    own: bool = False) -> list:
+                    own: bool = False, extra_request_ids=None) -> list:
+    clauses = []
     if lead_id:
-        q = {"leadId": lead_id}
-    elif request_id:
-        q = {"requestId": request_id}
-    else:
+        clauses.append({"leadId": lead_id})
+    if request_id:
+        clauses.append({"requestId": request_id})
+    for rid in extra_request_ids or []:
+        rid = str(rid or "").strip()
+        if rid:
+            clauses.append({"requestId": rid})
+    if not clauses:
         return []
-    rows = await db[COLLECTION].find(q, _META_PROJ).sort("uploadedAt", 1).to_list(200)
-    return [public_row(r) for r in rows if can_read_kind(user, r.get("kind") or "", own=own)]
+    q = {"$or": clauses} if len(clauses) > 1 else clauses[0]
+    rows = await db[COLLECTION].find(q, _META_PROJ).sort("uploadedAt", 1).to_list(400)
+    seen, out = set(), []
+    for r in rows:
+        if not can_read_kind(user, r.get("kind") or "", own=own):
+            continue
+        did = str(r.get("documentId") or "")
+        if did and did in seen:
+            continue
+        if did:
+            seen.add(did)
+        out.append(public_row(r))
+    return out
 
 
 async def get_meta(db, document_id: str):
@@ -502,6 +528,18 @@ async def _delete_overlapping_ledgers(db, *, lead_id: str, snos: list[int]):
         await db[COLLECTION].delete_many({"documentId": {"$in": ids}})
 
 
+async def _delete_unique_docs(db, kind, *, lead_id="", request_id="", unit_sno=None):
+    """Drop the previous file for this slot on the request or the live lead."""
+    clauses = []
+    if lead_id:
+        clauses.append(unique_doc_filter(kind, lead_id=lead_id, unit_sno=unit_sno))
+    if request_id:
+        clauses.append(unique_doc_filter(kind, request_id=request_id, unit_sno=unit_sno))
+    if not clauses:
+        return
+    await db[COLLECTION].delete_many({"$or": clauses} if len(clauses) > 1 else clauses[0])
+
+
 async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: str,
                    filename: str, lead_id: str = "", request_id: str = "",
                    unit_sno=None, unit_snos=None) -> dict:
@@ -513,11 +551,11 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
     if kind == LEDGER_KIND:
         await _delete_overlapping_ledgers(db, lead_id=lead_id, snos=snos)
         if not snos and info["unique"]:
-            await db[COLLECTION].delete_many(unique_doc_filter(
-                kind, lead_id=lead_id, request_id=request_id, unit_sno=None))
+            await _delete_unique_docs(
+                db, kind, lead_id=lead_id, request_id=request_id, unit_sno=None)
     elif info["unique"]:
-        await db[COLLECTION].delete_many(unique_doc_filter(
-            kind, lead_id=lead_id, request_id=request_id, unit_sno=sno))
+        await _delete_unique_docs(
+            db, kind, lead_id=lead_id, request_id=request_id, unit_sno=sno)
     doc = {
         "documentId": await next_id("lead_document", "DC26"),
         "leadId": lead_id or "",

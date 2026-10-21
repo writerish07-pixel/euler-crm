@@ -156,6 +156,8 @@ export default function Inventory() {
             { key: "bodyType", label: "Body" },
             { key: "emch", label: "EMCH", mono: true },
             { key: "chassis", label: "Chassis", mono: true, render: (r) => <span className="text-xs">{r.chassis}</span> },
+            { key: "motorNumber", label: "Motor", mono: true, render: (r) => <span className="text-xs">{r.motorNumber || "—"}</span> },
+            { key: "batteryNumber", label: "Battery", mono: true, render: (r) => <span className="text-xs">{r.batteryNumber || "—"}</span> },
             { key: "exShowroom", label: "Ex-Showroom", align: "right", mono: true, render: (r) => inr(r.exShowroom) },
             { key: "inventoryAgeing", label: "Age (days)", align: "right", mono: true },
             { key: "pdiDone", label: "PDI", render: (r) => <Badge tone={r.pdiDone ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20" : "bg-zinc-100 text-zinc-500 ring-zinc-400/20"}>{r.pdiDone ? "Done" : "Pending"}</Badge> },
@@ -211,6 +213,8 @@ export default function Inventory() {
             { key: "bodyType", label: "Body" },
             { key: "emch", label: "EMCH", mono: true },
             { key: "chassis", label: "Chassis", mono: true, render: (r) => <span className="text-xs">{r.chassis}</span> },
+            { key: "motorNumber", label: "Motor", mono: true, render: (r) => <span className="text-xs">{r.motorNumber || "—"}</span> },
+            { key: "batteryNumber", label: "Battery", mono: true, render: (r) => <span className="text-xs">{r.batteryNumber || "—"}</span> },
             { key: "exShowroom", label: "Ex-Showroom", align: "right", mono: true, render: (r) => inr(r.exShowroom) },
             { key: "inventoryAgeing", label: "Age (days)", align: "right", mono: true },
           ]}
@@ -229,6 +233,8 @@ export default function Inventory() {
             { key: "bodyType", label: "Body" },
             { key: "emch", label: "EMCH", mono: true },
             { key: "chassis", label: "Chassis", mono: true, render: (r) => <span className="text-xs">{r.chassis}</span> },
+            { key: "motorNumber", label: "Motor", mono: true, render: (r) => <span className="text-xs">{r.motorNumber || "—"}</span> },
+            { key: "batteryNumber", label: "Battery", mono: true, render: (r) => <span className="text-xs">{r.batteryNumber || "—"}</span> },
             { key: "exShowroom", label: "Ex-Showroom", align: "right", mono: true, render: (r) => inr(r.exShowroom) },
             { key: "inventoryAgeing", label: "Age (days)", align: "right", mono: true },
           ]}

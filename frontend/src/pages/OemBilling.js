@@ -226,6 +226,8 @@ export default function OemBilling() {
             </div>
           ) },
           { key: "chassis", label: "Chassis", mono: true },
+          { key: "motorNumber", label: "Motor", mono: true, render: (r) => r.motorNumber || "—" },
+          { key: "batteryNumber", label: "Battery", mono: true, render: (r) => r.batteryNumber || "—" },
           { key: "invoiceNumber", label: "Invoice", mono: true },
           { key: "soldDate", label: "OEM date", render: (r) => (
             r.undated ? <span className="text-ink-faint">Un-dated</span> : fmtDate(r.soldDate)

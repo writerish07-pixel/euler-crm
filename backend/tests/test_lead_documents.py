@@ -233,6 +233,69 @@ async def test_approvals_list_includes_deal_sheet_already_on_the_lead(exec_clien
 
 
 @pytest.mark.asyncio
+async def test_kyc_on_live_lead_lets_owner_approve_booking_request(exec_client, client):
+    """Executive uploaded KYC on the file; Approvals must not show empty / block."""
+    r = await client.post("/api/leads", json={
+        "customerName": "Parked KYC", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Executive", "budget": 185000})
+    lid = r.json()["leadId"]
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
+        up = await upload(exec_client, f"/api/leads/{lid}/documents", kind)
+        assert up.status_code == 200, up.text
+    await server.db.lead_requests.insert_one({
+        "requestId": "LR-PARKED-KYC", "status": "pending",
+        "existingLeadId": lid, "requestKind": "booking_deal",
+        "submittedBy": "executive@euler.com",
+        "payload": {
+            "customerName": "Parked KYC", "mobile": "",
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "budget": 185000, "executive": "Executive",
+            "customerType": "Individual",
+        },
+        "createdAt": "2026-10-20T10:00:00+00:00",
+    })
+    listed = (await client.get("/api/lead-requests", params={"status": "pending"})).json()
+    row = next(x for x in listed if x["requestId"] == "LR-PARKED-KYC")
+    assert row["kycComplete"] is True
+    assert row["dealSheetMissing"] is False
+    kinds = {d["kind"] for d in (row.get("documents") or [])}
+    assert {"kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"} <= kinds
+    ap = await client.post("/api/lead-requests/LR-PARKED-KYC/approve")
+    assert ap.status_code == 200, ap.text
+
+
+@pytest.mark.asyncio
+async def test_request_upload_also_lands_on_the_live_lead(exec_client, client):
+    r = await client.post("/api/leads", json={
+        "customerName": "Bind Docs", "mobile": next_mobile(),
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "executive": "Executive", "budget": 185000})
+    lid = r.json()["leadId"]
+    await server.db.lead_requests.insert_one({
+        "requestId": "LR-BIND-DOCS", "status": "pending",
+        "existingLeadId": lid, "requestKind": "booking_deal",
+        "submittedBy": "executive@euler.com",
+        "payload": {
+            "customerName": "Bind Docs", "executive": "Executive",
+            "customerType": "Individual",
+        },
+        "createdAt": "2026-10-20T10:00:00+00:00",
+    })
+    up = await upload(exec_client, "/api/lead-requests/LR-BIND-DOCS/documents",
+                      "kyc_pan", "pan.png")
+    assert up.status_code == 200, up.text
+    stored = await server.db[server.lead_docs.COLLECTION].find_one(
+        {"documentId": up.json()["documentId"]})
+    assert stored["leadId"] == lid
+    assert stored["requestId"] == "LR-BIND-DOCS"
+    lead_docs = (await client.get(f"/api/leads/{lid}/documents")).json()
+    assert any(d["kind"] == "kyc_pan" for d in lead_docs)
+    drawer = (await client.get(f"/api/leads/{lid}/360")).json()
+    assert any(d["kind"] == "kyc_pan" for d in (drawer.get("documents") or []))
+
+
+@pytest.mark.asyncio
 async def test_b2b_aadhaar_is_optional(exec_client, client):
     seeded = await seed_pending({
         "customerName": "B2B No Aadhaar", "mobile": next_mobile(),
@@ -496,6 +559,9 @@ def test_octet_stream_jpeg_is_sniffed_as_photo():
         filename = "image"
     assert server.lead_docs._content_type(Fake(), kind="oem_extra_support", data=jpeg) == "image/jpeg"
     assert server.lead_docs._sniff_content_type(b"\x89PNG\r\n\x1a\n" + b"x") == "image/png"
+    heic = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 40
+    assert server.lead_docs._sniff_content_type(heic) == "image/heic"
+    assert server.lead_docs._content_type(Fake(), kind="kyc_pan", data=heic) == "image/heic"
 
 
 @pytest.mark.asyncio
