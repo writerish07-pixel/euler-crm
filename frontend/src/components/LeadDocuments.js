@@ -241,7 +241,7 @@ export function LeadDocsStrip({ leadId, kinds, canUploadKinds = [], title, onCha
   useEffect(() => {
     if (!leadId) return undefined;
     let live = true;
-    get(`/leads/${leadId}/documents`).then((d) => { if (live) setRows(Array.isArray(d) ? d : []); }).catch(() => { if (live) setRows([]); });
+    get(`/leads/${leadId}/documents`).then((d) => { if (live && Array.isArray(d)) setRows(d); }).catch(() => {});
     return () => { live = false; };
   }, [leadId, refreshKey]);
   const groupSnos = Array.isArray(unitSnos) ? unitSnos.map((n) => Number(n)).filter((n) => n >= 1) : [];

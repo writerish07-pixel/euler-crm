@@ -518,6 +518,8 @@ def _merge_vehicle_rows(rows, chunk, status=""):
             for k in (
                 "invoice_number", "invoiceNumber", "customer_name", "customer_phone",
                 "customer_mobile", "registration_number", "invoice_creation_ts", "date",
+                "motor_number", "motorNumber", "motor_no", "engine_number", "engineNumber",
+                "battery_number", "batteryNumber", "battery_serial_number",
             ):
                 if row.get(k) not in (None, "") and (
                         status == "INVOICED" or dst.get(k) in (None, "")):

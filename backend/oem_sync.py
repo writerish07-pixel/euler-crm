@@ -259,6 +259,8 @@ async def _record_sync(db, ok, error="", extra=None):
 def _inventory_doc(vehicle, sku, price):
     return {
         "chassis": vehicle_chassis(vehicle) or vehicle.get("chassis") or "",
+        "motorNumber": vehicle_motor(vehicle),
+        "batteryNumber": vehicle_battery(vehicle),
         "emch": vehicle.get("emch") or vehicle.get("registration_number")
                 or vehicle.get("registration_no") or vehicle.get("registrationNo") or "",
         "colour": vehicle.get("colour") or "",
@@ -548,6 +550,17 @@ _PLATE_KEYS = (
     "vehicle_number", "reg_no",
 )
 _CHASSIS_KEYS = ("chassis", "chassis_number", "chassisNumber", "vin")
+_MOTOR_KEYS = (
+    "motor_number", "motorNumber", "motor_no", "motorNo",
+    "motor_serial_number", "motor_serial", "motorSerial",
+    "engine_number", "engineNumber", "engine_no", "engineNo",
+)
+_BATTERY_KEYS = (
+    "battery_number", "batteryNumber", "battery_no", "batteryNo",
+    "battery_serial_number", "battery_serial", "batterySerial",
+    "battery_serial_no", "pack_serial_number", "packSerialNumber",
+    "battery_pack_number", "batteryPackNumber",
+)
 _MODEL_KEYS = (
     "model", "octopus_model", "vehicle_model", "vehicleModel",
     "model_name", "modelName", "crm_model",
@@ -603,6 +616,31 @@ def vehicle_mobile(row):
 
 def vehicle_chassis(row):
     return _norm_chassis(_first_str(row, _CHASSIS_KEYS))
+
+
+def _nested_first_str(row, keys):
+    n = _first_str(row, keys)
+    if n:
+        return n
+    if not isinstance(row, dict):
+        return ""
+    for nested_key in _NESTED_VEHICLE_KEYS:
+        sub = row.get(nested_key)
+        if isinstance(sub, dict):
+            n = _first_str(sub, keys)
+            if n:
+                return n
+    return ""
+
+
+def vehicle_motor(row):
+    """Motor / engine serial on a Coulson yard or Sold row."""
+    return _nested_first_str(row, _MOTOR_KEYS)
+
+
+def vehicle_battery(row):
+    """Battery pack serial on a Coulson yard or Sold row."""
+    return _nested_first_str(row, _BATTERY_KEYS)
 
 
 def vehicle_model(row):

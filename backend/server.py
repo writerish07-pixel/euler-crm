@@ -5820,7 +5820,7 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
     docs_by_req = {}
     if req_ids:
         for d in await db[lead_docs.COLLECTION].find(
-                {"requestId": {"$in": req_ids}}, {"data": 0}).to_list(1000):
+                {"requestId": {"$in": req_ids}}, {"data": 0}).to_list(20000):
             docs_by_req.setdefault(d.get("requestId"), []).append(d)
     out = []
     for r in rows:
@@ -5829,14 +5829,16 @@ async def list_lead_requests(status: Optional[str] = None, user=Depends(current_
         docs = [lead_docs.public_row(d) for d in docs_by_req.get(r.get("requestId"), [])
                 if lead_docs.can_read_kind(user, d.get("kind") or "", own=own)]
         row["documents"] = docs
-        missing = await lead_docs.missing_kyc(
-            db, request_id=r.get("requestId") or "",
-            customer_type=row.get("customerType"), gstin=row.get("gstin"))
-        row["kycMissing"] = missing
-        row["kycComplete"] = not missing
         out.append(row)
     out = await _overlay_existing_lead_docs(out, user)
     out = await _attach_oem_extra_to_requests(out)
+    for row in out:
+        missing = await lead_docs.missing_kyc(
+            db, request_id=row.get("requestId") or "",
+            lead_id=row.get("existingLeadId") or "",
+            customer_type=row.get("customerType"), gstin=row.get("gstin"))
+        row["kycMissing"] = missing
+        row["kycComplete"] = not missing
     need_lead_proof = [
         r.get("existingLeadId") for r in out
         if ce.num(r.get("oemExtraSupportReceived")) > 0
@@ -5909,8 +5911,9 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
             403,
             "Only the Owner can approve this deal — Cx Demand differs from Ex-showroom + RTO + Insurance.",
         )
+    existing_id = str(claimed.get("existingLeadId") or "").strip()
     missing = await lead_docs.missing_kyc(
-        db, request_id=request_id,
+        db, request_id=request_id, lead_id=existing_id,
         customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
     if missing:
         await _copy_create_docs_from_sibling(
@@ -5920,18 +5923,13 @@ async def approve_lead_request(request_id: str, user=Depends(current_user)):
         if req_fresh:
             payload = req_fresh.get("payload") or payload
         missing = await lead_docs.missing_kyc(
-            db, request_id=request_id,
-            customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
-    if missing and str(claimed.get("existingLeadId") or "").strip():
-        missing = await lead_docs.missing_kyc(
-            db, lead_id=str(claimed.get("existingLeadId") or ""),
+            db, request_id=request_id, lead_id=existing_id,
             customer_type=payload.get("customerType"), gstin=payload.get("gstin"))
     if missing:
         await db.lead_requests.update_one(
             {"requestId": request_id}, {"$set": {"status": "pending", "approvedBy": "", "approvedAt": ""}})
         labels = [lead_docs.KINDS.get(k, {}).get("label") or k for k in missing]
         raise HTTPException(422, "KYC is incomplete — " + ", ".join(labels) + ".")
-    existing_id = str(claimed.get("existingLeadId") or "").strip()
     if str(claimed.get("requestKind") or "") != "booking_deal" and not await lead_docs.has_deal_sheet(
             db, request_id=request_id, lead_id=existing_id):
         await db.lead_requests.update_one(
@@ -6265,6 +6263,7 @@ async def _request_public(req, user):
     await _overlay_existing_lead_docs([row], user)
     missing = await lead_docs.missing_kyc(
         db, request_id=rid or "",
+        lead_id=str(row.get("existingLeadId") or ""),
         customer_type=row.get("customerType"), gstin=row.get("gstin"))
     row["kycMissing"] = missing
     row["kycComplete"] = not missing
@@ -6499,8 +6498,10 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
     lead = _strip_deal_verify_for_viewer(lead, user)
     documents = []
     try:
+        extra_reqs = [lead.get("approvalRequestId")] if lead.get("approvalRequestId") else []
         documents = await lead_docs.list_docs(
-            db, user, lead_id=lead_id, own=_is_own_lead(lead, user))
+            db, user, lead_id=lead_id, own=_is_own_lead(lead, user),
+            extra_request_ids=extra_reqs)
     except Exception as exc:
         logger.exception("list_docs failed for %s: %s", lead_id, exc)
     oem_sold = None
@@ -6543,7 +6544,17 @@ async def list_lead_documents(lead_id: str, user=Depends(current_user)):
     await _require_lead_visible(lead, user)
     if user.get("role") in authmod.FIELD_ROLES:
         raise HTTPException(403, "Field logins cannot open customer documents.")
-    return await lead_docs.list_docs(db, user, lead_id=lead_id, own=_is_own_lead(lead, user))
+    extra = []
+    pending = await db.lead_requests.find_one({
+        "existingLeadId": lead_id,
+        "status": {"$in": ["pending", "approving"]},
+    }, {"requestId": 1})
+    if pending and pending.get("requestId"):
+        extra.append(pending["requestId"])
+    if lead.get("approvalRequestId"):
+        extra.append(lead["approvalRequestId"])
+    return await lead_docs.list_docs(
+        db, user, lead_id=lead_id, own=_is_own_lead(lead, user), extra_request_ids=extra)
 
 
 @api.post("/leads/{lead_id}/documents")
@@ -6572,9 +6583,14 @@ async def upload_lead_document(lead_id: str, kind: str = Form(...),
             "Select the unit(s) for this Tally ledger — combine by selecting, or one unit for a separate ledger.",
         )
     data, ctype, filename = await lead_docs.read_upload(file, kind=kind)
+    pending = await db.lead_requests.find_one({
+        "existingLeadId": lead_id,
+        "status": {"$in": ["pending", "approving"]},
+    }, {"requestId": 1})
     row = await lead_docs.save_doc(
         db, next_id=next_id, user=user, kind=kind, data=data,
         content_type=ctype, filename=filename, lead_id=lead_id,
+        request_id=str((pending or {}).get("requestId") or ""),
         unit_sno=snos[0] if len(snos) == 1 else None,
         unit_snos=snos or None)
     await write_audit(act, "upload", "document", leadId=lead_id,
@@ -6610,6 +6626,7 @@ async def upload_request_document(request_id: str, kind: str = Form(...),
     return await lead_docs.save_doc(
         db, next_id=next_id, user=user, kind=kind, data=data,
         content_type=ctype, filename=filename, request_id=request_id,
+        lead_id=str(req.get("existingLeadId") or ""),
         unit_sno=unitSno)
 
 

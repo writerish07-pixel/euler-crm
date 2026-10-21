@@ -24,6 +24,19 @@ import coulson as coulson_client  # noqa: E402
 import server  # noqa: E402
 
 
+def test_inventory_reads_motor_and_battery_aliases():
+    row = {
+        "chassis": "MD9MOTORBATT01",
+        "motor_no": " mtr-9901 ",
+        "vehicle": {"battery_serial_number": "BAT-PACK-12"},
+    }
+    assert oem_sync.vehicle_motor(row) == "mtr-9901"
+    assert oem_sync.vehicle_battery(row) == "BAT-PACK-12"
+    doc = oem_sync._inventory_doc(row, None, 0)
+    assert doc["motorNumber"] == "mtr-9901"
+    assert doc["batteryNumber"] == "BAT-PACK-12"
+
+
 @pytest_asyncio.fixture
 async def client():
     await server.startup()
@@ -183,6 +196,7 @@ async def test_mocked_coulson_sync(client, monkeypatch):
         "sap_vehicle_model_id": "oem-maxx-pv", "sap_product_name": "TURBO RANGEMAXX PV",
         "is_pdi_done": True, "ready_for_allocation": True, "current_inventory_ageing": 4,
         "colour": "White",
+        "motor_number": "MTR-77821", "battery_serial_number": "BAT-44190",
     }]
 
     monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
@@ -203,6 +217,8 @@ async def test_mocked_coulson_sync(client, monkeypatch):
     inv = (await client.get("/api/inventory")).json()
     assert len(inv) == 1
     assert inv[0]["chassis"] == "MD9TESTCHASSIS0001"
+    assert inv[0]["motorNumber"] == "MTR-77821"
+    assert inv[0]["batteryNumber"] == "BAT-44190"
     assert inv[0]["model"] == "Turbo Max"
     assert inv[0]["variant"] == "Maxx (PV)"
     assert inv[0]["exShowroom"] == 770000
