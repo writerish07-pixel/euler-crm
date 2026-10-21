@@ -134,3 +134,46 @@ async def test_need_to_order_is_open_booking_without_yard(client):
     assert summary["needToOrder"] >= 1
     transit = (await client.get("/api/inventory/transit")).json()
     assert isinstance(transit, list)
+
+
+@pytest.mark.asyncio
+async def test_need_to_order_is_executive_scoped(client):
+    """An executive must not see another executive's unit or deal amount."""
+    await server.db.oem_inventory.delete_many({})
+    await server.db.leads.insert_many([
+        {
+            "leadId": "LD-NTO-MINE", "customerName": "My Booking",
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "accountStatus": "Active", "currentStatus": "Booked",
+            "bookingDate": "2026-10-01", "customerPayable": 410000,
+            "executive": "Executive", "mobile": "9811100001",
+        },
+        {
+            "leadId": "LD-NTO-THEIRS", "customerName": "Other Exec Booking",
+            "interestedModel": "Hi-Load", "variant": "XR",
+            "accountStatus": "Active", "currentStatus": "Booked",
+            "bookingDate": "2026-10-01", "customerPayable": 990000,
+            "executive": "Sanjay", "mobile": "9811100002",
+        },
+    ])
+    owner_rows = (await client.get("/api/inventory/need-to-order")).json()
+    owner_ids = {r["leadId"] for r in owner_rows}
+    assert "LD-NTO-MINE" in owner_ids
+    assert "LD-NTO-THEIRS" in owner_ids
+    assert (await client.get("/api/inventory/summary")).json()["needToOrder"] >= 2
+
+    exec_login = await client.post("/api/auth/login", json={
+        "email": "executive@euler.com", "password": "euler@123"})
+    assert exec_login.status_code == 200, exec_login.text
+    exec_c = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=server.app), base_url="http://test")
+    exec_c.headers.update({"Authorization": f"Bearer {exec_login.json()['token']}"})
+    try:
+        mine = (await exec_c.get("/api/inventory/need-to-order")).json()
+        ids = {r["leadId"] for r in mine}
+        assert "LD-NTO-MINE" in ids
+        assert "LD-NTO-THEIRS" not in ids
+        assert all(r.get("executive") == "Executive" for r in mine)
+        assert (await exec_c.get("/api/inventory/summary")).json()["needToOrder"] == len(mine)
+    finally:
+        await exec_c.aclose()
