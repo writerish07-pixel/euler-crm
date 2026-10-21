@@ -13254,19 +13254,40 @@ async def list_held_inventory(model: Optional[str] = None, _user=Depends(current
     return [clean(r) for r in rows]
 
 
+async def _need_to_order_for_viewer(user):
+    """Need-to-order is a booking list. Executives see only their units."""
+    rows = await oem_sync.need_to_order_bookings(db)
+    scoped = await _leads_for_scoped_viewer(
+        [{"leadId": r.get("leadId"), "executive": r.get("executive")} for r in rows],
+        user,
+    )
+    allowed = {l.get("leadId") for l in scoped}
+    out = [r for r in rows if r.get("leadId") in allowed]
+    role = str((user or {}).get("role") or "")
+    if role in authmod.FIELD_ROLES:
+        for r in out:
+            r.pop("customerPayable", None)
+            r.pop("mobile", None)
+    return out
+
+
 @api.get("/inventory/need-to-order")
-async def list_need_to_order(_user=Depends(current_user)):
-    """Booked deals whose model/variant has no live yard stock."""
-    return await oem_sync.need_to_order_bookings(db)
+async def list_need_to_order(user=Depends(current_user)):
+    """Booked deals whose model/variant has no live yard stock.
+
+    Yard stock itself is showroom-wide. The booking list is executive-scoped
+    so one executive never sees another file's customer or deal amount.
+    """
+    return await _need_to_order_for_viewer(user)
 
 
 @api.get("/inventory/summary")
-async def inventory_summary(_user=Depends(current_user)):
+async def inventory_summary(user=Depends(current_user)):
     counts = await oem_sync.inventory_counts(db)
     out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
     transit = await db.oem_inventory_transit.count_documents({})
     held = await db.oem_inventory_held.count_documents({})
-    need = await oem_sync.need_to_order_bookings(db)
+    need = await _need_to_order_for_viewer(user)
     check = inventory_check.public_check(await inventory_check.latest_check(db))
     last = await db.inventory_checks.find(
         {"submittedAt": {"$exists": True, "$ne": ""}}

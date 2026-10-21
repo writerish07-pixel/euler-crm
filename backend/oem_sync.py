@@ -3226,7 +3226,11 @@ def _is_open_booking(lead):
 
 
 async def need_to_order_bookings(db):
-    """Booked / finance leads with no matching chassis currently in the yard."""
+    """Booked / finance leads with no matching chassis currently in the yard.
+
+    Returns every open booking. The inventory API scopes this executive-wise
+    before it leaves the server — deal amount is not a yard-wide figure.
+    """
     counts = await inventory_counts(db)
     out = []
     async for l in db.leads.find({}):
