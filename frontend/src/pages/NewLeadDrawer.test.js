@@ -52,7 +52,22 @@ jest.mock("../lib/api", () => ({
   apiErrorDetail: (e) => e?.response?.data?.detail || {},
 }));
 jest.mock("../components/LeadDocuments", () => ({
-  LocalKycBlock: () => <div data-testid="kyc-block" />,
+  LocalKycBlock: ({ customerType, gstin, onGstin }) => (
+    <div data-testid="kyc-block">
+      {customerType === "B2B" ? (
+        <>
+          <input data-testid="lead-gstin" value={gstin || ""} onChange={(e) => onGstin && onGstin(e.target.value)} />
+          <div data-testid="kyc-gst-slot">GST certificate</div>
+          <div data-testid="kyc-pan-slot">PAN</div>
+        </>
+      ) : (
+        <>
+          <div data-testid="kyc-aadhaar-slot">Aadhaar front & back</div>
+          <div data-testid="kyc-pan-slot">PAN</div>
+        </>
+      )}
+    </div>
+  ),
   LocalOemExtraBlock: ({ amount }) => (
     Number(amount) > 0 ? <div data-testid="oem-extra-proof-block" /> : null
   ),
@@ -142,11 +157,45 @@ test("executive create form is name, mobile, model until Cx Demand needs approva
   expect(document.querySelector('[data-testid="lead-name"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="lead-mobile"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="lead-model"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="lead-customer-type"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="lead-customer-type"]').textContent).toMatch(/B2C/);
+  expect(document.querySelector('[data-testid="lead-customer-type"]').textContent).toMatch(/B2B/);
   expect(document.querySelector('[data-testid="deal-format-card"]')).toBeTruthy();
   expect(document.querySelector('[data-testid="kyc-block"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="kyc-aadhaar-slot"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="lead-gstin"]')).toBeFalsy();
   expect(document.querySelector('[data-testid="deal-sheet-block"]')).toBeFalsy();
   expect(document.querySelector('[data-testid="same-order-check"]')).toBeFalsy();
   expect(document.querySelector('[data-testid="save-lead-btn"]').textContent).toMatch(/Create Lead/);
+  await act(async () => { root.unmount(); });
+});
+
+test("executive create asks B2C or B2B and B2B switches to GST KYC", async () => {
+  const { root } = await renderDrawer();
+  const type = document.querySelector('[data-testid="lead-customer-type"]');
+  expect(type).toBeTruthy();
+  expect(document.querySelector('[data-testid="kyc-aadhaar-slot"]')).toBeTruthy();
+  await act(async () => {
+    type.value = "B2B";
+    type.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(document.querySelector('[data-testid="lead-gstin"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="kyc-gst-slot"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="kyc-aadhaar-slot"]')).toBeFalsy();
+  await act(async () => {
+    setInput(document.querySelector('[data-testid="lead-name"]'), "Firm Buyer");
+    setInput(document.querySelector('[data-testid="lead-mobile"]'), "9876500099");
+    setInput(document.querySelector('[data-testid="lead-gstin"]'), "22AAAAA0000A1Z5");
+  });
+  await act(async () => {
+    document.querySelector('[data-testid="save-lead-btn"]').click();
+  });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  expect(post).toHaveBeenCalledWith("/leads", expect.objectContaining({
+    customerName: "Firm Buyer",
+    customerType: "B2B",
+    gstin: "22AAAAA0000A1Z5",
+  }));
   await act(async () => { root.unmount(); });
 });
 
@@ -159,6 +208,8 @@ test("TL create form includes own name on the executive dropdown", async () => {
   const exec = document.querySelector('[data-testid="lead-executive"]');
   expect(exec).toBeTruthy();
   expect(exec.textContent).toMatch(/Create TL/);
+  expect(document.querySelector('[data-testid="lead-customer-type"]')).toBeTruthy();
+  expect(document.querySelector('[data-testid="kyc-block"]')).toBeTruthy();
   await act(async () => { root.unmount(); });
 });
 

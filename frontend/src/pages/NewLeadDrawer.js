@@ -344,14 +344,12 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
         )}
         <Field label="Mobile *"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} inputMode="numeric" placeholder="10-digit mobile" /></Field>
         {!enquiryOnly && <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>}
-        {!enquiryOnly && (
-          <Field label="Customer type">
-            <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>
-              <option>Individual</option>
-              <option value="B2B">B2B</option>
-            </Select>
-          </Field>
-        )}
+        <Field label="Customer type">
+          <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>
+            <option value="Individual">B2C</option>
+            <option value="B2B">B2B</option>
+          </Select>
+        </Field>
         {!enquiryOnly && <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{sources.map((s) => <option key={s}>{s}</option>)}</Select></Field>}
         {!isExecutive && (
           <Field label={isTl || isTeamLead || isSalesGm ? "Executive *" : "Executive"}>

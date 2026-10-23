@@ -297,7 +297,7 @@ export function LocalKycBlock({ customerType, files, setFiles, gstin, onGstin, c
           ? "KYC copies from the first file on this mobile. Attach replacements only if this unit is different."
           : b2b
           ? "B2B needs PAN, GST certificate and GSTIN. Aadhaar is optional."
-          : "Aadhaar front & back and PAN are required. Phone camera uses the rear lens."}
+          : "B2C needs Aadhaar front & back and PAN. Phone camera uses the rear lens."}
       </p>
       {attached.length > 0 && (
         <p className="text-[11px] text-emerald-700" data-testid="kyc-existing">

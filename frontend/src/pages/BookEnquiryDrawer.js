@@ -242,7 +242,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
           </Field>
           <Field label="Customer type">
             <Select data-testid="book-customer-type" value={customerType} onChange={(e) => setCustomerType(e.target.value)}>
-              <option>Individual</option>
+              <option value="Individual">B2C</option>
               <option value="B2B">B2B</option>
             </Select>
           </Field>
