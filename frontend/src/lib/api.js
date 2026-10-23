@@ -102,6 +102,7 @@ export const api = axios.create({ timeout: 25000 });
  *  first request may still be running on the server. */
 export const BULK_TIMEOUT_MS = 60000;
 export const OEM_SYNC_TIMEOUT_MS = 180000;
+export const REPORT_TIMEOUT_MS = 60000;
 export const DOC_UPLOAD_TIMEOUT_MS = 90000;
 
 export function isBulkMutationPath(url) {
@@ -137,6 +138,42 @@ export function isSlowOemMatchPath(url) {
   return p === "/claims/oem-match"
     || p === "/claims/oem-match/clear"
     || p === "/claims/oem-create";
+}
+
+/** Dashboard, registers and inventory lists — 25s used to abort Refresh. */
+export function isSlowReportPath(url) {
+  const p = String(url || "").split("?")[0];
+  return (
+    p === "/dashboard"
+    || p === "/executive/dashboard"
+    || p === "/sales-gm/dashboard"
+    || p === "/field/dashboard"
+    || p === "/accounts/dashboard"
+    || p === "/leads"
+    || p === "/lead-requests"
+    || p === "/claims"
+    || p.indexOf("/claims/") === 0
+    || p.indexOf("/reports/") === 0
+    || p.indexOf("/inventory") === 0
+    || p.indexOf("/whatsapp/") === 0
+    || p.indexOf("/oem-claims") === 0
+    || p === "/oem-extra-support"
+    || p === "/insurance"
+    || p.indexOf("/insurance/") === 0
+    || p === "/finance"
+    || p === "/bookings"
+    || p === "/deliveries"
+    || p === "/payments"
+    || p === "/activities"
+    || p === "/quotations"
+    || p === "/cancellations"
+    || p === "/dealer-earnings"
+    || p === "/edit-log"
+    || p === "/audit-log"
+    || p === "/price-list"
+    || p === "/allocation"
+    || p === "/deal-verify"
+  );
 }
 
 /** GET /leads/{id}/360 used to scan every Sold row + scheme master. */
@@ -272,6 +309,7 @@ function getTimeout(url, opts = {}) {
   if (isSlowLead360Path(url)) return 60000;
   if (isSlowIntegrationPath(url)) return 45000;
   if (isSlowOemMatchPath(url)) return BULK_TIMEOUT_MS;
+  if (isSlowReportPath(url)) return REPORT_TIMEOUT_MS;
   if (isDocumentFilePath(url) || isDocumentUploadPath(url)) return DOC_UPLOAD_TIMEOUT_MS;
   return undefined;
 }
@@ -280,6 +318,7 @@ export const get = (url, params, opts = {}) => withFallback(() => {
   const timeout = getTimeout(url, opts);
   return api.get(url, {
     params,
+    headers: { "Cache-Control": "no-cache", Pragma: "no-cache" },
     ...(timeout ? { timeout } : {}),
   }).then((r) => r.data);
 });

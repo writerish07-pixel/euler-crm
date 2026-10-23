@@ -11826,8 +11826,9 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     except coulson_client.CoulsonError as e:
         logging.exception("Coulson sold refresh failed for OEM billing")
         raise HTTPException(502, str(e) or "OEM Sold refresh failed") from e
-    except Exception:
+    except Exception as e:
         logging.exception("Coulson sold refresh failed for OEM billing")
+        raise HTTPException(502, str(e) or "OEM Sold refresh failed") from e
     stamped = {}
     try:
         stamped = await _apply_sold_vehicle_ids()

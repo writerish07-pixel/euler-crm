@@ -111,6 +111,38 @@ test("OEM billing tab shows pending delivery without asking for chassis", async 
   host.remove();
 });
 
+test("OEM billing refresh waits for the reload to finish", async () => {
+  let resolveLoad;
+  mockGet.mockImplementation((url) => {
+    if (String(url).includes("/oem-billing")) {
+      return new Promise((resolve) => { resolveLoad = () => resolve(mockBilling.current); });
+    }
+    return Promise.resolve({});
+  });
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<OemBilling />); });
+  await act(async () => { resolveLoad(); await Promise.resolve(); });
+  mockGet.mockClear();
+  let resolveRefresh;
+  mockGet.mockImplementation((url) => {
+    if (String(url).includes("/oem-billing")) {
+      return new Promise((resolve) => { resolveRefresh = () => resolve(mockBilling.current); });
+    }
+    return Promise.resolve({});
+  });
+  await act(async () => {
+    host.querySelector('[data-testid="report-refresh-btn"]').click();
+  });
+  expect(host.querySelector('[data-testid="report-refresh-btn"]').textContent).toMatch(/Refreshing/);
+  await act(async () => { resolveRefresh(); await Promise.resolve(); });
+  expect(host.querySelector('[data-testid="report-refresh-btn"]').textContent).toMatch(/Refresh/);
+  expect(mockGet).toHaveBeenCalled();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("OEM billing load failure toasts instead of pretending billed files are zero", async () => {
   mockGet.mockImplementation((url) => {
     if (String(url).includes("/oem-billing")) {

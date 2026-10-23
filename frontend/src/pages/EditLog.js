@@ -40,7 +40,7 @@ export default function EditLog() {
   const period = usePeriodState();
 
   const load = useCallback(() => {
-    get("/edit-log", {
+    return get("/edit-log", {
       ...(role ? { role } : {}),
       ...(module ? { module } : {}),
       ...(q.trim() ? { q: q.trim() } : {}),

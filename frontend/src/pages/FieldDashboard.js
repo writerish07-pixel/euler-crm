@@ -22,7 +22,7 @@ export default function FieldDashboard() {
   const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
     setErr("");
-    loadBoard("/field/dashboard", setD, setErr, "Could not load field dashboard");
+    return loadBoard("/field/dashboard", setD, setErr, "Could not load field dashboard");
   }, []);
   useEffect(() => { load(); }, [load]);
 

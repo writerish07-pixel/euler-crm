@@ -49,8 +49,9 @@ export default function OemClaims({ missingVehicleOnly = false }) {
   const qParam = params.get("q") || "";
 
   const load = useCallback(() => {
-    get("/oem-claims/summary").then(setSummary).catch(() => setSummary(null));
-    get("/oem-claims", {
+    return Promise.all([
+      get("/oem-claims/summary").then(setSummary).catch(() => setSummary(null)),
+      get("/oem-claims", {
       ...(status ? { status } : {}),
       ...(unlinked ? { unlinked: true } : {}),
       ...(missingDoc ? { missingDoc: true } : {}),
@@ -61,7 +62,8 @@ export default function OemClaims({ missingVehicleOnly = false }) {
       ...(chassis ? { chassis } : {}),
       ...(invoice ? { invoice } : {}),
       ...(leadId ? { leadId } : {}),
-    }).then((r) => setRows(Array.isArray(r) ? r : [])).catch(() => setRows([]));
+    }).then((r) => setRows(Array.isArray(r) ? r : [])).catch(() => setRows([])),
+    ]);
   }, [status, unlinked, missingDoc, qParam, chassis, invoice, leadId, missingVehicleOnly]);
 
   useEffect(() => { load(); }, [load]);

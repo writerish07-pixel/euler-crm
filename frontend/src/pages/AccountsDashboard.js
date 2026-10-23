@@ -23,7 +23,7 @@ export default function AccountsDashboard() {
 
   const load = () => {
     setErr("");
-    get("/accounts/dashboard").then(setD).catch((e) => {
+    return get("/accounts/dashboard").then(setD).catch((e) => {
       setErr(apiErrorMessage(e, "Could not load accounts dashboard"));
       toast.error(apiErrorMessage(e, "Could not load accounts dashboard"));
     });

@@ -21,7 +21,7 @@ export default function Approvals() {
   const [complete, setComplete] = useState(null);
 
   const load = useCallback(() => {
-    get("/lead-requests", { status }).then(setRows).catch(() => setRows([]));
+    return get("/lead-requests", { status }).then(setRows).catch(() => setRows([]));
   }, [status]);
   useEffect(() => { load(); }, [load]);
 

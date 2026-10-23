@@ -32,7 +32,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
   const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
     setErr("");
-    get("/executive/dashboard").then(setD).catch(() => {
+    return get("/executive/dashboard").then(setD).catch(() => {
       setErr("Could not load executive dashboard");
       toast.error("Could not load executive dashboard");
     });

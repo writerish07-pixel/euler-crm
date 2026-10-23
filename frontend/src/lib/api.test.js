@@ -1,4 +1,4 @@
-import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowOemMatchPath, isSlowLead360Path, isDocumentUploadPath, isDocumentFilePath, downloadFile, bulkStallMessage } from "./api";
+import { api, apiBases, isRetryableNetworkError, originCanProxyApi, isHtmlApiBody, apiErrorMessage, apiErrorDetail, postForm, post, get, isBulkMutationPath, isCreateOncePath, isSlowIntegrationPath, isSlowOemBillingPath, isSlowOemMatchPath, isSlowLead360Path, isSlowReportPath, isDocumentUploadPath, isDocumentFilePath, downloadFile, bulkStallMessage } from "./api";
 
 describe("apiBases", () => {
   test("Railway first, then the page origin", () => {
@@ -148,6 +148,11 @@ describe("bulk mutations", () => {
     expect(isSlowOemMatchPath("/claims/oem-match/clear")).toBe(true);
     expect(isSlowOemMatchPath("/claims/oem-create")).toBe(true);
     expect(isSlowOemMatchPath("/claims")).toBe(false);
+    expect(isSlowReportPath("/dashboard")).toBe(true);
+    expect(isSlowReportPath("/reports/monthly")).toBe(true);
+    expect(isSlowReportPath("/inventory")).toBe(true);
+    expect(isSlowReportPath("/whatsapp/messages")).toBe(true);
+    expect(isSlowReportPath("/auth/me")).toBe(false);
     expect(isDocumentUploadPath("/leads/LD26000926/documents")).toBe(true);
     expect(isDocumentUploadPath("/lead-requests/RQ1/documents")).toBe(true);
     expect(isDocumentUploadPath("/leads")).toBe(false);
@@ -190,6 +195,13 @@ describe("bulk mutations", () => {
     const spy = jest.spyOn(api, "get").mockResolvedValue({ data: { rows: [] } });
     await get("/oem-billing");
     expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 180000 }));
+    spy.mockRestore();
+  });
+
+  test("GET /dashboard uses a 60s timeout", async () => {
+    const spy = jest.spyOn(api, "get").mockResolvedValue({ data: {} });
+    await get("/dashboard");
+    expect(spy.mock.calls[0][1]).toEqual(expect.objectContaining({ timeout: 60000 }));
     spy.mockRestore();
   });
 

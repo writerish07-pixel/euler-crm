@@ -624,7 +624,7 @@ def _invoice_row_key(v):
     )
 
 
-def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE):
+def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE, max_rows=None):
     """Page GET dealer/invoice/vehicle the way the Coulson SPA does.
 
     Their Vehicle Invoices table sends offset as the 0-based *page index*
@@ -632,6 +632,10 @@ def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE):
     DESC. Older inventory endpoints used row-skip offsets; if page 1 looks
     like a 1-row slide of page 0 we switch to row skip so we still drain
     the full 234-row month.
+
+    Returns (rows, complete). complete is False when max_rows stopped us
+    before extras.total_count, so callers must not wipe older cancelled
+    invoices.
     """
     def pull(offset):
         payload = get_json(token, INVOICE_LIST_PATH, {
@@ -667,59 +671,80 @@ def _page_dealer_invoices(token: str, *, limit=INVENTORY_PAGE):
             added += 1
         return added
 
+    cap = INVENTORY_MAX_ROWS
+    if max_rows is not None:
+        try:
+            cap = max(1, min(int(max_rows), INVENTORY_MAX_ROWS))
+        except (TypeError, ValueError):
+            cap = INVENTORY_MAX_ROWS
+
+    def finished(complete_chunk=False):
+        if total is not None and len(rows) >= total:
+            return True, True
+        if len(rows) >= cap:
+            return True, bool(total is not None and len(rows) >= total)
+        if complete_chunk:
+            return True, True
+        return False, False
+
     first, total = pull(0)
     take(first)
-    if not first or len(first) < limit or (total is not None and len(rows) >= total):
-        return rows
+    stop, complete = finished(complete_chunk=bool(not first or len(first) < limit))
+    if stop:
+        return rows, complete
 
     probe, _ = pull(1)
     probe_new = take(probe)
+    stop, complete = finished()
+    if stop:
+        return rows, complete
     # Page-index returns a mostly-new page. Row-skip offset=1 returns the
     # same window shifted by one row (one new chassis, the rest duplicates).
     page_index = bool(probe) and probe_new > (len(probe) / 2)
     if page_index:
         page = 2
-        while len(rows) < INVENTORY_MAX_ROWS:
-            if total is not None and len(rows) >= total:
-                break
+        while True:
+            stop, complete = finished()
+            if stop:
+                return rows, complete
             chunk, _ = pull(page)
             if not chunk:
-                break
+                return rows, True
             added = take(chunk)
             if len(chunk) < limit or added == 0:
-                break
+                return rows, True
             page += 1
-        return rows
 
     # Probe was a 1-row shift — API is row-skip. Re-pull from offset=limit.
     rows, seen = [], set()
     take(first)
     offset = limit
-    while len(rows) < INVENTORY_MAX_ROWS:
-        if total is not None and len(rows) >= total:
-            break
+    while True:
+        stop, complete = finished()
+        if stop:
+            return rows, complete
         chunk, _ = pull(offset)
         if not chunk:
-            break
+            return rows, True
         added = take(chunk)
         if len(chunk) < limit or added == 0:
-            break
+            return rows, True
         offset += limit
-    return rows
 
 
-def fetch_raw_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
+def fetch_raw_vehicle_invoices(token: str, limit=INVENTORY_PAGE, max_rows=None):
     """Every Vehicle Invoice List row — Created and Cancelled.
 
     Coulson Vehicle Inventory → ⋮ menu → Invoice List. Status filter is
     Created / Cancelled. Unfiltered list is ~all dealer invoices.
 
-    Returns (rows, ok). ok is False when every path 404'd / failed so callers
-    must not wipe a previously synced cancelled list.
+    Returns (rows, ok). ok is False when every path 404'd / failed, or when
+    max_rows stopped a DESC page early, so callers must not wipe older
+    cancelled invoices.
     """
     last_error = None
     try:
-        return _page_dealer_invoices(token, limit=limit), True
+        return _page_dealer_invoices(token, limit=limit, max_rows=max_rows)
     except CoulsonError as e:
         last_error = e
         if e.status not in (404, 405, 400):
@@ -745,9 +770,9 @@ def fetch_raw_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
     return [], False
 
 
-def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE):
+def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE, max_rows=None):
     """Live (Created) invoices only — billed today even when Sold is yesterday."""
-    chunk, ok = fetch_raw_vehicle_invoices(token, limit=limit)
+    chunk, ok = fetch_raw_vehicle_invoices(token, limit=limit, max_rows=max_rows)
     live = _SoldPull(_merge_vehicle_rows([], _live_invoices(chunk), "INVOICED"))
     live.cancelled = tuple(_cancelled_invoices(chunk))
     live.invoice_list_ok = ok
@@ -834,11 +859,16 @@ def fill_missing_sold_models(token: str, rows, *, limit=40):
     return filled
 
 
-def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
+def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
+                         fill_models=True, invoice_max_rows=None):
     """Vehicles billed / sold — Sold tab PLUS Created invoices, minus Cancelled.
 
     The Sold tab often still shows a chassis after its tax invoice is Cancelled
     in Vehicle Inventory → Invoice List. Those ids must not stay on CRM leads.
+
+    invoice_max_rows caps the DESC invoice list (newest first) so an
+    interactive OEM Billing tap does not page years of invoices past the
+    HTTP timeout. fill_models=False skips the per-chassis model lookup.
     """
     rows = _SoldPull()
     errors = []
@@ -858,7 +888,7 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
         if meta.get("complete") is False:
             complete = False
     try:
-        invoices = fetch_vehicle_invoices(token, limit=limit)
+        invoices = fetch_vehicle_invoices(token, limit=limit, max_rows=invoice_max_rows)
         cancelled = list(getattr(invoices, "cancelled", ()) or ())
         invoice_list_ok = bool(getattr(invoices, "invoice_list_ok", False))
         _merge_vehicle_rows(rows, invoices, "INVOICED")
@@ -870,12 +900,13 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE):
         kept = [r for r in rows if _vehicle_key(r) not in drop]
         rows.clear()
         rows.extend(kept)
-    try:
-        fill_missing_sold_models(token, rows)
-    except CoulsonError as e:
-        log.info("Coulson chassis model fill skipped: %s", e)
-    except Exception:
-        log.exception("Coulson chassis model fill failed")
+    if fill_models:
+        try:
+            fill_missing_sold_models(token, rows)
+        except CoulsonError as e:
+            log.info("Coulson chassis model fill skipped: %s", e)
+        except Exception:
+            log.exception("Coulson chassis model fill failed")
     if not rows and errors:
         raise errors[0]
     rows.complete = complete

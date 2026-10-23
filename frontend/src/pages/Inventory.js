@@ -31,23 +31,25 @@ export default function Inventory() {
 
   const load = useCallback(() => {
     const q = model ? { model } : undefined;
-    get("/inventory", q).then((list) => {
-      const next = Array.isArray(list) ? list : [];
-      setRows(next);
-      setTicks((cur) => {
-        const out = { ...cur };
-        next.forEach((r) => {
-          if (r.chassis && r.physicalStatus && !out[r.chassis]) out[r.chassis] = r.physicalStatus;
+    return Promise.all([
+      get("/inventory", q).then((list) => {
+        const next = Array.isArray(list) ? list : [];
+        setRows(next);
+        setTicks((cur) => {
+          const out = { ...cur };
+          next.forEach((r) => {
+            if (r.chassis && r.physicalStatus && !out[r.chassis]) out[r.chassis] = r.physicalStatus;
+          });
+          return out;
         });
-        return out;
-      });
-    }).catch(() => setRows([]));
-    get("/inventory/transit", q).then(setTransit).catch(() => setTransit([]));
-    get("/inventory/held", q).then((list) => setHeld(Array.isArray(list) ? list : [])).catch(() => setHeld([]));
-    get("/inventory/need-to-order").then(setNeed).catch(() => setNeed([]));
-    get("/inventory/summary").then(setSummary).catch(() => {});
-    get("/inventory/check").then(setCheck).catch(() => {});
-    get("/integrations/coulson").then(setStatus).catch(() => {});
+      }).catch(() => setRows([])),
+      get("/inventory/transit", q).then(setTransit).catch(() => setTransit([])),
+      get("/inventory/held", q).then((list) => setHeld(Array.isArray(list) ? list : [])).catch(() => setHeld([])),
+      get("/inventory/need-to-order").then(setNeed).catch(() => setNeed([])),
+      get("/inventory/summary").then(setSummary).catch(() => {}),
+      get("/inventory/check").then(setCheck).catch(() => {}),
+      get("/integrations/coulson").then(setStatus).catch(() => {}),
+    ]);
   }, [model]);
   useEffect(() => { load(); }, [load]);
 

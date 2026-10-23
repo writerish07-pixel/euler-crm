@@ -201,10 +201,10 @@ async def test_mocked_coulson_sync(client, monkeypatch):
 
     monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
-    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: vehicles)
-    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200, **k: vehicles)
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200, **k: [])
 
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
@@ -255,10 +255,10 @@ async def test_sync_writes_oem_invoice_price_to_master_and_list(client, monkeypa
     }]
     monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
-    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200, **k: [])
 
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
@@ -709,10 +709,10 @@ async def test_save_session_still_saves_when_coulson_ping_is_down(client, monkey
 @pytest.mark.asyncio
 async def test_sync_uses_pasted_session_and_skips_password_login(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
-    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200, **k: [])
 
     def boom(*a, **k):
         raise AssertionError("login must not run when a live session is stored")
@@ -837,10 +837,10 @@ async def test_cancelled_sept_delivery_does_not_drop_yard(client):
 @pytest.mark.asyncio
 async def test_expired_session_renews_with_saved_password(client, monkeypatch):
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
-    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200, **k: [])
 
     renewed = _coulson_jwt(exp_offset=3600)
     monkeypatch.setattr(coulson_client, "login", lambda user, pw: renewed)
@@ -1042,6 +1042,48 @@ def test_sold_inventory_reraises_when_every_source_fails(monkeypatch):
         coulson_client.fetch_sold_inventory("tok")
 
 
+def test_sold_inventory_can_skip_model_fill(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            if (params or {}).get("chassis"):
+                calls["n"] += 1
+            return {"success": True, "data": [
+                {"chassis": "MD9SOLDONLY01", "invoice_number": "AF-1"},
+            ], "extras": {"total_count": 1}}
+        if path == "dealer/invoice/vehicle":
+            return {"success": True, "data": [
+                {"chassis": "MD9INVONLY01", "invoice_number": "AF-2", "status": "CREATED"},
+            ], "extras": {"total_count": 1}}
+        raise coulson_client.CoulsonError("nope", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok", fill_models=False)
+    assert calls["n"] == 0
+    assert {r["chassis"] for r in rows} == {"MD9SOLDONLY01", "MD9INVONLY01"}
+
+
+def test_invoice_max_rows_stops_paging(monkeypatch):
+    pages = {
+        0: [{"chassis": "MD9A"}, {"chassis": "MD9B"}],
+        1: [{"chassis": "MD9C"}, {"chassis": "MD9D"}],
+        2: [{"chassis": "MD9E"}],
+    }
+    hits = {"n": 0}
+
+    def fake_get_json(token, path, params=None):
+        hits["n"] += 1
+        off = int((params or {}).get("offset") or 0)
+        return {"success": True, "data": pages.get(off, []), "extras": {"total_count": 5}}
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows, ok = coulson_client.fetch_raw_vehicle_invoices("tok", limit=2, max_rows=2)
+    assert [r["chassis"] for r in rows] == ["MD9A", "MD9B"]
+    assert ok is False
+    assert hits["n"] == 1
+
+
 def test_vehicle_invoices_skip_cancelled(monkeypatch):
     def fake_get_json(token, path, params=None):
         if path == "dealer/invoice/vehicle":
@@ -1116,10 +1158,10 @@ async def test_sync_empty_sold_does_not_wipe_oem_sold(client, monkeypatch):
     })
     monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
-    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200, **k: [])
     await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
     r = await client.post("/api/integrations/coulson/sync")
     assert r.status_code == 200, r.text
@@ -1253,6 +1295,16 @@ async def test_replace_cancelled_strips_sold_and_held_sync(client):
     await server.db.oem_sold.insert_one({
         "chassis": dead, "invoiceNumber": "AF-DEAD", "coulsonStatus": "SOLD",
     })
+    kept_old = "MD9OLDCANCEL01"
+    await server.db.oem_cancelled_invoices.delete_many({"chassis": kept_old})
+    await server.db.oem_cancelled_invoices.insert_one({
+        "chassis": kept_old, "invoiceNumber": "AF-OLD-C", "invoiceStatus": "CANCELLED",
+    })
+    n = await oem_sync.replace_cancelled_invoices(server.db, [{
+        "chassis": dead, "invoice_number": "AF-DEAD", "status": "CANCELLED",
+    }], ok=False)
+    assert await server.db.oem_cancelled_invoices.find_one({"chassis": kept_old})
+    assert await server.db.oem_cancelled_invoices.find_one({"chassis": dead})
     n = await oem_sync.replace_cancelled_invoices(server.db, [{
         "chassis": dead, "invoice_number": "AF-DEAD", "status": "CANCELLED",
     }], ok=True)

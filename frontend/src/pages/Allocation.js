@@ -38,15 +38,17 @@ export default function Allocation() {
   const [matchBusy, setMatchBusy] = useState("");
 
   const load = useCallback(() => {
-    get("/leads/allocation/summary").then((s) => {
-      setSummary(s);
-      setDraft((s.split?.shares || []).map((row) => ({ executive: row.executive, pct: row.pct })));
-      const picks = {};
-      (s.executiveMatches || []).forEach((row) => { picks[row.key] = row.suggested || ""; });
-      setMatchPick(picks);
-    }).catch(() => {});
-    get("/leads", { scope: "all" }).then(setLeads).catch(() => toast.error("Could not load leads"));
-    get("/masters").then((m) => setExecs(m.executives || [])).catch(() => {});
+    return Promise.all([
+      get("/leads/allocation/summary").then((s) => {
+        setSummary(s);
+        setDraft((s.split?.shares || []).map((row) => ({ executive: row.executive, pct: row.pct })));
+        const picks = {};
+        (s.executiveMatches || []).forEach((row) => { picks[row.key] = row.suggested || ""; });
+        setMatchPick(picks);
+      }).catch(() => {}),
+      get("/leads", { scope: "all" }).then(setLeads).catch(() => toast.error("Could not load leads")),
+      get("/masters").then((m) => setExecs(m.executives || [])).catch(() => {}),
+    ]);
   }, []);
   useEffect(() => { load(); }, [load]);
 

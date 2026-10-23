@@ -31,8 +31,10 @@ export default function Insurance() {
 
   const load = useCallback(() => {
     const q = { view, ...(agentFilter ? { agent_id: agentFilter } : {}), ...period.params };
-    get("/insurance", q).then(setRows).catch(() => {});
-    get("/insurance/agents-rollup", { view }).then(setRollup).catch(() => {});
+    return Promise.all([
+      get("/insurance", q).then(setRows).catch(() => {}),
+      get("/insurance/agents-rollup", { view }).then(setRollup).catch(() => {}),
+    ]);
   }, [view, agentFilter, period.params]);
 
   useEffect(() => { load(); }, [load]);
@@ -194,7 +196,7 @@ export default function Insurance() {
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${tab === k ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}>{l}</button>
             ))}
           </div>
-          <ReportActions onRefresh={() => { load(); setReceiptTick((n) => n + 1); }} showRebuild />
+          <ReportActions onRefresh={async () => { setReceiptTick((n) => n + 1); await load(); }} showRebuild />
           <Button variant="secondary" data-testid="upload-mis-btn" onClick={() => setMisOpen(true)}>
             <UploadCloud size={16} /> Upload MIS
           </Button>

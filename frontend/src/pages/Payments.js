@@ -22,7 +22,7 @@ export default function Payments() {
   const period = usePeriodState();
   const load = useCallback(() => {
     const needle = String(q || "").trim();
-    get("/payments", {
+    return get("/payments", {
       ...period.params,
       ...(leadId ? { lead_id: leadId } : {}),
       ...(needle ? { q: needle } : {}),

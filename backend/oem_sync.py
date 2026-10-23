@@ -963,8 +963,11 @@ async def replace_cancelled_invoices(db, vehicles, *, ok=False):
     Sold often still lists a chassis after its tax invoice is Cancelled.
     Store those rows and strip them from oem_sold so matching cannot
     re-attach them.
+
+    A truncated / failed pull (ok=False) upserts the cancelled rows we did
+    see and leaves older stored cancellations in place.
     """
-    if not ok:
+    if not ok and not vehicles:
         return await db.oem_cancelled_invoices.count_documents({})
     docs, seen = [], set()
     for v in vehicles or []:
@@ -974,6 +977,13 @@ async def replace_cancelled_invoices(db, vehicles, *, ok=False):
             continue
         seen.add(ch)
         docs.append(doc)
+    if not ok:
+        for doc in docs:
+            await db.oem_cancelled_invoices.update_one(
+                {"chassis": doc["chassis"]}, {"$set": doc}, upsert=True)
+        if docs:
+            await db.oem_sold.delete_many({"chassis": {"$in": [d["chassis"] for d in docs]}})
+        return await db.oem_cancelled_invoices.count_documents({})
     await db.oem_cancelled_invoices.delete_many({})
     if docs:
         await db.oem_cancelled_invoices.insert_many(docs)
@@ -1016,12 +1026,31 @@ async def replace_held_inventory(db, vehicles, oem_by_id, by_key):
     return len(docs)
 
 
-async def refresh_sold_inventory(db):
-    """Live Sold + Vehicle Invoices pull without rewriting yard PRESENT stock."""
+# Newest-first invoice pages. Four pages of 200 covers a busy month without
+# paging years of Vehicle Invoices (that used to blow the OEM Billing HTTP
+# timeout so Sync looked dead).
+BILLING_INVOICE_MAX_ROWS = 800
+
+
+async def refresh_sold_inventory(db, *, interactive=True):
+    """Live Sold + Vehicle Invoices pull without rewriting yard PRESENT stock.
+
+    Interactive (OEM Billing Sync) skips the per-chassis model fill and caps
+    the DESC invoice list so the request finishes before Railway/Cloudflare
+    cut it off. A missing Coulson session is an error, not a silent no-op.
+    """
     token, _src = await _access_token(db)
     if not token:
-        return 0
-    sold_vehicles = await asyncio.to_thread(coulson_client.fetch_sold_inventory, token) or []
+        raise coulson_client.CoulsonError(
+            "Coulson session not configured — save it in Settings → Euler OEM"
+        )
+    sold_vehicles = await asyncio.to_thread(
+        coulson_client.fetch_sold_inventory,
+        token,
+        coulson_client.INVENTORY_PAGE,
+        fill_models=not interactive,
+        invoice_max_rows=BILLING_INVOICE_MAX_ROWS if interactive else None,
+    ) or []
     if not sold_vehicles:
         return await db.oem_sold.count_documents({})
     oem_models = []

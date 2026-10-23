@@ -30,12 +30,14 @@ export default function OemFinance() {
 
   const load = useCallback(() => {
     const p = periodParams(period);
-    get("/reports/oem-finance", { view, ...(financer ? { financer } : {}), ...p })
-      .then((r) => { setD(r); setErr(""); })
-      .catch((e) => setErr(apiErrorMessage(e, "Could not load the report")));
-    get("/reports/oem-monthly", p)
-      .then(setVol)
-      .catch(() => setVol(null));
+    return Promise.all([
+      get("/reports/oem-finance", { view, ...(financer ? { financer } : {}), ...p })
+        .then((r) => { setD(r); setErr(""); })
+        .catch((e) => setErr(apiErrorMessage(e, "Could not load the report"))),
+      get("/reports/oem-monthly", p)
+        .then(setVol)
+        .catch(() => setVol(null)),
+    ]);
   }, [view, financer, period.month, period.year]);
 
   useEffect(() => { load(); }, [load]);

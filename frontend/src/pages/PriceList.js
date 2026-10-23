@@ -31,7 +31,7 @@ export default function PriceList() {
   const [models, setModels] = useState([]);
 
   const load = useCallback(() => {
-    get("/price-list", { ...(model ? { model } : {}), q })
+    return get("/price-list", { ...(model ? { model } : {}), q })
       .then(setData)
       .catch(() => toast.error("Could not load the price list"));
   }, [model, q]);

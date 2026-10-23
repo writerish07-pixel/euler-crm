@@ -23,7 +23,7 @@ export default function SalesGmDashboard() {
   const board = useMonthlyScoreboard(month, year);
   const load = useCallback(() => {
     setErr("");
-    loadBoard("/sales-gm/dashboard", setD, setErr, "Could not load Sales GM dashboard");
+    return loadBoard("/sales-gm/dashboard", setD, setErr, "Could not load Sales GM dashboard");
   }, []);
   useEffect(() => { load(); }, [load]);
 
