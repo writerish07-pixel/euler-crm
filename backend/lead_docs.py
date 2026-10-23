@@ -92,6 +92,8 @@ def normalize_customer_type(value) -> str:
     t = str(value or "Individual").strip().lower()
     if t in ("b2b", "business", "gst", "company", "firm"):
         return "B2B"
+    if t in ("b2c", "individual", "retail", "personal"):
+        return "Individual"
     return "Individual"
 
 

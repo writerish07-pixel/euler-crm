@@ -33,6 +33,14 @@ def next_mobile():
     return str(MOBILE)
 
 
+def test_normalize_customer_type_maps_desk_labels():
+    assert server.lead_docs.normalize_customer_type("B2B") == "B2B"
+    assert server.lead_docs.normalize_customer_type("company") == "B2B"
+    assert server.lead_docs.normalize_customer_type("B2C") == "Individual"
+    assert server.lead_docs.normalize_customer_type("Individual") == "Individual"
+    assert server.lead_docs.normalize_customer_type("") == "Individual"
+
+
 @pytest_asyncio.fixture
 async def client():
     await server.startup()

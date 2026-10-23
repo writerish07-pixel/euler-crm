@@ -107,6 +107,9 @@ test("convert to booking asks for model, deal and KYC — not the old advance-on
   expect(drawer.querySelector('[data-testid="book-enquiry-drawer"]')).toBeTruthy();
   expect(drawer.querySelector('[data-testid="book-model"]')).toBeTruthy();
   expect(drawer.querySelector('[data-testid="book-variant"]')).toBeTruthy();
+  expect(drawer.querySelector('[data-testid="book-customer-type"]')).toBeTruthy();
+  expect(drawer.querySelector('[data-testid="book-customer-type"]').textContent).toMatch(/B2C/);
+  expect(drawer.querySelector('[data-testid="book-customer-type"]').textContent).toMatch(/B2B/);
   expect(drawer.querySelector('[data-testid="deal-format-card"]')).toBeTruthy();
   expect(drawer.querySelector('[data-testid="kyc-block"]')).toBeTruthy();
   expect(drawer.querySelector('[data-testid="confirm-booking-btn"]')).toBeTruthy();

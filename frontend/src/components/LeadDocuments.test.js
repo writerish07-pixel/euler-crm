@@ -29,6 +29,29 @@ test("kycReady makes Aadhaar optional for B2B", () => {
   expect(kycReady("B2B", { kyc_pan: 1 }, "22AAAAA0000A1Z5")).toMatch(/GST/);
 });
 
+test("B2B KYC shows GSTIN and GST certificate instead of required Aadhaar", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      <LocalKycBlock
+        customerType="B2B"
+        files={{}}
+        setFiles={() => {}}
+        gstin=""
+        onGstin={() => {}}
+      />,
+    );
+  });
+  expect(host.textContent).toMatch(/B2B needs PAN, GST certificate and GSTIN/);
+  expect(host.querySelector('[data-testid="lead-gstin"]')).toBeTruthy();
+  expect(host.textContent).toMatch(/GST certificate/);
+  expect(host.textContent).toMatch(/Optional for B2B/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("KYC slots show files already on the lead instead of No file", async () => {
   const host = document.createElement("div");
   document.body.appendChild(host);
