@@ -36,7 +36,7 @@ export default function Leads({ followup = false }) {
   const statusFilters = followup ? FOLLOWUP_STATUS_FILTERS : REGISTER_STATUS_FILTERS;
 
   const load = useCallback(() => {
-    loadList("/leads", setLeads, {
+    return loadList("/leads", setLeads, {
       status, q: q || undefined, ...period.params,
       ...(followup ? { followup: 1 } : {}),
     }, followup ? "Could not load follow-up leads" : "Could not load leads");

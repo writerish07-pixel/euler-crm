@@ -46,7 +46,7 @@ export default function OemBilling() {
 
   const load = useCallback(() => {
     setLoadError("");
-    get("/oem-billing", period.params)
+    return get("/oem-billing", period.params)
       .then((r) => {
         setPayload(r && typeof r === "object" ? r : { rows: [], counts: {}, soldCount: 0, repair: {} });
       })

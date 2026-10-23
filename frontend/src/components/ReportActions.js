@@ -22,6 +22,8 @@ export default function ReportActions({
     setRefreshing(true);
     try {
       await onRefresh();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Refresh failed"));
     } finally {
       setRefreshing(false);
     }

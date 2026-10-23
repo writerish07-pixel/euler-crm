@@ -43,13 +43,17 @@ export default function WhatsAppInbox() {
   const [summary, setSummary] = useState(null);
   const [active, setActive] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   const load = useCallback(() => {
-    get("/whatsapp/threads", { filter, q })
-      .then((d) => setData(d))
-      .catch(() => toast.error("Could not load conversations"))
-      .finally(() => setLoading(false));
-    get("/whatsapp/summary").then(setSummary).catch(() => {});
+    setRefreshTick((n) => n + 1);
+    return Promise.all([
+      get("/whatsapp/threads", { filter, q })
+        .then((d) => setData(d))
+        .catch(() => toast.error("Could not load conversations"))
+        .finally(() => setLoading(false)),
+      get("/whatsapp/summary").then(setSummary).catch(() => {}),
+    ]);
   }, [filter, q]);
 
   useEffect(() => { load(); }, [load]);
@@ -99,7 +103,7 @@ export default function WhatsAppInbox() {
         </div>
       )}
 
-      {tab === "sent" ? <SentBox /> : (
+      {tab === "sent" ? <SentBox refreshTick={refreshTick} /> : (
         <div className="grid lg:grid-cols-[22rem_1fr] gap-4 items-start">
           <Card className="p-0 overflow-hidden">
             <div className="p-3 border-b border-line space-y-2">
@@ -189,7 +193,7 @@ function Stat({ label, value, tone, sub, testid }) {
   );
 }
 
-function SentBox() {
+function SentBox({ refreshTick = 0 }) {
   const [rows, setRows] = useState([]);
   const [kind, setKind] = useState("");
   const [status, setStatus] = useState("");
@@ -198,7 +202,7 @@ function SentBox() {
   useEffect(() => {
     get("/whatsapp/messages", { direction: "outbound", kind, status, q })
       .then(setRows).catch(() => setRows([]));
-  }, [kind, status, q]);
+  }, [kind, status, q, refreshTick]);
 
   const failed = useMemo(() => rows.filter((r) => r.status === "failed").length, [rows]);
 

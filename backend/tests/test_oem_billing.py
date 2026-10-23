@@ -25,11 +25,11 @@ import server  # noqa: E402
 @pytest.fixture(autouse=True)
 def _no_live_coulson_sold(monkeypatch):
     """OEM Billing tests seed oem_sold themselves. Do not hit Euler."""
-    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200, **k: [])
     monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
-    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200: [])
-    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200: [])
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200, **k: [])
     monkeypatch.setattr(coulson_client, "login", lambda u, p: "test-token")
 
 
@@ -1370,13 +1370,44 @@ async def test_oem_billing_get_matches_without_scheme_blob(client):
 
 @pytest.mark.asyncio
 async def test_oem_billing_sync_returns_502_when_coulson_fails(client, monkeypatch):
-    async def boom(_db):
+    async def boom(_db, **_k):
         raise coulson_client.CoulsonError("Coulson unreachable: timed out")
 
     monkeypatch.setattr(oem_sync, "refresh_sold_inventory", boom)
     r = await client.post("/api/oem-billing/sync")
     assert r.status_code == 502, r.text
     assert "Coulson" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_sync_returns_502_when_session_missing(client, monkeypatch):
+    async def none(_db, username=None, password=None):
+        return "", ""
+
+    monkeypatch.setattr(oem_sync, "_access_token", none)
+    r = await client.post("/api/oem-billing/sync")
+    assert r.status_code == 502, r.text
+    assert "Coulson" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_sync_returns_502_on_unexpected_error(client, monkeypatch):
+    async def boom(_db, **_k):
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr(oem_sync, "refresh_sold_inventory", boom)
+    r = await client.post("/api/oem-billing/sync")
+    assert r.status_code == 502, r.text
+
+
+@pytest.mark.asyncio
+async def test_refresh_sold_raises_without_session(client, monkeypatch):
+    async def none(_db, username=None, password=None):
+        return "", ""
+
+    monkeypatch.setattr(oem_sync, "_access_token", none)
+    with pytest.raises(coulson_client.CoulsonError, match="not configured"):
+        await oem_sync.refresh_sold_inventory(server.db)
 
 
 def test_should_oem_auto_deliver_needs_unique_mobile_not_stub():

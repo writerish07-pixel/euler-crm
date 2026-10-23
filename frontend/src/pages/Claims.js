@@ -45,13 +45,15 @@ export default function Claims() {
   const period = usePeriodState();
   const load = useCallback(() => {
     setLoading(true);
-    get("/claims", period.params, { timeout: 60000 })
-      .then((r) => setRows(Array.isArray(r) ? r : []))
-      .catch((err) => {
-        toast.error(apiErrorMessage(err, "Could not load Scheme Claim Register"));
-      })
-      .finally(() => setLoading(false));
-    get("/claims/oem-only").then(setOemOnly).catch(() => setOemOnly(null));
+    return Promise.all([
+      get("/claims", period.params, { timeout: 60000 })
+        .then((r) => setRows(Array.isArray(r) ? r : []))
+        .catch((err) => {
+          toast.error(apiErrorMessage(err, "Could not load Scheme Claim Register"));
+        })
+        .finally(() => setLoading(false)),
+      get("/claims/oem-only").then(setOemOnly).catch(() => setOemOnly(null)),
+    ]);
   }, [period.params]);
   useEffect(() => { load(); }, [load]);
   const openManual = () => {

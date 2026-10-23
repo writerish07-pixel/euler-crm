@@ -29,7 +29,7 @@ export default function DealVerify() {
   const [listen, setListen] = useState({});
 
   const load = useCallback(() => {
-    get("/deal-verify", { filter, limit: 400 }).then(setRows).catch(() => setRows([]));
+    return get("/deal-verify", { filter, limit: 400 }).then(setRows).catch(() => setRows([]));
   }, [filter]);
   useEffect(() => { load(); }, [load]);
 

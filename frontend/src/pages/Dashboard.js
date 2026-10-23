@@ -21,7 +21,7 @@ export default function Dashboard() {
 
   const load = useCallback(() => {
     setErr("");
-    loadBoard("/dashboard", setD, setErr, "Could not load dashboard");
+    return loadBoard("/dashboard", setD, setErr, "Could not load dashboard");
   }, []);
   useEffect(() => { load(); }, [load]);
 

@@ -73,7 +73,7 @@ export default function MonthlyRegister() {
   const [err, setErr] = useState("");
 
   const load = useCallback(() => {
-    get("/reports/monthly", periodParams({ month, year }))
+    return get("/reports/monthly", periodParams({ month, year }))
       .then((r) => { setD(r); setErr(""); })
       .catch((e) => {
         const msg = apiErrorMessage(e, "Could not load the monthly register");

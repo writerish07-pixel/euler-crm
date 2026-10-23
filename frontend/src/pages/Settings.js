@@ -28,7 +28,10 @@ export default function Settings() {
   const [ensuringCommercial, setEnsuringCommercial] = useState(false);
   const [ensuringClaimOem, setEnsuringClaimOem] = useState(false);
 
-  const loadUsers = useCallback(() => { if (isOwner) get("/auth/users").then(setUsers).catch(() => {}); }, [isOwner]);
+  const loadUsers = useCallback(() => {
+    if (!isOwner) return Promise.resolve();
+    return get("/auth/users").then(setUsers).catch(() => {});
+  }, [isOwner]);
   useEffect(() => {
     loadUsers();
     if (isOwner) get("/staff").then(setStaff).catch(() => setStaff([]));

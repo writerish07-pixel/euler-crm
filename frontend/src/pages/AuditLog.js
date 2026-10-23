@@ -24,7 +24,7 @@ export default function AuditLog() {
   const [rows, setRows] = useState([]);
   const [module, setModule] = useState("");
   const load = useCallback(() => {
-    get("/audit-log", module ? { module } : {}).then(setRows).catch(() => setRows([]));
+    return get("/audit-log", module ? { module } : {}).then(setRows).catch(() => setRows([]));
   }, [module]);
   useEffect(() => { load(); }, [load]);
 
