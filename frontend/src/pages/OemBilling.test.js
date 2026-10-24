@@ -9,6 +9,10 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 const mockBilling = {
   current: {
     soldCount: 2,
+    byDate: [
+      { date: "2026-09-04", count: 1 },
+      { date: "2026-09-05", count: 1 },
+    ],
     counts: {
       pending_delivery: 1,
       created_from_oem: 1,
@@ -105,8 +109,16 @@ test("OEM billing tab shows pending delivery without asking for chassis", async 
   expect(host.querySelector('[data-testid="oem-billing-sync"]')).toBeTruthy();
   expect(host.querySelector('[data-testid="oem-billing-relink"]')).toBeTruthy();
   expect(host.textContent).toMatch(/Pending Person/);
+  expect(host.textContent).toMatch(/Created Person/);
+  expect(host.querySelector('[data-testid="oem-bill-by-date"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="oem-bill-day-2026-09-04"]').textContent).toMatch(/1/);
   expect(host.textContent).toMatch(/billed DV220 · available FB/);
   expect(host.textContent).not.toMatch(/Select chassis/i);
+  await act(async () => {
+    host.querySelector('[data-testid="oem-bill-day-2026-09-04"]').click();
+  });
+  expect(host.textContent).toMatch(/Pending Person/);
+  expect(host.textContent).not.toMatch(/Created Person/);
   await act(async () => { root.unmount(); });
   host.remove();
 });

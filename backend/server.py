@@ -11793,6 +11793,7 @@ def _oem_billing_payload(rows, period):
     return {
         "soldCount": len(visible),
         "counts": counts,
+        "byDate": oem_sync.billing_day_counts(visible),
         "rows": visible,
         "period": getattr(period, "label", "") or "All",
         "repair": {"pairs": [], "safeCount": 0, "reviewCount": 0, "stubCount": 0},

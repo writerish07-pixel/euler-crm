@@ -38,8 +38,9 @@ const LABEL = {
 export default function OemBilling() {
   const { canEditCommercials } = useAuth();
   const period = usePeriodState(thisMonth(), thisYear());
-  const [tab, setTab] = useState("pending_delivery");
-  const [payload, setPayload] = useState({ rows: [], counts: {}, soldCount: 0, repair: {} });
+  const [tab, setTab] = useState("");
+  const [day, setDay] = useState("");
+  const [payload, setPayload] = useState({ rows: [], counts: {}, byDate: [], soldCount: 0, repair: {} });
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
   const [creating, setCreating] = useState("");
@@ -48,7 +49,7 @@ export default function OemBilling() {
     setLoadError("");
     return get("/oem-billing", period.params)
       .then((r) => {
-        setPayload(r && typeof r === "object" ? r : { rows: [], counts: {}, soldCount: 0, repair: {} });
+        setPayload(r && typeof r === "object" ? r : { rows: [], counts: {}, byDate: [], soldCount: 0, repair: {} });
       })
       .catch((e) => {
         const msg = apiErrorMessage(e, "Could not load OEM billing");
@@ -136,18 +137,24 @@ export default function OemBilling() {
   };
 
   const counts = payload.counts || {};
+  const byDate = payload.byDate || [];
   const repair = payload.repair || {};
   const pairsByStub = Object.fromEntries(
     (repair.pairs || []).filter((p) => p?.stub?.leadId).map((p) => [p.stub.leadId, p]),
   );
-  const rows = (payload.rows || []).filter((r) => !tab || r.bucket === tab);
+  const rows = (payload.rows || []).filter((r) => {
+    if (tab && r.bucket !== tab) return false;
+    if (!day) return true;
+    const sold = r.undated ? "undated" : String(r.soldDate || "").slice(0, 10);
+    return sold === day;
+  });
   const emptyBecauseError = Boolean(loadError) && !(payload.soldCount || (payload.rows || []).length);
 
   return (
     <div data-testid="oem-billing">
       <PageHeader
         title="OEM Billing"
-        subtitle="Coulson Sold versus Euler leads. Sync only confirms existing files — it does not create or replace leads."
+        subtitle="Every Coulson tax invoice, on the India date the OEM app printed. Sync refreshes Sold + Invoice List — it does not invent invoices."
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
           {canEditCommercials && (repair.safeCount || 0) > 0 && (
@@ -162,7 +169,34 @@ export default function OemBilling() {
           )}
         </div>}
       />
-      <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+      <PeriodBar month={period.month} year={period.year} onChange={(next) => { setDay(""); period.onChange(next); }} />
+      {byDate.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-4" data-testid="oem-bill-by-date">
+          <button
+            type="button"
+            data-testid="oem-bill-day-all"
+            onClick={() => setDay("")}
+            className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ring-1 ring-inset ${
+              !day ? "bg-cobalt text-white ring-cobalt" : "bg-zinc-50 text-ink-soft ring-line"
+            }`}
+          >
+            All days {payload.soldCount || 0}
+          </button>
+          {byDate.map((d) => (
+            <button
+              key={d.date}
+              type="button"
+              data-testid={`oem-bill-day-${d.date}`}
+              onClick={() => setDay(d.date === day ? "" : d.date)}
+              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ring-1 ring-inset ${
+                day === d.date ? "bg-cobalt text-white ring-cobalt" : "bg-zinc-50 text-ink-soft ring-line"
+              }`}
+            >
+              {d.date === "undated" ? "Un-dated" : fmtDate(d.date)} · {d.count}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
         <Card className="p-3" data-testid="oem-bill-card-total">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">OEM billed</div>
