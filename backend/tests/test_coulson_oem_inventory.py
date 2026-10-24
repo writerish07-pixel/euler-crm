@@ -1322,3 +1322,171 @@ async def test_replace_cancelled_strips_sold_and_held_sync(client):
     assert [r["chassis"] for r in held] == [booked]
     assert held[0]["coulsonStatus"] == "BOOKED"
 
+
+def test_invoice_list_date_wins_over_dealer_billing(monkeypatch):
+    """Invoice List 14 Oct stays 14 Oct even when Sold has an earlier sap date."""
+    chassis = "MD9AMEERCHAND01"
+
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            return {"success": True, "data": [{
+                "chassis": chassis,
+                "sap_invoice_date": "2026-08-01",
+                "customer_name": "Yard Name",
+                "created_at": "2026-10-11",
+            }], "extras": {"total_count": 1}}
+        if path == "dealer/invoice/vehicle":
+            return {"success": True, "data": [{
+                "chassis": chassis,
+                "invoice_number": "AF-122-I2627AMEER",
+                "customer_name": "AMEERCHAND GURJAR",
+                "customer_phone": "9057027979",
+                "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+                "status": "CREATED",
+                "total_amount": 404834,
+            }], "extras": {"total_count": 1}}
+        raise coulson_client.CoulsonError("not found", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok", fill_models=False)
+    assert rows.invoice_list_ok is True
+    assert rows.complete is True
+    assert len(rows.invoices) == 1
+    hit = next(r for r in rows if r["chassis"] == chassis)
+    assert hit["customer_name"] == "AMEERCHAND GURJAR"
+    assert oem_sync.vehicle_sold_date(hit) == "2026-10-14"
+    assert oem_sync.vehicle_received_date(hit) == "2026-08-01"
+
+
+def test_invoice_list_failure_does_not_mark_sold_complete(monkeypatch):
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            return {"success": True, "data": [{"chassis": "MD9SOLDONLY01"}],
+                    "extras": {"total_count": 1}}
+        raise coulson_client.CoulsonError("nope", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok", fill_models=False)
+    assert rows.invoice_list_ok is False
+    assert rows.complete is False
+    assert [r["chassis"] for r in rows] == ["MD9SOLDONLY01"]
+
+
+@pytest.mark.asyncio
+async def test_billed_chassis_leaves_yard(client):
+    billed = "MD9BILLEDYARD01"
+    stay = "MD9STAYYARD01"
+    await server.db.oem_inventory.delete_many({})
+    await server.db.oem_sold.delete_many({})
+    await server.db.oem_inventory.insert_many([
+        {"chassis": billed, "model": "Turbo Max"},
+        {"chassis": stay, "model": "Storm"},
+    ])
+    await server.db.oem_sold.insert_one({
+        "chassis": billed, "soldDate": "2026-10-14",
+        "customerName": "AMEERCHAND GURJAR",
+    })
+    n = await oem_sync.drop_billed_from_inventory(server.db)
+    assert n == 1
+    left = [r["chassis"] async for r in server.db.oem_inventory.find({})]
+    assert left == [stay]
+
+
+@pytest.mark.asyncio
+async def test_chassis_ledger_keeps_earliest_received_and_never_deletes(client):
+    ch = "MD9LEDGER01"
+    await server.db.oem_chassis_ledger.delete_many({"chassis": ch})
+    await oem_sync.upsert_chassis_ledger(server.db, [{
+        "chassis": ch, "sap_invoice_date": "2026-08-01",
+    }], source="PRESENT")
+    await oem_sync.upsert_chassis_ledger(server.db, [{
+        "chassis": ch, "sap_invoice_date": "2026-10-14",
+    }], source="INVOICED")
+    row = await server.db.oem_chassis_ledger.find_one({"chassis": ch})
+    assert row["receivedDate"] == "2026-08-01"
+    assert row["receivedMonth"] == "2026-08"
+    await server.db.oem_inventory.delete_many({})
+    await oem_sync.upsert_chassis_ledger(server.db, [], source="PRESENT")
+    still = await server.db.oem_chassis_ledger.find_one({"chassis": ch})
+    assert still is not None
+    assert still["receivedDate"] == "2026-08-01"
+
+
+@pytest.mark.asyncio
+async def test_inventory_sold_and_received_endpoints(client):
+    await server.db.oem_sold.delete_many({})
+    await server.db.oem_chassis_ledger.delete_many({})
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9SOLDAPI01",
+        "soldDate": "2026-10-14",
+        "customerName": "AMEERCHAND GURJAR",
+        "invoiceNumber": "AF-HIDE",
+        "model": "Turbo Max",
+    })
+    await server.db.oem_chassis_ledger.insert_many([
+        {"chassis": "MD9SOLDAPI01", "receivedDate": "2026-08-01", "receivedMonth": "2026-08"},
+        {"chassis": "MD9OCTRECV01", "receivedDate": "2026-10-02", "receivedMonth": "2026-10"},
+    ])
+    sold = (await client.get("/api/inventory/sold")).json()
+    assert sold == [{
+        "chassis": "MD9SOLDAPI01",
+        "soldDate": "2026-10-14",
+        "customerName": "AMEERCHAND GURJAR",
+    }]
+    oct_rows = (await client.get("/api/inventory/received", params={"month": "2026-10"})).json()
+    assert oct_rows["total"] == 1
+    assert [r["chassis"] for r in oct_rows["rows"]] == ["MD9OCTRECV01"]
+    months = {m["month"]: m["count"] for m in oct_rows["byMonth"]}
+    assert months["2026-08"] == 1
+    assert months["2026-10"] == 1
+    summary = (await client.get("/api/inventory/summary")).json()
+    assert summary["sold"] >= 1
+    assert summary["received"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_sync_drops_invoiced_chassis_from_yard_and_writes_ledger(client, monkeypatch):
+    billed = "MD9SYNCBILL01"
+    yard = "MD9SYNCYARD01"
+    oem_models = [{
+        "id": "oem-maxx-pv", "model": "Turbo", "variant": "Range Maxx", "load_body": "PV",
+        "sap_product_id": "CD00001500", "sap_product_name": "TURBO RANGEMAXX PV",
+        "showroom_price_non_delhi": 770000, "showroom_price_delhi": 770000,
+    }]
+    present = [
+        {"chassis": billed, "emch": "EMCS-B", "model": "Turbo", "variant": "Range Maxx",
+         "sap_vehicle_model_id": "oem-maxx-pv", "sap_invoice_date": "2026-08-01"},
+        {"chassis": yard, "emch": "EMCS-Y", "model": "Turbo", "variant": "Range Maxx",
+         "sap_vehicle_model_id": "oem-maxx-pv", "sap_invoice_date": "2026-10-02"},
+    ]
+    sold = coulson_client._SoldPull([{
+        "chassis": billed, "customer_name": "AMEERCHAND GURJAR",
+        "invoice_number": "AF-14OCT", "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+        "sap_invoice_date": "2026-08-01", "_coulsonStatus": "INVOICED",
+    }])
+    sold.complete = True
+    sold.invoice_list_ok = True
+    sold.invoices = tuple(sold)
+
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: oem_models)
+    monkeypatch.setattr(coulson_client, "fetch_present_inventory", lambda token, limit=200, **k: present)
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", lambda token, limit=200, **k: sold)
+    monkeypatch.setattr(coulson_client, "fetch_transit_inventory", lambda token, limit=200, **k: [])
+    monkeypatch.setattr(coulson_client, "fetch_held_inventory", lambda token, limit=200, **k: [])
+    await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
+    r = await client.post("/api/integrations/coulson/sync")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["inventoryCount"] == 1
+    assert body["soldCount"] == 1
+    assert body["receivedCount"] >= 2
+    inv = (await client.get("/api/inventory")).json()
+    assert [row["chassis"] for row in inv] == [yard]
+    billed_row = await server.db.oem_sold.find_one({"chassis": billed})
+    assert billed_row["soldDate"] == "2026-10-14"
+    assert billed_row["customerName"] == "AMEERCHAND GURJAR"
+    ledger = await server.db.oem_chassis_ledger.find_one({"chassis": billed})
+    assert ledger["receivedDate"] == "2026-08-01"
+

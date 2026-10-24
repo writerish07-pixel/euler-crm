@@ -520,6 +520,8 @@ def _merge_vehicle_rows(rows, chunk, status=""):
                 "customer_mobile", "registration_number", "invoice_creation_ts", "date",
                 "motor_number", "motorNumber", "motor_no", "engine_number", "engineNumber",
                 "battery_number", "batteryNumber", "battery_serial_number",
+                "sap_invoice_date", "sap_invoice_number", "delivery_date",
+                "total_amount", "amount_paid", "amount_due", "payment_status", "status",
             ):
                 if row.get(k) not in (None, "") and (
                         status == "INVOICED" or dst.get(k) in (None, "")):
@@ -780,10 +782,11 @@ def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE, max_rows=None):
 
 
 class _SoldPull(list):
-    """List of Sold/invoice rows plus whether the Sold tab was fully paged."""
+    """List of Sold/invoice rows plus whether Invoice List + Sold fully paged."""
     complete = True
     cancelled = ()
     invoice_list_ok = False
+    invoices = ()
 
 
 _MODEL_COPY_KEYS = (
@@ -861,10 +864,15 @@ def fill_missing_sold_models(token: str, rows, *, limit=40):
 
 def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
                          fill_models=True, invoice_max_rows=None):
-    """Vehicles billed / sold — Sold tab PLUS Created invoices, minus Cancelled.
+    """Billed vehicles — Invoice List first, then Sold tab, minus Cancelled.
 
-    The Sold tab often still shows a chassis after its tax invoice is Cancelled
-    in Vehicle Inventory → Invoice List. Those ids must not stay on CRM leads.
+    Vehicle Inventory → ⋮ → Invoice List (`GET dealer/invoice/vehicle`) is
+    the dealer-visible billed source (Created rows). The Sold tab often
+    lags that list and still shows a chassis after its tax invoice is
+    Cancelled. Invoice dates/customer win; Sold only fills model and the
+    dealer inbound (`sap_invoice_date`) used for the received ledger.
+
+    A failed Invoice List pull must not wipe older oem_sold rows.
 
     invoice_max_rows caps the DESC invoice list (newest first) so an
     interactive OEM Billing tap does not page years of invoices past the
@@ -872,9 +880,19 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
     """
     rows = _SoldPull()
     errors = []
-    complete = True
+    sold_complete = True
     cancelled = []
     invoice_list_ok = False
+    created_invoices = []
+    try:
+        invoices = fetch_vehicle_invoices(token, limit=limit, max_rows=invoice_max_rows)
+        cancelled = list(getattr(invoices, "cancelled", ()) or ())
+        invoice_list_ok = bool(getattr(invoices, "invoice_list_ok", False))
+        created_invoices = [dict(r) for r in invoices if isinstance(r, dict)]
+        _merge_vehicle_rows(rows, invoices, "INVOICED")
+    except CoulsonError as e:
+        log.info("Coulson vehicle invoices skipped: %s", e)
+        errors.append(e)
     for status in SOLD_INVENTORY_STATUSES:
         meta = {}
         try:
@@ -882,19 +900,11 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
         except CoulsonError as e:
             log.info("Coulson %s inventory skipped: %s", status, e)
             errors.append(e)
-            complete = False
+            sold_complete = False
             continue
         _merge_vehicle_rows(rows, chunk, status)
         if meta.get("complete") is False:
-            complete = False
-    try:
-        invoices = fetch_vehicle_invoices(token, limit=limit, max_rows=invoice_max_rows)
-        cancelled = list(getattr(invoices, "cancelled", ()) or ())
-        invoice_list_ok = bool(getattr(invoices, "invoice_list_ok", False))
-        _merge_vehicle_rows(rows, invoices, "INVOICED")
-    except CoulsonError as e:
-        log.info("Coulson vehicle invoices skipped: %s", e)
-        errors.append(e)
+            sold_complete = False
     drop = cancelled_chassis_set(cancelled)
     if drop:
         kept = [r for r in rows if _vehicle_key(r) not in drop]
@@ -909,9 +919,12 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
             log.exception("Coulson chassis model fill failed")
     if not rows and errors:
         raise errors[0]
-    rows.complete = complete
+    # Wipe oem_sold only when Invoice List fully paged. Sold-tab-only
+    # completeness used to drop today's Created invoices after a 404/timeout.
+    rows.complete = bool(sold_complete and invoice_list_ok)
     rows.cancelled = tuple(cancelled)
     rows.invoice_list_ok = invoice_list_ok
+    rows.invoices = tuple(created_invoices)
     return rows
 
 

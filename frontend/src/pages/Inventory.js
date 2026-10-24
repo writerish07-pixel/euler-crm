@@ -11,6 +11,8 @@ const TABS = [
   ["yard", "In yard"],
   ["transit", "In transit"],
   ["held", "Booked / Pilot / Demo"],
+  ["sold", "Sold"],
+  ["received", "Received from OEM"],
   ["order", "Need to order"],
 ];
 
@@ -21,16 +23,20 @@ export default function Inventory() {
   const [transit, setTransit] = useState([]);
   const [held, setHeld] = useState([]);
   const [need, setNeed] = useState([]);
+  const [sold, setSold] = useState([]);
+  const [received, setReceived] = useState({ rows: [], byMonth: [], total: 0 });
   const [summary, setSummary] = useState(null);
   const [status, setStatus] = useState(null);
   const [check, setCheck] = useState(null);
   const [ticks, setTicks] = useState({});
   const [model, setModel] = useState("");
+  const [receivedMonth, setReceivedMonth] = useState("");
   const [busy, setBusy] = useState(false);
   const canConfirm = isOwner || isShowroomAdmin;
 
   const load = useCallback(() => {
     const q = model ? { model } : undefined;
+    const receivedQ = receivedMonth ? { month: receivedMonth } : undefined;
     return Promise.all([
       get("/inventory", q).then((list) => {
         const next = Array.isArray(list) ? list : [];
@@ -45,12 +51,24 @@ export default function Inventory() {
       }).catch(() => setRows([])),
       get("/inventory/transit", q).then(setTransit).catch(() => setTransit([])),
       get("/inventory/held", q).then((list) => setHeld(Array.isArray(list) ? list : [])).catch(() => setHeld([])),
+      get("/inventory/sold").then((list) => setSold(Array.isArray(list) ? list : [])).catch(() => setSold([])),
+      get("/inventory/received", receivedQ).then((payload) => {
+        if (payload && typeof payload === "object" && Array.isArray(payload.rows)) {
+          setReceived({
+            rows: payload.rows,
+            byMonth: Array.isArray(payload.byMonth) ? payload.byMonth : [],
+            total: payload.total ?? payload.rows.length,
+          });
+        } else {
+          setReceived({ rows: [], byMonth: [], total: 0 });
+        }
+      }).catch(() => setReceived({ rows: [], byMonth: [], total: 0 })),
       get("/inventory/need-to-order").then(setNeed).catch(() => setNeed([])),
       get("/inventory/summary").then(setSummary).catch(() => {}),
       get("/inventory/check").then(setCheck).catch(() => {}),
       get("/integrations/coulson").then(setStatus).catch(() => {}),
     ]);
-  }, [model]);
+  }, [model, receivedMonth]);
   useEffect(() => { load(); }, [load]);
 
   const sync = async () => {
@@ -58,7 +76,7 @@ export default function Inventory() {
     try {
       const r = await post("/integrations/coulson/sync", {});
       if (r.ok) toast.success(
-        `Synced ${r.inventoryCount || 0} in yard · ${r.transitCount || 0} in transit · ${r.heldCount || 0} booked/pilot/demo · ${(r.leadsVehicleIds && r.leadsVehicleIds.updated) || 0} leads chassis/invoice`,
+        `Synced ${r.inventoryCount || 0} in yard · ${r.soldCount || 0} billed · ${r.receivedCount || 0} received · ${r.transitCount || 0} in transit · ${r.heldCount || 0} booked/pilot/demo · ${(r.leadsVehicleIds && r.leadsVehicleIds.updated) || 0} leads chassis/invoice`,
       );
       else toast.error(r.reason === "not_configured" ? "Save Coulson login in Settings first" : "Sync did not run");
       load();
@@ -82,7 +100,7 @@ export default function Inventory() {
     <div data-testid="yard-inventory">
       <PageHeader
         title="Yard Inventory"
-        subtitle="OEM stock plus Showroom Admin's daily physical tick. Missing / damaged drop out of In yard for quoting."
+        subtitle="OEM Invoice List is the billed source. In yard drops those chassis. Sold tracks every billed chassis. Received keeps every chassis that arrived from OEM."
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
           {isOwner && (
@@ -92,7 +110,7 @@ export default function Inventory() {
           )}
         </div>} />
 
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-5">
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3 mb-5">
         <Card className="p-3" data-testid="inv-card-yard">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">In yard</div>
           <div className="text-xl font-bold tabular">{summary?.total ?? rows.length}</div>
@@ -104,6 +122,14 @@ export default function Inventory() {
         <Card className="p-3" data-testid="inv-card-held">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">Booked / Pilot / Demo</div>
           <div className="text-xl font-bold tabular">{summary?.held ?? held.length}</div>
+        </Card>
+        <Card className="p-3" data-testid="inv-card-sold">
+          <div className="text-[11px] uppercase tracking-wide text-ink-faint">Sold</div>
+          <div className="text-xl font-bold tabular">{summary?.sold ?? sold.length}</div>
+        </Card>
+        <Card className="p-3" data-testid="inv-card-received">
+          <div className="text-[11px] uppercase tracking-wide text-ink-faint">Received from OEM</div>
+          <div className="text-xl font-bold tabular">{summary?.received ?? received.total}</div>
         </Card>
         <Card className="p-3" data-testid="inv-card-need">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">Need to order</div>
@@ -142,10 +168,22 @@ export default function Inventory() {
             </button>
           ))}
         </div>
-        <Select data-testid="inventory-model-filter" value={model} onChange={(e) => setModel(e.target.value)} className="w-52">
-          <option value="">All models</option>
-          {models.map((m) => <option key={m}>{m}</option>)}
-        </Select>
+        {tab !== "sold" && tab !== "received" && (
+          <Select data-testid="inventory-model-filter" value={model} onChange={(e) => setModel(e.target.value)} className="w-52">
+            <option value="">All models</option>
+            {models.map((m) => <option key={m}>{m}</option>)}
+          </Select>
+        )}
+        {tab === "received" && (
+          <Select data-testid="inventory-received-month" value={receivedMonth} onChange={(e) => setReceivedMonth(e.target.value)} className="w-52">
+            <option value="">All months</option>
+            {(received.byMonth || []).filter((m) => m.month && m.month !== "undated").map((m) => (
+              <option key={m.month} value={m.month}>
+                {m.month} ({m.count})
+              </option>
+            ))}
+          </Select>
+        )}
       </div>
 
       {tab === "yard" && (
@@ -241,6 +279,32 @@ export default function Inventory() {
             { key: "inventoryAgeing", label: "Age (days)", align: "right", mono: true },
           ]}
           rows={heldRows}
+        />
+      )}
+
+      {tab === "sold" && (
+        <Table
+          rowKey="chassis"
+          empty="No billed chassis yet — owner can sync Invoice List from OEM."
+          columns={[
+            { key: "chassis", label: "Chassis", mono: true, render: (r) => <span className="text-xs">{r.chassis}</span> },
+            { key: "soldDate", label: "Sold date", render: (r) => fmtDate(r.soldDate) },
+            { key: "customerName", label: "Customer", render: (r) => <span className="font-semibold">{r.customerName || "—"}</span> },
+          ]}
+          rows={sold}
+        />
+      )}
+
+      {tab === "received" && (
+        <Table
+          rowKey="chassis"
+          empty="No chassis received from OEM yet — owner can sync from OEM."
+          columns={[
+            { key: "chassis", label: "Chassis", mono: true, render: (r) => <span className="text-xs">{r.chassis}</span> },
+            { key: "receivedDate", label: "Received date", render: (r) => fmtDate(r.receivedDate) },
+            { key: "receivedMonth", label: "Month" },
+          ]}
+          rows={received.rows || []}
         />
       )}
 

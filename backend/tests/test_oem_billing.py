@@ -80,6 +80,23 @@ def test_iso_date_uses_india_calendar_not_utc_slice():
     }) == "2026-10-14"
 
 
+def test_sold_date_ignores_dealer_billing_date():
+    """sap_invoice_date is when OEM billed the dealer, not the customer invoice."""
+    assert oem_sync.vehicle_sold_date({
+        "sap_invoice_date": "2026-08-01",
+        "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+        "customer_name": "AMEERCHAND GURJAR",
+    }) == "2026-10-14"
+    assert oem_sync.vehicle_received_date({
+        "sap_invoice_date": "2026-08-01",
+        "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+    }) == "2026-08-01"
+    assert oem_sync.vehicle_sold_date({
+        "sap_invoice_date": "2026-08-01",
+        "billing_date": "2026-08-01",
+    }) == ""
+
+
 def test_billing_day_counts_match_oem_invoice_list():
     rows = [
         {"soldDate": "2026-10-14", "invoiceNumber": "AF-1"},
