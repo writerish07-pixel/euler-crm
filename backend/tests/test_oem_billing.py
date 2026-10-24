@@ -36,6 +36,7 @@ def _no_live_coulson_sold(monkeypatch):
 @pytest_asyncio.fixture
 async def client():
     await server.startup()
+    await oem_sync.save_credentials(server.db, "dealer.user", "secret")
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.post("/api/auth/login", json={"email": "owner@euler.com", "password": "euler@123"})
@@ -62,6 +63,35 @@ def test_vehicle_sold_date_reads_coulson_invoice_spa_date():
     }) == "2026-10-16"
     assert oem_sync._iso_date("1792108800") == "2026-10-16"
     assert oem_sync._iso_date("1792108800000") == "2026-10-16"
+
+
+def test_iso_date_uses_india_calendar_not_utc_slice():
+    """14 Oct 01:00 IST is 13 Oct 19:30 UTC — Coulson still prints 14 Oct."""
+    assert oem_sync._iso_date("2026-10-13T19:30:00.000Z") == "2026-10-14"
+    assert oem_sync._iso_date("2026-10-13T18:30:00.000Z") == "2026-10-14"
+    assert oem_sync._iso_date("2026-10-13T18:29:00.000Z") == "2026-10-13"
+    assert oem_sync.vehicle_sold_date({
+        "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+        "created_at": "2026-10-11",
+    }) == "2026-10-14"
+    assert oem_sync.vehicle_sold_date({
+        "date": "14 Oct 2026",
+        "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+    }) == "2026-10-14"
+
+
+def test_billing_day_counts_match_oem_invoice_list():
+    rows = [
+        {"soldDate": "2026-10-14", "invoiceNumber": "AF-1"},
+        {"soldDate": "2026-10-14", "invoiceNumber": "AF-2"},
+        {"soldDate": "2026-10-14", "invoiceNumber": "AF-3"},
+        {"soldDate": "2026-10-14", "invoiceNumber": "AF-4"},
+        {"soldDate": "2026-10-14", "invoiceNumber": "AF-5"},
+        {"soldDate": "2026-10-13", "invoiceNumber": "AF-YDAY"},
+    ]
+    days = {d["date"]: d["count"] for d in oem_sync.billing_day_counts(rows)}
+    assert days["2026-10-14"] == 5
+    assert days["2026-10-13"] == 1
 
 
 def test_sold_doc_keeps_sold_date():

@@ -4,7 +4,12 @@ from __future__ import annotations
 import calendar
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:  # pragma: no cover
+    IST = timezone(timedelta(hours=5, minutes=30))
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _YEAR_RE = re.compile(r"^\d{4}$")
@@ -34,6 +39,23 @@ def utc_month() -> str:
 
 def utc_year() -> str:
     return datetime.now(timezone.utc).strftime("%Y")
+
+
+def ist_now() -> datetime:
+    return datetime.now(timezone.utc).astimezone(IST)
+
+
+def ist_today() -> str:
+    """Dealer calendar day in India — not UTC (00:00–05:29 IST is still yesterday UTC)."""
+    return ist_now().strftime("%Y-%m-%d")
+
+
+def ist_month() -> str:
+    return ist_now().strftime("%Y-%m")
+
+
+def ist_year() -> str:
+    return ist_now().strftime("%Y")
 
 
 def month_end(ym: str) -> str:
@@ -66,19 +88,19 @@ def parse_period(month: str = "", year: str = "") -> Period:
 
 
 def this_month_period() -> Period:
-    return parse_period(month=utc_month())
+    return parse_period(month=ist_month())
 
 
 def this_year_period() -> Period:
-    return parse_period(year=utc_year())
+    return parse_period(year=ist_year())
 
 
 def ytd_period(year: str = "") -> Period:
-    y = str(year or "").strip() or utc_year()
+    y = str(year or "").strip() or ist_year()
     p = parse_period(year=y)
-    if y == utc_year():
+    if y == ist_year():
         return Period(
-            kind="year", year=y, start=p.start, end=utc_today(),
+            kind="year", year=y, start=p.start, end=ist_today(),
             label=f"{y} YTD",
         )
     return Period(

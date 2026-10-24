@@ -9,7 +9,12 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except Exception:  # pragma: no cover — stdlib on 3.9+
+    IST = timezone(timedelta(hours=5, minutes=30))
 
 import oem_catalog as cat
 import coulson as coulson_client
@@ -749,12 +754,16 @@ def vehicle_customer_name(row, *, nested=False):
     return ""
 
 
+# Dealer-visible calendar date first (Coulson Invoice List prints "14 Oct 2026"),
+# then invoice timestamps converted to IST. created_at is last — that is when
+# the chassis left PRESENT, not the tax-invoice day.
 _SOLD_DATE_KEYS = (
-    "invoice_creation_ts", "invoiceCreationTs", "vehicle_invoice_date",
-    "customer_invoice_date", "sap_invoice_date", "sold_at", "soldAt",
-    "invoice_date", "invoiceDate", "billed_at", "billedAt",
+    "date", "Date", "invoice_date", "invoiceDate",
+    "vehicle_invoice_date", "customer_invoice_date", "sap_invoice_date",
+    "invoice_creation_ts", "invoiceCreationTs",
+    "sold_at", "soldAt", "billed_at", "billedAt",
     "sold_date", "soldDate", "billing_date", "billingDate",
-    "retail_date", "retailDate", "date", "Date", "_created_at",
+    "retail_date", "retailDate", "_created_at",
     "created_at", "createdAt",
 )
 _MONTH_NAME = {
@@ -765,15 +774,30 @@ _MONTH_NAME = {
 }
 
 
+def _ist_calendar_date(dt):
+    """Business day in India — the date Coulson Invoice List shows the dealer."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST).strftime("%Y-%m-%d")
+
+
 def _iso_date(raw):
-    """Normalize a Coulson timestamp to YYYY-MM-DD."""
+    """Normalize a Coulson timestamp to the India calendar day (YYYY-MM-DD).
+
+    `invoice_creation_ts` is UTC (`2026-10-13T20:30:00.000Z`). Slicing the
+    first ten characters stored that as 13 Oct, while Coulson printed
+    14 Oct. Early-morning IST invoices then vanished from that day.
+    """
     if raw is None:
         return ""
     if hasattr(raw, "strftime"):
         try:
-            return raw.strftime("%Y-%m-%d")
+            return _ist_calendar_date(raw) if getattr(raw, "tzinfo", None) or hasattr(raw, "hour") else raw.strftime("%Y-%m-%d")
         except Exception:
-            return ""
+            try:
+                return raw.strftime("%Y-%m-%d")
+            except Exception:
+                return ""
     s = str(raw).strip()
     if not s:
         return ""
@@ -787,10 +811,15 @@ def _iso_date(raw):
             ts //= 1000
         if 1_000_000_000 <= ts <= 2_200_000_000:
             try:
-                return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+                return _ist_calendar_date(datetime.fromtimestamp(ts, tz=timezone.utc))
             except (OSError, OverflowError, ValueError):
                 return ""
         return ""
+    if "T" in s or s.endswith("Z") or (len(s) > 10 and "+" in s[10:]):
+        try:
+            return _ist_calendar_date(datetime.fromisoformat(s.replace("Z", "+00:00")))
+        except ValueError:
+            pass
     if len(s) >= 10 and s[4] == "-" and s[7] == "-":
         return s[:10]
     m = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})", s)
@@ -1026,18 +1055,17 @@ async def replace_held_inventory(db, vehicles, oem_by_id, by_key):
     return len(docs)
 
 
-# Newest-first invoice pages. Four pages of 200 covers a busy month without
-# paging years of Vehicle Invoices (that used to blow the OEM Billing HTTP
-# timeout so Sync looked dead).
-BILLING_INVOICE_MAX_ROWS = 800
+# Page every Vehicle Invoice. A 800-row newest-first cap hid billed days
+# older than a few weeks and made OEM Billing disagree with Coulson.
+BILLING_INVOICE_MAX_ROWS = None
 
 
 async def refresh_sold_inventory(db, *, interactive=True):
     """Live Sold + Vehicle Invoices pull without rewriting yard PRESENT stock.
 
-    Interactive (OEM Billing Sync) skips the per-chassis model fill and caps
-    the DESC invoice list so the request finishes before Railway/Cloudflare
-    cut it off. A missing Coulson session is an error, not a silent no-op.
+    Interactive (OEM Billing Sync) skips the per-chassis model fill so the
+    request finishes. The invoice list is fully paged — a short cap used to
+    drop billed days. A missing Coulson session is an error, not a silent no-op.
     """
     token, _src = await _access_token(db)
     if not token:
@@ -1049,7 +1077,7 @@ async def refresh_sold_inventory(db, *, interactive=True):
         token,
         coulson_client.INVENTORY_PAGE,
         fill_models=not interactive,
-        invoice_max_rows=BILLING_INVOICE_MAX_ROWS if interactive else None,
+        invoice_max_rows=BILLING_INVOICE_MAX_ROWS,
     ) or []
     if not sold_vehicles:
         return await db.oem_sold.count_documents({})
@@ -3122,6 +3150,15 @@ def sold_row_in_period(row, period):
         return True
     import period as periodmod
     return periodmod.in_period(d, period)
+
+
+def billing_day_counts(rows):
+    """Invoice counts by India calendar day — the figure Coulson shows."""
+    out = {}
+    for row in rows or []:
+        d = str((row or {}).get("soldDate") or "").strip()[:10] or "undated"
+        out[d] = out.get(d, 0) + 1
+    return [{"date": d, "count": out[d]} for d in sorted(out)]
 
 
 def inventory_family_key(model, variant=""):
