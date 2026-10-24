@@ -1255,18 +1255,21 @@ def test_sold_inventory_drops_cancelled_even_when_sold_tab_still_lists_it(monkey
 
 
 def test_held_inventory_merges_booked_pilot_demo(monkeypatch):
+    seen = []
+
     def fake_get_json(token, path, params=None):
         assert path == "vehicle-inventory/transfer"
         status = str((params or {}).get("vehicle_status") or "")
+        seen.append(status)
         if status == "BOOKED":
             return {"success": True, "data": [
                 {"chassis": "MD9BOOKED01", "model": "Turbo"},
             ], "extras": {"total_count": 1}}
-        if status == "PILOT":
+        if status == "PILOT_VEHICLE":
             return {"success": True, "data": [
                 {"chassis": "MD9PILOT01", "model": "Storm"},
             ], "extras": {"total_count": 1}}
-        if status == "DEMO":
+        if status == "DEMO_VEHICLE":
             return {"success": True, "data": [
                 {"chassis": "MD9DEMO01", "model": "HiCity"},
             ], "extras": {"total_count": 1}}
@@ -1280,6 +1283,7 @@ def test_held_inventory_merges_booked_pilot_demo(monkeypatch):
         "MD9PILOT01": "PILOT",
         "MD9DEMO01": "DEMO",
     }
+    assert seen == ["BOOKED", "PILOT_VEHICLE", "DEMO_VEHICLE"]
 
 
 @pytest.mark.asyncio

@@ -458,11 +458,14 @@ def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
 #     Euler Assured, AMC/EW offers, Warranty Parts, Analytics,
 #     Announcements, Complaint Management, Downloads.
 SOLD_INVENTORY_STATUSES = ("SOLD",)
-TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT", "IN TRANSIT", "TRANSIT")
+TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT",)
+# Vehicle Inventory left filter (Oct 2026 SPA `cDt`): Present, In Transit,
+# Sold, Booked, Pilot Vehicle, Demo Vehicle. Unknown ids can echo Present
+# and then skip the real Pilot/Demo pull — only send the SPA ids.
 HELD_INVENTORY_STATUSES = (
     "BOOKED",
-    "PILOT", "PILOT_VEHICLE", "PILOT VEHICLE",
-    "DEMO", "DEMO_VEHICLE", "DEMO VEHICLE",
+    "PILOT_VEHICLE",
+    "DEMO_VEHICLE",
 )
 INVOICE_LIST_PATH = "dealer/invoice/vehicle"
 VEHICLE_INVOICE_PATHS = (
@@ -561,9 +564,10 @@ def _held_status_label(status: str) -> str:
 def fetch_held_inventory(token: str, limit=INVENTORY_PAGE):
     """Booked / Pilot / Demo — on the lot, not sellable Present yard.
 
-    Vehicle Inventory left filter: Present, In Transit, Sold, Booked,
-    Pilot Vehicle, Demo Vehicle. Euler yard is Present only; these sit
-    on a Held tab so matching does not treat them as available stock.
+    Vehicle Inventory left filter (`cDt`): Present, In Transit, Sold,
+    Booked, Pilot Vehicle (`PILOT_VEHICLE`), Demo Vehicle (`DEMO_VEHICLE`).
+    Euler yard is Present only; these sit on a Held tab so matching does
+    not treat them as available stock.
     """
     rows = []
     seen_labels = set()
@@ -924,8 +928,31 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
     rows.complete = bool(sold_complete and invoice_list_ok)
     rows.cancelled = tuple(cancelled)
     rows.invoice_list_ok = invoice_list_ok
-    rows.invoices = tuple(created_invoices)
+    rows.invoices = tuple(_enrich_invoice_rows(created_invoices, rows))
     return rows
+
+
+def _enrich_invoice_rows(invoices, merged):
+    """Copy model / dealer inbound date from the Sold+Invoice merge onto each list row."""
+    by_key = {}
+    for row in merged or []:
+        key = _vehicle_key(row)
+        if key:
+            by_key[key] = row
+    out = []
+    for inv in invoices or []:
+        if not isinstance(inv, dict):
+            continue
+        row = dict(inv)
+        hit = by_key.get(_vehicle_key(row))
+        if hit:
+            _copy_model_fields(row, hit)
+            for k in ("sap_invoice_date", "sap_invoice_number", "delivery_date",
+                      "model", "variant"):
+                if hit.get(k) not in (None, "") and row.get(k) in (None, ""):
+                    row[k] = hit[k]
+        out.append(row)
+    return out
 
 
 # ---------------------------------------------------------------- claim settlements
@@ -1078,10 +1105,10 @@ def fetch_claim_journey(token: str, debit_note_id: str):
 # and terminal states last. Used to sweep per-status when one unfiltered pull
 # comes back short of the true total.
 #
-# Oct 2026 Coulson SPA: the Zno filter still *labels* Dealer Development but
-# posts **Expansion Team Approval Pending**. Bill Posted in SAP is a new tab.
-# Sales Invoice Generation Pending dropped from the filter; keep it so older
-# notes still get swept.
+# Oct 2026 Coulson SPA `Jgo` filter: Dealer Development is only a *label*;
+# the posted value is **Expansion Team Approval Pending**. Bill Posted in SAP
+# is on the filter. Sales Invoice Generation Pending dropped from the filter;
+# keep it so older notes still get swept.
 CLAIM_STATUSES = (
     "RM Approval Pending",
     "Dealer Development Department Approval Pending",

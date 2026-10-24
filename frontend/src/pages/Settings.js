@@ -1089,7 +1089,7 @@ function coulsonSyncOkToast(r) {
   const m = ids.mobilesUpdated || 0;
   const extra = m ? ` · ${m} mobiles` : "";
   toast.success(
-    `Pulled ${r.inventoryCount || 0} vehicles · ${r.pricesUpdated || 0} prices · ${n} leads chassis/invoice${extra}`,
+    `Pulled ${r.inventoryCount || 0} in yard · ${r.soldCount || 0} billed · ${r.receivedCount || 0} received · ${r.pricesUpdated || 0} prices · ${n} leads chassis/invoice${extra}`,
   );
 }
 

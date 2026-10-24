@@ -1070,6 +1070,8 @@ def _oem_invoice_doc(vehicle):
         "amountPaid": (vehicle or {}).get("amount_paid"),
         "amountDue": (vehicle or {}).get("amount_due"),
         "paymentStatus": (vehicle or {}).get("payment_status") or "",
+        "model": vehicle_model(vehicle),
+        "variant": vehicle_variant(vehicle),
         "coulsonStatus": (vehicle or {}).get("_coulsonStatus") or "INVOICED",
         "source": "coulson_invoice_list",
         "syncedAt": now_iso(),
@@ -3049,7 +3051,26 @@ def classify_oem_billing(sold_rows, leads):
 
 
 async def list_oem_billing(db, leads=None):
+    """Invoice List Created rows when we have them — that is the billed source."""
     sold = [r async for r in db.oem_sold.find({})]
+    invoices = [r async for r in db.oem_invoices.find({})]
+    if invoices:
+        by_ch = {}
+        for row in sold:
+            ch = _norm_chassis(row.get("chassis"))
+            if ch:
+                by_ch[ch] = row
+        merged = []
+        for inv in invoices:
+            extra = by_ch.get(_norm_chassis(inv.get("chassis"))) or {}
+            row = dict(extra)
+            row.update({k: v for k, v in inv.items() if v not in (None, "")})
+            if not row.get("model") and extra.get("model"):
+                row["model"] = extra.get("model")
+            if not row.get("variant") and extra.get("variant"):
+                row["variant"] = extra.get("variant")
+            merged.append(row)
+        sold = merged
     if leads is None:
         leads = await load_oem_billing_leads(db)
     return classify_oem_billing(sold, leads)
