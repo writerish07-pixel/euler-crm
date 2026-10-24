@@ -498,6 +498,41 @@ def _vehicle_key(v):
     )
 
 
+def _invoice_created_at(row):
+    """UTC timestamp from Invoice List. None when the row has no creation time."""
+    raw = str(
+        (row or {}).get("invoice_creation_ts")
+        or (row or {}).get("invoiceCreationTs")
+        or ""
+    ).strip()
+    if not raw:
+        return None
+    text = raw.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _created_invoice_is_newer(incoming, existing) -> bool:
+    """True when the incoming Created row should replace invoice fields.
+
+    Invoice List is newest-first. A later page is an older bill for the same
+    chassis (rebill). That older row must not wipe the latest invoice number.
+    Rows with no timestamp still fill blanks and otherwise overwrite, which
+    is how the Sold tab used to land on an invoice-only chassis.
+    """
+    a = _invoice_created_at(incoming)
+    b = _invoice_created_at(existing)
+    if isinstance(a, datetime) and isinstance(b, datetime):
+        return a >= b
+    if isinstance(a, datetime) and b is None:
+        return True
+    if isinstance(b, datetime) and a is None:
+        return False
+    return True
+
+
 def _merge_vehicle_rows(rows, chunk, status=""):
     by_key = {}
     for i, v in enumerate(rows):
@@ -518,6 +553,7 @@ def _merge_vehicle_rows(rows, chunk, status=""):
             _copy_model_fields(dst, row)
             if row.get("updated_load_body"):
                 dst["updated_load_body"] = row["updated_load_body"]
+            overwrite = status == "INVOICED" and _created_invoice_is_newer(row, dst)
             for k in (
                 "invoice_number", "invoiceNumber", "customer_name", "customer_phone",
                 "customer_mobile", "registration_number", "invoice_creation_ts", "date",
@@ -527,7 +563,7 @@ def _merge_vehicle_rows(rows, chunk, status=""):
                 "total_amount", "amount_paid", "amount_due", "payment_status", "status",
             ):
                 if row.get(k) not in (None, "") and (
-                        status == "INVOICED" or dst.get(k) in (None, "")):
+                        overwrite or dst.get(k) in (None, "")):
                     dst[k] = row[k]
             if status == "INVOICED":
                 dst["_coulsonStatus"] = "INVOICED"
@@ -777,11 +813,18 @@ def fetch_raw_vehicle_invoices(token: str, limit=INVENTORY_PAGE, max_rows=None):
 
 
 def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE, max_rows=None):
-    """Live (Created) invoices only — billed today even when Sold is yesterday."""
+    """Live (Created) invoices only — billed today even when Sold is yesterday.
+
+    The returned list is one row per chassis (latest Created invoice wins).
+    `.invoices` keeps every Created row, including an older bill on a chassis
+    that was rebilled, so persistence is not limited to the chassis merge.
+    """
     chunk, ok = fetch_raw_vehicle_invoices(token, limit=limit, max_rows=max_rows)
-    live = _SoldPull(_merge_vehicle_rows([], _live_invoices(chunk), "INVOICED"))
+    live_rows = [r for r in _live_invoices(chunk) if isinstance(r, dict)]
+    live = _SoldPull(_merge_vehicle_rows([], live_rows, "INVOICED"))
     live.cancelled = tuple(_cancelled_invoices(chunk))
     live.invoice_list_ok = ok
+    live.invoices = tuple(dict(r) for r in live_rows)
     return live
 
 
@@ -892,7 +935,13 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
         invoices = fetch_vehicle_invoices(token, limit=limit, max_rows=invoice_max_rows)
         cancelled = list(getattr(invoices, "cancelled", ()) or ())
         invoice_list_ok = bool(getattr(invoices, "invoice_list_ok", False))
-        created_invoices = [dict(r) for r in invoices if isinstance(r, dict)]
+        # Raw Created rows, captured before the chassis merge inside
+        # fetch_vehicle_invoices. Copying `invoices` itself drops every
+        # extra bill when one chassis was invoiced twice.
+        created_invoices = [
+            dict(r) for r in (getattr(invoices, "invoices", ()) or ())
+            if isinstance(r, dict)
+        ]
         _merge_vehicle_rows(rows, invoices, "INVOICED")
     except CoulsonError as e:
         log.info("Coulson vehicle invoices skipped: %s", e)

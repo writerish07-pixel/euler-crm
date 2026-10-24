@@ -1362,6 +1362,45 @@ def test_invoice_list_date_wins_over_dealer_billing(monkeypatch):
     assert oem_sync.vehicle_received_date(hit) == "2026-08-01"
 
 
+def test_rebill_keeps_every_created_invoice(monkeypatch):
+    """Two Created bills on one chassis both survive; the chassis row stays on the latest."""
+    chassis = "MD9REBILL01"
+
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            return {"success": True, "data": [{
+                "chassis": chassis,
+                "sap_invoice_date": "2026-08-01",
+                "model": "Turbo",
+                "variant": "Range Maxx",
+            }], "extras": {"total_count": 1}}
+        if path == "dealer/invoice/vehicle":
+            return {"success": True, "data": [
+                {"chassis": chassis, "invoice_number": "AF-NEW",
+                 "status": "CREATED", "customer_name": "LATEST BILL",
+                 "customer_phone": "9000000002",
+                 "invoice_creation_ts": "2026-10-14T08:00:00.000Z"},
+                {"chassis": chassis, "invoice_number": "AF-OLD",
+                 "status": "CREATED", "customer_name": "FIRST BILL",
+                 "customer_phone": "9000000001",
+                 "invoice_creation_ts": "2026-09-01T08:00:00.000Z"},
+            ], "extras": {"total_count": 2}}
+        raise coulson_client.CoulsonError("not found", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    pulled = coulson_client.fetch_vehicle_invoices("tok")
+    assert len(pulled) == 1
+    assert len(pulled.invoices) == 2
+    rows = coulson_client.fetch_sold_inventory("tok", fill_models=False)
+    assert [r["chassis"] for r in rows] == [chassis]
+    assert rows[0]["invoice_number"] == "AF-NEW"
+    assert rows[0]["customer_name"] == "LATEST BILL"
+    assert rows[0]["customer_phone"] == "9000000002"
+    numbers = sorted(r["invoice_number"] for r in rows.invoices)
+    assert numbers == ["AF-NEW", "AF-OLD"]
+    assert all(r.get("model") == "Turbo" for r in rows.invoices)
+
+
 def test_invoice_list_failure_does_not_mark_sold_complete(monkeypatch):
     def fake_get_json(token, path, params=None):
         if path == "vehicle-inventory/transfer":
