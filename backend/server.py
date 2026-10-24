@@ -13256,6 +13256,22 @@ async def list_held_inventory(model: Optional[str] = None, _user=Depends(current
     return [clean(r) for r in rows]
 
 
+@api.get("/inventory/sold")
+async def list_sold_inventory(user=Depends(current_user)):
+    """Invoice List CREATED chassis — sold date and customer only."""
+    if not authmod.can_view_inventory_ledger(user):
+        raise HTTPException(403, "Sold chassis is not on the executive or TL desk.")
+    return await oem_sync.list_sold_inventory(db)
+
+
+@api.get("/inventory/received")
+async def list_received_chassis(month: Optional[str] = None, user=Depends(current_user)):
+    """Every chassis received from OEM, regardless of sold or still in yard."""
+    if not authmod.can_view_inventory_ledger(user):
+        raise HTTPException(403, "Received chassis is not on the executive or TL desk.")
+    return await oem_sync.list_received_chassis(db, month)
+
+
 async def _need_to_order_for_viewer(user):
     """Need-to-order is a booking list. Executives see only their units."""
     rows = await oem_sync.need_to_order_bookings(db)
@@ -13289,6 +13305,9 @@ async def inventory_summary(user=Depends(current_user)):
     out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
     transit = await db.oem_inventory_transit.count_documents({})
     held = await db.oem_inventory_held.count_documents({})
+    show_ledger = authmod.can_view_inventory_ledger(user)
+    sold = await db.oem_sold.count_documents({}) if show_ledger else 0
+    received = await db.oem_chassis_ledger.count_documents({}) if show_ledger else 0
     need = await _need_to_order_for_viewer(user)
     check = inventory_check.public_check(await inventory_check.latest_check(db))
     last = await db.inventory_checks.find(
@@ -13298,6 +13317,9 @@ async def inventory_summary(user=Depends(current_user)):
         "total": sum(c["count"] for c in out),
         "transit": transit,
         "held": held,
+        "sold": sold,
+        "received": received,
+        "showChassisLedger": show_ledger,
         "needToOrder": len(need),
         "rows": out,
         "physicalCheck": {
@@ -14998,7 +15020,8 @@ CRITICAL_ENDPOINTS = [
     ("GET", "/api/price-master"), ("GET", "/api/scheme-master"), ("GET", "/api/incentive-master"),
     ("GET", "/api/executive-incentive/plan"), ("PUT", "/api/executive-incentive/plan"),
     ("GET", "/api/executive-incentive/board"),
-    ("GET", "/api/inventory"), ("GET", "/api/integrations/coulson"),
+    ("GET", "/api/inventory"), ("GET", "/api/inventory/sold"),
+    ("GET", "/api/inventory/received"), ("GET", "/api/integrations/coulson"),
     ("GET", "/api/dealer-earnings"), ("GET", "/api/reports/owner-commercial"),
     ("GET", "/api/reports/oem-claim-dashboard"), ("GET", "/api/reports/claim-exceptions"),
     ("GET", "/api/reports/insurance-payout"), ("GET", "/api/reports/dealer-earnings"),
@@ -18689,6 +18712,10 @@ async def startup():
         await db.oem_inventory.create_index("chassis")
         await db.oem_sold.create_index("chassis")
         await db.oem_sold.create_index("mobile")
+        await db.oem_invoices.create_index("invoiceNumber")
+        await db.oem_invoices.create_index("chassis")
+        await db.oem_chassis_ledger.create_index("chassis", unique=True)
+        await db.oem_chassis_ledger.create_index("receivedMonth")
         # The daily revival sweep queries on these two together.
         await db.leads.create_index([("accountStatus", 1), ("reviveOn", 1)])
         await db.leads.create_index("dealVerifyNextAt")

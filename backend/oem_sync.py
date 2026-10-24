@@ -288,6 +288,7 @@ def _inventory_doc(vehicle, sku, price):
         "inventoryAgeing": vehicle.get("current_inventory_ageing") or 0,
         "showroomCity": vehicle.get("showroom_city") or "",
         "exShowroom": price,
+        "receivedDate": vehicle_received_date(vehicle),
         "syncedAt": now_iso(),
     }
 
@@ -432,12 +433,13 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
     await db.oem_inventory.delete_many({})
     if inv_docs:
         await db.oem_inventory.insert_many(inv_docs)
-    dropped = await drop_delivered_from_inventory(db)
-    yard_count = await db.oem_inventory.count_documents({})
     sold_count = await replace_sold_inventory(
         db, sold_vehicles, oem_by_id, by_key,
         complete=getattr(sold_vehicles, "complete", True),
         model_index=model_index)
+    invoice_count = await replace_oem_invoices(
+        db, getattr(sold_vehicles, "invoices", ()) or (),
+        ok=getattr(sold_vehicles, "invoice_list_ok", False))
     transit_docs = []
     for v in transit_vehicles:
         sku = None
@@ -455,8 +457,17 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
     await db.oem_inventory_transit.delete_many({})
     if transit_docs:
         await db.oem_inventory_transit.insert_many(transit_docs)
-    transit_count = len(transit_docs)
     held_count = await replace_held_inventory(db, held_vehicles, oem_by_id, by_key)
+    billed_dropped = await drop_billed_from_inventory(db)
+    dropped = await drop_delivered_from_inventory(db)
+    yard_count = await db.oem_inventory.count_documents({})
+    transit_count = await db.oem_inventory_transit.count_documents({})
+    held_count = await db.oem_inventory_held.count_documents({})
+    ledger_rows = []
+    for chunk in (vehicles, transit_vehicles, held_vehicles, sold_vehicles):
+        ledger_rows.extend(chunk or [])
+    received_count = await upsert_chassis_ledger(db, ledger_rows)
+    received_count = await db.oem_chassis_ledger.count_documents({})
     cancelled_count = await replace_cancelled_invoices(
         db, getattr(sold_vehicles, "cancelled", ()) or (),
         ok=getattr(sold_vehicles, "invoice_list_ok", False))
@@ -475,9 +486,12 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         "transitCount": transit_count,
         "heldCount": held_count,
         "soldCount": sold_count,
+        "invoiceCount": invoice_count,
+        "receivedCount": received_count,
         "cancelledInvoiceCount": cancelled_count,
         "leadsVehicleIds": leads_vehicle_ids,
         "deliveredDropped": dropped,
+        "billedDropped": billed_dropped,
         "oemModelCount": len(oem_models),
         "pricesUpdated": prices_updated,
         "unmatchedOemSkus": unmatched_oem,
@@ -755,16 +769,24 @@ def vehicle_customer_name(row, *, nested=False):
 
 
 # Dealer-visible calendar date first (Coulson Invoice List prints "14 Oct 2026"),
-# then invoice timestamps converted to IST. created_at is last — that is when
-# the chassis left PRESENT, not the tax-invoice day.
+# then invoice timestamps converted to IST. sap_invoice_date is Dealer Billing
+# Date — when OEM billed the dealer / the chassis arrived — not the customer
+# tax invoice. created_at is last — that is when the chassis left PRESENT.
 _SOLD_DATE_KEYS = (
     "date", "Date", "invoice_date", "invoiceDate",
-    "vehicle_invoice_date", "customer_invoice_date", "sap_invoice_date",
+    "vehicle_invoice_date", "customer_invoice_date",
     "invoice_creation_ts", "invoiceCreationTs",
+    "invoice_creation_sap_ts", "invoiceCreationSapTs",
     "sold_at", "soldAt", "billed_at", "billedAt",
-    "sold_date", "soldDate", "billing_date", "billingDate",
+    "sold_date", "soldDate",
     "retail_date", "retailDate", "_created_at",
     "created_at", "createdAt",
+)
+# Vehicle Inventory columns: "Dealer Billing Date" then OEM→dealer delivery.
+_RECEIVED_DATE_KEYS = (
+    "sap_invoice_date", "sapInvoiceDate",
+    "dealer_billing_date", "dealerBillingDate",
+    "delivery_date", "deliveryDate",
 )
 _MONTH_NAME = {
     "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
@@ -841,7 +863,7 @@ def _iso_date(raw):
 
 
 def vehicle_sold_date(row):
-    """Invoice / billed date on a Coulson Sold row, if the portal sent one."""
+    """Customer tax-invoice date from Invoice List — never Dealer Billing Date."""
     if not isinstance(row, dict):
         return ""
     for k in _SOLD_DATE_KEYS:
@@ -857,6 +879,17 @@ def vehicle_sold_date(row):
     return ""
 
 
+def vehicle_received_date(row):
+    """When the dealer received the chassis from OEM (Dealer Billing Date)."""
+    if not isinstance(row, dict):
+        return ""
+    for k in _RECEIVED_DATE_KEYS:
+        d = _iso_date(row.get(k))
+        if d:
+            return d
+    return ""
+
+
 def _sold_doc(vehicle, sku, price):
     inv = _inventory_doc(vehicle, sku, price)
     mobile = vehicle_mobile(vehicle)
@@ -868,6 +901,7 @@ def _sold_doc(vehicle, sku, price):
         "numberPlate": vehicle_plate(vehicle) or inv.get("emch") or "",
         "customerName": vehicle_customer_name(vehicle),
         "soldDate": vehicle_sold_date(vehicle),
+        "receivedDate": inv.get("receivedDate") or vehicle_received_date(vehicle),
         "coulsonStatus": vehicle.get("_coulsonStatus") or "SOLD",
         "source": "coulson_sold",
     }
@@ -1020,6 +1054,181 @@ async def replace_cancelled_invoices(db, vehicles, *, ok=False):
     return len(docs)
 
 
+def _oem_invoice_doc(vehicle):
+    ch = vehicle_chassis(vehicle) or _norm_chassis((vehicle or {}).get("chassis"))
+    number = vehicle_invoice(vehicle)
+    return {
+        "invoiceNumber": number,
+        "chassis": ch,
+        "mobile": vehicle_mobile(vehicle),
+        "numberPlate": vehicle_plate(vehicle),
+        "customerName": vehicle_customer_name(vehicle),
+        "soldDate": vehicle_sold_date(vehicle),
+        "receivedDate": vehicle_received_date(vehicle),
+        "invoiceStatus": str((vehicle or {}).get("status") or "CREATED").strip().upper(),
+        "amount": (vehicle or {}).get("total_amount"),
+        "amountPaid": (vehicle or {}).get("amount_paid"),
+        "amountDue": (vehicle or {}).get("amount_due"),
+        "paymentStatus": (vehicle or {}).get("payment_status") or "",
+        "model": vehicle_model(vehicle),
+        "variant": vehicle_variant(vehicle),
+        "coulsonStatus": (vehicle or {}).get("_coulsonStatus") or "INVOICED",
+        "source": "coulson_invoice_list",
+        "syncedAt": now_iso(),
+    }
+
+
+def _invoice_store_key(doc):
+    return (
+        str((doc or {}).get("invoiceNumber") or "").strip().upper()
+        or _norm_chassis((doc or {}).get("chassis"))
+    )
+
+
+async def replace_oem_invoices(db, vehicles, *, ok=False):
+    """Persist every Invoice List Created row, keyed by invoice number.
+
+    oem_sold is chassis-keyed for lead matching. This collection keeps the
+    full Created list (250 rows on 24 Oct 2026) so a rebill of the same
+    chassis cannot hide an older invoice.
+    """
+    if not ok and not vehicles:
+        return await db.oem_invoices.count_documents({})
+    docs, seen = [], set()
+    for v in vehicles or []:
+        doc = _oem_invoice_doc(v)
+        key = _invoice_store_key(doc)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        docs.append(doc)
+    if not ok:
+        for doc in docs:
+            filt = ({"invoiceNumber": doc["invoiceNumber"]}
+                    if doc.get("invoiceNumber") else {"chassis": doc["chassis"]})
+            await db.oem_invoices.update_one(filt, {"$set": doc}, upsert=True)
+        return await db.oem_invoices.count_documents({})
+    await db.oem_invoices.delete_many({})
+    if docs:
+        await db.oem_invoices.insert_many(docs)
+    return len(docs)
+
+
+async def billed_chassis_set(db):
+    out = set()
+    async for r in db.oem_sold.find({}, {"chassis": 1}):
+        ch = _norm_chassis(r.get("chassis"))
+        if ch:
+            out.add(ch)
+    return out
+
+
+async def drop_billed_from_inventory(db):
+    """Invoice List CREATED chassis is not yard / transit / held stock."""
+    billed = await billed_chassis_set(db)
+    if not billed:
+        return 0
+    removed = 0
+    for coll in ("oem_inventory", "oem_inventory_transit", "oem_inventory_held"):
+        async for row in db[coll].find({}):
+            if _norm_chassis(row.get("chassis")) in billed:
+                await db[coll].delete_one({"_id": row["_id"]})
+                removed += 1
+    return removed
+
+
+def _ledger_doc(vehicle, *, source=""):
+    ch = vehicle_chassis(vehicle) or _norm_chassis((vehicle or {}).get("chassis"))
+    received = vehicle_received_date(vehicle)
+    if not received and isinstance(vehicle, dict):
+        received = _iso_date(vehicle.get("receivedDate"))
+    return {
+        "chassis": ch,
+        "receivedDate": received,
+        "receivedMonth": received[:7] if received else "",
+        "source": source or (vehicle or {}).get("_coulsonStatus") or "",
+        "syncedAt": now_iso(),
+    }
+
+
+async def upsert_chassis_ledger(db, vehicles, *, source=""):
+    """Every chassis ever seen from OEM. Upsert; never delete.
+
+    receivedDate is the earliest Dealer Billing Date / delivery date we have
+    seen so monthly receive counts stay stable across later Sold pulls.
+    """
+    written = 0
+    for v in vehicles or []:
+        doc = _ledger_doc(v, source=source)
+        ch = _norm_chassis(doc.get("chassis"))
+        if not ch:
+            continue
+        existing = await db.oem_chassis_ledger.find_one({"chassis": ch})
+        received = doc.get("receivedDate") or ""
+        prev = str((existing or {}).get("receivedDate") or "")
+        if prev and (not received or received > prev):
+            received = prev
+        patch = {
+            "chassis": ch,
+            "source": doc.get("source") or ((existing or {}).get("source") or ""),
+            "syncedAt": now_iso(),
+        }
+        if received:
+            patch["receivedDate"] = received
+            patch["receivedMonth"] = received[:7]
+        elif existing and existing.get("receivedDate"):
+            patch["receivedDate"] = existing.get("receivedDate")
+            patch["receivedMonth"] = existing.get("receivedMonth") or str(existing.get("receivedDate") or "")[:7]
+        else:
+            patch.setdefault("receivedDate", "")
+            patch.setdefault("receivedMonth", "")
+        insert = {"firstSeenAt": now_iso()}
+        await db.oem_chassis_ledger.update_one(
+            {"chassis": ch},
+            {"$set": patch, "$setOnInsert": insert},
+            upsert=True,
+        )
+        written += 1
+    return written
+
+
+async def list_sold_inventory(db):
+    """Inventory Sold tab — chassis, customer tax-invoice date, customer."""
+    rows = []
+    async for r in db.oem_sold.find({}):
+        rows.append({
+            "chassis": r.get("chassis") or "",
+            "soldDate": r.get("soldDate") or "",
+            "customerName": r.get("customerName") or "",
+        })
+    rows.sort(key=lambda r: (r.get("soldDate") or "", r.get("chassis") or ""), reverse=True)
+    return rows
+
+
+async def list_received_chassis(db, month=None):
+    """Every chassis received from OEM, optional YYYY-MM filter."""
+    rows = []
+    by_month = {}
+    async for r in db.oem_chassis_ledger.find({}):
+        rec = {
+            "chassis": r.get("chassis") or "",
+            "receivedDate": r.get("receivedDate") or "",
+            "receivedMonth": r.get("receivedMonth") or "",
+        }
+        key = rec["receivedMonth"] or "undated"
+        by_month[key] = by_month.get(key, 0) + 1
+        rows.append(rec)
+    if month:
+        want = str(month).strip()[:7]
+        rows = [r for r in rows if r.get("receivedMonth") == want]
+    rows.sort(key=lambda r: (r.get("receivedDate") or "", r.get("chassis") or ""), reverse=True)
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "byMonth": [{"month": k, "count": n} for k, n in sorted(by_month.items())],
+    }
+
+
 async def replace_held_inventory(db, vehicles, oem_by_id, by_key):
     """Booked / Pilot / Demo — not Present yard, not Sold.
 
@@ -1095,9 +1304,14 @@ async def refresh_sold_inventory(db, *, interactive=True):
     n = await replace_sold_inventory(
         db, sold_vehicles, oem_by_id, by_key,
         complete=getattr(sold_vehicles, "complete", True))
+    await replace_oem_invoices(
+        db, getattr(sold_vehicles, "invoices", ()) or (),
+        ok=getattr(sold_vehicles, "invoice_list_ok", False))
     await replace_cancelled_invoices(
         db, getattr(sold_vehicles, "cancelled", ()) or (),
         ok=getattr(sold_vehicles, "invoice_list_ok", False))
+    await drop_billed_from_inventory(db)
+    await upsert_chassis_ledger(db, sold_vehicles, source="INVOICED")
     return n
 
 
@@ -2837,7 +3051,26 @@ def classify_oem_billing(sold_rows, leads):
 
 
 async def list_oem_billing(db, leads=None):
+    """Invoice List Created rows when we have them — that is the billed source."""
     sold = [r async for r in db.oem_sold.find({})]
+    invoices = [r async for r in db.oem_invoices.find({})]
+    if invoices:
+        by_ch = {}
+        for row in sold:
+            ch = _norm_chassis(row.get("chassis"))
+            if ch:
+                by_ch[ch] = row
+        merged = []
+        for inv in invoices:
+            extra = by_ch.get(_norm_chassis(inv.get("chassis"))) or {}
+            row = dict(extra)
+            row.update({k: v for k, v in inv.items() if v not in (None, "")})
+            if not row.get("model") and extra.get("model"):
+                row["model"] = extra.get("model")
+            if not row.get("variant") and extra.get("variant"):
+                row["variant"] = extra.get("variant")
+            merged.append(row)
+        sold = merged
     if leads is None:
         leads = await load_oem_billing_leads(db)
     return classify_oem_billing(sold, leads)

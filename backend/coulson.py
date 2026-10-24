@@ -458,11 +458,14 @@ def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
 #     Euler Assured, AMC/EW offers, Warranty Parts, Analytics,
 #     Announcements, Complaint Management, Downloads.
 SOLD_INVENTORY_STATUSES = ("SOLD",)
-TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT", "IN TRANSIT", "TRANSIT")
+TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT",)
+# Vehicle Inventory left filter (Oct 2026 SPA `cDt`): Present, In Transit,
+# Sold, Booked, Pilot Vehicle, Demo Vehicle. Unknown ids can echo Present
+# and then skip the real Pilot/Demo pull — only send the SPA ids.
 HELD_INVENTORY_STATUSES = (
     "BOOKED",
-    "PILOT", "PILOT_VEHICLE", "PILOT VEHICLE",
-    "DEMO", "DEMO_VEHICLE", "DEMO VEHICLE",
+    "PILOT_VEHICLE",
+    "DEMO_VEHICLE",
 )
 INVOICE_LIST_PATH = "dealer/invoice/vehicle"
 VEHICLE_INVOICE_PATHS = (
@@ -495,6 +498,41 @@ def _vehicle_key(v):
     )
 
 
+def _invoice_created_at(row):
+    """UTC timestamp from Invoice List. None when the row has no creation time."""
+    raw = str(
+        (row or {}).get("invoice_creation_ts")
+        or (row or {}).get("invoiceCreationTs")
+        or ""
+    ).strip()
+    if not raw:
+        return None
+    text = raw.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _created_invoice_is_newer(incoming, existing) -> bool:
+    """True when the incoming Created row should replace invoice fields.
+
+    Invoice List is newest-first. A later page is an older bill for the same
+    chassis (rebill). That older row must not wipe the latest invoice number.
+    Rows with no timestamp still fill blanks and otherwise overwrite, which
+    is how the Sold tab used to land on an invoice-only chassis.
+    """
+    a = _invoice_created_at(incoming)
+    b = _invoice_created_at(existing)
+    if isinstance(a, datetime) and isinstance(b, datetime):
+        return a >= b
+    if isinstance(a, datetime) and b is None:
+        return True
+    if isinstance(b, datetime) and a is None:
+        return False
+    return True
+
+
 def _merge_vehicle_rows(rows, chunk, status=""):
     by_key = {}
     for i, v in enumerate(rows):
@@ -515,14 +553,17 @@ def _merge_vehicle_rows(rows, chunk, status=""):
             _copy_model_fields(dst, row)
             if row.get("updated_load_body"):
                 dst["updated_load_body"] = row["updated_load_body"]
+            overwrite = status == "INVOICED" and _created_invoice_is_newer(row, dst)
             for k in (
                 "invoice_number", "invoiceNumber", "customer_name", "customer_phone",
                 "customer_mobile", "registration_number", "invoice_creation_ts", "date",
                 "motor_number", "motorNumber", "motor_no", "engine_number", "engineNumber",
                 "battery_number", "batteryNumber", "battery_serial_number",
+                "sap_invoice_date", "sap_invoice_number", "delivery_date",
+                "total_amount", "amount_paid", "amount_due", "payment_status", "status",
             ):
                 if row.get(k) not in (None, "") and (
-                        status == "INVOICED" or dst.get(k) in (None, "")):
+                        overwrite or dst.get(k) in (None, "")):
                     dst[k] = row[k]
             if status == "INVOICED":
                 dst["_coulsonStatus"] = "INVOICED"
@@ -559,9 +600,10 @@ def _held_status_label(status: str) -> str:
 def fetch_held_inventory(token: str, limit=INVENTORY_PAGE):
     """Booked / Pilot / Demo — on the lot, not sellable Present yard.
 
-    Vehicle Inventory left filter: Present, In Transit, Sold, Booked,
-    Pilot Vehicle, Demo Vehicle. Euler yard is Present only; these sit
-    on a Held tab so matching does not treat them as available stock.
+    Vehicle Inventory left filter (`cDt`): Present, In Transit, Sold,
+    Booked, Pilot Vehicle (`PILOT_VEHICLE`), Demo Vehicle (`DEMO_VEHICLE`).
+    Euler yard is Present only; these sit on a Held tab so matching does
+    not treat them as available stock.
     """
     rows = []
     seen_labels = set()
@@ -771,19 +813,27 @@ def fetch_raw_vehicle_invoices(token: str, limit=INVENTORY_PAGE, max_rows=None):
 
 
 def fetch_vehicle_invoices(token: str, limit=INVENTORY_PAGE, max_rows=None):
-    """Live (Created) invoices only — billed today even when Sold is yesterday."""
+    """Live (Created) invoices only — billed today even when Sold is yesterday.
+
+    The returned list is one row per chassis (latest Created invoice wins).
+    `.invoices` keeps every Created row, including an older bill on a chassis
+    that was rebilled, so persistence is not limited to the chassis merge.
+    """
     chunk, ok = fetch_raw_vehicle_invoices(token, limit=limit, max_rows=max_rows)
-    live = _SoldPull(_merge_vehicle_rows([], _live_invoices(chunk), "INVOICED"))
+    live_rows = [r for r in _live_invoices(chunk) if isinstance(r, dict)]
+    live = _SoldPull(_merge_vehicle_rows([], live_rows, "INVOICED"))
     live.cancelled = tuple(_cancelled_invoices(chunk))
     live.invoice_list_ok = ok
+    live.invoices = tuple(dict(r) for r in live_rows)
     return live
 
 
 class _SoldPull(list):
-    """List of Sold/invoice rows plus whether the Sold tab was fully paged."""
+    """List of Sold/invoice rows plus whether Invoice List + Sold fully paged."""
     complete = True
     cancelled = ()
     invoice_list_ok = False
+    invoices = ()
 
 
 _MODEL_COPY_KEYS = (
@@ -861,10 +911,15 @@ def fill_missing_sold_models(token: str, rows, *, limit=40):
 
 def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
                          fill_models=True, invoice_max_rows=None):
-    """Vehicles billed / sold — Sold tab PLUS Created invoices, minus Cancelled.
+    """Billed vehicles — Invoice List first, then Sold tab, minus Cancelled.
 
-    The Sold tab often still shows a chassis after its tax invoice is Cancelled
-    in Vehicle Inventory → Invoice List. Those ids must not stay on CRM leads.
+    Vehicle Inventory → ⋮ → Invoice List (`GET dealer/invoice/vehicle`) is
+    the dealer-visible billed source (Created rows). The Sold tab often
+    lags that list and still shows a chassis after its tax invoice is
+    Cancelled. Invoice dates/customer win; Sold only fills model and the
+    dealer inbound (`sap_invoice_date`) used for the received ledger.
+
+    A failed Invoice List pull must not wipe older oem_sold rows.
 
     invoice_max_rows caps the DESC invoice list (newest first) so an
     interactive OEM Billing tap does not page years of invoices past the
@@ -872,9 +927,25 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
     """
     rows = _SoldPull()
     errors = []
-    complete = True
+    sold_complete = True
     cancelled = []
     invoice_list_ok = False
+    created_invoices = []
+    try:
+        invoices = fetch_vehicle_invoices(token, limit=limit, max_rows=invoice_max_rows)
+        cancelled = list(getattr(invoices, "cancelled", ()) or ())
+        invoice_list_ok = bool(getattr(invoices, "invoice_list_ok", False))
+        # Raw Created rows, captured before the chassis merge inside
+        # fetch_vehicle_invoices. Copying `invoices` itself drops every
+        # extra bill when one chassis was invoiced twice.
+        created_invoices = [
+            dict(r) for r in (getattr(invoices, "invoices", ()) or ())
+            if isinstance(r, dict)
+        ]
+        _merge_vehicle_rows(rows, invoices, "INVOICED")
+    except CoulsonError as e:
+        log.info("Coulson vehicle invoices skipped: %s", e)
+        errors.append(e)
     for status in SOLD_INVENTORY_STATUSES:
         meta = {}
         try:
@@ -882,19 +953,11 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
         except CoulsonError as e:
             log.info("Coulson %s inventory skipped: %s", status, e)
             errors.append(e)
-            complete = False
+            sold_complete = False
             continue
         _merge_vehicle_rows(rows, chunk, status)
         if meta.get("complete") is False:
-            complete = False
-    try:
-        invoices = fetch_vehicle_invoices(token, limit=limit, max_rows=invoice_max_rows)
-        cancelled = list(getattr(invoices, "cancelled", ()) or ())
-        invoice_list_ok = bool(getattr(invoices, "invoice_list_ok", False))
-        _merge_vehicle_rows(rows, invoices, "INVOICED")
-    except CoulsonError as e:
-        log.info("Coulson vehicle invoices skipped: %s", e)
-        errors.append(e)
+            sold_complete = False
     drop = cancelled_chassis_set(cancelled)
     if drop:
         kept = [r for r in rows if _vehicle_key(r) not in drop]
@@ -909,10 +972,36 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
             log.exception("Coulson chassis model fill failed")
     if not rows and errors:
         raise errors[0]
-    rows.complete = complete
+    # Wipe oem_sold only when Invoice List fully paged. Sold-tab-only
+    # completeness used to drop today's Created invoices after a 404/timeout.
+    rows.complete = bool(sold_complete and invoice_list_ok)
     rows.cancelled = tuple(cancelled)
     rows.invoice_list_ok = invoice_list_ok
+    rows.invoices = tuple(_enrich_invoice_rows(created_invoices, rows))
     return rows
+
+
+def _enrich_invoice_rows(invoices, merged):
+    """Copy model / dealer inbound date from the Sold+Invoice merge onto each list row."""
+    by_key = {}
+    for row in merged or []:
+        key = _vehicle_key(row)
+        if key:
+            by_key[key] = row
+    out = []
+    for inv in invoices or []:
+        if not isinstance(inv, dict):
+            continue
+        row = dict(inv)
+        hit = by_key.get(_vehicle_key(row))
+        if hit:
+            _copy_model_fields(row, hit)
+            for k in ("sap_invoice_date", "sap_invoice_number", "delivery_date",
+                      "model", "variant"):
+                if hit.get(k) not in (None, "") and row.get(k) in (None, ""):
+                    row[k] = hit[k]
+        out.append(row)
+    return out
 
 
 # ---------------------------------------------------------------- claim settlements
@@ -1065,10 +1154,10 @@ def fetch_claim_journey(token: str, debit_note_id: str):
 # and terminal states last. Used to sweep per-status when one unfiltered pull
 # comes back short of the true total.
 #
-# Oct 2026 Coulson SPA: the Zno filter still *labels* Dealer Development but
-# posts **Expansion Team Approval Pending**. Bill Posted in SAP is a new tab.
-# Sales Invoice Generation Pending dropped from the filter; keep it so older
-# notes still get swept.
+# Oct 2026 Coulson SPA `Jgo` filter: Dealer Development is only a *label*;
+# the posted value is **Expansion Team Approval Pending**. Bill Posted in SAP
+# is on the filter. Sales Invoice Generation Pending dropped from the filter;
+# keep it so older notes still get swept.
 CLAIM_STATUSES = (
     "RM Approval Pending",
     "Dealer Development Department Approval Pending",

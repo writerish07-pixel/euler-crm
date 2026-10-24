@@ -59,6 +59,16 @@ def is_showroom_desk(user) -> bool:
 def is_team_lead(user) -> bool:
     return str((user or {}).get("role") or "").strip().lower() == "team_lead"
 
+
+# Full billed / received chassis ledgers are owner-desk. Executives and both
+# TL roles (working team_lead + Showroom Admin `tl`) quote from yard stock.
+INVENTORY_LEDGER_HIDDEN_ROLES = ("executive", "team_lead", "tl")
+
+
+def can_view_inventory_ledger(user) -> bool:
+    role = str((user or {}).get("role") or "").strip().lower()
+    return role not in INVENTORY_LEDGER_HIDDEN_ROLES
+
 # Roles belonging to people OUTSIDE the dealership. 37 of 43 GET endpoints carry
 # no role check of their own — the /api router only requires a valid token — so an
 # outside role would otherwise read the entire Lead Register, mobile numbers

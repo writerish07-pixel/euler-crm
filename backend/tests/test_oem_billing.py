@@ -36,6 +36,7 @@ def _no_live_coulson_sold(monkeypatch):
 @pytest_asyncio.fixture
 async def client():
     await server.startup()
+    await server.db.oem_invoices.delete_many({})
     await oem_sync.save_credentials(server.db, "dealer.user", "secret")
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -78,6 +79,23 @@ def test_iso_date_uses_india_calendar_not_utc_slice():
         "date": "14 Oct 2026",
         "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
     }) == "2026-10-14"
+
+
+def test_sold_date_ignores_dealer_billing_date():
+    """sap_invoice_date is when OEM billed the dealer, not the customer invoice."""
+    assert oem_sync.vehicle_sold_date({
+        "sap_invoice_date": "2026-08-01",
+        "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+        "customer_name": "AMEERCHAND GURJAR",
+    }) == "2026-10-14"
+    assert oem_sync.vehicle_received_date({
+        "sap_invoice_date": "2026-08-01",
+        "invoice_creation_ts": "2026-10-13T20:15:00.000Z",
+    }) == "2026-08-01"
+    assert oem_sync.vehicle_sold_date({
+        "sap_invoice_date": "2026-08-01",
+        "billing_date": "2026-08-01",
+    }) == ""
 
 
 def test_billing_day_counts_match_oem_invoice_list():
@@ -257,8 +275,39 @@ def test_classify_another_vehicle_same_mobile_is_unmatched():
 
 
 @pytest.mark.asyncio
+async def test_oem_billing_lists_invoice_list_not_sold_tab_date(client):
+    """Invoice List 14 Oct wins over a Sold-tab dealer billing date."""
+    await server.db.oem_sold.delete_many({})
+    await server.db.oem_invoices.delete_many({})
+    await server.db.leads.delete_many({"leadId": "LD-BILL-AMEER"})
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9AMEERBILL01", "mobile": "9057027979",
+        "invoiceNumber": "AF-OLD", "customerName": "Yard Name",
+        "soldDate": "2026-08-01", "coulsonStatus": "SOLD",
+    })
+    await server.db.oem_invoices.insert_one({
+        "chassis": "MD9AMEERBILL01", "mobile": "9057027979",
+        "invoiceNumber": "AF-122-I2627AMEER",
+        "customerName": "AMEERCHAND GURJAR",
+        "soldDate": "2026-10-14", "invoiceStatus": "CREATED",
+        "source": "coulson_invoice_list",
+    })
+    r = await client.get("/api/oem-billing", params={"month": "2026-10"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    hit = next(row for row in body["rows"] if row["chassis"] == "MD9AMEERBILL01")
+    assert hit["soldDate"] == "2026-10-14"
+    assert hit["customerName"] == "AMEERCHAND GURJAR"
+    assert hit["invoiceNumber"] == "AF-122-I2627AMEER"
+    days = {d["date"]: d["count"] for d in body["byDate"]}
+    assert days.get("2026-10-14") == 1
+    assert "2026-08-01" not in days
+
+
+@pytest.mark.asyncio
 async def test_oem_billing_lists_pending_delivery(client):
     await server.db.oem_sold.delete_many({})
+    await server.db.oem_invoices.delete_many({})
     await server.db.leads.delete_many({"leadId": "LD-BILL-PEND"})
     await server.db.oem_sold.insert_one({
         "chassis": "MD9BILLPEND01", "mobile": "9812200111", "invoiceNumber": "CINV-PEND",
