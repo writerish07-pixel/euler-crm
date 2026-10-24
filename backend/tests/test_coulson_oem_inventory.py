@@ -1446,6 +1446,36 @@ async def test_inventory_sold_and_received_endpoints(client):
     summary = (await client.get("/api/inventory/summary")).json()
     assert summary["sold"] >= 1
     assert summary["received"] >= 2
+    assert summary["showChassisLedger"] is True
+
+
+def test_inventory_ledger_hidden_roles():
+    import auth as authmod
+    assert authmod.can_view_inventory_ledger({"role": "owner"}) is True
+    assert authmod.can_view_inventory_ledger({"role": "sales_gm"}) is True
+    assert authmod.can_view_inventory_ledger({"role": "accounts"}) is True
+    assert authmod.can_view_inventory_ledger({"role": "executive"}) is False
+    assert authmod.can_view_inventory_ledger({"role": "team_lead"}) is False
+    assert authmod.can_view_inventory_ledger({"role": "tl"}) is False
+
+
+@pytest.mark.asyncio
+async def test_inventory_sold_received_hidden_from_executive(client):
+    exec_login = await client.post("/api/auth/login", json={
+        "email": "executive@euler.com", "password": "euler@123"})
+    assert exec_login.status_code == 200, exec_login.text
+    exec_c = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=server.app), base_url="http://test")
+    exec_c.headers.update({"Authorization": f"Bearer {exec_login.json()['token']}"})
+    try:
+        assert (await exec_c.get("/api/inventory/sold")).status_code == 403
+        assert (await exec_c.get("/api/inventory/received")).status_code == 403
+        summary = (await exec_c.get("/api/inventory/summary")).json()
+        assert summary["showChassisLedger"] is False
+        assert summary["sold"] == 0
+        assert summary["received"] == 0
+    finally:
+        await exec_c.aclose()
 
 
 @pytest.mark.asyncio

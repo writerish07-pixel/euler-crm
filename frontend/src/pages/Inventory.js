@@ -17,7 +17,8 @@ const TABS = [
 ];
 
 export default function Inventory() {
-  const { isOwner, isShowroomAdmin } = useAuth();
+  const { isOwner, isShowroomAdmin, isExecutive, isTeamLead, isTl } = useAuth();
+  const canSeeChassisLedger = !isExecutive && !isTeamLead && !isTl;
   const [tab, setTab] = useState("yard");
   const [rows, setRows] = useState([]);
   const [transit, setTransit] = useState([]);
@@ -51,25 +52,30 @@ export default function Inventory() {
       }).catch(() => setRows([])),
       get("/inventory/transit", q).then(setTransit).catch(() => setTransit([])),
       get("/inventory/held", q).then((list) => setHeld(Array.isArray(list) ? list : [])).catch(() => setHeld([])),
-      get("/inventory/sold").then((list) => setSold(Array.isArray(list) ? list : [])).catch(() => setSold([])),
-      get("/inventory/received", receivedQ).then((payload) => {
-        if (payload && typeof payload === "object" && Array.isArray(payload.rows)) {
-          setReceived({
-            rows: payload.rows,
-            byMonth: Array.isArray(payload.byMonth) ? payload.byMonth : [],
-            total: payload.total ?? payload.rows.length,
-          });
-        } else {
-          setReceived({ rows: [], byMonth: [], total: 0 });
-        }
-      }).catch(() => setReceived({ rows: [], byMonth: [], total: 0 })),
+      ...(canSeeChassisLedger ? [
+        get("/inventory/sold").then((list) => setSold(Array.isArray(list) ? list : [])).catch(() => setSold([])),
+        get("/inventory/received", receivedQ).then((payload) => {
+          if (payload && typeof payload === "object" && Array.isArray(payload.rows)) {
+            setReceived({
+              rows: payload.rows,
+              byMonth: Array.isArray(payload.byMonth) ? payload.byMonth : [],
+              total: payload.total ?? payload.rows.length,
+            });
+          } else {
+            setReceived({ rows: [], byMonth: [], total: 0 });
+          }
+        }).catch(() => setReceived({ rows: [], byMonth: [], total: 0 })),
+      ] : []),
       get("/inventory/need-to-order").then(setNeed).catch(() => setNeed([])),
       get("/inventory/summary").then(setSummary).catch(() => {}),
       get("/inventory/check").then(setCheck).catch(() => {}),
       get("/integrations/coulson").then(setStatus).catch(() => {}),
     ]);
-  }, [model, receivedMonth]);
+  }, [model, receivedMonth, canSeeChassisLedger]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!canSeeChassisLedger && (tab === "sold" || tab === "received")) setTab("yard");
+  }, [canSeeChassisLedger, tab]);
 
   const sync = async () => {
     setBusy(true);
@@ -123,14 +129,18 @@ export default function Inventory() {
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">Booked / Pilot / Demo</div>
           <div className="text-xl font-bold tabular">{summary?.held ?? held.length}</div>
         </Card>
-        <Card className="p-3" data-testid="inv-card-sold">
-          <div className="text-[11px] uppercase tracking-wide text-ink-faint">Sold</div>
-          <div className="text-xl font-bold tabular">{summary?.sold ?? sold.length}</div>
-        </Card>
-        <Card className="p-3" data-testid="inv-card-received">
-          <div className="text-[11px] uppercase tracking-wide text-ink-faint">Received from OEM</div>
-          <div className="text-xl font-bold tabular">{summary?.received ?? received.total}</div>
-        </Card>
+        {canSeeChassisLedger && (
+          <Card className="p-3" data-testid="inv-card-sold">
+            <div className="text-[11px] uppercase tracking-wide text-ink-faint">Sold</div>
+            <div className="text-xl font-bold tabular">{summary?.sold ?? sold.length}</div>
+          </Card>
+        )}
+        {canSeeChassisLedger && (
+          <Card className="p-3" data-testid="inv-card-received">
+            <div className="text-[11px] uppercase tracking-wide text-ink-faint">Received from OEM</div>
+            <div className="text-xl font-bold tabular">{summary?.received ?? received.total}</div>
+          </Card>
+        )}
         <Card className="p-3" data-testid="inv-card-need">
           <div className="text-[11px] uppercase tracking-wide text-ink-faint">Need to order</div>
           <div className="text-xl font-bold tabular">{summary?.needToOrder ?? need.length}</div>
@@ -161,7 +171,7 @@ export default function Inventory() {
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <div className="flex gap-1 bg-white rounded-lg p-1 border border-line shadow-card">
-          {TABS.map(([k, l]) => (
+          {TABS.filter(([k]) => canSeeChassisLedger || (k !== "sold" && k !== "received")).map(([k, l]) => (
             <button key={k} type="button" data-testid={`inv-tab-${k}`} onClick={() => setTab(k)}
               className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${tab === k ? "bg-cobalt text-white" : "text-ink-soft hover:bg-zinc-100"}`}>
               {l}
@@ -174,7 +184,7 @@ export default function Inventory() {
             {models.map((m) => <option key={m}>{m}</option>)}
           </Select>
         )}
-        {tab === "received" && (
+        {canSeeChassisLedger && tab === "received" && (
           <Select data-testid="inventory-received-month" value={receivedMonth} onChange={(e) => setReceivedMonth(e.target.value)} className="w-52">
             <option value="">All months</option>
             {(received.byMonth || []).filter((m) => m.month && m.month !== "undated").map((m) => (
@@ -282,7 +292,7 @@ export default function Inventory() {
         />
       )}
 
-      {tab === "sold" && (
+      {canSeeChassisLedger && tab === "sold" && (
         <Table
           rowKey="chassis"
           empty="No billed chassis yet — owner can sync Invoice List from OEM."
@@ -295,7 +305,7 @@ export default function Inventory() {
         />
       )}
 
-      {tab === "received" && (
+      {canSeeChassisLedger && tab === "received" && (
         <Table
           rowKey="chassis"
           empty="No chassis received from OEM yet — owner can sync from OEM."

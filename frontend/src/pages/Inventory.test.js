@@ -14,8 +14,13 @@ jest.mock("../lib/api", () => ({
   post: (...args) => mockPost(...args),
   apiErrorMessage: (e, fallback) => fallback,
 }));
+const mockAuth = {
+  current: {
+    isOwner: true, isShowroomAdmin: true, isExecutive: false, isTeamLead: false, isTl: false,
+  },
+};
 jest.mock("../context/AuthContext", () => ({
-  useAuth: () => ({ isOwner: true, isShowroomAdmin: true }),
+  useAuth: () => mockAuth.current,
 }));
 
 import Inventory from "./Inventory";
@@ -48,6 +53,9 @@ beforeEach(() => {
   mockGet.mockReset();
   mockPost.mockReset();
   mockGet.mockImplementation((url) => Promise.resolve(jsonFor(url)));
+  mockAuth.current = {
+    isOwner: true, isShowroomAdmin: true, isExecutive: false, isTeamLead: false, isTl: false,
+  };
 });
 
 test("inventory register has sold and received tabs", async () => {
@@ -73,6 +81,27 @@ test("inventory register has sold and received tabs", async () => {
   });
   expect(host.querySelector('[data-testid="inventory-received-month"]')).toBeTruthy();
   expect(host.textContent).toContain("MD9RECV01");
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("executive and TL do not see sold or received tabs", async () => {
+  mockAuth.current = {
+    isOwner: false, isShowroomAdmin: false, isExecutive: true, isTeamLead: false, isTl: false,
+  };
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<Inventory />); });
+  await act(async () => { await Promise.resolve(); });
+  await act(async () => { await Promise.resolve(); });
+  expect(host.querySelector('[data-testid="inv-tab-sold"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="inv-tab-received"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="inv-card-sold"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="inv-card-received"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="inv-tab-yard"]')).toBeTruthy();
+  expect(mockGet.mock.calls.some(([url]) => String(url) === "/inventory/sold")).toBe(false);
+  expect(mockGet.mock.calls.some(([url]) => String(url).startsWith("/inventory/received"))).toBe(false);
   await act(async () => { root.unmount(); });
   host.remove();
 });

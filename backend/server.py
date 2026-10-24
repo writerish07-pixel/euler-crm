@@ -13257,14 +13257,18 @@ async def list_held_inventory(model: Optional[str] = None, _user=Depends(current
 
 
 @api.get("/inventory/sold")
-async def list_sold_inventory(_user=Depends(current_user)):
+async def list_sold_inventory(user=Depends(current_user)):
     """Invoice List CREATED chassis — sold date and customer only."""
+    if not authmod.can_view_inventory_ledger(user):
+        raise HTTPException(403, "Sold chassis is not on the executive or TL desk.")
     return await oem_sync.list_sold_inventory(db)
 
 
 @api.get("/inventory/received")
-async def list_received_chassis(month: Optional[str] = None, _user=Depends(current_user)):
+async def list_received_chassis(month: Optional[str] = None, user=Depends(current_user)):
     """Every chassis received from OEM, regardless of sold or still in yard."""
+    if not authmod.can_view_inventory_ledger(user):
+        raise HTTPException(403, "Received chassis is not on the executive or TL desk.")
     return await oem_sync.list_received_chassis(db, month)
 
 
@@ -13301,8 +13305,9 @@ async def inventory_summary(user=Depends(current_user)):
     out = [{"model": m, "variant": v, "count": n} for (m, v), n in sorted(counts.items())]
     transit = await db.oem_inventory_transit.count_documents({})
     held = await db.oem_inventory_held.count_documents({})
-    sold = await db.oem_sold.count_documents({})
-    received = await db.oem_chassis_ledger.count_documents({})
+    show_ledger = authmod.can_view_inventory_ledger(user)
+    sold = await db.oem_sold.count_documents({}) if show_ledger else 0
+    received = await db.oem_chassis_ledger.count_documents({}) if show_ledger else 0
     need = await _need_to_order_for_viewer(user)
     check = inventory_check.public_check(await inventory_check.latest_check(db))
     last = await db.inventory_checks.find(
@@ -13314,6 +13319,7 @@ async def inventory_summary(user=Depends(current_user)):
         "held": held,
         "sold": sold,
         "received": received,
+        "showChassisLedger": show_ledger,
         "needToOrder": len(need),
         "rows": out,
         "physicalCheck": {
