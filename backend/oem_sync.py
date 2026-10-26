@@ -1021,11 +1021,11 @@ def _cancelled_invoice_doc(vehicle):
 
 
 async def replace_cancelled_invoices(db, vehicles, *, ok=False):
-    """Invoice List CANCELLED is the source of truth for gone chassis.
+    """Invoice List CANCELLED is history for a gone bill.
 
-    Sold often still lists a chassis after its tax invoice is Cancelled.
-    Store those rows and strip them from oem_sold so matching cannot
-    re-attach them.
+    A chassis whose invoices are all cancelled leaves oem_sold so matching
+    cannot re-attach it. A chassis that also has a Created invoice was
+    rebilled: the cancelled bill is stored, and the chassis stays on Sold.
 
     A truncated / failed pull (ok=False) upserts the cancelled rows we did
     see and leaves older stored cancellations in place.
@@ -1036,22 +1036,46 @@ async def replace_cancelled_invoices(db, vehicles, *, ok=False):
     for v in vehicles or []:
         doc = _cancelled_invoice_doc(v)
         ch = _norm_chassis(doc.get("chassis"))
-        if not ch or ch in seen:
+        inv = _norm_invoice(doc.get("invoiceNumber"))
+        key = inv or ch
+        if not key or key in seen:
             continue
-        seen.add(ch)
+        seen.add(key)
         docs.append(doc)
+    # A later Created invoice on the same chassis is a rebill. Keep that
+    # chassis on oem_sold. Only a chassis with no live bill leaves Sold.
+    live = await created_invoice_chassis(db)
+    drop = sorted({
+        _norm_chassis(d.get("chassis")) for d in docs
+        if _norm_chassis(d.get("chassis")) and _norm_chassis(d.get("chassis")) not in live
+    })
     if not ok:
         for doc in docs:
-            await db.oem_cancelled_invoices.update_one(
-                {"chassis": doc["chassis"]}, {"$set": doc}, upsert=True)
-        if docs:
-            await db.oem_sold.delete_many({"chassis": {"$in": [d["chassis"] for d in docs]}})
+            filt = ({"invoiceNumber": doc["invoiceNumber"]}
+                    if doc.get("invoiceNumber") else {"chassis": doc["chassis"]})
+            await db.oem_cancelled_invoices.update_one(filt, {"$set": doc}, upsert=True)
+        if drop:
+            await db.oem_sold.delete_many({"chassis": {"$in": drop}})
         return await db.oem_cancelled_invoices.count_documents({})
     await db.oem_cancelled_invoices.delete_many({})
     if docs:
         await db.oem_cancelled_invoices.insert_many(docs)
-        await db.oem_sold.delete_many({"chassis": {"$in": [d["chassis"] for d in docs]}})
+        if drop:
+            await db.oem_sold.delete_many({"chassis": {"$in": drop}})
     return len(docs)
+
+
+async def created_invoice_chassis(db):
+    """Chassis that still have a Created Invoice List row."""
+    out = set()
+    async for r in db.oem_invoices.find({}, {"chassis": 1, "invoiceStatus": 1}):
+        status = str(r.get("invoiceStatus") or "CREATED").strip().upper()
+        if status in ("CANCELLED", "CANCELED", "VOID"):
+            continue
+        ch = _norm_chassis(r.get("chassis"))
+        if ch:
+            out.add(ch)
+    return out
 
 
 def _oem_invoice_doc(vehicle):
@@ -1444,7 +1468,8 @@ def record_cancelled_invoice(target, old_invoice, new_invoice="", chassis=""):
     return target
 
 
-def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date=""):
+def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date="",
+                           motor="", battery=""):
     """Write chassis / invoice / plate / billed date onto the matching or next empty unit line."""
     units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
     ch = _norm_chassis(chassis)
@@ -1464,6 +1489,10 @@ def stamp_unit_vehicle_ids(lead, chassis, invoice="", plate="", sold_date=""):
             u["numberPlate"] = plate
         if date:
             u["soldDate"] = date
+        if motor:
+            u["motorNumber"] = motor
+        if battery:
+            u["batteryNumber"] = battery
         return u
 
     for u in units:
@@ -1493,6 +1522,8 @@ def stamp_family_vehicle_ids(lead, family):
             str((row or {}).get("invoiceNumber") or "").strip(),
             str((row or {}).get("numberPlate") or "").strip(),
             str((row or {}).get("soldDate") or "").strip()[:10],
+            str((row or {}).get("motorNumber") or "").strip(),
+            str((row or {}).get("batteryNumber") or "").strip(),
         )
         working["units"] = units
     return working.get("units") or units
@@ -2246,11 +2277,49 @@ OEM_BILLING_LEAD_PROJ = {
     "cancelledInvoiceNumber": 1,
     "cancelledInvoices": 1,
     "rebilledInvoiceNumber": 1,
+    "motorNumber": 1,
+    "batteryNumber": 1,
+    "soldDate": 1,
 }
 
 
 async def load_oem_billing_leads(db):
     return [l async for l in db.leads.find({}, OEM_BILLING_LEAD_PROJ)]
+
+
+def _note_stamp(stats, bucket, item, limit=20):
+    """Keep the sync toast short: first few filled and skipped leads only."""
+    rows = stats.setdefault(bucket, [])
+    if len(rows) < limit:
+        rows.append(item)
+
+
+def _drop_taken_identifier(patch, lead, field):
+    """A taken plate or invoice must not block chassis and the other ids."""
+    patch.pop(field, None)
+    if field == "invoiceNumber":
+        for key in ("cancelledInvoiceNumber", "rebilledInvoiceNumber", "cancelledInvoices"):
+            patch.pop(key, None)
+    units = patch.get("units")
+    if not isinstance(units, list):
+        return
+    original = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    for i, unit in enumerate(units):
+        if not isinstance(unit, dict):
+            continue
+        prev = original[i] if i < len(original) else {}
+        if field in prev:
+            unit[field] = prev.get(field) or ""
+        else:
+            unit.pop(field, None)
+        if field == "invoiceNumber":
+            for key in ("cancelledInvoiceNumber", "rebilledInvoiceNumber", "cancelledInvoices"):
+                if key in prev:
+                    unit[key] = prev[key]
+                else:
+                    unit.pop(key, None)
+    if [dict(u) for u in units if isinstance(u, dict)] == [dict(u) for u in original]:
+        patch.pop("units", None)
 
 
 async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
@@ -2273,6 +2342,8 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         "skippedNoMatch": 0,
         "skippedAmbiguous": 0,
         "skippedConflict": 0,
+        "filled": [],
+        "skipped": [],
         "mobilesUpdated": 0,
         "bodyAdopted": 0,
         "bodyMismatch": 0,
@@ -2308,6 +2379,11 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         top = [p for p in ranked if _sold_apply_rank(p[0], ch) == best]
         if len(top) != 1:
             stats["skippedAmbiguous"] += len(group)
+            for l, _r in group:
+                _note_stamp(stats, "skipped", {
+                    "leadId": (l or {}).get("leadId") or "",
+                    "reason": "more than one lead matches this chassis",
+                })
             continue
         winners.append(top[0])
         winner_id = (top[0][0] or {}).get("leadId")
@@ -2316,6 +2392,10 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
                 continue
             if live_occupies_vehicle_id(l):
                 stats["skippedAmbiguous"] += 1
+                _note_stamp(stats, "skipped", {
+                    "leadId": (l or {}).get("leadId") or "",
+                    "reason": "another lead already holds this chassis",
+                })
 
     filled_ids = set()
     for lead, row in winners:
@@ -2351,7 +2431,16 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
             if not is_same_order_pack(lead) or not str(lead.get("numberPlate") or "").strip():
                 patch["numberPlate"] = plate
         sold_date = str(row.get("soldDate") or "").strip()[:10]
-        stamped_units = stamp_unit_vehicle_ids(lead, chassis, invoice, plate, sold_date)
+        motor = str(row.get("motorNumber") or "").strip()
+        battery = str(row.get("batteryNumber") or "").strip()
+        if motor and str(lead.get("motorNumber") or "").strip() != motor:
+            patch["motorNumber"] = motor
+        if battery and str(lead.get("batteryNumber") or "").strip() != battery:
+            patch["batteryNumber"] = battery
+        if sold_date and str(lead.get("soldDate") or "").strip()[:10] != sold_date:
+            patch["soldDate"] = sold_date
+        stamped_units = stamp_unit_vehicle_ids(
+            lead, chassis, invoice, plate, sold_date, motor, battery)
         body_adopted = False
         body_mismatch = False
         if can_adopt_sold_body(lead, row):
@@ -2390,18 +2479,30 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         if not patch:
             stats["unchanged"] += 1
             continue
-        conflict = False
         if "chassisNumber" in patch and _field_taken(
                 leads, "chassisNumber", patch["chassisNumber"], lid, chassis=True):
-            conflict = True
+            stats["skippedConflict"] += 1
+            _note_stamp(stats, "skipped", {
+                "leadId": lid, "reason": "chassis already on another lead",
+            })
+            continue
+        partial = []
         if "invoiceNumber" in patch and _field_taken(
                 leads, "invoiceNumber", patch["invoiceNumber"], lid):
-            conflict = True
+            partial.append("invoice already on another lead")
+            _drop_taken_identifier(patch, lead, "invoiceNumber")
         if "numberPlate" in patch and _field_taken(
                 leads, "numberPlate", patch["numberPlate"], lid):
-            conflict = True
-        if conflict:
-            stats["skippedConflict"] += 1
+            partial.append("number plate already on another lead")
+            _drop_taken_identifier(patch, lead, "numberPlate")
+        if not patch:
+            if partial:
+                stats["skippedConflict"] += 1
+                _note_stamp(stats, "skipped", {
+                    "leadId": lid, "reason": "; ".join(partial),
+                })
+            else:
+                stats["unchanged"] += 1
             continue
         patch["oemSoldSyncedAt"] = now_iso()
         await db.leads.update_one({"leadId": lid}, {"$set": patch})
@@ -2414,6 +2515,11 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         lead.update(patch)
         filled_ids.add(lid)
         stats["updated"] += 1
+        _note_stamp(stats, "filled", {
+            "leadId": lid,
+            "chassis": chassis,
+            "note": "; ".join(partial),
+        })
         if units_filled:
             stats["bodyUnitsFilled"] += 1
         if "mobile" in patch:
@@ -2449,6 +2555,10 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         occupied.update(lead_chassis_list(lead))
         filled_ids.add(lid)
         stats["updated"] += 1
+        _note_stamp(stats, "filled", {
+            "leadId": lid,
+            "chassis": _norm_chassis(lead.get("chassisNumber")),
+        })
         if sku_patch:
             stats["bodyUnitsFilled"] += 1
     return stats
@@ -2648,20 +2758,27 @@ def drop_cancelled_empty_units(lead):
 
 
 async def delink_cancelled_sold_invoices(db):
-    """Drop chassis whose Invoice List row is Cancelled, even if Sold still lists them.
+    """Drop chassis whose Invoice List rows are all Cancelled.
 
-    Staff-completed Delivered / Close Won files keep their delivery status.
-    A cancelled Invoice List chassis is always cleared (and an empty cancelled
-    pack unit is dropped). Chassis that merely vanished from Sold — with no
-    Invoice List cancel — stay on staff-delivered files and are flagged, unless
-    Sold already has a replacement for the same customer.
+    A rebilled chassis is on Sold again under the new Created invoice. That
+    cancelled bill is history and must not clear the lead. Staff-completed
+    Delivered / Close Won files keep their delivery status. A cancelled-only
+    chassis is always cleared (and an empty cancelled pack unit is dropped).
+    Chassis that merely vanished from Sold — with no Invoice List cancel —
+    stay on staff-delivered files and are flagged, unless Sold already has a
+    replacement for the same customer.
     """
     sold = [r async for r in db.oem_sold.find({})]
     cancelled_rows = [r async for r in db.oem_cancelled_invoices.find({})]
     cancelled_ch = sold_chassis_set(cancelled_rows)
-    if cancelled_ch:
-        await db.oem_sold.delete_many({"chassis": {"$in": list(cancelled_ch)}})
-        sold = [r for r in sold if _norm_chassis((r or {}).get("chassis")) not in cancelled_ch]
+    # Rebill: the chassis is on Sold again under the new invoice. A cancelled
+    # bill for that chassis is history, not a reason to clear the lead.
+    live_sold = sold_chassis_set(sold)
+    cancelled_only = cancelled_ch - live_sold
+    if cancelled_only:
+        await db.oem_sold.delete_many({"chassis": {"$in": list(cancelled_only)}})
+        sold = [r for r in sold if _norm_chassis((r or {}).get("chassis")) not in cancelled_only]
+    cancelled_ch = cancelled_only
     sold_ch = sold_chassis_set(sold)
     leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads)
@@ -3366,7 +3483,16 @@ def merge_patch_for_stub(original, stub):
             if not is_same_order_pack(original) or not str((original or {}).get("numberPlate") or "").strip():
                 patch["numberPlate"] = plate
         sold_date = str((stub or {}).get("soldDate") or "").strip()[:10]
-        stamped = stamp_unit_vehicle_ids(original, chassis, invoice, plate, sold_date)
+        motor = str((stub or {}).get("motorNumber") or "").strip()
+        battery = str((stub or {}).get("batteryNumber") or "").strip()
+        if motor and str((original or {}).get("motorNumber") or "").strip() != motor:
+            patch["motorNumber"] = motor
+        if battery and str((original or {}).get("batteryNumber") or "").strip() != battery:
+            patch["batteryNumber"] = battery
+        if sold_date and str((original or {}).get("soldDate") or "").strip()[:10] != sold_date:
+            patch["soldDate"] = sold_date
+        stamped = stamp_unit_vehicle_ids(
+            original, chassis, invoice, plate, sold_date, motor, battery)
         if stamped and stamped != list((original or {}).get("units") or []):
             patch["units"] = stamped
     elif invoice and not _norm_invoice((original or {}).get("invoiceNumber")):

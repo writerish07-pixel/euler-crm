@@ -139,6 +139,23 @@ test("blank pack units show the lead model and variant", async () => {
   host.remove();
 });
 
+test("OEM Sold match fills chassis while outstanding is still open", async () => {
+  mockOemSold.current = {
+    matched: true,
+    chassis: "MD9OSFILL0001",
+    invoiceNumber: "CINV-OS",
+  };
+  const { host, root } = await renderDelivery({
+    lead: bookedLead({ customerOutstanding: 430834 }),
+    oemSold: mockOemSold.current,
+  });
+  expect(host.querySelector('[data-testid="delivery-chassis"]').value).toBe("MD9OSFILL0001");
+  expect(host.querySelector('[data-testid="delivery-invoice"]').value).toBe("CINV-OS");
+  expect(host.textContent).toMatch(/Outstanding still has to be cleared before Mark Delivered/);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("OEM Sold match fills chassis without typing", async () => {
   mockOemSold.current = {
     matched: true,

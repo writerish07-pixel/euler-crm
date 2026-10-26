@@ -1,4 +1,4 @@
-import { formatInr, num, resolveNumberLocale, resolveDateLocale, fmtDate, fmtTime, telHref, digitsLast10 } from "./format";
+import { formatInr, num, resolveNumberLocale, resolveDateLocale, fmtDate, fmtTime, telHref, digitsLast10, oemStampSummary, oemSyncToast } from "./format";
 
 describe("resolveNumberLocale", () => {
   test("skips en-IN when the WebView throws RangeError", () => {
@@ -60,6 +60,21 @@ describe("telHref", () => {
     expect(telHref("7014236242")).toBe("tel:+917014236242");
     expect(telHref("+91 70142 36242")).toBe("tel:+917014236242");
     expect(telHref("")).toBe("");
+  });
+});
+
+describe("oem stamp toast", () => {
+  test("names filled leads and why others were skipped", () => {
+    const text = oemStampSummary({
+      updated: 1,
+      filled: [{ leadId: "LD260000919", chassis: "MD9", note: "" }],
+      skipped: [{ leadId: "LD-OTHER", reason: "chassis already on another lead" }],
+    });
+    expect(text).toMatch(/1 lead chassis\/invoice/);
+    expect(text).toMatch(/LD260000919/);
+    expect(text).toMatch(/LD-OTHER: chassis already on another lead/);
+    expect(oemSyncToast({ soldCount: 4, leadsVehicleIds: { updated: 1, filled: [], skipped: [] } }))
+      .toMatch(/4 billed/);
   });
 });
 

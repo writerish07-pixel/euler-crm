@@ -1362,6 +1362,102 @@ def test_invoice_list_date_wins_over_dealer_billing(monkeypatch):
     assert oem_sync.vehicle_received_date(hit) == "2026-08-01"
 
 
+def test_cancelled_then_reinvoiced_chassis_stays_billed(monkeypatch):
+    """Ameechand: the old bill is Cancelled and a new Created bill is on the same chassis."""
+    chassis = "MD9AMEERCHAND01"
+
+    def fake_get_json(token, path, params=None):
+        if path == "vehicle-inventory/transfer":
+            return {"success": True, "data": [{
+                "chassis": chassis,
+                "customer_name": "AMEERCHAND GURJAR",
+                "customer_phone": "9057027979",
+                "invoice_number": "AF-OLD",
+                "motor_no": "MTR-AMEER-1",
+                "battery_no": "BAT-AMEER-1",
+            }], "extras": {"total_count": 1}}
+        if path == "dealer/invoice/vehicle":
+            return {"success": True, "data": [
+                {"chassis": chassis, "invoice_number": "AF-NEW",
+                 "status": "CREATED", "customer_name": "AMEERCHAND GURJAR",
+                 "customer_phone": "9057027979",
+                 "invoice_creation_ts": "2026-10-14T06:30:00.000Z"},
+                {"chassis": chassis, "invoice_number": "AF-OLD",
+                 "status": "CANCELLED", "customer_name": "AMEERCHAND GURJAR",
+                 "customer_phone": "9057027979",
+                 "invoice_creation_ts": "2026-10-01T06:30:00.000Z"},
+            ], "extras": {"total_count": 2}}
+        raise coulson_client.CoulsonError("not found", status=404)
+
+    monkeypatch.setattr(coulson_client, "get_json", fake_get_json)
+    rows = coulson_client.fetch_sold_inventory("tok", fill_models=False)
+    assert [r["chassis"] for r in rows] == [chassis]
+    assert rows[0].get("invoice_number") == "AF-NEW" or rows[0].get("invoiceNumber") == "AF-NEW"
+    assert {r.get("invoice_number") or r.get("invoiceNumber") for r in rows.cancelled} == {"AF-OLD"}
+    assert any(
+        (r.get("invoice_number") or r.get("invoiceNumber")) == "AF-NEW" for r in rows.invoices)
+
+
+@pytest.mark.asyncio
+async def test_replace_cancelled_keeps_rebilled_chassis_on_sold(client):
+    chassis = "MD9REBILLKEEP02"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_invoices.delete_many({"chassis": chassis})
+    await server.db.oem_cancelled_invoices.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "invoiceNumber": "AF-NEW", "coulsonStatus": "SOLD",
+        "mobile": "9057027979",
+    })
+    await server.db.oem_invoices.insert_one({
+        "chassis": chassis, "invoiceNumber": "AF-NEW", "invoiceStatus": "CREATED",
+    })
+    await oem_sync.replace_cancelled_invoices(server.db, [{
+        "chassis": chassis, "invoice_number": "AF-OLD", "status": "CANCELLED",
+    }], ok=True)
+    assert await server.db.oem_sold.find_one({"chassis": chassis})
+    cancelled = await server.db.oem_cancelled_invoices.find_one({"invoiceNumber": "AF-OLD"})
+    assert cancelled and cancelled["chassis"] == chassis
+
+
+@pytest.mark.asyncio
+async def test_delink_and_stamp_keep_rebilled_chassis_on_the_lead(client):
+    chassis = "MD9AMEERSTAMP01"
+    mobile = "9057027979"
+    lid = "LD-AMEER-REBILL"
+    await server.db.oem_sold.delete_many({"$or": [{"chassis": chassis}, {"mobile": mobile}]})
+    await server.db.oem_cancelled_invoices.delete_many({"chassis": chassis})
+    await server.db.leads.delete_many({"$or": [{"leadId": lid}, {"mobile": mobile}]})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Ameechand Gurjar", "mobile": mobile,
+        "interestedModel": "Hi-Load", "variant": "TR-NC (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "invoiceNumber": "AF-OLD",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "AF-NEW",
+        "customerName": "AMEERCHAND GURJAR", "soldDate": "2026-10-14",
+        "motorNumber": "MTR-AMEER-1", "batteryNumber": "BAT-AMEER-1",
+        "coulsonStatus": "SOLD",
+    })
+    await server.db.oem_cancelled_invoices.insert_one({
+        "chassis": chassis, "invoiceNumber": "AF-OLD", "invoiceStatus": "CANCELLED",
+    })
+    gone = await oem_sync.delink_cancelled_sold_invoices(server.db)
+    assert lid not in (gone.get("clearedIds") or [])
+    kept = await server.db.leads.find_one({"leadId": lid})
+    assert kept.get("invoiceNumber") == "AF-OLD"
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert stats["updated"] >= 1
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead["chassisNumber"] == chassis
+    assert lead["invoiceNumber"] == "AF-NEW"
+    assert lead.get("cancelledInvoiceNumber") == "AF-OLD"
+    assert lead.get("motorNumber") == "MTR-AMEER-1"
+    assert lead.get("batteryNumber") == "BAT-AMEER-1"
+    assert str(lead.get("soldDate") or "")[:10] == "2026-10-14"
+    assert any(row.get("leadId") == lid for row in stats.get("filled") or [])
+
+
 def test_rebill_keeps_every_created_invoice(monkeypatch):
     """Two Created bills on one chassis both survive; the chassis row stays on the latest."""
     chassis = "MD9REBILL01"

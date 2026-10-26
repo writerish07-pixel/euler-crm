@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
-import { fmtDate } from "../lib/format";
+import { fmtDate, oemSyncToast } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Card } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
@@ -73,7 +73,7 @@ export default function OemBilling() {
       const qs = new URLSearchParams(period.params).toString();
       const r = await post(qs ? `/oem-billing/sync?${qs}` : "/oem-billing/sync", {});
       applyPayload(r);
-      toast.success(`Synced OEM Sold · ${(r.soldCount || 0)} billed. Matching only — no new leads.`);
+      toast.success(oemSyncToast(r));
     } catch (e) {
       toast.error(apiErrorMessage(e, "OEM billing sync failed"));
     } finally {

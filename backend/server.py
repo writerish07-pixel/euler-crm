@@ -1247,8 +1247,6 @@ async def _fill_delivery_from_sold(lead, body):
     keyed by the same unique mobile as the CRM lead. Empty ids are allowed —
     the next Sold sync backfills them. A same-order pack fills every S.No. line.
     """
-    if ce.num((lead or {}).get("customerOutstanding")) > 0.01:
-        return body
     match = await oem_sync.match_sold_family_for_lead(db, lead)
     if not match or not match.get("chassis"):
         return body
@@ -2160,6 +2158,9 @@ class SnapshotComputeIn(BaseModel):
     additionalDiscount: float = 0
     benefitMode: str = "Full Benefit"
     finalExchangeValue: float = 0
+    # Agreed customer price. A lower RTO / insurance then reduces Additional
+    # (Dealer) and this payable stays put.
+    cxDemand: float = 0
 
 
 # ---------------------------------------------------------------- misc
@@ -7086,17 +7087,33 @@ async def _set_pack_unit_cx_demand(lead_id, unit_sno, value, act):
     return _lead_for_viewer(clean(updated), act)
 
 
+# Showroom Admin enters the real RTO and insurance. The difference reduces
+# Additional (Dealer). Customer payable stays on Cx Demand.
+SHOWROOM_ACTUAL_PRICE_FIELDS = {"rto", "insuranceAmount"}
+
+
 @api.put("/leads/{lead_id}/owner-field")
-async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(actor),
-                               _owner=Depends(owner_only)):
-    """Owner inline edit of one lead field (identity, price source, or scheme extra)."""
+async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(actor)):
+    """Owner inline edit of one lead field (identity, price source, or scheme extra).
+
+    Showroom Admin may edit RTO and insurance on an Active file, including
+    after delivery, so the real premium and RTO land before Mark Delivered.
+    """
     field = str(body.field or "").strip()
     if field == "cxDemand":
         field = "budget"
     if field not in OWNER_IDENTITY_FIELDS | OWNER_PRICE_FIELDS | OWNER_SCHEME_FIELDS:
         raise HTTPException(422, f"Field '{field}' cannot be edited inline.")
+    role = ((act or {}).get("role") or "").strip().lower()
+    showroom_actual = authmod.is_showroom_admin(act) and field in SHOWROOM_ACTUAL_PRICE_FIELDS
+    if role != "owner" and not showroom_actual:
+        raise HTTPException(403, "Owner access required")
     lead = await get_lead_or_404(lead_id)
-    _require_mutable_lead(lead, "lead edits", act)
+    if showroom_actual:
+        if _acct(lead) != "Active":
+            raise HTTPException(409, "This lead is closed — RTO and insurance cannot be changed.")
+    else:
+        _require_mutable_lead(lead, "lead edits", act)
     value = body.value
     if field in ("budget", "bookingAmount", "additionalDiscount") and value is not None:
         value = ce.round2(max(0.0, ce.num(value)))
@@ -7112,10 +7129,30 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
         else:
             patch_val = ce.round2(max(0.0, ce.num(value)))
         old = {field: lead.get(field)}
-        await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        price_set = {
             field: patch_val, "lastUpdated": now_iso(),
             "lastUpdatedBy": act.get("email", ""),
-        }})
+        }
+        if field == "insuranceAmount":
+            price_set["insurance"] = patch_val
+        if not oem_sync.is_same_order_pack(lead):
+            cx_now = ce.num(lead.get("cxDemand"))
+            pay_now = ce.num(lead.get("customerPayable"))
+            if cx_now <= 0 and pay_now > 0:
+                price_set["cxDemand"] = ce.round2(pay_now)
+                price_set["useDealPrice"] = True
+        units = list(lead.get("units") or [])
+        if units and isinstance(units[0], dict) and not body.unitSno:
+            u0 = dict(units[0])
+            u0[field] = patch_val
+            if field == "insuranceAmount":
+                u0["insurance"] = patch_val
+            if ce.num(u0.get("cxDemand")) <= 0 and ce.num(u0.get("customerPayable")) > 0:
+                u0["cxDemand"] = ce.round2(ce.num(u0.get("customerPayable")))
+                u0["useDealPrice"] = True
+            units[0] = u0
+            price_set["units"] = units
+        await db.leads.update_one({"leadId": lead_id}, {"$set": price_set})
         await recompute_lead(lead_id)
         await write_audit(act, "update", "lead-field", leadId=lead_id, old=old, new={field: patch_val})
         updated = await db.leads.find_one({"leadId": lead_id})
@@ -8909,10 +8946,25 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     rec = dict(units[idx])
     rec.update({k: payload[k] for k in payload if k != "unitSno"})
     rec["sno"] = idx + 1
+    # Real RTO / insurance must not cheapen the agreed customer price.
+    # Lock Cx Demand to the payable already on the file when the deal
+    # was never stored as cxDemand.
+    if ce.num(rec.get("cxDemand")) <= 0 and ce.num(rec.get("customerPayable")) > 0:
+        rec["cxDemand"] = ce.round2(ce.num(rec.get("customerPayable")))
+        rec["useDealPrice"] = True
     units[idx] = rec
     patch = {"units": units, "lastUpdated": now_iso()}
     if idx == 0:
         patch.update(payload)
+        if not oem_sync.is_same_order_pack(lead):
+            cx_now = ce.num(lead.get("cxDemand"))
+            pay_now = ce.num(lead.get("customerPayable"))
+            if cx_now <= 0 and pay_now > 0:
+                patch["cxDemand"] = ce.round2(pay_now)
+                patch["useDealPrice"] = True
+            elif ce.num(rec.get("cxDemand")) > 0 and cx_now <= 0:
+                patch["cxDemand"] = rec["cxDemand"]
+                patch["useDealPrice"] = True
     old = {k: (chosen.get(k) if idx > 0 else lead.get(k)) for k in payload.keys()}
     await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
     # Owner re-edit of price must also realign scheme pools / retained totals.
@@ -18125,7 +18177,24 @@ async def share_dashboard():
 # ---------------------------------------------------------------- commercial preview + quotation
 @api.post("/commercial/compute")
 async def commercial_compute(body: SnapshotComputeIn, user=Depends(current_user)):
-    result = ce.compute_full_commercials(body.model_dump())
+    raw = body.model_dump()
+    cx = ce.round2(max(0.0, ce.num(raw.pop("cxDemand", 0))))
+    result = ce.compute_full_commercials(raw)
+    if cx > 0:
+        derived = ce.derive_deal_customer_pass(
+            result.get("grossVehicleCost"), cx,
+            result.get("customerBenefitPassed") or 0,
+            result.get("oemExtraSupportReceived") or 0)
+        if derived.get("applied"):
+            old_addl = ce.round2(max(0.0, ce.num(raw.get("additionalDiscount"))))
+            new_addl = ce.round2(derived["additionalDiscount"])
+            result["additionalDiscount"] = new_addl
+            result["customerPayable"] = cx
+            result["extraIncomeFromCustomer"] = ce.round2(derived["extraFromCustomer"])
+            result["totalDiscount"] = ce.round2(
+                ce.num(result.get("totalDiscount")) - old_addl + new_addl)
+            result["dealerDiscount"] = ce.round2(
+                ce.num(result.get("dealerDiscount")) - old_addl + new_addl)
     if not _is_owner_user(user):
         return _staff_safe_commercials(result)
     return result

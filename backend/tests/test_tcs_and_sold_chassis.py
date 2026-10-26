@@ -317,6 +317,42 @@ async def test_sold_id_backfill_prefers_delivered_when_mobile_is_shared(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_taken_plate_does_not_block_chassis_or_invoice(client):
+    mobile = "9812304666"
+    chassis = "MD9PLATEFREE0001"
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-PLATE-WANT", "LD-PLATE-HAS"]}})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.leads.insert_one({
+        "leadId": "LD-PLATE-WANT", "customerName": "Needs Chassis", "mobile": mobile,
+        "interestedModel": "Hi-Load", "variant": "TR-NC (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "customerOutstanding": 430834,
+    })
+    await server.db.leads.insert_one({
+        "leadId": "LD-PLATE-HAS", "customerName": "Has Plate", "mobile": "9812304777",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-09-02",
+        "numberPlate": "RJ14TAKEN",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "AF-PLATE-1",
+        "numberPlate": "RJ14TAKEN", "motorNumber": "MTR-PLATE-1",
+        "batteryNumber": "BAT-PLATE-1", "soldDate": "2026-10-14",
+        "model": "Hi-Load", "variant": "TR-NC (PV)",
+    })
+    stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    want = await server.db.leads.find_one({"leadId": "LD-PLATE-WANT"})
+    assert want["chassisNumber"] == chassis
+    assert want["invoiceNumber"] == "AF-PLATE-1"
+    assert want.get("motorNumber") == "MTR-PLATE-1"
+    assert str(want.get("numberPlate") or "") == ""
+    assert stats["updated"] >= 1
+    note = next(row for row in stats["filled"] if row["leadId"] == "LD-PLATE-WANT")
+    assert "number plate" in note["note"]
+
+
+@pytest.mark.asyncio
 async def test_sold_id_backfill_does_not_steal_live_chassis(client):
     mobile = "9812304444"
     chassis = "MD9SOLDTAKEN0001"

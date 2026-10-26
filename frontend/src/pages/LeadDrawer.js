@@ -717,14 +717,15 @@ function KV({ label, value, tone }) {
   );
 }
 
-function OwnerKV({ label, field, value, display, type = "text", options, leadId, onSaved, tone, numeric, unitSno }) {
-  const { isOwner } = useAuth();
+function OwnerKV({ label, field, value, display, type = "text", options, leadId, onSaved, tone, numeric, unitSno, allowShowroom = false }) {
+  const { isOwner, isShowroomAdmin } = useAuth();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value ?? "");
   const [busy, setBusy] = useState(false);
   const fieldId = unitSno ? `${field}-unit-${unitSno}` : field;
   useEffect(() => { setDraft(value ?? ""); }, [value]);
-  if (!isOwner) return <KV label={label} value={display ?? value ?? "—"} tone={tone} />;
+  const canEdit = isOwner || (allowShowroom && isShowroomAdmin);
+  if (!canEdit) return <KV label={label} value={display ?? value ?? "—"} tone={tone} />;
   const save = async () => {
     setBusy(true);
     try {
@@ -962,7 +963,7 @@ export function OverviewUnits({
 
 export function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
   onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate }) {
-  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, canSeeOwnerCommercials, canManageShowroom } = useAuth();
+  const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, isShowroomAdmin, canSeeOwnerCommercials, canManageShowroom } = useAuth();
   const booked = !!actions.isBooked;
   const kycDocKinds = kycKinds(lead.customerType);
   const canUploadKyc = isOwner || isSalesGm || isTl || isTeamLead || isExecutive;
@@ -1013,6 +1014,10 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
         <KV label="TCS" value={inr(c.tcs)} />
         {!isExecutive && <KV label="Total Discount" value={inr(c.totalDiscount)} tone="text-emerald-600" />}
         {!isExecutive && <KV label="Passed to Customer" value={inr(c.totalPassedToCustomer)} />}
+        <OwnerKV label="RTO" field="rto" value={lead.rto || 0}
+          display={inr(lead.rto || 0)} numeric allowShowroom leadId={lid} onSaved={onSaved} />
+        <OwnerKV label="Insurance" field="insuranceAmount" value={lead.insuranceAmount || 0}
+          display={inr(lead.insuranceAmount || 0)} numeric allowShowroom leadId={lid} onSaved={onSaved} />
         <OwnerKV label="Final Exchange Value" field="finalExchangeValue" value={lead.finalExchangeValue || 0}
           display={inr(lead.finalExchangeValue || 0)} numeric leadId={lid} onSaved={onSaved} />
         {canSeeOwnerCommercials && Number(lead.extraIncomeFromCustomer) > 0 && (
@@ -1035,6 +1040,9 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
           <KV label="Booking advance" value={inr(lead.bookingAmount || 0)} />
         )}
         <KV label="Total Received" value={inr(lead.totalReceived)} tone="text-emerald-600" />
+        {(isOwner || isShowroomAdmin) && Number(lead.excessReceived) > 0 && (
+          <KV label="Excess received" value={inr(lead.excessReceived)} tone="text-amber-700" />
+        )}
         <KV label="Customer Outstanding" value={inr(lead.customerOutstanding)} tone={lead.customerOutstanding > 0 ? "text-red-600" : "text-emerald-600"} />
         {canSeeOwnerCommercials && (
           <KV label="OEM Claimable (Company Share)" value={inr(c.oemClaimCompanyShare ?? c.claim?.claimEligible)} tone="text-amber-600" />
@@ -1285,6 +1293,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
   }, [lead.leadId, unitSno, src.interestedModel, src.variant]);
 
   const computePreview = useCallback(() => {
+    const locked = Number(src.cxDemand || 0) || (Number(src.customerPayable || 0) > 0 ? Number(src.customerPayable) : 0);
     post("/commercial/compute", {
       exShowroom: +form.exShowroom, accessories: +form.accessoriesAmount, insurance: +form.insuranceAmount,
       insuranceArrangedBy: form.insuranceArrangedBy,
@@ -1295,6 +1304,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
       consumerDiscount: src.consumerDiscount, exchangeBonus: src.exchangeBonus, loyaltyBonus: src.loyaltyBonus,
       referralBonus: src.referralBonus, dsaDiscount: src.dsaDiscount, additionalDiscount: src.additionalDiscount,
       benefitMode: src.benefitMode || "Full Benefit",
+      cxDemand: locked,
     }).then(setPreview);
   }, [form, src]);
   useEffect(() => { computePreview(); }, [computePreview]);
@@ -1381,9 +1391,14 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
             <Prev label="Gross Vehicle Cost" v={preview.grossVehicleCost} />
             <Prev label="TCS" v={preview.tcs} />
-            <Prev label="Total Discount" v={preview.totalDiscount} />
+            <Prev label="Additional (Dealer)" v={preview.additionalDiscount} />
             <Prev label="Customer Payable" v={preview.customerPayable} highlight />
           </div>
+          {Number(preview.extraIncomeFromCustomer) > 0 && (
+            <p className="text-xs text-ink-soft mt-3 text-center" data-testid="price-extra-from-customer">
+              Extra from customer {inr(preview.extraIncomeFromCustomer)} stays dealer income. Payable does not fall, and this is not excess received.
+            </p>
+          )}
         </Card>
       )}
       <div className="flex justify-end mt-4">
@@ -2285,7 +2300,7 @@ function OemClaimStrip({ leadId, unitSno }) {
 }
 
 export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommercials = false, isAccounts = false, delivery, billingSummary, oemSold = null, documents = [], unitSno, onSaved }) {
-  const { isShowroomAdmin } = useAuth();
+  const { isShowroomAdmin } = useAuth() || {};
   const packList = packUnitList(lead);
   const focusSno = packList ? (unitSno || packList[0]?.sno || 1) : 1;
   const focusUnit = (packList || []).find((u) => (u.sno || 0) === focusSno) || (lead.units || [])[focusSno - 1] || {};
@@ -2368,8 +2383,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
     return () => { cancelled = true; };
   }, [lead.leadId, oemSold]);
   useEffect(() => {
-    const outstanding = Number(lead.customerOutstanding || 0);
-    if (!sold?.chassis || locked || outstanding > 0.01) return;
+    if (!sold?.chassis || locked) return;
     setForm((f) => {
       const next = { ...f };
       let changed = false;
@@ -2433,7 +2447,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         });
       });
     }
-  }, [sold, lead.customerOutstanding, locked, lead.units, lead.sameOrderMultiUnit]);
+  }, [sold, locked, lead.units, lead.sameOrderMultiUnit]);
   useEffect(() => {
     if (!alreadyDelivered) return;
     if (billingSummary && billingSummary.leadId) return;
@@ -2558,9 +2572,8 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         <p className="text-xs text-emerald-800 bg-emerald-50 ring-1 ring-emerald-600/15 rounded-lg px-3 py-2 mb-3" data-testid="delivery-sold-match">
           OEM Sold matched this mobile to chassis <b>{soldChassis}</b>
           {sold.invoiceNumber ? ` · invoice ${sold.invoiceNumber}` : ""}.
-          {outstandingCleared
-            ? " Filled automatically — no need to type them."
-            : " Clear outstanding, then these ids fill automatically."}
+          {" "}Filled automatically — no need to type them.
+          {!outstandingCleared ? " Outstanding still has to be cleared before Mark Delivered." : ""}
           {sold.bodyDiffers && sold.variant
             ? ` Coulson billed body ${sold.model || ""} ${sold.variant}${sold.willAdoptBody ? " — this file will switch to that body and price." : "."}`
             : ""}

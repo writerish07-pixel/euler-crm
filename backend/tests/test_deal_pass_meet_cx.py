@@ -17,6 +17,7 @@ from mongomock_motor import AsyncMongoMockClient  # noqa: E402
 
 motor.motor_asyncio.AsyncIOMotorClient = AsyncMongoMockClient
 
+import auth as authmod  # noqa: E402
 import commercial as ce  # noqa: E402
 import httpx  # noqa: E402
 import sept_2026_schemes as sept  # noqa: E402
@@ -256,6 +257,109 @@ async def test_pack_rto_insurance_cut_shrinks_additional_not_payable(client):
     assert ce.num(u1.get("additionalDiscount")) == 20574
     assert ce.num(u2.get("additionalDiscount")) == 25000
     assert ce.num(u1.get("customerPayable")) != 820074
+
+
+@pytest.mark.asyncio
+async def test_actual_rto_and_insurance_cut_additional_not_payable(client):
+    """Lower real RTO and insurance shrink Additional. Payable and excess stay."""
+    lid = "LD-ACTUAL-RTO"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.payments.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"model": "Plain Haul", "variant": "Bare"})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Actual RTO", "mobile": "9001112233",
+        "interestedModel": "Plain Haul", "variant": "Bare", "executive": "Amit",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-01-15", "priceStructureSaved": False,
+        "exShowroom": 785000, "rto": 5500, "insuranceAmount": 19000, "insurance": 19000,
+        "additionalDiscount": 19500, "customerPayable": 790000,
+        "cxDemand": 0, "useDealPrice": False,
+    })
+    await server.db.payments.insert_one({
+        "leadId": lid, "amount": 790000, "paymentMode": "Cash",
+        "date": "2026-10-14", "receiptNumber": "RCPT-ACTUAL-RTO",
+    })
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 785000, "rto": 4500, "insuranceAmount": 15000,
+    })
+    assert saved.status_code == 200, saved.text
+    body = saved.json()
+    assert ce.num(body["customerPayable"]) == 790000
+    assert ce.num(body["cxDemand"]) == 790000
+    assert ce.num(body["additionalDiscount"]) == 14500
+    assert ce.num(body.get("excessReceived")) == 0
+    preview = await client.post("/api/commercial/compute", json={
+        "exShowroom": 785000, "registrationRto": 4500, "insurance": 15000,
+        "additionalDiscount": 19500, "cxDemand": 790000,
+    })
+    assert preview.status_code == 200, preview.text
+    card = preview.json()
+    assert ce.num(card["customerPayable"]) == 790000
+    assert ce.num(card["additionalDiscount"]) == 14500
+    assert ce.num(card.get("extraIncomeFromCustomer")) == 0
+
+
+@pytest.mark.asyncio
+async def test_showroom_admin_sets_real_rto_and_insurance(client):
+    lid = "LD-SA-RTO"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.payments.delete_many({"leadId": lid})
+    await server.db.users.delete_many({"email": {"$in": [
+        "showroom.actual@euler.com", "working.tl.actual@euler.com",
+    ]}})
+    for email, role, name in (
+        ("showroom.actual@euler.com", "tl", "Showroom Admin"),
+        ("working.tl.actual@euler.com", "team_lead", "Working TL"),
+    ):
+        await server.db.users.insert_one({
+            "userId": email, "email": email, "name": name, "role": role,
+            "passwordHash": authmod.hash_password(PW), "passwordPlain": PW,
+        })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Showroom Actual", "mobile": "9001112244",
+        "interestedModel": "Plain Haul", "variant": "Bare", "executive": "Amit",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-10-14",
+        "bookingDate": "2026-01-15",
+        "exShowroom": 785000, "rto": 5500, "insuranceAmount": 19000, "insurance": 19000,
+        "additionalDiscount": 19500, "customerPayable": 790000,
+        "cxDemand": 790000, "useDealPrice": True,
+    })
+    await server.db.payments.insert_one({
+        "leadId": lid, "amount": 790000, "paymentMode": "Cash",
+        "date": "2026-10-14", "receiptNumber": "RCPT-SA-RTO",
+    })
+
+    async def login(email):
+        r = await client.post("/api/auth/login", json={"email": email, "password": PW})
+        assert r.status_code == 200, r.text
+        client.headers["Authorization"] = f"Bearer {r.json()['token']}"
+
+    await login("working.tl.actual@euler.com")
+    blocked_tl = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "rto", "value": 4500})
+    assert blocked_tl.status_code == 403, blocked_tl.text
+
+    await login("showroom.actual@euler.com")
+    rto = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "rto", "value": 4500})
+    assert rto.status_code == 200, rto.text
+    ins = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "insuranceAmount", "value": 15000})
+    assert ins.status_code == 200, ins.text
+    body = ins.json()
+    assert ce.num(body["rto"]) == 4500
+    assert ce.num(body["insuranceAmount"]) == 15000
+    assert ce.num(body["customerPayable"]) == 790000
+    assert ce.num(body["additionalDiscount"]) == 14500
+    assert ce.num(body.get("excessReceived")) == 0
+    addl = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "additionalDiscount", "value": 1000,
+    })
+    assert addl.status_code == 403
+
+    await login("owner@euler.com")
+    owner_addl = await client.put(f"/api/leads/{lid}/owner-field", json={
+        "field": "additionalDiscount", "value": 10000,
+    })
+    assert owner_addl.status_code == 200, owner_addl.text
 
 
 def test_recut_cx_demand_round_trips_derive_additional():

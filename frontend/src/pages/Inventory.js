@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
-import { inr, fmtDate } from "../lib/format";
+import { inr, fmtDate, oemStampSummary } from "../lib/format";
 import { PageHeader, Table, Badge, Select, Button, Card } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import { useAuth } from "../context/AuthContext";
@@ -82,7 +82,7 @@ export default function Inventory() {
     try {
       const r = await post("/integrations/coulson/sync", {});
       if (r.ok) toast.success(
-        `Synced ${r.inventoryCount || 0} in yard · ${r.soldCount || 0} billed · ${r.receivedCount || 0} received · ${r.transitCount || 0} in transit · ${r.heldCount || 0} booked/pilot/demo · ${(r.leadsVehicleIds && r.leadsVehicleIds.updated) || 0} leads chassis/invoice`,
+        `Synced ${r.inventoryCount || 0} in yard · ${r.soldCount || 0} billed · ${r.receivedCount || 0} received · ${r.transitCount || 0} in transit · ${r.heldCount || 0} booked/pilot/demo · ${oemStampSummary(r.leadsVehicleIds)}`,
       );
       else toast.error(r.reason === "not_configured" ? "Save Coulson login in Settings first" : "Sync did not run");
       load();

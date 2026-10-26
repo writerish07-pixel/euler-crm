@@ -169,3 +169,34 @@ export function telHref(mobile) {
   if (!last10) return "";
   return `tel:+91${last10}`;
 }
+
+/** Chassis stamp result for the Sync from OEM toast. */
+export function oemStampSummary(ids) {
+  const stamp = ids || {};
+  const n = Number(stamp.updated) || 0;
+  const filled = Array.isArray(stamp.filled) ? stamp.filled : [];
+  const skipped = Array.isArray(stamp.skipped) ? stamp.skipped : [];
+  const names = filled
+    .slice(0, 3)
+    .map((row) => {
+      if (!row || !row.leadId) return "";
+      return row.note ? `${row.leadId} (${row.note})` : row.leadId;
+    })
+    .filter(Boolean);
+  let text = `${n} lead${n === 1 ? "" : "s"} chassis/invoice`;
+  if (names.length) text += ` (${names.join(", ")}${filled.length > names.length ? "…" : ""})`;
+  if (skipped.length) {
+    const why = skipped.slice(0, 3).map((row) => {
+      const id = (row && row.leadId) || "lead";
+      return `${id}: ${(row && row.reason) || "skipped"}`;
+    }).join("; ");
+    const extra = skipped.length > 3 ? ` +${skipped.length - 3} more` : "";
+    text += `. Skipped ${why}${extra}`;
+  }
+  return text;
+}
+
+export function oemSyncToast(payload) {
+  const r = payload || {};
+  return `Synced OEM Sold · ${r.soldCount || 0} billed. ${oemStampSummary(r.leadsVehicleIds)}. Matching only — no new leads.`;
+}
