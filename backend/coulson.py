@@ -958,7 +958,11 @@ def fetch_sold_inventory(token: str, limit=INVENTORY_PAGE, *,
         _merge_vehicle_rows(rows, chunk, status)
         if meta.get("complete") is False:
             sold_complete = False
-    drop = cancelled_chassis_set(cancelled)
+    # A chassis with a newer Created invoice was rebilled. The cancelled bill
+    # stays in history; the chassis stays billed. Drop only chassis whose
+    # invoices are all cancelled.
+    live_keys = {_vehicle_key(r) for r in created_invoices if _vehicle_key(r)}
+    drop = cancelled_chassis_set(cancelled) - live_keys
     if drop:
         kept = [r for r in rows if _vehicle_key(r) not in drop]
         rows.clear()
