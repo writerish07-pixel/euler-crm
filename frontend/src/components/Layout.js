@@ -17,6 +17,8 @@ import ExportDialog from "./ExportDialog";
 import { fmtWhen } from "../lib/format";
 import { openLeadPath } from "../lib/leadPaths";
 import { keepNavItem } from "../lib/accountsNav";
+import { claimsNavItems, useClaimsDeskMode } from "../lib/claimsDeskMode";
+import ClaimsDeskSwitch from "./ClaimsDeskSwitch";
 
 const NAV = [
   { section: "Overview", items: [
@@ -93,6 +95,7 @@ const OEM_NAV = [
 ];
 
 function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
+  const claimsDesk = useClaimsDeskMode();
   const deskLabel = isOemFinance ? "OEM finance desk"
     : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk"
       : isTl ? "Showroom Admin desk" : isTeamLead ? "Team Leader desk" : "EV Dealership";
@@ -126,7 +129,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
         {nav.map((group) => {
           if (group.ownerOnly && !isOwner) return null;
           if (group.pipeline && !isSalesStaff && !isField && !isAccounts) return null;
-          const items = group.items.filter((i) => keepNavItem(i, {
+          const items = claimsNavItems(group.items, claimsDesk).filter((i) => keepNavItem(i, {
             isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk,
             canViewFinance, canEditCommercials, canManageShowroom, canManageStaff,
             isSalesGm, canApproveLeads, isExecutive, isTeamLead, canViewMonthly,
@@ -149,6 +152,11 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
                     )}
                   </NavLink>
                 ))}
+                {group.section === "OEM & Commercial" && items.some((i) => i.to === "/claims") ? (
+                  <div className="px-3 pt-1">
+                    <ClaimsDeskSwitch className="text-xs font-medium text-ink-faint hover:text-ink" />
+                  </div>
+                ) : null}
               </div>
             </div>
           );

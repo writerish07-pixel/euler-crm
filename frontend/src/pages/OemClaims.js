@@ -9,6 +9,7 @@ import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal,
 import ReportActions from "../components/ReportActions";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
+import ClaimsDeskSwitch from "../components/ClaimsDeskSwitch";
 
 // Euler's own ladder. Approval stages are the ones worth chasing; the terminal
 // three have stopped moving and are toned apart so they never read as "pending".
@@ -140,6 +141,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
             mirror.syncedAt ? ` · synced ${fmtDate(String(mirror.syncedAt).slice(0, 10))}` : ""
           }`}
         actions={<div className="flex items-center gap-2">
+          <ClaimsDeskSwitch />
           <ReportActions onRefresh={load} />
           <Link to="/claims" data-testid="open-scheme-register"
             className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
@@ -515,7 +517,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
   );
 }
 
-function CreateOemButton({ row, line, onDone }) {
+export function CreateOemButton({ row, line, onDone }) {
   const [busy, setBusy] = useState(false);
   const go = async (e) => {
     e?.stopPropagation?.();
@@ -547,7 +549,7 @@ function canRelinkTo(row) {
   return !["Cancelled", "Rejected"].includes(row?.status || "");
 }
 
-function RelinkButton({ row, line, onClick }) {
+export function RelinkButton({ row, line, onClick }) {
   if (!canRelinkTo(row)) return null;
   return (
     <button type="button" data-testid={`oem-relink-${row.claimNumber}${line?.lineId ? `-${line.lineId}` : ""}`}
@@ -572,7 +574,7 @@ function optionLabel(r, { packUnitCount = 0 } = {}) {
   return bits.filter(Boolean).join(" · ");
 }
 
-function MatchRegisterModal({ row, onClose, onDone }) {
+export function MatchRegisterModal({ row, onClose, onDone }) {
   const relink = !!row.relink;
   const line = row.matchLine || {};
   const already = lineLeadIds(line);
