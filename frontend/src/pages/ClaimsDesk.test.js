@@ -15,19 +15,49 @@ jest.mock("../context/AuthContext", () => ({
 jest.mock("../lib/api", () => ({
   get: (url) => {
     if (url === "/claims") {
-      return Promise.resolve([{
-        claimId: "C1",
-        leadId: "LD1",
-        customer: "Ramesh",
-        component: "Consumer Offer",
-        componentKey: "consumerOffer",
-        eligibleClaim: 5000,
-        receivedAmount: 0,
-        chassisNumber: "CHS1",
-        invoiceNumber: "INV1",
-        oemMatch: { state: "not_filed", claimNumbers: [] },
-        claimStatus: "Eligible",
-      }]);
+      return Promise.resolve([
+        {
+          claimId: "C1",
+          leadId: "LD1",
+          customer: "Ramesh",
+          component: "Consumer Offer",
+          componentKey: "consumerOffer",
+          eligibleClaim: 5000,
+          receivedAmount: 0,
+          chassisNumber: "CHS1",
+          invoiceNumber: "INV1",
+          oemMatch: { state: "not_filed", claimNumbers: [] },
+          claimStatus: "Eligible",
+        },
+        {
+          claimId: "C2",
+          leadId: "LD2",
+          customer: "Sita",
+          component: "Consumer Offer",
+          componentKey: "consumerOffer",
+          eligibleClaim: 2000,
+          receivedAmount: 2000,
+          oemMatch: { state: "accepted", claimNumbers: ["DN2"] },
+          claimStatus: "Received",
+        },
+      ]);
+    }
+    if (url === "/claims/oem-only") {
+      return Promise.resolve({
+        count: 1,
+        total: 1000,
+        rows: [{ claimNumber: "DN1", lineId: "L9", description: "Referral", amount: 1000, oemStatus: "Submitted", mappedComponent: "referralBonus" }],
+      });
+    }
+    if (url === "/oem-claims/summary") {
+      return Promise.resolve({
+        total: 1,
+        totals: { claimed: 8000, approved: 0, openClaimed: 8000 },
+        mirror: { missingVehicle: 1, withVehicle: 0, missingDocument: 1 },
+        buckets: [],
+        rejected: [],
+        invoiceConflicts: [],
+      });
     }
     if (url === "/oem-claims") {
       return Promise.resolve([{
@@ -37,6 +67,7 @@ jest.mock("../lib/api", () => ({
         approvedAmount: 0,
         lineItems: [{ lineId: "L1", description: "No vehicle", leadIds: [] }],
         leadIds: [],
+        linkedLineCount: 0,
         registerMatch: { state: "unknown_lead" },
         terminal: false,
       }]);
@@ -74,6 +105,13 @@ test("jobs open the unfiled claim and the old screens stay one click away", asyn
   });
   await act(async () => { await Promise.resolve(); });
   expect(el.textContent).toContain("Ramesh");
+  expect(el.querySelector("[data-testid='oem-only-create-DN1']")).toBeTruthy();
+  const ours = el.querySelector("[data-testid='claims-desk-tab-ours']");
+  await act(async () => {
+    ours.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => { await Promise.resolve(); });
+  expect(el.textContent).toContain("Sita");
   await act(async () => { root.unmount(); });
   el.remove();
 });

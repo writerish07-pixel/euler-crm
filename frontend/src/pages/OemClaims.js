@@ -549,7 +549,7 @@ function canRelinkTo(row) {
   return !["Cancelled", "Rejected"].includes(row?.status || "");
 }
 
-function RelinkButton({ row, line, onClick }) {
+export function RelinkButton({ row, line, onClick }) {
   if (!canRelinkTo(row)) return null;
   return (
     <button type="button" data-testid={`oem-relink-${row.claimNumber}${line?.lineId ? `-${line.lineId}` : ""}`}

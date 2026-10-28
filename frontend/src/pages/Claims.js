@@ -345,7 +345,7 @@ export default function Claims() {
   );
 }
 
-function OemOnlyCreate({ row, onDone }) {
+export function OemOnlyCreate({ row, onDone }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
     setBusy(true);
