@@ -2,12 +2,15 @@
  * @jest-environment node
  */
 import {
+  claimHasVehicle,
+  eulerClaimJob,
   extraSupportLeadOptions,
   extraSupportMatchUnitSnos,
   looksCombinedSupport,
   matchRegisterLeadRows,
   matchableExtraUnitRows,
   registerMatchKeys,
+  schemeClaimJob,
 } from "./claimMatch";
 
 test("Additional Discount Claim matches Extra Support register rows", () => {
@@ -73,4 +76,22 @@ test("invoice copy & mail is not a combined Extra Support amount", () => {
     description: "Extra Support",
     customerName: "Swapna Creations & Swarna Creations",
   })).toBe(true);
+});
+
+test("claim jobs split unfiled, rejected, no lead, and missing chassis", () => {
+  expect(schemeClaimJob({ oemMatch: { state: "not_filed" } })).toBe("not_claimed");
+  expect(schemeClaimJob({ oemMatch: { state: "rejected" } })).toBe("rejected");
+  expect(schemeClaimJob({ oemMatch: { state: "filed" } })).toBe("");
+  const missing = { leadIds: [], lineItems: [{ description: "No vehicle" }] };
+  expect(claimHasVehicle(missing)).toBe(false);
+  expect(eulerClaimJob(missing)).toBe("missing_chassis");
+  const noLead = {
+    leadIds: [],
+    lineItems: [{ chassis: "MD9XYZ", sourceInvoiceNumber: "INV1" }],
+  };
+  expect(eulerClaimJob(noLead)).toBe("no_lead");
+  expect(eulerClaimJob({
+    leadIds: ["LD1"],
+    lineItems: [{ chassis: "MD9XYZ", leadIds: ["LD1"] }],
+  })).toBe("");
 });

@@ -10,6 +10,7 @@ import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
 import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
+import ClaimsDeskSwitch from "../components/ClaimsDeskSwitch";
 import { usePeriodState } from "../lib/period";
 
 const MATCH = OEM_MATCH;
@@ -94,6 +95,7 @@ export default function Claims() {
     <div>
       <PageHeader title="Scheme Claim Register" subtitle={loading ? "Loading…" : `${rows.length} claims · ${inr(eligible)} eligible`}
         actions={<div className="flex items-center gap-2">
+          <ClaimsDeskSwitch />
           <ReportActions onRefresh={load} showRebuild />
           <Link to="/oem-claims" data-testid="open-oem-settlements"
             className="inline-flex items-center gap-1.5 text-sm font-medium text-cobalt hover:underline">
@@ -372,7 +374,7 @@ function OemOnlyCreate({ row, onDone }) {
 }
 
 const CLAIM_TYPES = ["OEM Incentive", "Warranty Claim", "Scheme Support", "Target Incentive", "Other"];
-function ManualClaimModal({ leads, onClose, onDone }) {
+export function ManualClaimModal({ leads, onClose, onDone }) {
   const [form, setForm] = useState({ claimType: "OEM Incentive", oemCompany: "", leadId: "", customer: "", model: "", claimAmount: "", submittedDate: todayISO(), claimReference: "", note: "" });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const pickLead = (e) => {
@@ -416,7 +418,7 @@ function ManualClaimModal({ leads, onClose, onDone }) {
   );
 }
 
-function ClaimReceiptModal({ rows, onClose, onDone }) {
+export function ClaimReceiptModal({ rows, onClose, onDone }) {
   const [key, setKey] = useState("");
   const [form, setForm] = useState({ amount: "", date: todayISO(), reference: "" });
   const rowKey = (r) => `${r.leadId}|${r.componentKey}|${r.unitSno || 0}`;
@@ -464,7 +466,7 @@ function ClaimReceiptModal({ rows, onClose, onDone }) {
   );
 }
 
-function SettleModal({ claim, onClose, onDone }) {
+export function SettleModal({ claim, onClose, onDone }) {
   const [form, setForm] = useState({ claimStatus: claim.claimStatus || "Submitted", receivedAmount: claim.receivedAmount || claim.eligibleClaim || 0, claimReference: claim.claimReference || "", submittedDate: claim.submittedDate || todayISO(), approvedDate: claim.approvedDate || todayISO() });
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
@@ -514,7 +516,7 @@ function isRegisterRelink(claim) {
     || claim?.oemMatch?.oemStatus === "Cancelled";
 }
 
-function MatchOemModal({ claim, onClose, onDone }) {
+export function MatchOemModal({ claim, onClose, onDone }) {
   const relink = isRegisterRelink(claim);
   const [oemRows, setOemRows] = useState([]);
   const [claimNumber, setClaimNumber] = useState(

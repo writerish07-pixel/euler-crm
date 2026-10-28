@@ -69,6 +69,27 @@ export function rowLineItems(row) {
   return raw.filter((li) => li && typeof li === "object");
 }
 
+/** Same rule as the OEM claims list: a chassis or a source invoice counts. */
+export function claimHasVehicle(row) {
+  return rowLineItems(row).some((li) =>
+    lineChassisList(li).length > 0 || String(li?.sourceInvoiceNumber || "").trim());
+}
+
+/** Scheme register work. Rejected wins over not-filed. */
+export function schemeClaimJob(row) {
+  const state = row?.oemMatch?.state || "";
+  if (state === "rejected") return "rejected";
+  if (state === "not_filed") return "not_claimed";
+  return "";
+}
+
+/** Euler work. A missing chassis is its own job, even when the lead is also blank. */
+export function eulerClaimJob(row) {
+  if (!claimHasVehicle(row)) return "missing_chassis";
+  if (!rowLeadIds(row).length) return "no_lead";
+  return "";
+}
+
 export function lineLeadLabel(li, leadId) {
   const ids = lineLeadIds(li);
   const names = li?.leadCustomers || [];

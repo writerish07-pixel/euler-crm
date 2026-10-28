@@ -23,7 +23,7 @@ import Deliveries from "./pages/Deliveries";
 import OemBilling from "./pages/OemBilling";
 import Finance from "./pages/Finance";
 import Insurance from "./pages/Insurance";
-import Claims from "./pages/Claims";
+import ClaimsRoute, { OemClaimsRoute } from "./pages/ClaimsRoute";
 import Activities from "./pages/Activities";
 import DealerEarnings from "./pages/DealerEarnings";
 import Quotations from "./pages/Quotations";
@@ -42,7 +42,6 @@ import AuditLog from "./pages/AuditLog";
 import EditLog from "./pages/EditLog";
 import DealVerify from "./pages/DealVerify";
 import OemFinance from "./pages/OemFinance";
-import OemClaims from "./pages/OemClaims";
 import ClaimReconciliation from "./pages/ClaimReconciliation";
 import DroppedExtraSupport from "./pages/DroppedExtraSupport";
 import OemExtraSupport from "./pages/OemExtraSupport";
@@ -171,12 +170,11 @@ function AppRoutes() {
       <Route path="/insurance-agents" element={P(<InsuranceAgents />, { ownerOnly: true })} />
       <Route path="/deliveries" element={P(<Deliveries />)} />
       <Route path="/oem-billing" element={P(<OemBilling />, { oemClaimDesk: true })} />
-      <Route path="/claims" element={P(<Claims />, { oemClaimDesk: true })} />
-      {/* Euler's own claim workflow, mirrored read-only. Deliberately a different
-          page from the Scheme Claim Register above — different money, different
-          lifecycle. See backend/oem_claims.py. */}
-      <Route path="/oem-claims" element={P(<OemClaims />, { oemClaimDesk: true })} />
-      <Route path="/oem-claims/no-vehicle" element={P(<OemClaims missingVehicleOnly />, { oemClaimDesk: true })} />
+      <Route path="/claims" element={P(<ClaimsRoute />, { oemClaimDesk: true })} />
+      {/* Euler's own claim workflow. The new Claims page can send these routes
+          back into itself. Classic mode still renders the original screens. */}
+      <Route path="/oem-claims" element={P(<OemClaimsRoute />, { oemClaimDesk: true })} />
+      <Route path="/oem-claims/no-vehicle" element={P(<OemClaimsRoute missingVehicleOnly />, { oemClaimDesk: true })} />
       <Route path="/oem-extra-support" element={P(<OemExtraSupport />, { oemClaimDesk: true })} />
       <Route path="/dropped-extra-support" element={P(<DroppedExtraSupport />, { oemClaimDesk: true })} />
       <Route path="/claim-reconciliation" element={P(<ClaimReconciliation />, { ownerOnly: true })} />
