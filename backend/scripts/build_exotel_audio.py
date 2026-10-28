@@ -35,7 +35,10 @@ async def _synth(text: str, dest: Path):
 
 async def main():
     exo.AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    keep = set(exo.AUDIO_CLIPS)  # first-upload clips
+    keep = set(exo.AUDIO_CLIPS)  # first-upload verify clips — do not replace
+    review = exo.AUDIO_DIR / "review.mp3"
+    if review.is_file():
+        keep.add("review")
     for name, text in exo.SPOKEN_HI.items():
         dest = exo.AUDIO_DIR / f"{name}.mp3"
         if name in keep:

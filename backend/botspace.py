@@ -703,6 +703,13 @@ async def notify_delivery(lead_id: str, *, force: bool = False, immediate: bool 
             "whatsappDeliverySentAt": datetime.now(timezone.utc).isoformat(),
         }})
         await _activity(lead, "WhatsApp delivery + Google review sent")
+        # The spoken line says the link was sent, so a morning queue is not enough.
+        if not res.get("queued"):
+            try:
+                import exotel as exo
+                await exo.enqueue_review_call(lead_id)
+            except Exception:
+                logger.exception("review call queue failed for %s", lead_id)
     return {**res, "leadId": lead_id}
 
 
@@ -1023,6 +1030,12 @@ async def flush_outbox() -> dict:
             )
             await db.whatsapp_outbox.update_one({"_id": item["_id"]}, {"$set": {"status": "sent"}})
             flushed += 1
+            if res.get("ok") and (item.get("kind") or "") == "delivery" and item.get("leadId"):
+                try:
+                    import exotel as exo
+                    await exo.enqueue_review_call(item["leadId"])
+                except Exception:
+                    logger.exception("review call queue failed for %s", item.get("leadId"))
         except Exception as e:
             await db.whatsapp_outbox.update_one({"_id": item["_id"]}, {"$set": {
                 "status": "failed", "error": str(e)[:400],

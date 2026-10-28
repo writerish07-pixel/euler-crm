@@ -57,6 +57,12 @@ def test_quiet_hours_and_next_slot():
     nxt = exo.next_slot(evening, cfg)
     assert nxt.hour == 10
     assert nxt.date() > evening.date()
+    # Call 2 waits for the next morning, not another same-day gap.
+    second = exo.next_calling_morning(noon, cfg)
+    assert second.hour == 10 and second.minute == 15
+    assert second.date() > noon.date()
+    early = exo.next_calling_morning(morning, cfg)
+    assert early.date() == morning.date() and early.hour == 10 and early.minute == 15
     stored = exo.as_utc_iso(nxt)
     assert "+00:00" in stored or stored.endswith("Z")
     later = datetime(2026, 10, 17, 5, 0, tzinfo=timezone.utc).isoformat()
@@ -141,6 +147,8 @@ async def test_place_call_skips_record_and_retries_india_host(monkeypatch):
     assert "Record" not in posts[0]["data"]
     assert "StatusCallbackEvents[0]" not in posts[0]["data"]
     assert posts[0]["data"]["From"] == "09667991287"
+    assert posts[0]["data"]["Url"] == "http://my.exotel.com/shubhammotors1/exoml/start_voice/1361923"
+    assert posts[0]["data"]["CustomField"] == "LD26EXO1"
     assert any("api.in.exotel.com" in p["url"] for p in posts)
 
 
@@ -154,6 +162,50 @@ def test_connect_url_uses_app_bazaar_id():
     assert url == "http://my.exotel.com/shubhammotors1/exoml/start_voice/261787"
 
 
+@pytest.mark.asyncio
+async def test_review_call_uses_crm_voice_not_amount_flow(monkeypatch):
+    posts = []
+
+    class FakeResp:
+        def __init__(self, code, body):
+            self.status_code = code
+            self.text = ""
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, data=None, auth=None):
+            posts.append({"url": url, "data": dict(data or {})})
+            return FakeResp(200, {"Call": {"Sid": "rev-sid", "Status": "queued"}})
+
+    monkeypatch.setattr(exo.httpx, "AsyncClient", FakeClient)
+    cfg = {
+        "accountSid": "shubhammotors1", "subdomain": "api.in.exotel.com",
+        "exoPhone": "01414937655", "apiKey": "k", "apiToken": "t",
+        "flowAppId": "1361923", "webhookSecret": "tok",
+    }
+    res = await exo._place_call_http(cfg, "9667991287", "LD26REV", purpose="review")
+    assert res["ok"] is True
+    data = posts[0]["data"]
+    assert data["CustomField"] == "review:LD26REV"
+    assert "purpose=review" in data["Url"]
+    assert "/voice" in data["Url"]
+    assert "start_voice" not in data["Url"]
+    assert "purpose=review" in data["StatusCallback"]
+    assert "Record" not in data
+
+
 @pytest_asyncio.fixture
 async def client(monkeypatch):
     isolated = server.client["exotel_deal_verify_isolated"]
@@ -164,8 +216,9 @@ async def client(monkeypatch):
     monkeypatch.delenv("EXOTEL_API_KEY", raising=False)
     monkeypatch.delenv("EXOTEL_API_TOKEN", raising=False)
 
-    async def fake_place(cfg, customer, lead_id):
-        return {"ok": True, "statusCode": 200, "callSid": f"sid-{lead_id}", "status": "queued", "body": {}}
+    async def fake_place(cfg, customer, lead_id, **kwargs):
+        return {"ok": True, "statusCode": 200, "callSid": f"sid-{lead_id}", "status": "queued", "body": {},
+                "purpose": kwargs.get("purpose") or "verify"}
 
     monkeypatch.setattr(exo, "_place_call_http", fake_place)
     await isolated.settings.update_one(
@@ -251,7 +304,7 @@ async def test_enqueue_then_dtmf_mismatch(client):
 
 
 @pytest.mark.asyncio
-async def test_recording_without_digits_keeps_retrying(client):
+async def test_recording_without_digits_stops_auto_calls(client):
     await server.db.leads.insert_one({
         "leadId": "LD26EXO2", "customerName": "Spoke Only", "mobile": "9876500022",
         "currentStatus": "Booked", "bookingDate": "2026-10-16",
@@ -268,7 +321,8 @@ async def test_recording_without_digits_keeps_retrying(client):
     assert lead["dealVerifyStatus"] == "listening"
     assert lead["dealVerifyRecordingUrl"].endswith("a.mp3")
     assert lead.get("dealVerifyAmount") in (None, 0, "")
-    assert lead.get("dealVerifyNextAt")
+    assert not lead.get("dealVerifyNextAt")
+    assert lead.get("dealVerifyAutoStop") is True
 
     confirm = await client.post("/api/leads/LD26EXO2/deal-verify/amount", json={"amount": "185000"})
     assert confirm.status_code == 200, confirm.text
@@ -493,3 +547,325 @@ async def test_executive_360_hides_deal_verify_mismatch(client):
         assert "dealVerifyMismatch" not in lead
         assert "dealVerifyAmount" not in lead
         assert "dealVerifyRecordingUrl" not in lead
+
+
+def _ist_of(iso: str) -> datetime:
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
+
+
+def _freeze_ist(monkeypatch, when: datetime):
+    monkeypatch.setattr(exo, "now_ist", lambda: when)
+    monkeypatch.setattr(exo, "today_ist", lambda: when.strftime("%Y-%m-%d"))
+
+
+def _booked(lead_id, mobile):
+    return {
+        "leadId": lead_id, "customerName": "Call Cx", "mobile": mobile,
+        "currentStatus": "Booked", "bookingDate": "2026-10-16",
+        "accountStatus": "Active", "totalReceived": 10000, "customerPayable": 400000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pickup_stops_and_three_misses_stop(client, monkeypatch):
+    noon = datetime(2026, 10, 16, 11, 0, tzinfo=IST)
+    _freeze_ist(monkeypatch, noon)
+    await server.db.leads.insert_one(_booked("LD26PICK", "9876500101"))
+    await exo.enqueue_after_booking("LD26PICK")
+    placed = await exo.place_verify_call("LD26PICK")
+    assert placed.get("ok") is True
+    await exo.handle_status({
+        "CustomField": "LD26PICK", "Status": "completed", "CallSid": "sid-pick",
+    })
+    lead = await server.db.leads.find_one({"leadId": "LD26PICK"})
+    assert lead["dealVerifyStatus"] == "picked-up"
+    assert not lead.get("dealVerifyNextAt")
+    assert lead.get("dealVerifyAutoStop") is True
+    assert not lead.get("dealVerifyAmount")
+
+    forced = await exo.place_verify_call("LD26PICK", force=True)
+    assert forced.get("ok") is True
+    lead = await server.db.leads.find_one({"leadId": "LD26PICK"})
+    assert not lead.get("dealVerifyNextAt")
+    assert lead.get("dealVerifyAutoStop") is True
+    await exo.handle_status({"CustomField": "LD26PICK", "Status": "no-answer", "CallSid": "sid-force"})
+    lead = await server.db.leads.find_one({"leadId": "LD26PICK"})
+    assert not lead.get("dealVerifyNextAt")
+    assert lead.get("dealVerifyAutoStop") is True
+
+    dialed = []
+
+    async def capture(lead_id, *, force=False):
+        dialed.append((lead_id, force))
+        return {"ok": True, "leadId": lead_id}
+
+    monkeypatch.setattr(exo, "place_verify_call", capture)
+    due = await exo.run_due_calls(limit=25, force=True)
+    assert due.get("ok") is True
+    assert "LD26PICK" not in [row[0] for row in dialed]
+
+
+@pytest.mark.asyncio
+async def test_three_unanswered_calls_then_never_again(client, monkeypatch):
+    _freeze_ist(monkeypatch, datetime(2026, 10, 16, 11, 0, tzinfo=IST))
+    await server.db.leads.insert_one(_booked("LD26CAP", "9876500102"))
+    await exo.enqueue_after_booking("LD26CAP")
+
+    assert (await exo.place_verify_call("LD26CAP")).get("ok") is True
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    assert lead["dealVerifyAttempts"] == 1
+    first = _ist_of(lead["dealVerifyNextAt"])
+    assert first.hour == 14 and first.date().day == 16
+    await exo.handle_status({"CustomField": "LD26CAP", "Status": "no-answer", "CallSid": "c1"})
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    assert lead["dealVerifyStatus"] == "pending"
+    assert _ist_of(lead["dealVerifyNextAt"]).hour == 14
+
+    _freeze_ist(monkeypatch, datetime(2026, 10, 16, 14, 0, tzinfo=IST))
+    assert (await exo.place_verify_call("LD26CAP")).get("ok") is True
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    assert lead["dealVerifyAttempts"] == 2
+    second = _ist_of(lead["dealVerifyNextAt"])
+    assert (second.hour, second.minute, second.day) == (10, 15, 17)
+    await exo.handle_status({"CustomField": "LD26CAP", "Status": "busy", "CallSid": "c2"})
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    second = _ist_of(lead["dealVerifyNextAt"])
+    assert (second.hour, second.minute, second.day) == (10, 15, 17)
+    assert second.month == 10
+
+    _freeze_ist(monkeypatch, datetime(2026, 10, 17, 10, 20, tzinfo=IST))
+    assert (await exo.place_verify_call("LD26CAP")).get("ok") is True
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    assert lead["dealVerifyAttempts"] == 3
+    assert not lead.get("dealVerifyNextAt")
+    await exo.handle_status({"CustomField": "LD26CAP", "Status": "no-answer", "CallSid": "c3"})
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    assert lead["dealVerifyStatus"] == "exhausted"
+    assert not lead.get("dealVerifyNextAt")
+    assert lead.get("dealVerifyAutoStop") is True
+
+    blocked = await exo.place_verify_call("LD26CAP")
+    assert blocked.get("reason") == "attempt-cap"
+    forced = await exo.place_verify_call("LD26CAP", force=True)
+    assert forced.get("ok") is True
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    assert not lead.get("dealVerifyNextAt")
+    assert lead.get("dealVerifyAutoStop") is True
+    await exo.handle_status({"CustomField": "LD26CAP", "Status": "no-answer", "CallSid": "c-force"})
+    lead = await server.db.leads.find_one({"leadId": "LD26CAP"})
+    assert not lead.get("dealVerifyNextAt")
+    assert lead.get("dealVerifyAutoStop") is True
+
+    dialed = []
+
+    async def capture(lead_id, *, force=False):
+        dialed.append(lead_id)
+        return {"ok": True}
+
+    monkeypatch.setattr(exo, "place_verify_call", capture)
+    await exo.run_due_calls(limit=25, force=True)
+    await exo.run_auto_calls(limit=25, force=True)
+    assert "LD26CAP" not in dialed
+
+
+@pytest.mark.asyncio
+async def test_review_clip_hangs_up_without_amount_prompt(client):
+    xml = exo.exoml_review({"webhookSecret": "", "quietStart": 10, "quietEnd": 19})
+    assert "Hangup" in xml
+    assert "Gather" not in xml
+    assert "Record" not in xml
+    assert "review.mp3" in xml or "Google review" in xml
+    r = await client.get("/api/integrations/exotel/voice", params={"purpose": "review"})
+    assert r.status_code == 200
+    assert "Gather" not in r.text
+    assert "Hangup" in r.text
+    verify = await client.get("/api/integrations/exotel/voice")
+    assert "Gather" in verify.text
+
+
+@pytest.mark.asyncio
+async def test_review_call_is_separate_from_booking_calls(client, monkeypatch):
+    seen = []
+    original = exo._place_call_http
+
+    async def wrap(cfg, customer, lead_id, **kwargs):
+        seen.append(kwargs.get("purpose") or "verify")
+        return await original(cfg, customer, lead_id, **kwargs)
+
+    monkeypatch.setattr(exo, "_place_call_http", wrap)
+    _freeze_ist(monkeypatch, datetime(2026, 10, 16, 11, 0, tzinfo=IST))
+    await server.db.leads.insert_one({
+        "leadId": "LD26REV", "customerName": "Review Cx", "mobile": "9876500103",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "deliveryDate": "2026-10-16", "accountStatus": "Active",
+        "dealVerifyStatus": "pending", "dealVerifyAttempts": 1,
+        "dealVerifyNextAt": "2026-10-16T08:30:00+00:00",
+    })
+    res = await exo.place_review_call("LD26REV")
+    assert res.get("ok") is True
+    assert seen == ["review"]
+    lead = await server.db.leads.find_one({"leadId": "LD26REV"})
+    assert lead["reviewCallAttempts"] == 1
+    assert not lead.get("reviewCallNextAt")
+    assert lead["dealVerifyAttempts"] == 1
+    assert lead["dealVerifyStatus"] == "pending"
+
+    again = await exo.enqueue_review_call("LD26REV")
+    assert again.get("skipped") in ("already-called", "already-queued")
+    assert seen == ["review"]
+
+    r = await client.post("/api/integrations/exotel/status", data={
+        "CustomField": "review:LD26REV", "Status": "no-answer", "CallSid": "rev-sid",
+        "purpose": "review",
+    })
+    assert r.status_code == 200
+    lead = await server.db.leads.find_one({"leadId": "LD26REV"})
+    assert lead["reviewCallStatus"] == "missed"
+    assert not lead.get("reviewCallNextAt")
+    assert lead["dealVerifyStatus"] == "pending"
+    assert lead["dealVerifyAttempts"] == 1
+
+    rdone = await client.post(
+        "/api/integrations/exotel/status",
+        params={"purpose": "review"},
+        data={"CustomField": "review:LD26REV", "Status": "completed", "CallSid": "rev-sid"},
+    )
+    assert rdone.status_code == 200
+    lead = await server.db.leads.find_one({"leadId": "LD26REV"})
+    assert lead["reviewCallStatus"] == "done"
+    assert lead["dealVerifyStatus"] == "pending"
+    assert lead.get("dealVerifyAmount") in (None, 0, "")
+
+
+@pytest.mark.asyncio
+async def test_review_call_waits_for_morning_window(client, monkeypatch):
+    _freeze_ist(monkeypatch, datetime(2026, 10, 16, 20, 30, tzinfo=IST))
+    await server.db.leads.insert_one({
+        "leadId": "LD26REVM", "customerName": "Morning", "mobile": "9876500104",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active",
+    })
+    queued = await exo.enqueue_review_call("LD26REVM")
+    assert queued.get("queued") is True
+    lead = await server.db.leads.find_one({"leadId": "LD26REVM"})
+    assert lead["reviewCallStatus"] == "pending"
+    assert int(lead.get("reviewCallAttempts") or 0) == 0
+    nxt = _ist_of(lead["reviewCallNextAt"])
+    assert (nxt.hour, nxt.minute, nxt.day) == (10, 15, 17)
+
+    _freeze_ist(monkeypatch, datetime(2026, 10, 17, 10, 20, tzinfo=IST))
+    ran = await exo.run_due_review_calls(limit=10)
+    assert ran.get("placed") == 1
+    lead = await server.db.leads.find_one({"leadId": "LD26REVM"})
+    assert lead["reviewCallAttempts"] == 1
+    assert lead["reviewCallStatus"] == "calling"
+    ran_again = await exo.run_due_review_calls(limit=10)
+    assert ran_again.get("placed") == 0
+
+
+@pytest.mark.asyncio
+async def test_review_api_failure_does_not_ring_forever(client, monkeypatch):
+    async def fail_place(cfg, customer, lead_id, **kwargs):
+        return {"ok": False, "statusCode": 400, "callSid": "", "status": "", "reason": "bad-flow", "body": {}}
+
+    monkeypatch.setattr(exo, "_place_call_http", fail_place)
+    _freeze_ist(monkeypatch, datetime(2026, 10, 16, 11, 0, tzinfo=IST))
+    await server.db.leads.insert_one({
+        "leadId": "LD26REVF", "customerName": "Fail", "mobile": "9876500109",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active",
+    })
+    first = await exo.place_review_call("LD26REVF")
+    assert first.get("ok") is False
+    lead = await server.db.leads.find_one({"leadId": "LD26REVF"})
+    assert lead["reviewCallStatus"] == "pending"
+    assert lead["reviewCallApiTries"] == 1
+    assert int(lead.get("reviewCallAttempts") or 0) == 0
+    await server.db.leads.update_one({"leadId": "LD26REVF"}, {"$set": {"reviewCallApiTries": 5}})
+    second = await exo.place_review_call("LD26REVF")
+    assert second.get("ok") is False
+    lead = await server.db.leads.find_one({"leadId": "LD26REVF"})
+    assert lead["reviewCallStatus"] == "missed"
+    assert not lead.get("reviewCallNextAt")
+    assert int(lead.get("reviewCallAttempts") or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_review_call_only_after_whatsapp_is_sent(client, monkeypatch):
+    import botspace as wa
+    queued = []
+
+    async def capture(lead_id):
+        queued.append(lead_id)
+        return {"ok": True, "skipped": "test"}
+
+    async def fake_send(phone, template_id, variables, name=""):
+        return {"ok": True, "data": {"id": "wamid.1"}}
+
+    monkeypatch.setattr(exo, "enqueue_review_call", capture)
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    monkeypatch.setattr(wa, "in_customer_hours", lambda when=None: True)
+    await server.db.settings.update_one(
+        {"_id": "botspace"},
+        {"$set": {"apiKey": "bot-key", "channelId": "chan-1", "reviewUrl": "https://g.page/akar"}},
+        upsert=True,
+    )
+    await server.db.leads.insert_one({
+        "leadId": "LD26WON", "customerName": "Won", "mobile": "9876500105",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "deliveryDate": "2026-10-16", "interestedModel": "Hi-Load",
+        "accountStatus": "Active",
+    })
+    sent = await wa.notify_delivery("LD26WON")
+    assert sent.get("ok") is True
+    assert queued == ["LD26WON"]
+
+    opted = {
+        "leadId": "LD26WOUT", "customerName": "Out", "mobile": "9876500106",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active", "whatsappOptOut": True,
+    }
+    await server.db.leads.insert_one(opted)
+    blocked = await wa.notify_delivery("LD26WOUT")
+    assert blocked.get("reason") == "opted-out"
+    assert queued == ["LD26WON"]
+
+    failed = []
+
+    async def fail_send(*a, **k):
+        failed.append(True)
+        return {"ok": False, "error": "provider"}
+
+    monkeypatch.setattr(wa, "send_template", fail_send)
+    await server.db.leads.insert_one({
+        "leadId": "LD26WFAIL", "customerName": "Fail", "mobile": "9876500107",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active",
+    })
+    bad = await wa.notify_delivery("LD26WFAIL")
+    assert bad.get("ok") is False
+    assert queued == ["LD26WON"]
+
+    # Outside WhatsApp hours the link is only queued, so the call waits.
+    monkeypatch.setattr(wa, "send_template", fake_send)
+    monkeypatch.setattr(wa, "in_customer_hours", lambda when=None: False)
+    await server.db.leads.insert_one({
+        "leadId": "LD26WQUE", "customerName": "Queue", "mobile": "9876500108",
+        "currentStatus": "Delivered", "deliveryStatus": "Delivered",
+        "accountStatus": "Active",
+    })
+    held = await wa.notify_delivery("LD26WQUE")
+    assert held.get("queued") is True
+    assert "LD26WQUE" not in queued
+    monkeypatch.setattr(wa, "in_customer_hours", lambda when=None: True)
+    flushed = await wa.flush_outbox()
+    assert flushed.get("flushed", 0) >= 1
+    assert queued[-1] == "LD26WQUE"
+
+    # A second delivery notice does not place another review call.
+    again = await wa.notify_delivery("LD26WON")
+    assert again.get("skipped") is True
+    assert queued.count("LD26WON") == 1
