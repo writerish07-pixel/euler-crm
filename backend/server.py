@@ -18033,6 +18033,8 @@ async def exotel_audio(name: str):
 async def exotel_voice(request: Request):
     await _exotel_token_ok(request)
     cfg = await exo.get_config()
+    if (request.query_params.get("purpose") or "").strip().lower() == "review":
+        return _exoml(exo.exoml_review(cfg))
     return _exoml(exo.exoml_start(cfg))
 
 
@@ -18071,6 +18073,9 @@ async def exotel_recorded(request: Request):
 async def exotel_status(request: Request):
     await _exotel_token_ok(request)
     form = await _exotel_form(request)
+    purpose = (request.query_params.get("purpose") or "").strip().lower()
+    if purpose:
+        form["purpose"] = purpose
     return await exo.handle_status(form)
 
 
@@ -18789,6 +18794,7 @@ async def startup():
         await db.leads.create_index([("accountStatus", 1), ("reviveOn", 1)])
         await db.leads.create_index("dealVerifyNextAt")
         await db.leads.create_index("dealVerifyMismatch")
+        await db.leads.create_index("reviewCallNextAt")
     except Exception:
         pass
     # Insurance agents / staff / cancel reasons are small and needed on the first

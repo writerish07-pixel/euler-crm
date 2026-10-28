@@ -1,10 +1,14 @@
-"""Akar Euler deal-verify calls via Exotel.
+"""Akar Euler calls via Exotel.
 
-Booked leads are called in Hindi from the dealership ExoPhone. The customer
-types the amount they paid and/or speaks it. We keep rescheduling until an
-amount is stored, then flag a mismatch vs receipts on the file.
+Booked leads get a Hindi amount check from the dealership ExoPhone. Automatic
+calling stops when the customer picks up, or after three calls with no answer.
+A stored amount still flags a mismatch vs receipts on the file.
 
-Never blocks Convert to Booking. Secrets live in Settings, never in git.
+After the Google-review WhatsApp for a delivered file has actually been sent,
+one separate call plays a short Hindi line and hangs up. It does not ask for
+an amount, and it does not count toward the three booking calls.
+
+Never blocks Convert to Booking or Mark Delivered. Secrets live in Settings.
 """
 from __future__ import annotations
 
@@ -32,10 +36,14 @@ IN_API_HOST = "api.in.exotel.com"
 DEFAULT_EXOPHONE = "01414937655"
 DEFAULT_QUIET_START = 10
 DEFAULT_QUIET_END = 19
-MAX_ATTEMPTS_PER_DAY = 2
+# Lifetime automatic booking calls. Picking up stops earlier. Staff Call now
+# can still dial after this, without scheduling another automatic call.
+MAX_VERIFY_ATTEMPTS = 3
 SLACK_RUPEES = 100
 AUDIO_DIR = Path(__file__).parent / "static" / "exotel"
+# First-upload verify clips. The build script skips these so they are not replaced.
 AUDIO_CLIPS = ("intro", "prompt", "speak", "thanks")
+REVIEW_CLIP = "review"
 
 # Same words as the first-upload MP3s (do not regenerate those clips).
 SPOKEN = {
@@ -49,6 +57,11 @@ SPOKEN = {
     ),
     "speak": "Kripya ab rashi bol kar bataiye.",
     "thanks": "Dhanyavaad. Akar Euler.",
+    "review": (
+        "Namaskar, main Akar Euler se bol raha hoon. "
+        "Humne aapko WhatsApp par Google review dene ke liye ek link bheja hai. "
+        "Kripya us link par jaakar humein apna review dein. Dhanyavaad!"
+    ),
 }
 
 # Devanagari used only if the original clips are rebuilt.
@@ -63,6 +76,11 @@ SPOKEN_HI = {
     ),
     "speak": "कृपया अब राशि बोल कर बताइये।",
     "thanks": "धन्यवाद। आकर यूलर।",
+    "review": (
+        "नमस्कार, मैं आकर Euler से बोल रहा हूँ। "
+        "हमने आपको व्हाट्सऐप पर गूगल रिव्यू देने के लिए एक लिंक भेजा है। "
+        "कृपया उस लिंक पर जाकर हमें अपना रिव्यू दें। धन्यवाद!"
+    ),
 }
 
 # Hindi number words used when a recording is transcribed or staff types words.
@@ -258,6 +276,29 @@ def next_slot(when: Optional[datetime] = None, cfg: Optional[dict] = None) -> da
     return nxt
 
 
+def next_calling_morning(when: Optional[datetime] = None, cfg: Optional[dict] = None) -> datetime:
+    """10:15 IST on the next calling morning. Same-day three-hour gaps are not used."""
+    t = when or now_ist()
+    start = int((cfg or {}).get("quietStart") or DEFAULT_QUIET_START)
+    if t.hour < start or (t.hour == start and t.minute < 15):
+        return t.replace(hour=start, minute=15, second=0, microsecond=0)
+    return (t + timedelta(days=1)).replace(hour=start, minute=15, second=0, microsecond=0)
+
+
+def _verify_followup_at(placed_attempts: int, cfg: Optional[dict]) -> str:
+    """When the next automatic booking call should ring.
+
+    After call 1 with no answer: about three hours later, or the next morning
+    if that falls outside the window. After call 2: the next calling morning
+    only. After call 3: stop.
+    """
+    if placed_attempts >= MAX_VERIFY_ATTEMPTS:
+        return ""
+    if placed_attempts >= 2:
+        return as_utc_iso(next_calling_morning(now_ist(), cfg))
+    return as_utc_iso(next_slot(now_ist(), cfg))
+
+
 def parse_amount(raw) -> Optional[float]:
     """DTMF digits, '486933#', '4.87 lakh', or Hindi लाख/हजार phrasing."""
     if raw is None:
@@ -390,7 +431,7 @@ def _form(form) -> dict:
 
 def audio_path(name: str) -> Optional[Path]:
     safe = re.sub(r"[^a-z]", "", str(name or "").lower())
-    if safe not in AUDIO_CLIPS:
+    if safe not in set(AUDIO_CLIPS) | {REVIEW_CLIP}:
         return None
     path = AUDIO_DIR / f"{safe}.mp3"
     return path if path.is_file() else None
@@ -442,6 +483,25 @@ def exoml_record_then_thanks(cfg: dict) -> str:
     )
 
 
+def exoml_review(cfg: dict) -> str:
+    """Google-review line, then hang up. No keypad and no amount recording."""
+    line = _play_or_say(cfg, REVIEW_CLIP, SPOKEN[REVIEW_CLIP])
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response>"
+        f"{line}"
+        "<Hangup/>"
+        "</Response>"
+    )
+
+
+def _url_with(url: str, **params) -> str:
+    extra = "&".join(f"{key}={value}" for key, value in params.items() if value)
+    if not extra:
+        return url
+    return url + ("&" if "?" in url else "?") + extra
+
+
 def _exotel_fail_reason(body, status_code) -> str:
     if isinstance(body, dict):
         ex = body.get("RestException") if isinstance(body.get("RestException"), dict) else {}
@@ -460,18 +520,33 @@ def _api_hosts(cfg: dict) -> list:
     return hosts
 
 
-async def _place_call_http(cfg: dict, customer: str, lead_id: str) -> dict:
-    """Connect-to-flow only. Do not send Record/To — those belong to connect-two-numbers."""
+async def _place_call_http(cfg: dict, customer: str, lead_id: str, *, purpose: str = "verify") -> dict:
+    """Connect-to-flow only. Do not send Record/To — those belong to connect-two-numbers.
+
+    Booking verify uses the App Bazaar flow when one is saved. The review call
+    uses the CRM voice URL so the customer hears the review line and not the
+    amount prompt.
+    """
     urls = webhook_urls(cfg)
     sid = cfg["accountSid"]
+    if purpose == "review":
+        flow = _url_with(urls["voice"], purpose="review")
+        status_cb = _url_with(urls["status"], purpose="review")
+        custom = f"review:{lead_id}"
+        time_limit = "60"
+    else:
+        flow = connect_flow_url(cfg)
+        status_cb = urls["status"]
+        custom = lead_id
+        time_limit = "120"
     data = {
         "From": india_dial(customer),
         "CallerId": cfg["exoPhone"],
-        "Url": connect_flow_url(cfg),
-        "StatusCallback": urls["status"],
-        "CustomField": lead_id,
+        "Url": flow,
+        "StatusCallback": status_cb,
+        "CustomField": custom,
         "CallType": "trans",
-        "TimeLimit": "120",
+        "TimeLimit": time_limit,
         "TimeOut": "25",
     }
     auth = (cfg["apiKey"], cfg["apiToken"])
@@ -548,11 +623,16 @@ async def enqueue_after_booking(lead_id: str) -> dict:
     if not in_quiet_hours(nxt, cfg):
         nxt = next_slot(now_ist(), cfg)
     due = as_utc_iso(nxt)
+    # A new booking starts its own three-call cycle. The historical sweep does not.
     await _apply(lead_id, {
         "dealVerifyStatus": "pending",
         "dealVerifyPaused": False,
         "dealVerifyNextAt": due,
         "dealVerifyLastStatus": "queued",
+        "dealVerifyAttempts": 0,
+        "dealVerifyAttemptsToday": 0,
+        "dealVerifyAttemptsDate": "",
+        "dealVerifyAutoStop": False,
     })
     return {"ok": True, "nextAt": due}
 
@@ -567,7 +647,11 @@ async def enqueue_unverified_booked(limit: int = 400) -> dict:
     q = {
         "dealCancelled": {"$ne": True},
         "dealVerifyPaused": {"$ne": True},
-        "dealVerifyStatus": {"$nin": ["pending", "calling", "failed", "queued", "listening", "answered", "paused"]},
+        "dealVerifyAutoStop": {"$ne": True},
+        "dealVerifyStatus": {"$nin": [
+            "pending", "calling", "failed", "queued", "listening", "answered",
+            "paused", "picked-up", "exhausted",
+        ]},
         "$or": [
             {"dealVerifyAmount": {"$exists": False}},
             {"dealVerifyAmount": 0},
@@ -584,6 +668,10 @@ async def enqueue_unverified_booked(limit: int = 400) -> dict:
         if not _is_booked(lead):
             continue
         if parse_amount(lead.get("dealVerifyAmount")):
+            continue
+        if lead.get("dealVerifyAutoStop"):
+            continue
+        if int(lead.get("dealVerifyAttempts") or 0) >= MAX_VERIFY_ATTEMPTS:
             continue
         if len(digits10(lead.get("mobile"))) != 10:
             continue
@@ -621,20 +709,34 @@ async def place_verify_call(lead_id: str, *, force: bool = False) -> dict:
     mobile = digits10(lead.get("mobile"))
     if len(mobile) != 10:
         return {"ok": False, "reason": "no-mobile"}
+    already = int(lead.get("dealVerifyAttempts") or 0)
+    status_now = str(lead.get("dealVerifyStatus") or "")
+    stopped = bool(lead.get("dealVerifyAutoStop")) or status_now in ("picked-up", "exhausted", "listening")
     if not force:
+        if status_now in ("picked-up", "listening"):
+            return {"ok": True, "skipped": "picked-up"}
+        if status_now == "exhausted" or already >= MAX_VERIFY_ATTEMPTS or lead.get("dealVerifyAutoStop"):
+            await _apply(lead_id, {
+                "dealVerifyStatus": "exhausted",
+                "dealVerifyNextAt": "",
+                "dealVerifyAutoStop": True,
+            })
+            return {"ok": False, "reason": "attempt-cap"}
         if not in_quiet_hours(now_ist(), cfg):
             due = as_utc_iso(next_slot(now_ist(), cfg))
             await _apply(lead_id, {"dealVerifyNextAt": due, "dealVerifyStatus": "pending"})
             return {"ok": False, "reason": "quiet-hours", "nextAt": due}
-        if _attempts_today(lead) >= MAX_ATTEMPTS_PER_DAY:
-            due = as_utc_iso(next_slot(now_ist() + timedelta(hours=12), cfg))
-            await _apply(lead_id, {"dealVerifyNextAt": due})
-            return {"ok": False, "reason": "day-cap", "nextAt": due}
     today = today_ist()
     today_n = _attempts_today(lead) + 1
-    total_n = int(lead.get("dealVerifyAttempts") or 0) + 1
+    total_n = already + 1
     result = await _place_call_http(cfg, mobile, lead_id)
-    due = as_utc_iso(next_slot(now_ist(), cfg))
+    # Staff Call now after pickup or after the three calls must not restart the loop.
+    if force and (stopped or already >= MAX_VERIFY_ATTEMPTS):
+        due = ""
+        auto_stop = True
+    else:
+        due = _verify_followup_at(total_n, cfg)
+        auto_stop = False
     await _apply(lead_id, {
         "dealVerifyStatus": "calling" if result.get("ok") else "failed",
         "dealVerifyCallSid": result.get("callSid") or lead.get("dealVerifyCallSid") or "",
@@ -646,6 +748,7 @@ async def place_verify_call(lead_id: str, *, force: bool = False) -> dict:
             "queued" if result.get("ok") else (result.get("reason") or "failed")
         ),
         "dealVerifyNextAt": due,
+        "dealVerifyAutoStop": auto_stop,
     })
     await _db().deal_verify_calls.insert_one({
         "leadId": lead_id,
@@ -680,6 +783,7 @@ async def record_amount(lead_id: str, amount, *, source: str, recording_url: str
         "dealVerifyMismatchKind": kind,
         "dealVerifyNextAt": "",
         "dealVerifyPaused": False,
+        "dealVerifyAutoStop": True,
         "dealVerifyLastAt": now_iso(),
         "dealVerifyLastStatus": "answered",
     }
@@ -694,7 +798,7 @@ async def record_amount(lead_id: str, amount, *, source: str, recording_url: str
 
 
 async def record_listening(lead_id: str, *, recording_url: str, call_sid: str = "") -> dict:
-    """Customer spoke but we do not yet have digits — keep the tape, retry later."""
+    """Customer picked up and spoke, but no amount was parsed. Keep the tape and stop auto-dial."""
     if not recording_url:
         return {"ok": False, "reason": "no-recording"}
     lead = await _db().leads.find_one({"leadId": lead_id}) or {}
@@ -702,27 +806,40 @@ async def record_listening(lead_id: str, *, recording_url: str, call_sid: str = 
         if recording_url:
             await _apply(lead_id, {"dealVerifyRecordingUrl": recording_url})
         return {"ok": True, "skipped": "already-answered"}
-    due = as_utc_iso(next_slot(now_ist() + timedelta(hours=6), await get_config()))
     lead = await _apply(lead_id, {
         "dealVerifyStatus": "listening",
         "dealVerifyRecordingUrl": recording_url,
         "dealVerifyCallSid": call_sid or lead.get("dealVerifyCallSid") or "",
         "dealVerifyLastAt": now_iso(),
         "dealVerifyLastStatus": "recorded",
-        "dealVerifyNextAt": due,
+        "dealVerifyNextAt": "",
+        "dealVerifyAutoStop": True,
     })
     return {"ok": True, "leadId": lead_id, **snapshot(lead)}
 
 
+def _lead_id_from_token(val: str) -> str:
+    raw = str(val or "").strip()
+    if raw.startswith("review:"):
+        raw = raw.split(":", 1)[1].strip()
+    return raw if raw.startswith("LD") else ""
+
+
+def call_purpose(form: dict) -> str:
+    if str(form.get("purpose") or "").strip().lower() == "review":
+        return "review"
+    for key in ("CustomField", "customField", "custom_field"):
+        if str(form.get(key) or "").strip().startswith("review:"):
+            return "review"
+    return "verify"
+
+
 def _pick_lead_id(form: dict, custom: str = "") -> str:
     for key in ("CustomField", "customField", "custom_field", "leadId", "LeadId"):
-        val = str(form.get(key) or "").strip()
-        if val.startswith("LD"):
-            return val
-    extra = str(custom or "").strip()
-    if extra.startswith("LD"):
-        return extra
-    return ""
+        found = _lead_id_from_token(str(form.get(key) or ""))
+        if found:
+            return found
+    return _lead_id_from_token(custom)
 
 
 async def _lead_for_call(form: dict) -> Optional[dict]:
@@ -731,6 +848,10 @@ async def _lead_for_call(form: dict) -> Optional[dict]:
     lid = _pick_lead_id(form)
     if lid:
         return await db.leads.find_one({"leadId": lid})
+    if sid and call_purpose(form) == "review":
+        found = await db.leads.find_one({"reviewCallSid": sid})
+        if found:
+            return found
     if sid:
         return await db.leads.find_one({"dealVerifyCallSid": sid})
     return None
@@ -766,42 +887,116 @@ async def handle_recorded(form: dict) -> dict:
     return await record_listening(lead["leadId"], recording_url=rec, call_sid=sid)
 
 
+_MISSED_STATUSES = {"failed", "busy", "no-answer", "no_answer", "canceled", "cancelled"}
+
+
+async def _handle_review_status(form: dict, lead: dict) -> dict:
+    """A review call never schedules another try and never touches deal-verify."""
+    status = str(form.get("Status") or form.get("DialCallStatus") or "").lower()
+    sid = str(form.get("CallSid") or form.get("Sid") or "")
+    updates = {
+        "reviewCallLastStatus": status,
+        "reviewCallLastAt": now_iso(),
+        "reviewCallSid": sid or lead.get("reviewCallSid") or "",
+        "reviewCallNextAt": "",
+        "reviewCallAttempts": max(1, int(lead.get("reviewCallAttempts") or 0)),
+    }
+    if status in ("completed", "answered"):
+        updates["reviewCallStatus"] = "done"
+    elif status in _MISSED_STATUSES:
+        updates["reviewCallStatus"] = "missed"
+    else:
+        updates["reviewCallStatus"] = "calling"
+    await _apply(lead["leadId"], updates)
+    return {"ok": True, "leadId": lead["leadId"], "purpose": "review", "status": status}
+
+
 async def handle_status(form: dict) -> dict:
     lead = await _lead_for_call(form)
     if not lead:
         return {"ok": True, "ignored": True}
+    if call_purpose(form) == "review":
+        return await _handle_review_status(form, lead)
     if parse_amount(lead.get("dealVerifyAmount")):
         return {"ok": True, "skipped": "already-answered"}
     status = str(form.get("Status") or form.get("DialCallStatus") or "").lower()
     rec = str(form.get("RecordingUrl") or "")
     sid = str(form.get("CallSid") or form.get("Sid") or "")
     cfg = await get_config()
-    due = as_utc_iso(next_slot(now_ist(), cfg))
-    updates = {
+    attempts = int(lead.get("dealVerifyAttempts") or 0)
+    base = {
         "dealVerifyLastStatus": status or lead.get("dealVerifyLastStatus") or "",
         "dealVerifyLastAt": now_iso(),
         "dealVerifyCallSid": sid or lead.get("dealVerifyCallSid") or "",
-        "dealVerifyNextAt": due,
     }
     if rec and not lead.get("dealVerifyRecordingUrl"):
-        updates["dealVerifyRecordingUrl"] = rec
-        if str(lead.get("dealVerifyStatus") or "") not in ("answered",):
-            updates["dealVerifyStatus"] = "listening"
-    elif status in ("completed", "in-progress"):
+        base["dealVerifyRecordingUrl"] = rec
+    # Pickup stops the automatic caller even when no amount was stored.
+    if status in ("completed", "answered") or (rec and status not in _MISSED_STATUSES and status not in ("in-progress", "ringing", "queued")):
+        updates = {
+            **base,
+            "dealVerifyStatus": "listening" if (rec or lead.get("dealVerifyRecordingUrl")) else "picked-up",
+            "dealVerifyNextAt": "",
+            "dealVerifyAutoStop": True,
+        }
+        await _apply(lead["leadId"], updates)
+        return {"ok": True, "leadId": lead["leadId"], "status": status, "stopped": True}
+    if status in ("in-progress", "ringing", "queued"):
+        await _apply(lead["leadId"], {**base, "dealVerifyStatus": "calling"})
+        return {"ok": True, "leadId": lead["leadId"], "status": status}
+    if lead.get("dealVerifyAutoStop"):
+        kept = "exhausted" if attempts >= MAX_VERIFY_ATTEMPTS else (
+            "listening" if lead.get("dealVerifyRecordingUrl") else "picked-up"
+        )
         if str(lead.get("dealVerifyStatus") or "") == "calling":
+            next_status = kept
+        else:
+            next_status = str(lead.get("dealVerifyStatus") or kept)
+        await _apply(lead["leadId"], {
+            **base,
+            "dealVerifyStatus": next_status,
+            "dealVerifyNextAt": "",
+            "dealVerifyAutoStop": True,
+        })
+        return {"ok": True, "leadId": lead["leadId"], "status": status, "stopped": True}
+    if status in _MISSED_STATUSES:
+        due = _verify_followup_at(attempts, cfg)
+        updates = {**base, "dealVerifyNextAt": due}
+        if due:
             updates["dealVerifyStatus"] = "pending"
-    elif status in ("failed", "busy", "no-answer", "no_answer"):
-        updates["dealVerifyStatus"] = "pending"
-    await _apply(lead["leadId"], updates)
+            updates["dealVerifyAutoStop"] = False
+        else:
+            updates["dealVerifyStatus"] = "exhausted"
+            updates["dealVerifyAutoStop"] = True
+        await _apply(lead["leadId"], updates)
+        return {"ok": True, "leadId": lead["leadId"], "status": status}
+    await _apply(lead["leadId"], base)
     return {"ok": True, "leadId": lead["leadId"], "status": status}
 
 
 async def pause_lead(lead_id: str, paused: bool = True) -> dict:
-    lead = await _apply(lead_id, {
-        "dealVerifyPaused": bool(paused),
-        "dealVerifyStatus": "paused" if paused else "pending",
-        "dealVerifyNextAt": "" if paused else as_utc_iso(next_slot(now_ist(), await get_config())),
-    })
+    current = await _db().leads.find_one({"leadId": lead_id}) or {}
+    cfg = await get_config()
+    blocked = (
+        current.get("dealVerifyAutoStop")
+        or int(current.get("dealVerifyAttempts") or 0) >= MAX_VERIFY_ATTEMPTS
+        or parse_amount(current.get("dealVerifyAmount"))
+    )
+    if paused:
+        updates = {
+            "dealVerifyPaused": True,
+            "dealVerifyStatus": "paused",
+            "dealVerifyNextAt": "",
+        }
+    elif blocked:
+        updates = {"dealVerifyPaused": False, "dealVerifyNextAt": ""}
+    else:
+        updates = {
+            "dealVerifyPaused": False,
+            "dealVerifyStatus": "pending",
+            "dealVerifyNextAt": as_utc_iso(next_slot(now_ist(), cfg)),
+        }
+    lead = await _apply(lead_id, updates)
     return snapshot(lead or {})
 
 
@@ -812,19 +1007,19 @@ async def run_due_calls(limit: int = 25, *, force: bool = False) -> dict:
     if not force and not in_quiet_hours(now_ist(), cfg):
         return {"ok": True, "reason": "quiet-hours", "placed": 0}
     now = now_iso()
-    today = today_ist()
     q = {
         "dealCancelled": {"$ne": True},
         "dealVerifyPaused": {"$ne": True},
+        "dealVerifyAutoStop": {"$ne": True},
         "$or": [
             {"dealVerifyAmount": {"$exists": False}},
             {"dealVerifyAmount": 0},
             {"dealVerifyAmount": None},
             {"dealVerifyAmount": ""},
         ],
-        # Only files already marked for verify. Historical booked files are
-        # queued first by run_auto_calls / enqueue_unverified_booked.
-        "dealVerifyStatus": {"$in": ["pending", "calling", "failed", "queued", "listening"]},
+        # Only files already marked for verify. Pickup, a saved tape, and a
+        # finished three-call cycle stay out of this list.
+        "dealVerifyStatus": {"$in": ["pending", "calling", "failed", "queued"]},
         "$and": [
             {"$or": [
                 {"dealVerifyNextAt": {"$lte": now}},
@@ -832,9 +1027,8 @@ async def run_due_calls(limit: int = 25, *, force: bool = False) -> dict:
                 {"dealVerifyNextAt": ""},
             ]},
             {"$or": [
-                {"dealVerifyAttemptsDate": {"$ne": today}},
-                {"dealVerifyAttemptsToday": {"$lt": MAX_ATTEMPTS_PER_DAY}},
-                {"dealVerifyAttemptsToday": {"$exists": False}},
+                {"dealVerifyAttempts": {"$lt": MAX_VERIFY_ATTEMPTS}},
+                {"dealVerifyAttempts": {"$exists": False}},
             ]},
         ],
     }
@@ -850,7 +1044,9 @@ async def run_due_calls(limit: int = 25, *, force: bool = False) -> dict:
         res = await place_verify_call(lead["leadId"], force=force)
         if res.get("ok") and not res.get("skipped"):
             placed += 1
-        elif res.get("skipped") or res.get("reason") in ("quiet-hours", "day-cap", "paused", "already-answered"):
+        elif res.get("skipped") or res.get("reason") in (
+            "quiet-hours", "attempt-cap", "paused", "already-answered", "picked-up",
+        ):
             skipped += 1
         else:
             failed += 1
@@ -858,11 +1054,124 @@ async def run_due_calls(limit: int = 25, *, force: bool = False) -> dict:
     return {"ok": True, "placed": placed, "skipped": skipped, "failed": failed, "reasons": reasons[:8]}
 
 
+async def enqueue_review_call(lead_id: str) -> dict:
+    """Queue the one Google-review call. Only after the WhatsApp link was sent."""
+    lead = await _db().leads.find_one({"leadId": lead_id}) or {}
+    if not lead:
+        return {"ok": False, "reason": "missing-lead"}
+    if len(digits10(lead.get("mobile"))) != 10:
+        return {"ok": False, "reason": "no-mobile"}
+    status = str(lead.get("reviewCallStatus") or "")
+    if status in ("pending", "calling", "done", "missed") or int(lead.get("reviewCallAttempts") or 0) >= 1:
+        return {"ok": True, "skipped": "already-queued"}
+    cfg = await get_config()
+    if not in_quiet_hours(now_ist(), cfg):
+        due = as_utc_iso(next_calling_morning(now_ist(), cfg))
+        await _apply(lead_id, {
+            "reviewCallStatus": "pending",
+            "reviewCallNextAt": due,
+            "reviewCallAttempts": int(lead.get("reviewCallAttempts") or 0),
+        })
+        return {"ok": True, "queued": True, "nextAt": due}
+    return await place_review_call(lead_id)
+
+
+async def place_review_call(lead_id: str) -> dict:
+    """Dial the review clip once. A missed call is not tried again."""
+    cfg = await get_config()
+    lead = await _db().leads.find_one({"leadId": lead_id}) or {}
+    if not lead:
+        return {"ok": False, "reason": "missing-lead"}
+    if int(lead.get("reviewCallAttempts") or 0) >= 1 or str(lead.get("reviewCallStatus") or "") in (
+        "calling", "done", "missed",
+    ):
+        return {"ok": True, "skipped": "already-called"}
+    mobile = digits10(lead.get("mobile"))
+    if len(mobile) != 10:
+        return {"ok": False, "reason": "no-mobile"}
+    if not cfg.get("enabled"):
+        due = as_utc_iso(next_calling_morning(now_ist(), cfg))
+        await _apply(lead_id, {"reviewCallStatus": "pending", "reviewCallNextAt": due})
+        return {"ok": False, "reason": "exotel-not-configured", "nextAt": due}
+    if not in_quiet_hours(now_ist(), cfg):
+        due = as_utc_iso(next_calling_morning(now_ist(), cfg))
+        await _apply(lead_id, {"reviewCallStatus": "pending", "reviewCallNextAt": due})
+        return {"ok": False, "reason": "quiet-hours", "nextAt": due}
+    result = await _place_call_http(cfg, mobile, lead_id, purpose="review")
+    if result.get("ok"):
+        await _apply(lead_id, {
+            "reviewCallStatus": "calling",
+            "reviewCallSid": result.get("callSid") or "",
+            "reviewCallAttempts": 1,
+            "reviewCallLastAt": now_iso(),
+            "reviewCallLastStatus": result.get("status") or "queued",
+            "reviewCallNextAt": "",
+        })
+    else:
+        # The phone did not ring. Retry a few times for a blip, then stop.
+        tries = int(lead.get("reviewCallApiTries") or 0) + 1
+        reason = (result.get("reason") or "failed")[:180]
+        if tries >= 6:
+            await _apply(lead_id, {
+                "reviewCallStatus": "missed",
+                "reviewCallApiTries": tries,
+                "reviewCallLastAt": now_iso(),
+                "reviewCallLastStatus": reason,
+                "reviewCallNextAt": "",
+            })
+        else:
+            await _apply(lead_id, {
+                "reviewCallStatus": "pending",
+                "reviewCallApiTries": tries,
+                "reviewCallLastAt": now_iso(),
+                "reviewCallLastStatus": reason,
+                "reviewCallNextAt": as_utc_iso(now_ist() + timedelta(minutes=15)),
+            })
+    return {**result, "leadId": lead_id, "purpose": "review"}
+
+
+async def run_due_review_calls(limit: int = 25) -> dict:
+    cfg = await get_config()
+    if not cfg.get("enabled"):
+        return {"ok": False, "reason": "exotel-not-configured", "placed": 0}
+    if not in_quiet_hours(now_ist(), cfg):
+        return {"ok": True, "reason": "quiet-hours", "placed": 0}
+    now = now_iso()
+    q = {
+        "reviewCallStatus": "pending",
+        "$and": [
+            {"$or": [
+                {"reviewCallAttempts": {"$lt": 1}},
+                {"reviewCallAttempts": {"$exists": False}},
+            ]},
+            {"$or": [
+                {"reviewCallNextAt": {"$lte": now}},
+                {"reviewCallNextAt": ""},
+                {"reviewCallNextAt": {"$exists": False}},
+            ]},
+        ],
+    }
+    rows = await _db().leads.find(q).sort("reviewCallNextAt", 1).to_list(max(limit * 4, 40))
+    placed = skipped = failed = 0
+    for lead in rows:
+        if placed + skipped + failed >= limit:
+            break
+        res = await place_review_call(lead["leadId"])
+        if res.get("ok") and not res.get("skipped"):
+            placed += 1
+        elif res.get("skipped") or res.get("reason") in ("quiet-hours", "exotel-not-configured"):
+            skipped += 1
+        else:
+            failed += 1
+    return {"ok": True, "placed": placed, "skipped": skipped, "failed": failed}
+
+
 async def run_auto_calls(limit: int = 25, *, force: bool = False, enqueue_limit: int = 400) -> dict:
-    """Queue every unverified booked file, then place due calls in the window."""
+    """Queue every unverified booked file, then place due verify and review calls."""
     queued = await enqueue_unverified_booked(limit=enqueue_limit)
     placed = await run_due_calls(limit=limit, force=force)
-    return {**placed, "queued": queued.get("queued", 0)}
+    reviews = await run_due_review_calls(limit=limit)
+    return {**placed, "queued": queued.get("queued", 0), "reviewPlaced": reviews.get("placed", 0)}
 
 
 async def list_queue(filter: str = "mismatch", limit: int = 300) -> list:
@@ -870,8 +1179,7 @@ async def list_queue(filter: str = "mismatch", limit: int = 300) -> list:
     if filter == "mismatch":
         q["dealVerifyMismatch"] = True
     elif filter == "listening":
-        q["dealVerifyStatus"] = "listening"
-        q["dealVerifyRecordingUrl"] = {"$ne": ""}
+        q["dealVerifyStatus"] = {"$in": ["listening", "picked-up"]}
     elif filter == "pending":
         q["dealVerifyStatus"] = {"$in": ["pending", "calling", "failed", "queued"]}
         q["$or"] = [{"dealVerifyAmount": {"$exists": False}}, {"dealVerifyAmount": 0}, {"dealVerifyAmount": ""}]

@@ -151,7 +151,7 @@ export function DealVerifyCard({ lead, booked, canManage, onSaved }) {
         )}
       </div>
       <p className="text-[11px] text-ink-faint mb-2">
-        Hindi call asks what they paid. Typed keypad and spoken recording both count. Retries until an amount is stored.
+        Hindi call asks what they paid. Pickup ends the automatic calls. Three unanswered calls end them too. Call now is still available.
       </p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-sm mb-2">
         <div><div className="text-[11px] text-ink-faint">Status</div>{lead.dealVerifyStatus || "queued"}</div>
