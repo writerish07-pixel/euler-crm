@@ -217,3 +217,22 @@ async def test_booking_autofill_does_not_lock_price_for_staff(client):
     await _login(client, "owner@euler.com")
     r = await client.put(f"/api/leads/{lid}/price-structure", json=ps)
     assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_unit_copy_follows_a_variant_without_a_price_row(client):
+    """Price preview reads units[0] first. A move to a variant that Price Master
+    does not list must still take units[0] off the old vehicle."""
+    await _login(client, "owner@euler.com")
+    lid = await _lead(client, "9777700021")
+    ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+    assert (await client.put(f"/api/leads/{lid}/price-structure", json=ps)).status_code == 200
+    r = await client.put(f"/api/leads/{lid}", json={
+        "interestedModel": MODEL, "variant": "Not In Price Master", "customerName": "Step Lock"})
+    assert r.status_code == 200, r.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    units = after.get("units") or []
+    assert units and units[0]["variant"] == "Not In Price Master"
+    preview = (await client.get(f"/api/leads/{lid}/price-preview")).json()
+    assert preview["found"] is False
+    assert preview["variant"] == "Not In Price Master"
