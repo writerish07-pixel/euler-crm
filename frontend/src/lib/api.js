@@ -185,9 +185,15 @@ export function isSlowLead360Path(url) {
 /** POST /leads mints a new leadId. A timeout / 502 / HTML miss after the
  *  first insert already landed used to replay the same create on Railway and
  *  then again on the Cloudflare origin — three New files for one tap. */
+// Money and booking posts are never re-sent automatically. A 502/504 can come
+// back after the server already saved the receipt; a silent second POST then
+// either doubles it or fails as "duplicate" on a receipt that did save. Staff
+// see the error and check the ledger instead.
+const CREATE_ONCE_LEAD_ACTIONS = /^\/leads\/[^/]+\/(payments|refund|convert-booking)$/;
+
 export function isCreateOncePath(url) {
   const p = String(url || "").split("?")[0];
-  return p === "/leads";
+  return p === "/leads" || CREATE_ONCE_LEAD_ACTIONS.test(p);
 }
 
 /** KYC / OEM Extra Support / deal-sheet scans. Never retry: the first POST
@@ -427,8 +433,15 @@ function saveBlob(data, filename) {
   const link = document.createElement("a");
   link.href = window.URL.createObjectURL(blob);
   link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
   link.click();
-  window.URL.revokeObjectURL(link.href);
+  // Revoking straight after click() cancels the download on Safari / Firefox.
+  const href = link.href;
+  setTimeout(() => {
+    window.URL.revokeObjectURL(href);
+    link.remove();
+  }, 60000);
   return blob;
 }
 
