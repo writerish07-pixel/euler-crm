@@ -405,3 +405,37 @@ def test_the_morning_report_is_no_longer_exec_day_ahead():
     import botspace as wa
     assert wa.DEFAULT_TEMPLATES["execMorning"] == "exec_morning_statement"
     assert "day_ahead" not in wa.DEFAULT_TEMPLATES["execMorning"]
+
+
+# ============ a colleague's lead stays closed on every single-lead route
+@pytest.mark.asyncio
+async def test_executive_cannot_act_on_a_colleagues_lead(client, exec_client):
+    theirs = await make_lead(client, "ITER35 Not Mine", executive="Sanjay")
+    mine = await make_lead(client, "ITER35 Own File", executive="Executive")
+    blocked = [
+        ("get", f"/api/leads/{theirs}/whatsapp", None),
+        ("post", f"/api/leads/{theirs}/whatsapp/reply", {"text": "hello"}),
+        ("post", f"/api/leads/{theirs}/whatsapp/booking-confirm", {}),
+        ("post", f"/api/leads/{theirs}/whatsapp/google-review", {}),
+        ("post", f"/api/leads/{theirs}/units", {"model": TURBO[0], "variant": TURBO[1]}),
+        ("post", f"/api/leads/{theirs}/activities",
+         {"activityType": "Call", "discussion": "x", "date": "2026-10-02"}),
+        ("get", f"/api/leads/{theirs}/deal-sheet.pdf", None),
+        ("get", f"/api/leads/{theirs}/billing-summary", None),
+        ("get", f"/api/leads/{theirs}/scheme-rules", None),
+        ("get", f"/api/leads/{theirs}/price-preview", None),
+        ("post", f"/api/leads/{theirs}/convert-booking",
+         {"bookingDate": "2026-10-02", "bookingAmount": 1000, "paymentMode": "Cash",
+          "financeRequired": "No", "exchangeRequired": "No"}),
+    ]
+    for method, url, body in blocked:
+        r = await (exec_client.get(url) if method == "get" else exec_client.post(url, json=body))
+        assert r.status_code == 403, f"{method.upper()} {url} -> {r.status_code} {r.text[:200]}"
+
+    # Their own file still works.
+    ok = await exec_client.post(f"/api/leads/{mine}/activities",
+                                json={"activityType": "Call", "discussion": "called", "date": "2026-10-02"})
+    assert ok.status_code == 200, ok.text
+    assert (await exec_client.get(f"/api/leads/{mine}/price-preview")).status_code == 200
+    # The owner is not affected.
+    assert (await client.get(f"/api/leads/{theirs}/price-preview")).status_code == 200

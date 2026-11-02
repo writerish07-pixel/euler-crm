@@ -134,6 +134,10 @@ describe("bulk mutations", () => {
     expect(isBulkMutationPath("/leads")).toBe(false);
     expect(isCreateOncePath("/leads")).toBe(true);
     expect(isCreateOncePath("/leads/allocate")).toBe(false);
+    expect(isCreateOncePath("/leads/LD26000001/payments")).toBe(true);
+    expect(isCreateOncePath("/leads/LD26000001/refund")).toBe(true);
+    expect(isCreateOncePath("/leads/LD26000001/convert-booking")).toBe(true);
+    expect(isCreateOncePath("/leads/LD26000001/price-structure")).toBe(false);
     expect(isSlowIntegrationPath("/integrations/coulson")).toBe(true);
     expect(isSlowIntegrationPath("/integrations/coulson/sync")).toBe(true);
     expect(isSlowIntegrationPath("/leads")).toBe(false);

@@ -346,3 +346,39 @@ async def test_oem_create_on_delivered_file_mints_new_lead_with_kyc(client):
     kinds = {d["kind"] for d in docs}
     assert "kyc_pan" in kinds
     assert await server.db.leads.count_documents({"mobile": mobile}) == 2
+
+
+@pytest.mark.asyncio
+async def test_pack_refund_is_judged_against_the_whole_order(client):
+    """A two-vehicle order paid more than unit 1 but less than the pack has no
+    excess. Unit 1's price alone used to let that money be refunded."""
+    lid, lead = await _seed_pack(client, "9813399444")
+    pay1 = ce.num((lead.get("units") or [{}])[0].get("customerPayable"))
+    pay2 = ce.num((lead.get("units") or [{}])[1].get("customerPayable"))
+    paid = ce.round2(pay1 + 50000)
+    r = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": paid, "paymentMode": "NEFT", "paymentReference": "UTRPACKREF1",
+        "date": "2026-10-02", "unitSnos": [1, 2], "allocation": "club",
+    })
+    assert r.status_code == 200, r.text
+
+    pos = (await client.get(f"/api/leads/{lid}/refund-position")).json()
+    assert pos["customerPayable"] == ce.round2(pay1 + pay2)
+    assert pos["excessReceived"] == 0
+
+    refund = await client.post(f"/api/leads/{lid}/refund", json={
+        "amount": 10000, "paymentMode": "Cash", "date": "2026-10-03",
+    })
+    assert refund.status_code == 422, refund.text
+
+    # Running totals rebuilt after a delete use the pack payable too.
+    extra = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 1000, "paymentMode": "Cash", "date": "2026-10-04",
+        "unitSnos": [2], "allocation": "separate",
+    })
+    assert extra.status_code == 200, extra.text
+    d = await client.delete(f"/api/payments/{extra.json()['receiptNumber']}")
+    assert d.status_code == 200, d.text
+    rows = await server.db.payments.find({"leadId": lid}).to_list(50)
+    first = next(p for p in rows if ce.num(p.get("amount")) == paid)
+    assert ce.round2(ce.num(first.get("outstandingBalance"))) == ce.round2(pay1 + pay2 - paid)

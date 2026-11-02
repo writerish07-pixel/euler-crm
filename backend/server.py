@@ -235,11 +235,19 @@ def _schedule_sheet_syncs(docs, entity="leads"):
 
 
 def today():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Dealership calendar day (India). UTC kept 00:00–05:29 IST on yesterday, so
+    early receipts / bookings were dated a day early and, on the 1st, landed in
+    the previous month's scheme and reports."""
+    return periodmod.ist_today()
 
 
 def this_month():
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+    return periodmod.ist_month()
+
+
+def now_hhmm():
+    """Wall-clock time staff read on the activity log (India)."""
+    return periodmod.ist_now().strftime("%H:%M")
 
 
 def _parse_period(month: Optional[str] = None, year: Optional[str] = None):
@@ -339,7 +347,7 @@ async def _log_activity_safe(lead: dict, activity_type: str, discussion: str):
     try:
         doc = {
             "activityId": await next_id("activity", "AC26"), "leadId": lead_id,
-            "date": today(), "time": datetime.now(timezone.utc).strftime("%H:%M"),
+            "date": today(), "time": now_hhmm(),
             "activityType": activity_type, "discussion": discussion,
             "customerName": lead.get("customerName"), "mobile": lead.get("mobile"),
             "model": lead.get("interestedModel"),
@@ -4608,6 +4616,9 @@ async def _team_visible_lead_ids(user, lead_ids):
     return allowed
 
 
+_PHONE_LIKE = re.compile(r"^[\d\s+()\[\].-]+$")
+
+
 def _lead_search_or(q):
     """Mongo `$or` for the lead search box, or None when the box is empty.
 
@@ -4625,11 +4636,15 @@ def _lead_search_or(q):
         {"mobile": {"$regex": safe, "$options": "i"}},
         {"leadId": {"$regex": safe, "$options": "i"}},
     ]
-    digits = re.sub(r"\D", "", term)
-    if len(digits) > 10 and digits.startswith("91"):
-        digits = digits[-10:]
-    if len(digits) >= 3 and digits != term:
-        ors.append({"mobile": {"$regex": re.escape(digits)}})
+    # Only text that looks like a phone number (digits with + - ( ) . or
+    # spaces) also searches the mobile by its digits. A lead ID or name with
+    # digits in it ("LD26SRCH01") must not match unrelated mobiles on "2601".
+    if _PHONE_LIKE.match(term):
+        digits = re.sub(r"\D", "", term)
+        if len(digits) > 10 and digits.startswith("91"):
+            digits = digits[-10:]
+        if len(digits) >= 3 and digits != term:
+            ors.append({"mobile": {"$regex": re.escape(digits)}})
     return ors
 
 
@@ -5093,7 +5108,7 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
     await db.leads.insert_one(doc)
     _act_doc = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": created_date,
-        "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Note",
+        "time": now_hhmm(), "activityType": "Note",
         "discussion": source_note, "executive": body.executive,
         "customerName": body.customerName, "mobile": body.mobile, "model": body.interestedModel,
     }
@@ -5521,6 +5536,7 @@ async def add_lead_unit(lead_id: str, body: AddLeadUnitIn, act=Depends(actor),
     if not str(body.model or "").strip():
         raise HTTPException(422, "Pick a model for the extra unit.")
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, user)
     if _is_delivered(lead) or _is_delivered_lead(lead) or lead.get("dealCancelled"):
         raise HTTPException(422, "Cannot add a unit on a delivered or cancelled file. Add another vehicle as a new lead so KYC copies and this unit stays editable.")
     units = _ensure_lead_units(lead)
@@ -6878,6 +6894,7 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
     other field on the lead (including system/financial fields, which aren't even
     part of this model) is left exactly as it was. See LEAD_SYSTEM_FIELDS."""
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, _sales)
     _require_mutable_lead(lead, "lead edits", act)
     if str((act or {}).get("role") or "").strip().lower() == "executive":
         raise HTTPException(
@@ -8417,8 +8434,12 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
     if refresh_price:
         row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
         if row:
-            # Full Price Master structure for the new model/variant.
-            patch.update(_price_structure_from_master(row, _lead_price_as_of(lead)))
+            # Full Price Master structure for the new model/variant, priced on
+            # the same date Price Preview uses (unit billed / scheme date, then
+            # booking date, then today) so the two screens agree.
+            u0 = (lead.get("units") or [None])[0] if not oem_sync.is_same_order_pack(lead) else None
+            as_of = _lead_price_as_of(lead, unit=u0 if isinstance(u0, dict) else None)
+            patch.update(_price_structure_from_master(row, as_of))
 
     if realign_scheme and _has_persisted_scheme(lead):
         import json as _json
@@ -8475,6 +8496,20 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
         patch["schemeAllocationExplicit"] = True
         patch["schemeAllocationV2"] = True
 
+    # A single-vehicle file keeps a copy of its vehicle on units[0], and price
+    # preview / scheme rules read that copy first. Move it to the new model /
+    # variant too, or the scheme and deal sheet stay on the old vehicle.
+    if patch and not oem_sync.is_same_order_pack(lead):
+        units = list(lead.get("units") or [])
+        if len(units) == 1 and isinstance(units[0], dict):
+            merged = {**lead, **patch}
+            u0 = dict(units[0])
+            u0["model"] = merged.get("interestedModel") or ""
+            u0["variant"] = merged.get("variant") or ""
+            _copy_unit_commercials(merged, u0)
+            units[0] = u0
+            patch["units"] = units
+
     if patch:
         patch["lastUpdated"] = now_iso()
         await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
@@ -8482,11 +8517,12 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
 
 
 @api.get("/leads/{lead_id}/price-preview")
-async def price_preview(lead_id: str, unit: Optional[int] = None):
+async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(current_user)):
     """What Price Master resolves to for this lead's model/variant, before booking.
     Lets the UI show the real commercial structure (or a precise 'not found')
     instead of discovering it only at booking time."""
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, user)
     idx, units = _resolve_unit_index(lead, unit)
     chosen = units[idx] if units else {}
     model = chosen.get("model") or lead.get("interestedModel")
@@ -8553,6 +8589,7 @@ async def _apply_book_enquiry(lead, body, act):
 @api.post("/leads/{lead_id}/convert-booking")
 async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, _sales)
     _require_action(lead, "canBook", "conversion to booking", act)
     lead = await _apply_book_enquiry(lead, body, act)
     gstin = str(body.gstin or "").strip().upper()
@@ -8650,7 +8687,7 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
             narration=adv_note, paymentReference=pay_ref))
     _bk_act = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": bdate,
-        "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Booking",
+        "time": now_hhmm(), "activityType": "Booking",
         "discussion": "Booking converted.", "executive": lead.get("executive"),
         "customerName": lead.get("customerName"), "mobile": lead.get("mobile"), "model": lead.get("interestedModel"),
     }
@@ -9011,6 +9048,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
 async def scheme_rules(lead_id: str, on: Optional[str] = None, unit: Optional[int] = None,
                       user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, user)
     scheme_rows = await get_scheme_rows()
     idx, units = _resolve_unit_index(lead, unit)
     chosen = units[idx] if units else {}
@@ -9932,7 +9970,7 @@ async def allocate_leads(body: AllocateIn, act=Depends(actor), _desk=Depends(sho
         for i, (lead, previous, note) in enumerate(history):
             act_docs.append({
                 "activityId": act_ids[i], "leadId": lead.get("leadId"),
-                "date": today(), "time": datetime.now(timezone.utc).strftime("%H:%M"),
+                "date": today(), "time": now_hhmm(),
                 "activityType": "Note", "discussion": note,
                 "customerName": lead.get("customerName"), "mobile": lead.get("mobile"),
                 "model": lead.get("interestedModel"),
@@ -10786,9 +10824,10 @@ async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), user=De
 async def _rebuild_payment_running_totals(lead_id):
     """After a receipt is removed, rewrite runningTotal / outstandingBalance in date order."""
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
-    payable = _deal_price_payable(lead)
-    if payable is None:
-        payable = ce.compute_commercial_totals(lead_to_snapshot(lead), await get_scheme_rows())["customerPayable"]
+    # Same payable the receipt desk uses: the whole pack on a multi-vehicle
+    # order, the agreed deal price when it is on. Unit 1 alone rewrote every
+    # receipt's outstanding wrong after a delete on a pack.
+    payable = _receipt_payable(lead, await get_scheme_rows())
     rows = await db.payments.find({"leadId": lead_id}).sort(
         [("date", 1), ("recordedAt", 1), ("receiptNumber", 1)]
     ).to_list(2000)
@@ -10905,7 +10944,10 @@ async def _refund_position(lead_id, lead=None):
     the same number is both "surplus still held" and "still refundable".
     """
     lead = lead or await db.leads.find_one({"leadId": lead_id}) or {}
-    payable = ce.compute_commercial_totals(lead_to_snapshot(lead), await get_scheme_rows())["customerPayable"]
+    # Judge "excess" against the same payable receipts are accepted against.
+    # Unit 1's price alone let a multi-vehicle order refund money the customer
+    # still owed on the other vehicles.
+    payable = _receipt_payable(lead, await get_scheme_rows())
     rows = await db.payments.find({"leadId": lead_id}).to_list(2000)
     received = ce.round2(sum(ce.num(p.get("amount")) for p in rows))
     refunded = ce.round2(sum(-ce.num(p.get("amount")) for p in rows if p.get("entryType") == "Refund"))
@@ -11780,7 +11822,7 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     await db.leads.insert_one(doc)
     act_doc = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": sold_date,
-        "time": datetime.now(timezone.utc).strftime("%H:%M"), "activityType": "Note",
+        "time": now_hhmm(), "activityType": "Note",
         "discussion": "Created from OEM billing", "executive": "",
         "customerName": name, "mobile": mobile, "model": model,
     }
@@ -12425,6 +12467,7 @@ async def get_billing_summary(lead_id: str, user=Depends(current_user)):
     (Dealer) changes are reflected immediately (not stuck on the first snapshot).
     """
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, user)
     if not _is_delivered(lead):
         raise HTTPException(
             409,
@@ -12827,6 +12870,7 @@ async def deal_sheet_preview_pdf(body: DealSheetPreviewIn, _sales=Depends(sales_
 @api.get("/leads/{lead_id}/deal-sheet.pdf")
 async def lead_deal_sheet_pdf(lead_id: str, _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, _sales)
     cx = ce.num(lead.get("cxDemand") or lead.get("budget"))
     deal = lead.get("dealFormat") or {}
     if not deal or ce.num(deal.get("exShowroom")) <= 0:
@@ -13667,6 +13711,7 @@ async def list_activities(lead_id: Optional[str] = None, month: Optional[str] = 
 @api.post("/leads/{lead_id}/activities")
 async def add_activity(lead_id: str, body: ActivityIn, act=Depends(actor), _sales=Depends(sales_staff_only)):
     lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, _sales)
     if _acct(lead) != "Active":
         raise HTTPException(
             409,
@@ -13677,7 +13722,7 @@ async def add_activity(lead_id: str, body: ActivityIn, act=Depends(actor), _sale
     act_date = str(payload.pop("date", None) or "").strip() or today()
     doc = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": act_date,
-        "time": datetime.now(timezone.utc).strftime("%H:%M"), **payload,
+        "time": now_hhmm(), **payload,
         "customerName": lead.get("customerName"), "mobile": lead.get("mobile"), "model": lead.get("interestedModel"),
     }
     await db.activities.insert_one(doc)
@@ -17736,15 +17781,16 @@ async def botspace_run_model_ask(confirm: bool = False, limit: int = 500, act=De
 
 
 @api.get("/leads/{lead_id}/whatsapp")
-async def lead_whatsapp_thread(lead_id: str):
-    await get_lead_or_404(lead_id)
+async def lead_whatsapp_thread(lead_id: str, user=Depends(current_user)):
+    await _require_lead_visible(await get_lead_or_404(lead_id), user)
     return await wa.list_thread(lead_id)
 
 
 @api.post("/leads/{lead_id}/whatsapp/booking-confirm")
-async def lead_whatsapp_booking_confirm(lead_id: str, body: Optional[GoogleReviewIn] = None):
+async def lead_whatsapp_booking_confirm(lead_id: str, body: Optional[GoogleReviewIn] = None,
+                                        user=Depends(current_user)):
     """Send booking confirmation template. Lead must already be booked."""
-    await get_lead_or_404(lead_id)
+    await _require_lead_visible(await get_lead_or_404(lead_id), user)
     force = bool(body and body.force)
     res = await wa.notify_booking(lead_id, force=force, immediate=True)
     if res.get("reason") == "not-booked":
@@ -17759,9 +17805,10 @@ async def lead_whatsapp_booking_confirm(lead_id: str, body: Optional[GoogleRevie
 
 
 @api.post("/leads/{lead_id}/whatsapp/google-review")
-async def lead_whatsapp_google_review(lead_id: str, body: Optional[GoogleReviewIn] = None):
+async def lead_whatsapp_google_review(lead_id: str, body: Optional[GoogleReviewIn] = None,
+                                      user=Depends(current_user)):
     """Send delivery + Google review template to this lead. Lead must be Delivered."""
-    await get_lead_or_404(lead_id)
+    await _require_lead_visible(await get_lead_or_404(lead_id), user)
     force = bool(body and body.force)
     res = await wa.notify_delivery(lead_id, force=force, immediate=True)
     if res.get("reason") == "not-delivered":
@@ -17777,7 +17824,7 @@ async def lead_whatsapp_google_review(lead_id: str, body: Optional[GoogleReviewI
 
 @api.post("/leads/{lead_id}/whatsapp/reply")
 async def lead_whatsapp_reply(lead_id: str, body: WhatsAppReplyIn, user=Depends(current_user)):
-    await get_lead_or_404(lead_id)
+    await _require_lead_visible(await get_lead_or_404(lead_id), user)
     try:
         return await wa.staff_reply(lead_id, body.text, actor_name=(user or {}).get("name") or "")
     except ValueError as e:
@@ -17800,9 +17847,13 @@ def _thread_view(t: dict, now_iso_s: str) -> dict:
 
 
 async def _visible_threads(user) -> list:
-    """Executives see conversations on their own leads; everyone else sees all."""
+    """Executives see conversations on their own leads, a Team Leader their
+    team's leads (the same files they can open); everyone else sees all."""
     rows = [clean(t) for t in
             await db.whatsapp_threads.find().sort("lastMessageAt", -1).to_list(2000)]
+    if authmod.is_team_lead(user):
+        allowed = await _team_visible_lead_ids(user, [t.get("leadId") for t in rows])
+        return [t for t in rows if t.get("leadId") in allowed]
     if (user or {}).get("role") != "executive":
         return rows
     mine = {l["leadId"] for l in _leads_for_executive(

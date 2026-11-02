@@ -509,7 +509,7 @@ async def get_meta(db, document_id: str):
     return await db[COLLECTION].find_one({"documentId": document_id}, _META_PROJ)
 
 
-async def _delete_overlapping_ledgers(db, *, lead_id: str, snos: list[int]):
+async def _delete_overlapping_ledgers(db, *, lead_id: str, snos: list[int], keep_id: str = ""):
     """One ledger covers a unit — combined or separate. Replacing overlaps."""
     if not lead_id:
         return
@@ -525,12 +525,12 @@ async def _delete_overlapping_ledgers(db, *, lead_id: str, snos: list[int]):
             continue
         if not have or have & want:
             ids.append(doc.get("documentId"))
-    ids = [i for i in ids if i]
+    ids = [i for i in ids if i and i != keep_id]
     if ids:
         await db[COLLECTION].delete_many({"documentId": {"$in": ids}})
 
 
-async def _delete_unique_docs(db, kind, *, lead_id="", request_id="", unit_sno=None):
+async def _delete_unique_docs(db, kind, *, lead_id="", request_id="", unit_sno=None, keep_id=""):
     """Drop the previous file for this slot on the request or the live lead."""
     clauses = []
     if lead_id:
@@ -539,7 +539,10 @@ async def _delete_unique_docs(db, kind, *, lead_id="", request_id="", unit_sno=N
         clauses.append(unique_doc_filter(kind, request_id=request_id, unit_sno=unit_sno))
     if not clauses:
         return
-    await db[COLLECTION].delete_many({"$or": clauses} if len(clauses) > 1 else clauses[0])
+    filt = {"$or": clauses} if len(clauses) > 1 else clauses[0]
+    if keep_id:
+        filt = {"$and": [filt, {"documentId": {"$ne": keep_id}}]}
+    await db[COLLECTION].delete_many(filt)
 
 
 async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: str,
@@ -550,14 +553,6 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
     info = KINDS[kind]
     snos = parse_unit_snos(kind, unit_sno, unit_snos)
     sno = snos[0] if len(snos) == 1 else parse_unit_sno(kind, unit_sno)
-    if kind == LEDGER_KIND:
-        await _delete_overlapping_ledgers(db, lead_id=lead_id, snos=snos)
-        if not snos and info["unique"]:
-            await _delete_unique_docs(
-                db, kind, lead_id=lead_id, request_id=request_id, unit_sno=None)
-    elif info["unique"]:
-        await _delete_unique_docs(
-            db, kind, lead_id=lead_id, request_id=request_id, unit_sno=sno)
     doc = {
         "documentId": await next_id("lead_document", "DC26"),
         "leadId": lead_id or "",
@@ -577,7 +572,18 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
         doc["unitSnos"] = snos
     elif sno:
         doc["unitSno"] = sno
+    # Store the new file first, then drop the one it replaces. Deleting first
+    # lost both copies whenever the insert failed (size limit, network blip).
     await db[COLLECTION].insert_one(dict(doc))
+    keep = doc["documentId"]
+    if kind == LEDGER_KIND:
+        await _delete_overlapping_ledgers(db, lead_id=lead_id, snos=snos, keep_id=keep)
+        if not snos and info["unique"]:
+            await _delete_unique_docs(
+                db, kind, lead_id=lead_id, request_id=request_id, unit_sno=None, keep_id=keep)
+    elif info["unique"]:
+        await _delete_unique_docs(
+            db, kind, lead_id=lead_id, request_id=request_id, unit_sno=sno, keep_id=keep)
     return public_row(doc)
 
 

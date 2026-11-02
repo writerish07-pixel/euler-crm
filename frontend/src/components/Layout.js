@@ -214,6 +214,9 @@ function GlobalLeadSearch() {
   // "" = idle, "searching", or "done" — so an empty result says so instead of
   // looking like the search did nothing.
   const [state, setState] = useState("");
+  // The text the current `hits` were found for. Enter only opens a hit that
+  // belongs to what is in the box now, not the previous search's first row.
+  const [hitsFor, setHitsFor] = useState("");
   const seq = useRef(0);
   const [drawerLead, setDrawerLead] = useState(null);
   const [masters, setMasters] = useState(null);
@@ -235,6 +238,7 @@ function GlobalLeadSearch() {
       get("/leads", { q: term, limit: 8, scope: "all" }).then((rows) => {
         if (mine !== seq.current) return;
         setHits(Array.isArray(rows) ? rows.slice(0, 8) : []);
+        setHitsFor(term);
         setState("done");
         setOpen(true);
       }).catch(() => {
@@ -279,7 +283,7 @@ function GlobalLeadSearch() {
         onFocus={() => q.trim().length >= 2 && setOpen(true)}
         onKeyDown={(e) => {
           if (e.key === "Escape") { setOpen(false); e.currentTarget.blur(); }
-          if (e.key === "Enter" && hits.length) { e.preventDefault(); pick(hits[0]); }
+          if (e.key === "Enter" && hits.length && hitsFor === q.trim()) { e.preventDefault(); pick(hits[0]); }
         }}
         type="search"
         enterKeyHint="search"

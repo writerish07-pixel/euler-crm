@@ -1272,7 +1272,10 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
     CHARGE_FIELDS.forEach(([k]) => (f[k] = next[k] || 0));
     setForm(f);
     setPriceDate(unitBilledDate(next, lead) || lead.createdDate || todayISO());
-  }, [lead.leadId, unitSno]); // form reset is keyed only to the selected pack unit
+    // Reset when the selected pack unit changes, or when the owner moves this
+    // file to another model / variant — otherwise the old vehicle's RTO and
+    // insurance stayed in the form and were saved back.
+  }, [lead.leadId, unitSno, src.interestedModel, src.variant]);
 
   // Ex-Showroom is locked to Price Master for this unit's model/variant.
   useEffect(() => {
@@ -1484,13 +1487,15 @@ export function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onS
       inferred[k] = Number(v) > 0;
     });
     setUsedMap(inferred);
-  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate, unitSoldDate]); // billed date drives scheme month per pack unit
+    // Billed date drives scheme month per pack unit; a model / variant change
+    // brings different scheme pools.
+  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate, unitSoldDate, src.interestedModel, src.variant]);
   useEffect(() => {
     if (!lead.leadId || !schemeDate) return;
     get(`/leads/${lead.leadId}/scheme-rules`, { on: schemeDate, ...(units ? { unit: unitSno } : {}) })
       .then(setRules)
       .catch(() => setRules({ rules: {} }));
-  }, [lead.leadId, schemeDate, unitSno, unitSoldDate]);
+  }, [lead.leadId, schemeDate, unitSno, unitSoldDate, src.interestedModel, src.variant]);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const r = rules?.rules || {};
