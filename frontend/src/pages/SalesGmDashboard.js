@@ -5,7 +5,7 @@ import {
   Ban, IndianRupee, Percent, ClipboardList, Warehouse, Trophy, CalendarDays,
 } from "lucide-react";
 import { loadBoard } from "../lib/loadBoard";
-import { compactInr, inr, num, ytdCount, fmtTime } from "../lib/format";
+import { compactInr, inr, num, ytdCount, fmtTime, fmtDate } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
@@ -98,7 +98,7 @@ export default function SalesGmDashboard() {
               { key: "executive", label: "Executive" },
               { key: "model", label: "Model" },
               { key: "status", label: "Status" },
-              { key: "date", label: "Date", mono: true },
+              { key: "date", label: "Date", render: (r) => fmtDate(r.date) },
             ]}
             rows={d.worklist || []}
           />

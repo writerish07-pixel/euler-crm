@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Trash2, Wallet, X } from "lucide-react";
 import { del, get, post, apiErrorMessage } from "../lib/api";
-import { inr, fmtDate, todayISO } from "../lib/format";
+import { inr, fmtDate, todayISO, amountLabel } from "../lib/format";
+import { useDebouncedValue } from "../lib/useDebounced";
 import { useAuth } from "../context/AuthContext";
 import { PageHeader, Table, Badge, Card, Field, Input, Select, Button } from "../components/ui";
 import PeriodBar from "../components/PeriodBar";
@@ -20,17 +21,20 @@ export default function Payments() {
   const [lead, setLead] = useState(null);
   const [masters, setMasters] = useState(null);
   const period = usePeriodState();
+  const needle = useDebouncedValue(String(q || "").trim(), 300);
+  const loadSeq = useRef(0);
   const load = useCallback(() => {
-    const needle = String(q || "").trim();
+    const seq = ++loadSeq.current;
     return get("/payments", {
       ...period.params,
       ...(leadId ? { lead_id: leadId } : {}),
       ...(needle ? { q: needle } : {}),
-    }).then(setRows).catch(() => {
+    }).then((data) => { if (seq === loadSeq.current) setRows(data); }).catch(() => {
+      if (seq !== loadSeq.current) return;
       setRows([]);
       toast.error("Could not load payments");
     });
-  }, [period.params, leadId, q]);
+  }, [period.params, leadId, needle]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters).catch(() => setMasters(null)); }, []);
   useEffect(() => {
@@ -112,11 +116,12 @@ export default function Payments() {
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
       <div className="mb-3 max-w-sm">
         <Field label="Search UTR / receipt / customer">
-          <Input data-testid="payments-utr-search" value={q} placeholder="UTR, receipt, name, lead"
+          <Input data-testid="payments-utr-search" type="search" enterKeyHint="search" value={q} placeholder="UTR, receipt, name, lead"
             onChange={(e) => setQ(e.target.value)} />
         </Field>
       </div>
-      <Table rowKey="receiptNumber" columns={columns} rows={rows} />
+      <Table rowKey="receiptNumber" columns={columns} rows={rows}
+        empty={q.trim() ? `No receipt matches “${q.trim()}” in this period` : "No receipts in this period"} />
     </div>
   );
 }
@@ -179,7 +184,7 @@ function AddReceiptForm({ leadId, masters, onSaved }) {
     <Card className="p-4 mb-4" data-testid="payments-add-receipt">
       <div className="text-sm font-semibold text-ink mb-3">Add receipt for this lead</div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 items-end">
-        <Field label="Amount (₹)"><Input data-testid="ledger-payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
+        <Field label={amountLabel("Amount (₹)", form.amount)}><Input data-testid="ledger-payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
         <Field label="Date"><Input type="date" value={form.date} onChange={set("date")} /></Field>
         <Field label="Mode">
           <Select data-testid="ledger-payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>

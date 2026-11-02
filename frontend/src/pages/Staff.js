@@ -186,7 +186,7 @@ function StaffDrawer({ row, people = [], onClose, onSaved }) {
             </Select>
           </Field>
         )}
-        <Field label="WhatsApp number"><Input data-testid="staff-mobile" value={form.mobile} onChange={set("mobile")} placeholder="10-digit mobile" /></Field>
+        <Field label="WhatsApp number"><Input data-testid="staff-mobile" value={form.mobile} onChange={set("mobile")} type="tel" inputMode="numeric" placeholder="10-digit mobile" /></Field>
         <Field label="Email"><Input value={form.email} onChange={set("email")} /></Field>
         {form.role === "executive" && (
           <Field label="Monthly target (units)">

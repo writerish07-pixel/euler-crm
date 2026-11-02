@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { get, post, put, del } from "../lib/api";
+import { get, post, put, del, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Drawer, Field, Input, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -51,7 +51,16 @@ export default function SchemeMaster() {
   useEffect(() => {
     get("/scheme-circulars", { on: asOf }).then((r) => setCircular(r && r.imageUrl ? r : null)).catch(() => setCircular(null));
   }, [asOf]);
-  const remove = async (r) => { if (!window.confirm("Delete scheme row?")) return; await del(`/scheme-master/${r.schemeId}`); toast.success("Deleted"); load(); };
+  const remove = async (r) => {
+    if (!window.confirm(`Delete the ${[r.model, r.variant].filter(Boolean).join(" ") || "selected"} scheme row?`)) return;
+    try {
+      await del(`/scheme-master/${r.schemeId}`);
+      toast.success("Deleted");
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not delete this scheme row"));
+    }
+  };
 
   const visible = useMemo(
     () => (showAll ? rows : rows.filter((r) => rowMatchesMonth(r, asOf))),

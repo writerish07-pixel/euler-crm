@@ -4608,6 +4608,31 @@ async def _team_visible_lead_ids(user, lead_ids):
     return allowed
 
 
+def _lead_search_or(q):
+    """Mongo `$or` for the lead search box, or None when the box is empty.
+
+    The text is matched literally. A `+`, `(` or `[` used to be read as a regex
+    operator and the register failed with HTTP 500 while staff typed a phone
+    number. A mobile typed as "+91 98765-43210" or "98765 43210" also matches
+    the stored 10 digits.
+    """
+    term = str(q or "").strip()
+    if not term:
+        return None
+    safe = re.escape(term)
+    ors = [
+        {"customerName": {"$regex": safe, "$options": "i"}},
+        {"mobile": {"$regex": safe, "$options": "i"}},
+        {"leadId": {"$regex": safe, "$options": "i"}},
+    ]
+    digits = re.sub(r"\D", "", term)
+    if len(digits) > 10 and digits.startswith("91"):
+        digits = digits[-10:]
+    if len(digits) >= 3 and digits != term:
+        ors.append({"mobile": {"$regex": re.escape(digits)}})
+    return ors
+
+
 @api.get("/leads")
 async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      month: Optional[str] = None, year: Optional[str] = None,
@@ -4623,12 +4648,9 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     query = {"dealApprovalPending": {"$ne": True}}
     if status and status != "all":
         query["currentStatus"] = status
-    if q:
-        query["$or"] = [
-            {"customerName": {"$regex": q, "$options": "i"}},
-            {"mobile": {"$regex": q, "$options": "i"}},
-            {"leadId": {"$regex": q, "$options": "i"}},
-        ]
+    search_or = _lead_search_or(q)
+    if search_or:
+        query["$or"] = search_or
     cap = 3000
     if limit is not None:
         try:

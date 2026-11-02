@@ -1,6 +1,7 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { X, Loader2 } from "lucide-react";
+import { reportActionError } from "../lib/actionErrors";
 
 export const cx = (...a) => a.filter(Boolean).join(" ");
 
@@ -37,6 +38,33 @@ export function useBodyScrollLock(active = true) {
   }, [active]);
 }
 
+// Open drawers / modals, oldest first. Escape closes only the top one, so a
+// confirm box inside a lead drawer does not close the drawer as well.
+const overlayStack = [];
+
+/** Close the top-most overlay with the Escape key, the same as tapping outside it. */
+export function useEscapeToClose(active, onClose) {
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  useEffect(() => {
+    if (!active || typeof document === "undefined") return undefined;
+    const token = {};
+    overlayStack.push(token);
+    const onKey = (e) => {
+      if (e.key !== "Escape" || overlayStack[overlayStack.length - 1] !== token) return;
+      if (typeof latest.current !== "function") return;
+      e.preventDefault();
+      latest.current();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      const i = overlayStack.indexOf(token);
+      if (i >= 0) overlayStack.splice(i, 1);
+    };
+  }, [active]);
+}
+
 export function Card({ className, children, ...rest }) {
   return (
     <div className={cx("bg-white rounded-xl border border-line shadow-card", className)} {...rest}>
@@ -57,13 +85,42 @@ export function PageHeader({ title, subtitle, actions }) {
   );
 }
 
-export function Button({ variant = "primary", className, children, ...rest }) {
+/**
+ * When `onClick` returns a promise (an async save), the button disables itself
+ * and shows a spinner until it settles. A second tap on a slow connection used
+ * to post the same receipt, activity or booking twice.
+ */
+export function Button({ variant = "primary", className, children, onClick, disabled, ...rest }) {
   const styles = {
     primary: "bg-cobalt text-white hover:bg-cobalt-hover shadow-sm",
     secondary: "bg-white text-ink ring-1 ring-inset ring-line hover:bg-zinc-50",
     ghost: "text-ink-soft hover:bg-zinc-100 hover:text-ink",
     danger: "bg-red-600 text-white hover:bg-red-700",
   };
+  const [busy, setBusy] = useState(false);
+  const running = useRef(false);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const handleClick = onClick ? (e) => {
+    if (running.current) {
+      if (e && typeof e.preventDefault === "function") e.preventDefault();
+      return undefined;
+    }
+    const out = onClick(e);
+    if (out && typeof out.then === "function") {
+      running.current = true;
+      setBusy(true);
+      const done = () => {
+        running.current = false;
+        if (alive.current) setBusy(false);
+      };
+      out.then(done, (err) => { done(); reportActionError(err); });
+    }
+    return out;
+  } : undefined;
   return (
     <button
       className={cx(
@@ -71,8 +128,12 @@ export function Button({ variant = "primary", className, children, ...rest }) {
         styles[variant],
         className
       )}
+      onClick={handleClick}
+      disabled={disabled || busy}
+      aria-busy={busy || undefined}
       {...rest}
     >
+      {busy && <Loader2 size={14} className="animate-spin shrink-0" aria-hidden="true" />}
       {children}
     </button>
   );
@@ -162,6 +223,7 @@ export function Table({ columns, rows, onRowClick, empty = "No records", rowKey,
 
 export function Drawer({ open, onClose, title, subtitle, children, width = "max-w-2xl", footer }) {
   useBodyScrollLock(!!open);
+  useEscapeToClose(!!open, onClose);
   if (!open) return null;
   return (
     <Portal>
@@ -175,7 +237,7 @@ export function Drawer({ open, onClose, title, subtitle, children, width = "max-
               <h2 className="font-heading text-base sm:text-lg font-bold text-ink break-words">{title}</h2>
               {subtitle && <div className="text-xs text-ink-soft mt-0.5 break-words">{subtitle}</div>}
             </div>
-            <button onClick={onClose} data-testid="drawer-close" className="rounded-lg p-1.5 text-ink-faint hover:bg-zinc-100 hover:text-ink transition-colors shrink-0">
+            <button type="button" onClick={onClose} data-testid="drawer-close" aria-label="Close" title="Close (Esc)" className="rounded-lg p-1.5 text-ink-faint hover:bg-zinc-100 hover:text-ink transition-colors shrink-0">
               <X size={18} />
             </button>
           </div>
@@ -194,12 +256,13 @@ export function Drawer({ open, onClose, title, subtitle, children, width = "max-
  */
 export function Modal({ open = true, onClose, children, width = "max-w-lg", testid }) {
   useBodyScrollLock(!!open);
+  useEscapeToClose(!!open, onClose);
   if (!open) return null;
   return (
     <Portal>
       <div className={cx("fixed inset-0 z-[60] h-[100dvh] flex items-center justify-center p-4")} data-testid={testid}>
         <div className="absolute inset-0 bg-ink/50 backdrop-blur-sm" onClick={onClose} />
-        <Card className={cx("relative w-full max-h-[calc(100dvh-2rem)] flex flex-col animate-fade-up min-w-0", width)}>
+        <Card role="dialog" aria-modal="true" className={cx("relative w-full max-h-[calc(100dvh-2rem)] flex flex-col animate-fade-up min-w-0", width)}>
           {children}
         </Card>
       </div>
@@ -293,8 +356,20 @@ export function Field({ label, children }) {
 
 const inputCls = "block w-full rounded-lg border-0 py-2 px-3 text-sm text-ink ring-1 ring-inset ring-line placeholder:text-ink-faint focus:ring-2 focus:ring-inset focus:ring-cobalt transition-shadow bg-white";
 
+/**
+ * Number fields: a desktop mouse wheel over a focused amount used to change it
+ * silently (₹50,000 became ₹49,999 while scrolling the form). Phones get the
+ * number pad.
+ */
+const stopWheelChange = (e) => {
+  if (typeof document !== "undefined" && document.activeElement === e.currentTarget) e.currentTarget.blur();
+};
+
 export function Input({ className, ...rest }) {
-  return <input className={cx(inputCls, className)} {...rest} />;
+  const numberProps = rest.type === "number"
+    ? { inputMode: "decimal", onWheel: stopWheelChange }
+    : null;
+  return <input className={cx(inputCls, className)} {...numberProps} {...rest} />;
 }
 
 export function Select({ className, children, ...rest }) {

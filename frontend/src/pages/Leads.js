@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Plus, ChevronRight, Upload } from "lucide-react";
 import ReportActions from "../components/ReportActions";
@@ -15,6 +15,7 @@ import PeriodBar from "../components/PeriodBar";
 import { usePeriodState } from "../lib/period";
 import CallLink from "../components/CallLink";
 import CompleteFormatDrawer from "../components/CompleteFormatDrawer";
+import { useDebouncedValue } from "../lib/useDebounced";
 
 const REGISTER_STATUS_FILTERS = ["all", "Booked", "Finance Process", "Delivered", "Close Won"];
 const FOLLOWUP_STATUS_FILTERS = ["all", "New", "Contacted", "Follow-up", "In Progress", "Lost"];
@@ -34,16 +35,22 @@ export default function Leads({ followup = false }) {
   const [masters, setMasters] = useState(null);
   const period = usePeriodState();
   const statusFilters = followup ? FOLLOWUP_STATUS_FILTERS : REGISTER_STATUS_FILTERS;
+  // Search after typing stops, and keep only the newest answer — an older,
+  // slower reply must not replace the list for what is in the box now.
+  const searchQ = useDebouncedValue(q.trim(), 300);
+  const loadSeq = useRef(0);
 
   const load = useCallback(() => {
-    return loadList("/leads", setLeads, {
-      status, q: q || undefined, ...period.params,
+    const seq = ++loadSeq.current;
+    const setIfLatest = (rows) => { if (seq === loadSeq.current) setLeads(rows); };
+    return loadList("/leads", setIfLatest, {
+      status, q: searchQ || undefined, ...period.params,
       ...(followup ? { followup: 1 } : {}),
     }, followup ? "Could not load follow-up leads" : "Could not load leads");
-  }, [status, q, period.params, followup]);
+  }, [status, searchQ, period.params, followup]);
 
   useEffect(() => { load(); }, [load]);
-  useEffect(() => { get("/masters").then(setMasters); }, []);
+  useEffect(() => { get("/masters").then(setMasters).catch(() => {}); }, []);
   useEffect(() => {
     const open = searchParams.get("open");
     if (!open) return undefined;
@@ -205,7 +212,7 @@ export default function Leads({ followup = false }) {
           ))}
         </div>
         <div className="w-full sm:flex-1 sm:min-w-[200px]">
-          <Input data-testid="lead-search" placeholder="Search name / mobile / ID…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Input data-testid="lead-search" type="search" enterKeyHint="search" placeholder="Search name / mobile / ID…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
       </div>
 
@@ -214,7 +221,9 @@ export default function Leads({ followup = false }) {
         onRowClick={(r) => openLead(r)}
         columns={columns}
         rows={shown}
-        empty={followup ? "No follow-up enquiries match this filter" : "No booked files match this filter"}
+        empty={q.trim()
+          ? `Nothing matches “${q.trim()}”. Check the spelling or the last digits of the mobile, or pick another month.`
+          : (followup ? "No follow-up enquiries match this filter" : "No booked files match this filter")}
       />
 
       {active && (

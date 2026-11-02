@@ -211,6 +211,10 @@ function GlobalLeadSearch() {
   const [q, setQ] = useState("");
   const [hits, setHits] = useState([]);
   const [open, setOpen] = useState(false);
+  // "" = idle, "searching", or "done" — so an empty result says so instead of
+  // looking like the search did nothing.
+  const [state, setState] = useState("");
+  const seq = useRef(0);
   const [drawerLead, setDrawerLead] = useState(null);
   const [masters, setMasters] = useState(null);
   const box = useRef(null);
@@ -223,14 +227,23 @@ function GlobalLeadSearch() {
 
   useEffect(() => {
     if (isOemFinance) return undefined;
+    const term = q.trim();
+    const mine = ++seq.current;
+    if (term.length < 2) { setHits([]); setState(""); return undefined; }
+    setState("searching");
     const t = setTimeout(() => {
-      const term = q.trim();
-      if (term.length < 2) { setHits([]); return; }
       get("/leads", { q: term, limit: 8, scope: "all" }).then((rows) => {
+        if (mine !== seq.current) return;
         setHits(Array.isArray(rows) ? rows.slice(0, 8) : []);
+        setState("done");
         setOpen(true);
-      }).catch(() => setHits([]));
-    }, 220);
+      }).catch(() => {
+        if (mine !== seq.current) return;
+        setHits([]);
+        setState("done");
+        setOpen(true);
+      });
+    }, 250);
     return () => clearTimeout(t);
   }, [q, isOemFinance]);
 
@@ -247,6 +260,7 @@ function GlobalLeadSearch() {
     setOpen(false);
     setQ("");
     setHits([]);
+    setState("");
     if (isSalesStaff || isField) {
       navigate(openLeadPath(id, row));
       return;
@@ -262,11 +276,23 @@ function GlobalLeadSearch() {
       <input
         value={q}
         onChange={(e) => setQ(e.target.value)}
-        onFocus={() => hits.length && setOpen(true)}
+        onFocus={() => q.trim().length >= 2 && setOpen(true)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") { setOpen(false); e.currentTarget.blur(); }
+          if (e.key === "Enter" && hits.length) { e.preventDefault(); pick(hits[0]); }
+        }}
+        type="search"
+        enterKeyHint="search"
+        aria-label="Search leads"
         placeholder="Search name / mobile / lead ID…"
         data-testid="header-search"
         className="w-full rounded-lg bg-zinc-100 border-0 py-2 pl-9 pr-3 text-sm text-ink placeholder:text-ink-faint focus:ring-2 focus:ring-cobalt focus:bg-white transition-all"
       />
+      {open && q.trim().length >= 2 && hits.length === 0 && (
+        <div className="absolute left-0 right-0 mt-1 bg-white rounded-xl border border-line shadow-drawer px-3 py-3 z-50 text-sm text-ink-soft" data-testid="search-empty">
+          {state === "searching" ? "Searching…" : `No lead found for “${q.trim()}”. Try the last 4–5 digits of the mobile or the lead ID.`}
+        </div>
+      )}
       {open && hits.length > 0 && (
         <div className="absolute left-0 right-0 mt-1 bg-white rounded-xl border border-line shadow-drawer py-1 z-50 max-h-80 overflow-y-auto">
           {hits.map((r) => (
@@ -307,6 +333,22 @@ function Topbar({ onMenuOpen }) {
   const location = useLocation();
   const [menu, setMenu] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const menuBox = useRef(null);
+  // Tapping anywhere else, or Escape, closes the account menu.
+  useEffect(() => {
+    if (!menu) return undefined;
+    const onDoc = (e) => { if (menuBox.current && !menuBox.current.contains(e.target)) setMenu(false); };
+    const onKey = (e) => { if (e.key === "Escape") setMenu(false); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("touchstart", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("touchstart", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+  useEffect(() => { setMenu(false); }, [location.pathname]);
   const initials = (user?.name || user?.email || "U").slice(0, 2).toUpperCase();
   return (
     <>
@@ -334,8 +376,8 @@ function Topbar({ onMenuOpen }) {
           </Button>
         )}
         <SyncBadge />
-        <div className="relative">
-          <button data-testid="user-menu" onClick={() => setMenu((m) => !m)} className="h-9 w-9 rounded-full bg-ink flex items-center justify-center text-white text-sm font-bold font-heading">{initials}</button>
+        <div className="relative" ref={menuBox}>
+          <button data-testid="user-menu" type="button" aria-label="Account menu" aria-expanded={menu} onClick={() => setMenu((m) => !m)} className="h-9 w-9 rounded-full bg-ink flex items-center justify-center text-white text-sm font-bold font-heading">{initials}</button>
           {menu && (
             <div className="absolute right-0 mt-2 w-52 bg-white rounded-xl border border-line shadow-drawer py-1.5 z-50">
               <div className="px-3 py-2 border-b border-line">

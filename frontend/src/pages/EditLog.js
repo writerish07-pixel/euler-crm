@@ -7,6 +7,7 @@ import { PageHeader, Table, Badge, Field, Select, Input } from "../components/ui
 import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
+import { useDebouncedValue } from "../lib/useDebounced";
 
 const ROLES = [
   ["", "All roles"],
@@ -38,15 +39,16 @@ export default function EditLog() {
   const [module, setModule] = useState("");
   const [q, setQ] = useState("");
   const period = usePeriodState();
+  const searchQ = useDebouncedValue(q.trim(), 300);
 
   const load = useCallback(() => {
     return get("/edit-log", {
       ...(role ? { role } : {}),
       ...(module ? { module } : {}),
-      ...(q.trim() ? { q: q.trim() } : {}),
+      ...(searchQ ? { q: searchQ } : {}),
       ...period.params,
     }).then(setRows).catch(() => setRows([]));
-  }, [role, module, q, period.params]);
+  }, [role, module, searchQ, period.params]);
 
   useEffect(() => { load(); }, [load]);
 

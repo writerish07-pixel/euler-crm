@@ -137,7 +137,7 @@ function AgentDrawer({ row, onClose, onSaved }) {
         <Field label="Agent Name *"><Input data-testid="agent-name" value={form.agentName} onChange={set("agentName")} /></Field>
         <Field label="Agent Code"><Input value={form.agentCode} onChange={set("agentCode")} /></Field>
         <Field label="Contact Person"><Input value={form.contactPerson} onChange={set("contactPerson")} /></Field>
-        <Field label="Mobile"><Input value={form.mobile} onChange={set("mobile")} /></Field>
+        <Field label="Mobile"><Input value={form.mobile} onChange={set("mobile")} type="tel" inputMode="numeric" placeholder="10-digit mobile" /></Field>
         <Field label="Email"><Input value={form.email} onChange={set("email")} /></Field>
         <Field label="Status">
           <Select value={form.status} onChange={set("status")}>
