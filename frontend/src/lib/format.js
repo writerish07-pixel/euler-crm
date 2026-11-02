@@ -79,6 +79,14 @@ export function formatInr(n, opts = {}, locale = numberLocale()) {
 
 export const inr = (n, opts = {}) => formatInr(n, opts);
 
+/** "Amount (₹) · ₹1,50,000" — read the typed figure back in lakh format so an
+ *  extra or missing zero is caught before the receipt is saved. */
+export function amountLabel(base, value) {
+  const n = Number(value);
+  if (!String(value ?? "").trim() || !Number.isFinite(n) || n <= 0) return base;
+  return `${base} · ${formatInr(n, { decimals: Number.isInteger(n) ? 0 : 2 })}`;
+}
+
 export const num = (n) => {
   const v = Number(n || 0);
   const loc = numberLocale();

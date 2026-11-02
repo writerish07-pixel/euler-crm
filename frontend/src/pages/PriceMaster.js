@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from "react";
 import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { get, del } from "../lib/api";
+import { get, del, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, Select, Button } from "../components/ui";
 import { PriceRowDrawer } from "../components/PriceRowDrawer";
@@ -20,7 +20,16 @@ export default function PriceMaster() {
   useEffect(() => { get("/masters").then((m) => setModels(m.models)); }, []);
   useEffect(() => { load(); }, [load]);
 
-  const remove = async (r) => { if (!window.confirm(`Delete ${r.model} ${r.variant}?`)) return; await del(`/price-master/${r.priceId}`); toast.success("Deleted"); load(); };
+  const remove = async (r) => {
+    if (!window.confirm(`Delete ${r.model} ${r.variant}?`)) return;
+    try {
+      await del(`/price-master/${r.priceId}`);
+      toast.success("Deleted");
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not delete this price row"));
+    }
+  };
 
   return (
     <div>

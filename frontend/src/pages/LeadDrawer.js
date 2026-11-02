@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { ArrowRightLeft, Wallet, XCircle, Pencil, Trash2, Printer, FileText, Ban, RotateCcw, AlertTriangle, ExternalLink, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
 import { get, post, put, patch, del, apiErrorMessage, apiErrorDetail, downloadFile } from "../lib/api";
-import { inr, fmtDate, todayISO } from "../lib/format";
+import { inr, fmtDate, todayISO, amountLabel } from "../lib/format";
 import { oemMatchOf, oemClaimsHref, claimsHref } from "../lib/claimMatch";
 import { Drawer, Modal, Tabs, Badge, Button, Field, Input, Select, Card, MobileClashDialog } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
@@ -2032,7 +2032,7 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
           </div>
         )}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3 items-end">
-          <Field label="Amount (₹)"><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
+          <Field label={amountLabel("Amount (₹)", form.amount)}><Input data-testid="payment-amount" type="number" value={form.amount} onChange={set("amount")} /></Field>
           <Field label="Date"><Input data-testid="payment-date" type="date" value={form.date} onChange={set("date")} /></Field>
           <Field label="Mode"><Select data-testid="payment-mode" value={form.paymentMode} onChange={set("paymentMode")}>{paymentModes.map((m) => <option key={m}>{m}</option>)}</Select></Field>
           <Field label={paymentRefLabel(form.paymentMode)}>
@@ -2120,7 +2120,7 @@ function RefundForm({ lead, excess, dealCancelled = false, onSaved }) {
   return (
     <div className="mt-4 pt-4 border-t border-amber-200">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
-        <Field label="Refund (₹)">
+        <Field label={amountLabel("Refund (₹)", form.amount)}>
           <Input data-testid="refund-amount" type="number" value={form.amount} onChange={set("amount")} placeholder={String(excess)} />
         </Field>
         <Field label="Date"><Input data-testid="refund-date" type="date" value={form.date} onChange={set("date")} /></Field>
@@ -2956,7 +2956,7 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="edit-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
           <Field label="Status"><Select data-testid="edit-status" value={form.currentStatus} onChange={set("currentStatus")}>{(m.statuses || ["New","Contacted","Follow-up","In Progress","Booked","Finance Process","Delivered","Close Won","Lost"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Mobile"><Input data-testid="edit-mobile" value={form.mobile} onChange={set("mobile")} /></Field>
-          <Field label="Alt Mobile"><Input value={form.altMobile} onChange={set("altMobile")} /></Field>
+          <Field label="Alt Mobile"><Input value={form.altMobile} onChange={set("altMobile")} type="tel" inputMode="numeric" placeholder="10-digit mobile" /></Field>
           <Field label="City"><Input value={form.city} onChange={set("city")} /></Field>
           <Field label="Village"><Input value={form.village} onChange={set("village")} /></Field>
           <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{(m.leadSources || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
@@ -3024,17 +3024,22 @@ function InsuranceTab({ lead, masters }) {
 
   const save = async () => {
     if (!form.policyDate) return toast.error("Policy date is required");
-    await post("/insurance", {
-      leadId: lead.leadId, customerName: lead.customerName, mobile: lead.mobile,
-      model: lead.interestedModel, variant: lead.variant,
-      insuranceCompany: form.insuranceCompany, policyNumber: form.policyNumber,
-      insuranceAmount: +form.insuranceAmount, payoutRate: +form.payoutRate,
-      receivedPayout: +form.receivedPayout, insuranceExecutive: form.insuranceExecutive,
-      policyDate: form.policyDate,
-    });
-    toast.success("Insurance entry added");
-    setForm((f) => ({ ...f, policyNumber: "", policyDate: todayISO() }));
-    load();
+    try {
+      await post("/insurance", {
+        leadId: lead.leadId, customerName: lead.customerName, mobile: lead.mobile,
+        model: lead.interestedModel, variant: lead.variant,
+        insuranceCompany: form.insuranceCompany, policyNumber: form.policyNumber,
+        insuranceAmount: +form.insuranceAmount, payoutRate: +form.payoutRate,
+        receivedPayout: +form.receivedPayout, insuranceExecutive: form.insuranceExecutive,
+        policyDate: form.policyDate,
+      });
+      toast.success("Insurance entry added");
+      setForm((f) => ({ ...f, policyNumber: "", policyDate: todayISO() }));
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not add the insurance entry"));
+    }
+    return undefined;
   };
 
   return (
@@ -3084,10 +3089,15 @@ function ActivityTab({ lead, activities, masters, onSaved, readOnly = false }) {
   const add = async () => {
     if (!form.discussion) return toast.error("Add a discussion note");
     if (!form.date) return toast.error("Activity date is required");
-    await post(`/leads/${lead.leadId}/activities`, { ...form, executive: lead.executive });
-    toast.success("Activity logged");
-    setForm({ activityType: "Call", discussion: "", nextFollowup: "", date: todayISO() });
-    onSaved();
+    try {
+      await post(`/leads/${lead.leadId}/activities`, { ...form, executive: lead.executive });
+      toast.success("Activity logged");
+      setForm({ activityType: "Call", discussion: "", nextFollowup: "", date: todayISO() });
+      onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not log the activity"));
+    }
+    return undefined;
   };
   return (
     <div>

@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { get } from "../lib/api";
-import { inr, compactInr, num, ytdCount, fmtTime } from "../lib/format";
+import { inr, compactInr, num, ytdCount, fmtTime, fmtDate } from "../lib/format";
 import { Card, PageHeader, StatCard, Table, Badge, Button } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import YardStockCard from "../components/YardStockCard";
@@ -132,7 +132,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
               { key: "executive", label: "Executive" },
               { key: "model", label: "Model" },
               { key: "status", label: "Status", render: (r) => <Badge>{r.status || "New"}</Badge> },
-              { key: "createdDate", label: "Date", mono: true },
+              { key: "createdDate", label: "Date", render: (r) => fmtDate(r.createdDate) },
             ]}
             rows={d.recentLeads || []}
           />
@@ -158,7 +158,7 @@ export default function ExecutiveDashboard({ teamView = false }) {
               ) },
               { key: "model", label: "Model" },
               { key: "status", label: "Status" },
-              { key: "date", label: "Date", mono: true },
+              { key: "date", label: "Date", render: (r) => fmtDate(r.date) },
             ]}
             rows={d.worklist || []}
           />

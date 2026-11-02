@@ -89,7 +89,7 @@ function QuoteDrawer({ masters, onClose, onSaved }) {
       footer={<div className="flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button data-testid="save-quote-btn" onClick={save}>Save Quotation</Button></div>}>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
         <Field label="Customer Name *"><Input data-testid="quote-name" value={form.customerName} onChange={set("customerName")} /></Field>
-        <Field label="Mobile"><Input value={form.mobile} onChange={set("mobile")} /></Field>
+        <Field label="Mobile"><Input value={form.mobile} onChange={set("mobile")} type="tel" inputMode="numeric" placeholder="10-digit mobile" /></Field>
         <div />
         <Field label="Model"><Select value={form.model} onChange={set("model")}><option value="">—</option>{masters.models.map((m) => <option key={m}>{m}</option>)}</Select></Field>
         <div className="sm:col-span-2"><Field label="Variant (auto-fills price)"><Select value={form.variant} onChange={(e) => applyVariant(e.target.value)}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field></div>

@@ -342,7 +342,7 @@ export default function NewLeadDrawer({ masters, onClose, onCreated, initial = {
             <Field label="Next Follow-up"><Input data-testid="lead-followup" type="date" value={form.nextFollowupDate} onChange={set("nextFollowupDate")} /></Field>
           </>
         )}
-        <Field label="Mobile *"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} inputMode="numeric" placeholder="10-digit mobile" /></Field>
+        <Field label="Mobile *"><Input data-testid="lead-mobile" value={form.mobile} onChange={set("mobile")} type="tel" inputMode="numeric" autoComplete="off" placeholder="10-digit mobile" /></Field>
         {!enquiryOnly && <Field label="City / Village"><Input value={form.city} onChange={set("city")} /></Field>}
         <Field label="Customer type">
           <Select data-testid="lead-customer-type" value={form.customerType} onChange={set("customerType")}>

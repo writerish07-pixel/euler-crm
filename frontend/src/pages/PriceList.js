@@ -6,6 +6,7 @@ import { inr, fmtDate } from "../lib/format";
 import { PageHeader, Card, Badge, Button, Input, Select } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 import OemPriceSyncButton from "../components/OemPriceSyncButton";
+import { useDebouncedValue } from "../lib/useDebounced";
 
 // A price a salesperson can paste into WhatsApp without reformatting.
 function quoteText(r) {
@@ -30,11 +31,13 @@ export default function PriceList() {
   const [open, setOpen] = useState({});
   const [models, setModels] = useState([]);
 
+  const searchQ = useDebouncedValue(q.trim(), 250);
+
   const load = useCallback(() => {
-    return get("/price-list", { ...(model ? { model } : {}), q })
+    return get("/price-list", { ...(model ? { model } : {}), q: searchQ })
       .then(setData)
       .catch(() => toast.error("Could not load the price list"));
-  }, [model, q]);
+  }, [model, searchQ]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then((m) => setModels(m.models || [])).catch(() => {}); }, []);

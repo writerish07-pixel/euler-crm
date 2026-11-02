@@ -5,6 +5,7 @@ import { get, post } from "../lib/api";
 import { fmtDate } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Card, Input, Select } from "../components/ui";
 import LeadWhatsApp from "./LeadWhatsApp";
+import { useDebouncedValue } from "../lib/useDebounced";
 
 const FILTERS = [
   ["all", "All"],
@@ -45,16 +46,18 @@ export default function WhatsAppInbox() {
   const [loading, setLoading] = useState(true);
   const [refreshTick, setRefreshTick] = useState(0);
 
+  const searchQ = useDebouncedValue(q.trim(), 300);
+
   const load = useCallback(() => {
     setRefreshTick((n) => n + 1);
     return Promise.all([
-      get("/whatsapp/threads", { filter, q })
+      get("/whatsapp/threads", { filter, q: searchQ })
         .then((d) => setData(d))
         .catch(() => toast.error("Could not load conversations"))
         .finally(() => setLoading(false)),
       get("/whatsapp/summary").then(setSummary).catch(() => {}),
     ]);
-  }, [filter, q]);
+  }, [filter, searchQ]);
 
   useEffect(() => { load(); }, [load]);
   // Nothing pushes to the browser, so poll while the page is open.
@@ -198,11 +201,12 @@ function SentBox({ refreshTick = 0 }) {
   const [kind, setKind] = useState("");
   const [status, setStatus] = useState("");
   const [q, setQ] = useState("");
+  const searchQ = useDebouncedValue(q.trim(), 300);
 
   useEffect(() => {
-    get("/whatsapp/messages", { direction: "outbound", kind, status, q })
+    get("/whatsapp/messages", { direction: "outbound", kind, status, q: searchQ })
       .then(setRows).catch(() => setRows([]));
-  }, [kind, status, q, refreshTick]);
+  }, [kind, status, searchQ, refreshTick]);
 
   const failed = useMemo(() => rows.filter((r) => r.status === "failed").length, [rows]);
 
