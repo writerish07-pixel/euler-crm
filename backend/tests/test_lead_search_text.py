@@ -68,3 +68,10 @@ async def test_regex_symbols_do_not_match_everything(client):
     r = await client.get("/api/leads", params={"q": ".*", "scope": "all"})
     assert r.status_code == 200, r.text
     assert LEAD["leadId"] not in [row["leadId"] for row in r.json()]
+
+
+def test_lead_id_digits_do_not_search_mobiles():
+    ors = server._lead_search_or("LD26SRCH01")
+    assert all("2601" not in str(clause) for clause in ors)
+    phone = server._lead_search_or("+91 98765-43210")
+    assert {"mobile": {"$regex": "9876543210"}} in phone

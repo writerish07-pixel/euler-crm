@@ -4616,6 +4616,9 @@ async def _team_visible_lead_ids(user, lead_ids):
     return allowed
 
 
+_PHONE_LIKE = re.compile(r"^[\d\s+()\[\].-]+$")
+
+
 def _lead_search_or(q):
     """Mongo `$or` for the lead search box, or None when the box is empty.
 
@@ -4633,11 +4636,15 @@ def _lead_search_or(q):
         {"mobile": {"$regex": safe, "$options": "i"}},
         {"leadId": {"$regex": safe, "$options": "i"}},
     ]
-    digits = re.sub(r"\D", "", term)
-    if len(digits) > 10 and digits.startswith("91"):
-        digits = digits[-10:]
-    if len(digits) >= 3 and digits != term:
-        ors.append({"mobile": {"$regex": re.escape(digits)}})
+    # Only text that looks like a phone number (digits with + - ( ) . or
+    # spaces) also searches the mobile by its digits. A lead ID or name with
+    # digits in it ("LD26SRCH01") must not match unrelated mobiles on "2601".
+    if _PHONE_LIKE.match(term):
+        digits = re.sub(r"\D", "", term)
+        if len(digits) > 10 and digits.startswith("91"):
+            digits = digits[-10:]
+        if len(digits) >= 3 and digits != term:
+            ors.append({"mobile": {"$regex": re.escape(digits)}})
     return ors
 
 
