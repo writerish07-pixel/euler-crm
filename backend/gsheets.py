@@ -446,7 +446,28 @@ def _sheet_value(v):
         return ""
     if isinstance(v, bool):
         return "Yes" if v else "No"
+    if isinstance(v, str):
+        return _plain_text(v)
     return v
+
+
+def _plain_text(text):
+    """Keep typed text as text in the Sheet.
+
+    Writes use USER_ENTERED, so a customer name or narration starting with "="
+    ran as a formula in the owner's workbook, and "+91 98…" was turned into a
+    number. A leading apostrophe makes Sheets store it as typed (it is not
+    shown in the cell). A plain negative amount such as "-5000" stays a number.
+    """
+    if not text or text[0] not in "=+-@":
+        return text
+    if text[0] == "-":
+        try:
+            float(text)
+            return text
+        except ValueError:
+            pass
+    return "'" + text
 
 
 def _col_letter(idx0):

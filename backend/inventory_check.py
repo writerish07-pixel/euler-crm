@@ -1,14 +1,15 @@
 """Daily physical yard confirmation — overlay on OEM/Coulson stock."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 STATUSES = ("present", "missing", "damaged")
 COLLECTION = "inventory_checks"
 
 
 def today_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # India calendar day, like the rest of the dealership dates.
+    return (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
 
 
 def now_iso():

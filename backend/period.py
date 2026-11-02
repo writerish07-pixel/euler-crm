@@ -154,9 +154,9 @@ def as_dict(period: Period) -> dict:
 
 
 def year_months(year: str) -> list:
-    y = str(year or "").strip() or utc_year()
+    y = str(year or "").strip() or ist_year()
     return [f"{y}-{m:02d}" for m in range(1, 13)]
 
 
 def focus_year(period: Period) -> str:
-    return period.year or utc_year()
+    return period.year or ist_year()

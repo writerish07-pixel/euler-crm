@@ -62,9 +62,14 @@ def num(v):
     try:
         if v is None or v == "":
             return 0.0
-        return float(v)
+        out = float(v)
     except (ValueError, TypeError):
         return 0.0
+    # JSON from a client can carry NaN / Infinity. Rounding those raised and
+    # returned HTTP 500; treat them as "no amount" so the normal 422 applies.
+    if out != out or out in (float("inf"), float("-inf")):
+        return 0.0
+    return out
 
 
 def round2(n):
@@ -568,7 +573,7 @@ def derive_claim(s, approvals=None):
 # ===========================================================================
 import re
 import os
-from datetime import datetime, timezone, date
+from datetime import datetime, timedelta, timezone, date
 
 # component key -> master label used for byComponent output
 SCHEME_COMPONENT_LABELS = {
@@ -747,7 +752,8 @@ def get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows):
     """
     effective_date = str(booking_date or "")[:10]
     if not effective_date:
-        effective_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # India calendar day: the scheme month flips at midnight IST, not 05:30.
+        effective_date = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
     month = scheme_month_from_date(effective_date)
     iso = effective_date
     exact = {}
