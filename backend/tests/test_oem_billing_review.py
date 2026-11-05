@@ -8,6 +8,7 @@ import os
 import sys
 
 import pytest
+import pytest_asyncio
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,6 +25,22 @@ TURBO_ROW = {
     "customerName": "Repeat Buyer", "model": "Turbo Max", "variant": "Maxx (PV)",
     "soldDate": "2026-11-03", "coulsonStatus": "SOLD",
 }
+
+
+TEST_MOBILE_PREFIXES = ("9024000", "9000000")
+TEST_CHASSIS_PREFIXES = ("MD9EVDAD26K0", "MD9EMSDL26E0")
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _clean_review_data():
+    """Leave the shared test database as we found it — other modules scan every
+    lead / Sold row (apply_sold_vehicle_ids_to_leads) and trip on our fixtures."""
+    yield
+    mob = {"$regex": "^(" + "|".join(TEST_MOBILE_PREFIXES) + ")"}
+    ch = {"$regex": "^(" + "|".join(TEST_CHASSIS_PREFIXES) + ")"}
+    await server.db.leads.delete_many({"$or": [
+        {"mobile": mob}, {"chassisNumber": ch}, {"units.chassisNumber": ch}]})
+    await server.db.oem_sold.delete_many({"$or": [{"mobile": mob}, {"chassis": ch}]})
 
 
 def _storm_lead(**kw):
