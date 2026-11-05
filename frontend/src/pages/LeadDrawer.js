@@ -770,6 +770,106 @@ function OwnerKV({ label, field, value, display, type = "text", options, leadId,
   );
 }
 
+/** Model + Variant edited together. Variant comes from Price Master for the
+ *  chosen model, so a file can never be "Storm + Maxx (FB)". Owner / Showroom
+ *  Admin only; saving reprices from Price Master. */
+export function VehicleKV({ lead, models, leadId, onSaved }) {
+  const { isOwner, isShowroomAdmin } = useAuth();
+  const [editing, setEditing] = useState(false);
+  const [model, setModel] = useState(lead.interestedModel || "");
+  const [variant, setVariant] = useState(lead.variant || "");
+  const [variants, setVariants] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const canEdit = (isOwner || isShowroomAdmin) && !(lead.units || []).some((u, i) => i > 0);
+
+  useEffect(() => {
+    if (!editing) return;
+    setModel(lead.interestedModel || "");
+    setVariant(lead.variant || "");
+  }, [editing, lead.interestedModel, lead.variant]);
+
+  useEffect(() => {
+    if (!editing || !model) { setVariants([]); return undefined; }
+    let live = true;
+    setLoading(true);
+    get("/price-master/variants", { model })
+      .then((rows) => {
+        if (!live) return;
+        const list = rows || [];
+        setVariants(list);
+        if (!list.some((v) => v.variant === variant)) setVariant("");
+      })
+      .catch(() => { if (live) setVariants([]); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [editing, model]);
+
+  if (!canEdit || !editing) {
+    const row = (label, value, testid) => (
+      <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 min-w-0" data-testid={testid}>
+        <span className="text-sm text-ink-soft shrink-0 pr-3">{label}</span>
+        {canEdit ? (
+          <button type="button" className="inline-flex items-center gap-1 font-mono tabular text-sm font-medium text-right shrink-0"
+            data-testid={`${testid}-edit`} onClick={() => setEditing(true)}>
+            <span className="text-ink">{value || "—"}</span>
+            <Pencil size={11} className="text-ink-faint" />
+          </button>
+        ) : <span className="font-mono text-sm font-medium text-ink">{value || "—"}</span>}
+      </div>
+    );
+    return (
+      <>
+        {row("Model", lead.interestedModel, "owner-field-interestedModel")}
+        {row("Variant", lead.variant, "owner-field-variant")}
+      </>
+    );
+  }
+
+  const save = async () => {
+    if (!model || !variant) return toast.error("Pick both a model and a variant");
+    setBusy(true);
+    try {
+      await put(`/leads/${leadId}/vehicle`, { model, variant });
+      toast.success(`Vehicle set to ${model} · ${variant} — price refreshed from Price Master`);
+      setEditing(false);
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not change the vehicle"));
+    } finally { setBusy(false); }
+  };
+  const sel = "rounded-md ring-1 ring-inset ring-line text-sm py-1 px-1.5 max-w-[14rem]";
+  return (
+    <div className="py-1.5 border-b border-zinc-100 space-y-1.5" data-testid="vehicle-edit">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm text-ink-soft">Model</span>
+        <select className={sel} value={model} onChange={(e) => setModel(e.target.value)} data-testid="vehicle-edit-model">
+          <option value="">—</option>
+          {models.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm text-ink-soft">Variant</span>
+        <select className={sel} value={variant} onChange={(e) => setVariant(e.target.value)}
+          disabled={!model || loading} data-testid="vehicle-edit-variant">
+          <option value="">{loading ? "Loading…" : "—"}</option>
+          {variants.map((v) => (
+            <option key={v.priceId || v.variant} value={v.variant}>
+              {v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="flex items-center justify-end gap-1">
+        <span className="text-[11px] text-ink-faint mr-auto">Saving reprices from Price Master</span>
+        <Button className="!py-0.5 !px-1.5 text-[11px]" onClick={save} disabled={busy || !model || !variant}
+          data-testid="vehicle-edit-save">Save</Button>
+        <Button variant="ghost" className="!py-0.5 !px-1.5 text-[11px]" onClick={() => setEditing(false)}>Cancel</Button>
+      </div>
+    </div>
+  );
+}
+
 function unitBodyNote(u) {
   const billed = String(u?.oemBilledBodyType || u?.bodyType || "").trim();
   const avail = String(u?.availableBodyType || "").trim();
@@ -1082,7 +1182,7 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
           </p>
         </Card>
       )}
-      {(lead.oemBodyMismatch || (lead.originalVariant && lead.originalVariant !== lead.variant)) && (
+      {(lead.oemBodyMismatch || (lead.oemBodyChanges || []).length > 0) && (
         <Card className="p-3 sm:col-span-2 border-amber-200 bg-amber-50/70" data-testid="oem-body-banner">
           {lead.oemBodyMismatch
             ? (
@@ -1108,10 +1208,14 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
               </div>
             )
             : (
-              <p className="text-sm text-amber-900">
-                Coulson billed this chassis as {lead.interestedModel} {lead.variant}
-                {lead.originalVariant ? ` (was ${lead.originalModel || ""} ${lead.originalVariant})` : ""}. Price follows the billed body.
-              </p>
+              <div className="space-y-0.5">
+                {(lead.oemBodyChanges || []).map((n) => (
+                  <p key={n.chassis} className="text-sm text-amber-900" data-testid={`oem-body-change-${n.chassis}`}>
+                    {(lead.oemBodyChanges || []).length > 1 ? `Unit ${n.unitSno}: ` : ""}
+                    Built {n.builtBody} → billed {n.billedBody} (body changed on Coulson)
+                  </p>
+                ))}
+              </div>
             )}
         </Card>
       )}
@@ -1140,9 +1244,7 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
             options={["Individual", "B2B"]} leadId={lid} onSaved={onSaved} />
           <OwnerKV label="GSTIN" field="gstin" value={lead.gstin || ""} leadId={lid} onSaved={onSaved} />
           <OwnerKV label="City" field="city" value={lead.city || ""} leadId={lid} onSaved={onSaved} />
-          <OwnerKV label="Model" field="interestedModel" value={lead.interestedModel || ""}
-            options={["", ...(masters.models || [])]} leadId={lid} onSaved={onSaved} />
-          <OwnerKV label="Variant" field="variant" value={lead.variant || ""} leadId={lid} onSaved={onSaved} />
+          <VehicleKV lead={lead} models={masters.models || []} leadId={lid} onSaved={onSaved} />
           <OverviewUnits
             lead={lead}
             onOpenUnit={onOpenUnit}

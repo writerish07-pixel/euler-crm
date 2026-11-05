@@ -6555,6 +6555,15 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
         whatsapp = await wa.summary_for_lead(lead_id)
     except Exception as exc:
         logger.exception("whatsapp summary failed for %s: %s", lead_id, exc)
+    # Built → billed body per chassis, read live from Coulson Sold (never stale).
+    try:
+        held = oem_sync.lead_chassis_list(lead)
+        sold_rows = ([r async for r in db.oem_sold.find({"chassis": {"$in": held}})]
+                     if held else [])
+        lead["oemBodyChanges"] = oem_sync.body_change_notes(lead, sold_rows)
+    except Exception as exc:
+        logger.exception("body change notes failed for %s: %s", lead_id, exc)
+        lead["oemBodyChanges"] = []
     return {
         "lead": lead, "commercials": commercials, "payments": payments,
         "activities": activities, "delivery": delivery, "booking": booking,
@@ -6941,9 +6950,11 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
         or ("variant" in payload and str(payload["variant"] or "").strip()
             != str(lead.get("variant") or "").strip())
     )
-    # Once priced/schemed, only the owner may change model/variant (cascades commercials).
+    # Once priced/schemed, only the owner or Showroom Admin may change model /
+    # variant (it reprices from Price Master and realigns the scheme).
     if vehicle_changed and (_is_priced(lead) or _has_persisted_scheme(lead)):
-        _require_owner_reedit(act, True, "Model / variant")
+        if not authmod.is_showroom_admin(act):
+            _require_owner_reedit(act, True, "Model / variant")
 
     old_booking_amount = ce.num(lead.get("bookingAmount"))
     if "bookingAmount" in payload:
@@ -7130,6 +7141,39 @@ async def _set_pack_unit_cx_demand(lead_id, unit_sno, value, act):
 # Showroom Admin enters the real RTO and insurance. The difference reduces
 # Additional (Dealer). Customer payable stays on Cx Demand.
 SHOWROOM_ACTUAL_PRICE_FIELDS = {"rto", "insuranceAmount"}
+
+
+class LeadVehicleIn(BaseModel):
+    model: str = ""
+    variant: str = ""
+
+
+@api.put("/leads/{lead_id}/vehicle")
+async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)):
+    """Owner / Showroom Admin: change model + variant together, from Price Master.
+
+    The variant must exist in Price Master for that model, so a file can never be
+    "Storm + Maxx (FB)". Price is refreshed from Price Master and the scheme
+    realigned (same cascade as any vehicle change).
+    """
+    role = str((act or {}).get("role") or "").strip().lower()
+    if role != "owner" and not authmod.is_showroom_admin(act):
+        raise HTTPException(403, "Only the Owner or Showroom Admin can change the model / variant.")
+    model = str(body.model or "").strip()
+    variant = str(body.variant or "").strip()
+    if not model or not variant:
+        raise HTTPException(422, "Pick both a model and a variant.")
+    lead = await get_lead_or_404(lead_id)
+    if oem_sync.is_same_order_pack(lead):
+        raise HTTPException(422, "This order has several vehicles — change each unit from its Price step.")
+    row = await _price_master_row(model, variant)
+    if not row:
+        raise HTTPException(422, f"{model} · {variant} is not in Price Master. Pick a variant from the list.")
+    model = row.get("model") or model
+    variant = row.get("variant") or variant
+    if model == (lead.get("interestedModel") or "") and variant == (lead.get("variant") or ""):
+        return clean(lead)
+    return await update_lead(lead_id, LeadUpdateIn(interestedModel=model, variant=variant), act, None)
 
 
 @api.put("/leads/{lead_id}/owner-field")
@@ -12144,6 +12188,12 @@ class OemBillingResolveIn(BaseModel):
     manual: bool = False
 
 
+_BODY_RECORD_KEYS = (
+    "originalModel", "originalVariant", "availableModel", "availableVariant",
+    "availableBodyType", "oemBilledModel", "oemBilledVariant", "oemBilledBodyType",
+)
+
+
 async def _replace_wrong_oem_chassis(lead, row, pick, act):
     """Swap another model's chassis off this file for the billed one.
 
@@ -12163,12 +12213,17 @@ async def _replace_wrong_oem_chassis(lead, row, pick, act):
     # The old plate belongs to the other vehicle; keep none unless OEM sent one.
     plate = str(row.get("numberPlate") or "").strip()
     old = {k: lead.get(k) or "" for k in ("chassisNumber", "invoiceNumber", "numberPlate")}
+    # Built / billed body records described the other vehicle — drop them so
+    # they are rebuilt from this chassis only.
+    body_reset = {k: "" for k in _BODY_RECORD_KEYS}
+    body_reset["oemBodyMismatch"] = False
     patch = {"chassisNumber": chassis, "invoiceNumber": invoice, "numberPlate": plate,
-             "oemSoldSyncedAt": now_iso(), "lastUpdated": now_iso()}
+             "oemSoldSyncedAt": now_iso(), "lastUpdated": now_iso(), **body_reset}
     units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
     for u in units:
         if oem_sync._norm_chassis(u.get("chassisNumber")) == wrong:
-            u.update({"chassisNumber": chassis, "invoiceNumber": invoice, "numberPlate": plate})
+            u.update({"chassisNumber": chassis, "invoiceNumber": invoice, "numberPlate": plate,
+                      **body_reset})
             sold_date = str(row.get("soldDate") or "")[:10]
             if sold_date:
                 u["soldDate"] = sold_date
