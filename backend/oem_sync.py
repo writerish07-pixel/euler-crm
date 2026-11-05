@@ -1774,6 +1774,61 @@ def available_differs_from_billed(available, billed):
     )
 
 
+def _short_body(fields):
+    """Body label for the banner: PV / FB / DV220 … (variant's bracket, else body type)."""
+    fields = fields or {}
+    body = str(fields.get("bodyType") or "").strip()
+    if body:
+        return body
+    m = re.search(r"\(([^)]+)\)", str(fields.get("variant") or ""))
+    return m.group(1).strip() if m else str(fields.get("variant") or "").strip()
+
+
+def body_change_notes(lead, sold_rows):
+    """Built body → billed body for each chassis on this file, read live from Coulson.
+
+    The banner used to read originalModel / originalVariant, which are written
+    once and never cleared — a chassis that was wrongly on the file left "was
+    Storm LR200" on a Turbo Max for good. This is derived from the CURRENT
+    chassis's Sold row every time, so it cannot go stale. A Sold row of another
+    model (a wrong chassis) is never described.
+    """
+    by_ch = {}
+    for row in sold_rows or []:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if ch:
+            by_ch[ch] = row
+    targets = []
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    for i, u in enumerate(units):
+        ch = _norm_chassis(u.get("chassisNumber"))
+        if ch:
+            targets.append((int(u.get("sno") or i + 1), ch))
+    top = _norm_chassis((lead or {}).get("chassisNumber"))
+    if top and top not in {c for _, c in targets}:
+        targets.insert(0, (1, top))
+    notes = []
+    for sno, ch in targets:
+        row = by_ch.get(ch)
+        if not row or sold_model_conflicts(row, lead):
+            continue
+        billed = sold_body_fields(row)
+        built = available_body_fields(row)
+        if not billed or not built or not available_differs_from_billed(built, billed):
+            continue
+        b_from, b_to = _short_body(built), _short_body(billed)
+        if not b_from or not b_to or b_from == b_to:
+            continue
+        notes.append({
+            "unitSno": sno, "chassis": ch,
+            "model": billed.get("model") or "",
+            "builtBody": b_from, "billedBody": b_to,
+            "builtVariant": built.get("variant") or "",
+            "billedVariant": billed.get("variant") or "",
+        })
+    return notes
+
+
 def pack_sibling_sku_fields(lead):
     """Booked SKU on a same-order pack — first unit with a model, else the lead."""
     for u in (lead or {}).get("units") or []:
