@@ -12132,6 +12132,71 @@ async def merge_oem_billing_repair(body: OemBillingRepairIn, act=Depends(actor))
     return payload
 
 
+class OemBillingResolveIn(BaseModel):
+    chassis: str = ""
+    leadId: str = ""
+    # "link" = this chassis is that file's vehicle; "add_unit" = another vehicle
+    # on the same open order; "create" = a separate purchase, new lead.
+    action: str = "link"
+
+
+@api.post("/oem-billing/resolve", dependencies=[Depends(deal_desk_only)])
+async def resolve_oem_billing_review(body: OemBillingResolveIn, act=Depends(actor)):
+    """Settle a Needs-review Sold row: link it, add it as a unit, or create a lead.
+
+    Only a lead the review itself offered may be picked, and the same rules the
+    review showed are re-checked here: link needs a matching model and a free
+    chassis slot; add-as-unit needs an open (not delivered / closed / cancelled)
+    file. Nothing is merged or deleted — a repeat purchase stays its own lead.
+    """
+    chassis = oem_sync._norm_chassis(body.chassis)
+    lead_id = str(body.leadId or "").strip()
+    action = str(body.action or "").strip().lower()
+    if action not in ("link", "add_unit", "create"):
+        raise HTTPException(400, "Choose link, add_unit or create")
+    if not chassis or (action != "create" and not lead_id):
+        raise HTTPException(400, "Chassis and lead are required")
+    sold = [r async for r in db.oem_sold.find({})]
+    leads = await oem_sync.load_oem_billing_leads(db)
+    classified = oem_sync.classify_oem_billing(sold, leads)
+    row = next((r for r in classified if oem_sync._norm_chassis(r.get("chassis")) == chassis), None)
+    if not row:
+        raise HTTPException(404, "That chassis is not on OEM Sold")
+    if row.get("bucket") != oem_sync.BUCKET_REVIEW:
+        raise HTTPException(409, "That chassis no longer needs review — refresh OEM Billing")
+    if action == "create":
+        # Repeat purchase: its own Lead Register file, KYC copied from the sibling.
+        created = await _insert_oem_billing_lead(row, sold)
+        if not created:
+            raise HTTPException(409, "Could not create a lead for this chassis — nothing was changed")
+        await write_audit(act, "resolve", "oem-billing", leadId=created.get("leadId"),
+                          new={"chassis": chassis, "action": "create"})
+        return {"ok": True, "leadId": created.get("leadId"), "chassis": chassis,
+                "action": "create", "vehicleCount": 1}
+    pick = next((c for c in row.get("candidateLeads") or [] if c.get("leadId") == lead_id), None)
+    if not pick:
+        raise HTTPException(409, f"{lead_id} is not one of the leads this chassis could belong to")
+    lead = await get_lead_or_404(lead_id)
+    await _require_lead_visible(lead, act)
+    if action == "link":
+        if not pick.get("canLink"):
+            raise HTTPException(409, pick.get("linkBlockedReason") or "Cannot link this chassis here")
+        live = await _connect_oem_sold(lead, row)
+    else:
+        if not pick.get("canAddUnit") or not _can_append_sold_unit(lead):
+            raise HTTPException(409, pick.get("addUnitBlockedReason")
+                                or "This file cannot take another vehicle")
+        live = await _append_oem_unit(lead, row)
+    if not live or chassis not in set(oem_sync.lead_chassis_list(live)):
+        raise HTTPException(409, "Could not put this chassis on the lead — nothing was changed")
+    await write_audit(act, "resolve", "oem-billing", leadId=lead_id,
+                      new={"chassis": chassis, "action": action,
+                           "invoiceNumber": row.get("invoiceNumber") or "",
+                           "vehicleCount": oem_sync.vehicle_count(live)})
+    return {"ok": True, "leadId": lead_id, "chassis": chassis, "action": action,
+            "vehicleCount": oem_sync.vehicle_count(live)}
+
+
 @api.post("/oem-billing/create", dependencies=[Depends(deal_desk_only)])
 async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
     """Connect this Sold chassis to the live CRM file on the same mobile.

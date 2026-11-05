@@ -658,8 +658,12 @@ async def test_empty_sold_pull_keeps_existing_oem_sold(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_mark_delivered_fills_from_unique_mobile_even_if_model_differs(client):
-    """OEM Sold match is the unique 10-digit mobile, not a typed chassis."""
+async def test_mark_delivered_never_fills_a_different_models_chassis(client):
+    """Unique mobile is not enough when the OEM billed another model.
+
+    Repeat buyers (Storm delivered, Turbo Max booked) share one mobile. Copying
+    the only Sold chassis on that mobile put the Storm's chassis on the Turbo
+    Max file. A different model is now left for the desk to fill by hand."""
     mobile = "9811100333"
     chassis = "MD9UNIQUEMOBILE01"
     await _booked_cleared_lead("LD-UNIQUE-MOB", mobile, "Unique Mobile")
@@ -672,8 +676,8 @@ async def test_mark_delivered_fills_from_unique_mobile_even_if_model_differs(cli
     assert r.status_code == 200, r.text
     lead = await server.db.leads.find_one({"leadId": "LD-UNIQUE-MOB"})
     assert server._is_delivered(lead) is True
-    assert lead["chassisNumber"] == chassis
-    assert lead["invoiceNumber"] == "CINV-UNIQ"
+    assert (lead.get("chassisNumber") or "") == ""
+    assert (lead.get("invoiceNumber") or "") != "CINV-UNIQ"
     assert lead["interestedModel"] == "Turbo Max"
     assert lead["variant"] == "Maxx (PV)"
 

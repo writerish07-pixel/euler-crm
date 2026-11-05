@@ -44,6 +44,7 @@ export default function OemBilling() {
   const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
   const [creating, setCreating] = useState("");
+  const [resolving, setResolving] = useState("");
 
   const load = useCallback(() => {
     setLoadError("");
@@ -133,6 +134,29 @@ export default function OemBilling() {
       toast.error(apiErrorMessage(e, "Could not create lead"));
     } finally {
       setCreating("");
+    }
+  };
+
+  const resolveReview = async (r, action, leadId) => {
+    const what = action === "create"
+      ? `Create a NEW lead for ${r.model || "this vehicle"} ${r.chassis}? Use this for a separate purchase.`
+      : action === "add_unit"
+        ? `Add ${r.model || "this vehicle"} ${r.chassis} as ANOTHER UNIT on ${leadId}? Only do this if it is the same order.`
+        : `Link chassis ${r.chassis} (invoice ${r.invoiceNumber || "—"}) to ${leadId}?`;
+    if (!window.confirm(what)) return;
+    setResolving(r.chassis);
+    try {
+      const res = await post("/oem-billing/resolve", { chassis: r.chassis, leadId, action }, { retry: false });
+      toast.success(action === "create"
+        ? `Created ${res.leadId}`
+        : action === "add_unit"
+          ? `Added as unit ${res.vehicleCount} on ${res.leadId}`
+          : `Linked to ${res.leadId}`);
+      load();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not resolve this review"));
+    } finally {
+      setResolving("");
     }
   };
 
@@ -290,6 +314,10 @@ export default function OemBilling() {
             <div>
               <Badge tone={TONE[r.bucket] || TONE.unmatched}>{LABEL[r.bucket] || r.bucket}</Badge>
               {r.reviewReason ? <div className="text-[11px] text-ink-faint mt-1">{r.reviewReason}</div> : null}
+              {canEditCommercials && r.bucket === "needs_review" && (r.candidateLeads || []).length > 0 && (
+                <ReviewChoices row={r} busy={busy || resolving === r.chassis}
+                  onResolve={resolveReview} onOpen={openLead} />
+              )}
               {canEditCommercials && r.bucket === "unmatched" && (
                 <Button
                   variant="secondary"
@@ -357,6 +385,57 @@ export default function OemBilling() {
         </p>
       )}
       {drawer}
+    </div>
+  );
+}
+
+
+/** Needs review: which CRM file is this chassis? Link / add as unit / new lead. */
+export function ReviewChoices({ row, busy, onResolve, onOpen }) {
+  const cands = row.candidateLeads || [];
+  return (
+    <div className="mt-2 space-y-2 min-w-[16rem]" data-testid={`oem-review-${row.chassis}`}>
+      {cands.map((c) => (
+        <div key={c.leadId}
+          className={`rounded-lg ring-1 ring-inset p-2 ${c.recommended ? "ring-emerald-500/40 bg-emerald-50/50" : "ring-line bg-white"}`}
+          data-testid={`oem-review-cand-${row.chassis}-${c.leadId}`}>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <LeadLink leadId={c.leadId} onOpen={onOpen} subtitle={c.currentStatus} />
+            {c.recommended ? <Badge tone="bg-emerald-50 text-emerald-800 ring-emerald-600/20">Suggested</Badge> : null}
+          </div>
+          <div className="text-[11px] text-ink-soft mt-0.5">
+            {[c.model, c.variant].filter(Boolean).join(" · ") || "No vehicle"}
+            {c.vehicleCount > 1 ? ` · ${c.vehicleCount} vehicles` : ""}
+            {c.chassis ? ` · has ${c.chassis}` : " · no chassis yet"}
+            {c.executive ? ` · ${c.executive}` : ""}
+          </div>
+          {!c.modelMatches ? (
+            <div className="text-[11px] text-rose-700 mt-0.5">Different vehicle from the OEM invoice ({row.model || "—"})</div>
+          ) : null}
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            <Button variant="secondary" disabled={busy || !c.canLink} title={c.linkBlockedReason || ""}
+              data-testid={`oem-review-link-${row.chassis}-${c.leadId}`}
+              onClick={() => onResolve(row, "link", c.leadId)}>
+              Link to {c.leadId}
+            </Button>
+            <Button variant="secondary" disabled={busy || !c.canAddUnit} title={c.addUnitBlockedReason || ""}
+              data-testid={`oem-review-unit-${row.chassis}-${c.leadId}`}
+              onClick={() => onResolve(row, "add_unit", c.leadId)}>
+              Add as another unit
+            </Button>
+          </div>
+          {(!c.canLink && c.linkBlockedReason) || (!c.canAddUnit && c.addUnitBlockedReason) ? (
+            <div className="text-[10.5px] text-ink-faint mt-1">
+              {[!c.canLink && c.linkBlockedReason, !c.canAddUnit && c.addUnitBlockedReason].filter(Boolean).join(" · ")}
+            </div>
+          ) : null}
+        </div>
+      ))}
+      <Button variant="secondary" disabled={busy}
+        data-testid={`oem-review-create-${row.chassis}`}
+        onClick={() => onResolve(row, "create")}>
+        Create new lead (separate purchase)
+      </Button>
     </div>
   );
 }
