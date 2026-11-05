@@ -224,3 +224,89 @@ test("Needs review offers link / add-unit / new lead and explains blocked choice
   await act(async () => { root.unmount(); });
   host.remove();
 });
+
+test("Needs review offers Replace when a file holds another model's chassis", async () => {
+  const reviewRow = {
+    chassis: "MD9EVDAD26K217971", invoiceNumber: "AF-122-I26270264", mobile: "9024073526",
+    customerName: "Mukesh sharma", model: "Turbo Max", variant: "Maxx (PV)",
+    soldDate: "2026-11-03", undated: false, bucket: "needs_review", leadId: "",
+    reviewReason: "LD26000949 holds MD9EMSDL26E217037, which OEM billed as Storm — replace it with this chassis",
+    candidateLeads: [
+      { leadId: "LD26000949", currentStatus: "Booked", model: "Turbo Max", variant: "Maxx (FB)",
+        chassis: "MD9EMSDL26E217037", vehicleCount: 1, modelMatches: true, canLink: false,
+        linkBlockedReason: "Holds MD9EMSDL26E217037, which OEM billed as Storm — use Replace",
+        canAddUnit: false, addUnitBlockedReason: "This file holds the wrong vehicle — use Replace",
+        canReplace: true, wrongChassis: { chassis: "MD9EMSDL26E217037", model: "Storm" }, recommended: true },
+    ],
+  };
+  mockGet.mockImplementation((url) => {
+    if (String(url).includes("/oem-billing")) {
+      return Promise.resolve({ soldCount: 1, byDate: [], counts: { needs_review: 1 }, rows: [reviewRow], repair: {} });
+    }
+    return Promise.resolve({});
+  });
+  mockPost.mockResolvedValue({ ok: true, leadId: "LD26000949", chassis: "MD9EVDAD26K217971",
+    removedChassis: "MD9EMSDL26E217037", action: "replace" });
+  const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<OemBilling />); });
+  await act(async () => { await Promise.resolve(); });
+  const q = (id) => host.querySelector(`[data-testid="${id}"]`);
+  expect(q("oem-review-wrong-MD9EVDAD26K217971-LD26000949").textContent).toMatch(/billed as Storm/);
+  await act(async () => { q("oem-review-replace-MD9EVDAD26K217971-LD26000949").click(); });
+  await act(async () => { await Promise.resolve(); });
+  expect(confirm.mock.calls[0][0]).toMatch(/replace chassis MD9EMSDL26E217037 \(Storm\)/);
+  expect(mockPost).toHaveBeenCalledWith("/oem-billing/resolve",
+    { chassis: "MD9EVDAD26K217971", leadId: "LD26000949", action: "replace" }, { retry: false });
+  expect(toast.success).toHaveBeenCalledWith("Replaced MD9EMSDL26E217037 with MD9EVDAD26K217971 on LD26000949");
+  confirm.mockRestore();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("Not in CRM row can be linked by hand to an open lead found by search", async () => {
+  jest.useFakeTimers();
+  const row = {
+    chassis: "MD9EVDAD26K217971", invoiceNumber: "AF-122-I26270264", mobile: "9024073526",
+    customerName: "Mukesh sharma", model: "Turbo Max", variant: "Maxx (PV)",
+    soldDate: "2026-11-03", undated: false, bucket: "unmatched", leadId: "",
+  };
+  mockGet.mockImplementation((url) => {
+    if (String(url).includes("/oem-billing")) {
+      return Promise.resolve({ soldCount: 1, byDate: [], counts: { unmatched: 1 }, rows: [row], repair: {} });
+    }
+    if (url === "/leads") {
+      return Promise.resolve([
+        { leadId: "LD26000949", customerName: "Mukesh Sharma", mobile: "9024073526",
+          interestedModel: "Turbo Max", variant: "Maxx (FB)", currentStatus: "Booked", accountStatus: "Active" },
+        { leadId: "LD26000062", customerName: "mukesh sharma", mobile: "9024073526",
+          interestedModel: "Storm", currentStatus: "Delivered", deliveryStatus: "Delivered",
+          accountStatus: "Active", chassisNumber: "MD9EMSDL26E217037" },
+      ]);
+    }
+    return Promise.resolve({});
+  });
+  mockPost.mockResolvedValue({ ok: true, leadId: "LD26000949", vehicleCount: 1 });
+  const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<OemBilling />); });
+  await act(async () => { await Promise.resolve(); });
+  const q = (id) => host.querySelector(`[data-testid="${id}"]`);
+  await act(async () => { q("oem-manual-open-MD9EVDAD26K217971").click(); });
+  await act(async () => { jest.advanceTimersByTime(350); await Promise.resolve(); await Promise.resolve(); });
+  expect(mockGet).toHaveBeenCalledWith("/leads", { q: "9024073526", limit: 25 });
+  // Delivered Storm file is not offered — open leads only.
+  expect(q("oem-manual-hit-MD9EVDAD26K217971-LD26000062")).toBeNull();
+  await act(async () => { q("oem-manual-link-MD9EVDAD26K217971-LD26000949").click(); });
+  await act(async () => { await Promise.resolve(); });
+  expect(mockPost).toHaveBeenCalledWith("/oem-billing/resolve",
+    { chassis: "MD9EVDAD26K217971", leadId: "LD26000949", action: "link", manual: true }, { retry: false });
+  confirm.mockRestore();
+  jest.useRealTimers();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});

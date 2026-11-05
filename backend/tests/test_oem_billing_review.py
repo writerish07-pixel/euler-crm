@@ -135,7 +135,10 @@ def test_only_other_model_on_mobile_is_review_with_create_path():
 # ------------------------------------------------------------------ resolve API
 async def _seed(leads, sold):
     ids = [l["leadId"] for l in leads]
-    await server.db.leads.delete_many({"$or": [{"leadId": {"$in": ids}}, {"mobile": MOBILE}]})
+    chs = [s["chassis"] for s in sold]
+    await server.db.leads.delete_many({"$or": [
+        {"leadId": {"$in": ids}}, {"mobile": MOBILE},
+        {"chassisNumber": {"$in": chs}}, {"units.chassisNumber": {"$in": chs}}]})
     await server.db.oem_sold.delete_many({"$or": [{"mobile": MOBILE},
                                                    {"chassis": {"$in": [s["chassis"] for s in sold]}}]})
     await server.db.oem_invoices.delete_many({})
@@ -162,10 +165,12 @@ async def test_resolve_link_puts_chassis_on_the_chosen_lead(client):
 
 @pytest.mark.asyncio
 async def test_resolve_refuses_a_lead_the_review_did_not_offer(client):
-    await _seed([_turbo_lead(leadId="LD-A"), _turbo_lead(leadId="LD-B")], [TURBO_ROW])
+    other = _turbo_lead(leadId="LD-ELSEWHERE", mobile="9024000999", customerName="Someone Else")
+    await _seed([_turbo_lead(leadId="LD-A"), _turbo_lead(leadId="LD-B"), other], [TURBO_ROW])
     r = await client.post("/api/oem-billing/resolve",
                           json={"chassis": TURBO_ROW["chassis"], "leadId": "LD-ELSEWHERE", "action": "link"})
     assert r.status_code == 409
+    assert "not one of the leads" in r.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -232,3 +237,138 @@ async def test_resolve_is_deal_desk_only(client):
                          headers={"Authorization": f"Bearer {r.json()['token']}"},
                          json={"chassis": TURBO_ROW["chassis"], "leadId": "LD-A", "action": "link"})
         assert r.status_code == 403
+
+
+# ------------------------------------------------------------------ wrong chassis already saved
+def _turbo_holding_storm():
+    """The state the old auto-fill left behind: Turbo file saved with the Storm's ids."""
+    return _turbo_lead(chassisNumber=STORM_ROW["chassis"], invoiceNumber=STORM_ROW["invoiceNumber"],
+                       numberPlate="RJ59GA0301")
+
+
+def test_wrong_model_chassis_is_detected():
+    by_ch = {STORM_ROW["chassis"]: STORM_ROW, TURBO_ROW["chassis"]: TURBO_ROW}
+    wrong = oem_sync.wrong_model_chassis(_turbo_holding_storm(), by_ch)
+    assert wrong["chassis"] == STORM_ROW["chassis"] and wrong["model"] == "Storm"
+    assert oem_sync.wrong_model_chassis(_storm_lead(chassisNumber=STORM_ROW["chassis"]), by_ch) is None
+
+
+def test_storm_invoice_goes_to_the_storm_file_when_both_hold_it():
+    storm = _storm_lead(chassisNumber=STORM_ROW["chassis"])
+    rows = oem_sync.classify_oem_billing([STORM_ROW, TURBO_ROW], [storm, _turbo_holding_storm()])
+    assert _row(rows, STORM_ROW["chassis"])["leadId"] == "LD-STORM"
+
+
+def test_turbo_invoice_becomes_a_replace_review_not_not_in_crm():
+    storm = _storm_lead(chassisNumber=STORM_ROW["chassis"])
+    rows = oem_sync.classify_oem_billing([STORM_ROW, TURBO_ROW], [storm, _turbo_holding_storm()])
+    hit = _row(rows, TURBO_ROW["chassis"])
+    assert hit["bucket"] == oem_sync.BUCKET_REVIEW
+    assert "LD-TURBO" in hit["reviewReason"] and "Storm" in hit["reviewReason"]
+    cand = {c["leadId"]: c for c in hit["candidateLeads"]}
+    turbo = cand["LD-TURBO"]
+    assert turbo["canReplace"] and turbo["recommended"]
+    assert turbo["wrongChassis"]["chassis"] == STORM_ROW["chassis"]
+    assert not turbo["canLink"] and not turbo["canAddUnit"]
+    assert not cand["LD-STORM"]["canReplace"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_replace_swaps_the_wrong_chassis(client):
+    storm = _storm_lead(chassisNumber=STORM_ROW["chassis"], invoiceNumber=STORM_ROW["invoiceNumber"])
+    await _seed([storm, _turbo_holding_storm()], [STORM_ROW, TURBO_ROW])
+    r = await client.post("/api/oem-billing/resolve", json={
+        "chassis": TURBO_ROW["chassis"], "leadId": "LD-TURBO", "action": "replace"})
+    assert r.status_code == 200, r.text
+    assert r.json()["removedChassis"] == STORM_ROW["chassis"]
+    turbo = await server.db.leads.find_one({"leadId": "LD-TURBO"})
+    assert oem_sync.lead_chassis_list(turbo) == [TURBO_ROW["chassis"]]
+    assert turbo["invoiceNumber"] == TURBO_ROW["invoiceNumber"]
+    assert (turbo.get("numberPlate") or "") == ""      # the Storm's plate is gone
+    rows = oem_sync.classify_oem_billing(
+        [STORM_ROW, TURBO_ROW], [await server.db.leads.find_one({"leadId": "LD-STORM"}), turbo])
+    assert _row(rows, TURBO_ROW["chassis"])["leadId"] == "LD-TURBO"
+    assert _row(rows, STORM_ROW["chassis"])["leadId"] == "LD-STORM"
+    audit = await server.db.audit_log.find_one({"leadId": "LD-TURBO", "action": "resolve"},
+                                              sort=[("timestamp", -1)])
+    assert audit and audit["oldValue"]["chassisNumber"] == STORM_ROW["chassis"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_replace_refused_on_a_lead_without_a_wrong_chassis(client):
+    await _seed([_turbo_lead(leadId="LD-A"), _turbo_lead(leadId="LD-B")], [TURBO_ROW])
+    r = await client.post("/api/oem-billing/resolve", json={
+        "chassis": TURBO_ROW["chassis"], "leadId": "LD-A", "action": "replace"})
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_create_refusal_names_the_customers_files(client):
+    # Two open Turbo files, both already holding a chassis: Create must refuse and say which.
+    a = _turbo_lead(leadId="LD-A", chassisNumber="MD9EVDAD26K000011")
+    b = _turbo_lead(leadId="LD-B", chassisNumber="MD9EVDAD26K000012")
+    await _seed([a, b], [TURBO_ROW])
+    rows = oem_sync.classify_oem_billing([TURBO_ROW], [a, b])
+    assert _row(rows, TURBO_ROW["chassis"])["bucket"] == oem_sync.BUCKET_UNMATCHED
+    r = await client.post("/api/oem-billing/create", json={"chassis": TURBO_ROW["chassis"]})
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    assert "LD-A" in detail and "LD-B" in detail and "Do not create" in detail
+
+
+# ------------------------------------------------------------------ manual link (any open lead)
+@pytest.mark.asyncio
+async def test_manual_link_from_not_in_crm_to_an_open_lead_with_another_mobile(client):
+    """OEM billed on a mobile the CRM does not have; staff pick the right file by hand."""
+    elsewhere = {**TURBO_ROW, "chassis": "MD9EVDAD26K000999", "mobile": "9000000999", "customerName": "Name On Invoice"}
+    target = _turbo_lead(leadId="LD-MANUAL", mobile="9024000555", customerName="Real Customer")
+    await _seed([target], [elsewhere])
+    rows = oem_sync.classify_oem_billing([elsewhere], [target])
+    assert _row(rows, elsewhere["chassis"])["bucket"] == oem_sync.BUCKET_UNMATCHED
+    # Not a suggestion, so it needs manual=True.
+    r = await client.post("/api/oem-billing/resolve", json={
+        "chassis": elsewhere["chassis"], "leadId": "LD-MANUAL", "action": "link"})
+    assert r.status_code == 409
+    r = await client.post("/api/oem-billing/resolve", json={
+        "chassis": elsewhere["chassis"], "leadId": "LD-MANUAL", "action": "link", "manual": True})
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": "LD-MANUAL"})
+    assert oem_sync.lead_chassis_list(lead) == [elsewhere["chassis"]]
+    audit = await server.db.audit_log.find_one({"leadId": "LD-MANUAL", "action": "resolve"})
+    assert audit["newValue"]["manual"] is True
+
+
+@pytest.mark.asyncio
+async def test_manual_link_still_refuses_a_different_model(client):
+    elsewhere = {**TURBO_ROW, "chassis": "MD9EVDAD26K000998", "mobile": "9000000998"}
+    storm_open = _storm_lead(leadId="LD-STORM-OPEN", currentStatus="Booked", deliveryStatus="",
+                             mobile="9024000556")
+    await _seed([storm_open], [elsewhere])
+    r = await client.post("/api/oem-billing/resolve", json={
+        "chassis": elsewhere["chassis"], "leadId": "LD-STORM-OPEN", "action": "link", "manual": True})
+    assert r.status_code == 409
+    assert "Storm" in r.json()["detail"] and "Turbo Max" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_manual_add_unit_on_an_open_lead_that_has_its_vehicle(client):
+    elsewhere = {**TURBO_ROW, "chassis": "MD9EVDAD26K000997", "mobile": "9000000997"}
+    held = _turbo_lead(leadId="LD-MAN-PACK", mobile="9024000557",
+                       chassisNumber="MD9EVDAD26K000021", invoiceNumber="AF-T-21")
+    await _seed([held], [elsewhere])
+    link = await client.post("/api/oem-billing/resolve", json={
+        "chassis": elsewhere["chassis"], "leadId": "LD-MAN-PACK", "action": "link", "manual": True})
+    assert link.status_code == 409
+    r = await client.post("/api/oem-billing/resolve", json={
+        "chassis": elsewhere["chassis"], "leadId": "LD-MAN-PACK", "action": "add_unit", "manual": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["vehicleCount"] == 2
+
+
+@pytest.mark.asyncio
+async def test_manual_cannot_create_from_not_in_crm(client):
+    elsewhere = {**TURBO_ROW, "chassis": "MD9EVDAD26K000996", "mobile": "9000000996"}
+    await _seed([], [elsewhere])
+    r = await client.post("/api/oem-billing/resolve", json={
+        "chassis": elsewhere["chassis"], "action": "create", "manual": True})
+    assert r.status_code == 409

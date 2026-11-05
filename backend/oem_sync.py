@@ -3010,6 +3010,30 @@ def _lead_model_variant(lead, chassis=""):
     return model, variant
 
 
+def wrong_model_chassis(lead, sold_by_chassis):
+    """The chassis on this single-unit file when OEM billed it as another model.
+
+    That is how a repeat buyer's Turbo Max file ended up holding the Storm's
+    chassis (old auto-fill on mobile alone). Returns {chassis, model, variant}
+    or None. Packs are skipped: a mixed-model order is legitimate.
+    """
+    if not lead or is_same_order_pack(lead):
+        return None
+    held = lead_chassis_list(lead)
+    if len(held) != 1:
+        return None
+    row = (sold_by_chassis or {}).get(held[0])
+    if not row or not sold_model_conflicts(row, lead):
+        return None
+    fields = sold_body_fields(row) or {}
+    return {
+        "chassis": held[0],
+        "model": fields.get("model") or row.get("model") or "",
+        "variant": fields.get("variant") or row.get("variant") or "",
+        "invoiceNumber": str(row.get("invoiceNumber") or "").strip(),
+    }
+
+
 def lead_has_free_chassis_slot(lead):
     """Single file with no chassis yet, or a pack with a unit still waiting for one."""
     if is_same_order_pack(lead):
@@ -3044,6 +3068,14 @@ def review_candidate(lead, sold):
     if can_unit and free:
         # An empty slot is filled by Link; "another unit" would only fill it too.
         can_unit, unit_reason = False, "No chassis on this file yet — use Link"
+    wrong = lead.get("_wrongChassis") or None
+    can_replace = bool(wrong) and not conflict
+    if can_replace:
+        # The file's model matches this invoice but it holds another model's
+        # chassis: the fix is to swap, not to add a unit or mint a lead.
+        can_unit, unit_reason = False, "This file holds the wrong vehicle — use Replace"
+        link_reason = (f"Holds {wrong['chassis']}, which OEM billed as "
+                       f"{wrong.get('model') or 'another model'} — use Replace")
     # A different model as an extra unit stays allowed (one order, mixed fleet)
     # but is never the suggested choice — see review_candidates.
     return {
@@ -3055,14 +3087,16 @@ def review_candidate(lead, sold):
         "linkBlockedReason": link_reason,
         "canAddUnit": can_unit,
         "addUnitBlockedReason": unit_reason,
+        "canReplace": can_replace,
+        "wrongChassis": wrong if can_replace else None,
     }
 
 
 def review_candidates(leads, sold):
     rows = [review_candidate(l, sold) for l in (leads or []) if (l or {}).get("leadId")]
-    rows.sort(key=lambda c: (not c["canLink"], not c["modelMatches"], not c["canAddUnit"],
-                             c["leadId"]))
-    if rows and rows[0]["canLink"]:
+    rows.sort(key=lambda c: (not (c["canLink"] or c["canReplace"]), not c["modelMatches"],
+                             not c["canAddUnit"], c["leadId"]))
+    if rows and (rows[0]["canLink"] or rows[0]["canReplace"]):
         rows[0]["recommended"] = True
     return rows
 
@@ -3163,7 +3197,16 @@ def classify_oem_billing(sold_rows, leads):
     same mobile or the same usable name (Messenger SCS × 5) stay unmatched so
     sync can create the remaining units.
     """
-    live = [l for l in (leads or []) if repair_original_lead(l) or is_oem_billing_stub(l)]
+    sold_by_chassis = {
+        _norm_chassis((r or {}).get("chassis")): r
+        for r in (sold_rows or []) if _norm_chassis((r or {}).get("chassis"))
+    }
+    live = []
+    for l in (leads or []):
+        if not (repair_original_lead(l) or is_oem_billing_stub(l)):
+            continue
+        wrong = wrong_model_chassis(l, sold_by_chassis)
+        live.append({**l, "_wrongChassis": wrong} if wrong else l)
     occupied = occupied_chassis_numbers(leads)
     claimed = {}
     out = []
@@ -3181,6 +3224,11 @@ def classify_oem_billing(sold_rows, leads):
             continue
         holders = [l for l in live if chassis in lead_chassis_list(l)]
         if len(holders) > 1:
+            fit = [h for h in holders if not sold_model_conflicts(sold, h)]
+            if len(fit) == 1:
+                # The other holder carries this chassis by mistake (other model).
+                take(sold, fit[0], _bucket_for_matched_lead(fit[0]))
+                continue
             keeper = resolve_chassis_holders(holders)
             if keeper:
                 take(sold, keeper, _bucket_for_matched_lead(keeper))
@@ -3256,6 +3304,16 @@ def classify_oem_billing(sold_rows, leads):
                 candidates=empty))
             continue
         if same:
+            swap = [l for l in same
+                    if l.get("_wrongChassis") and not sold_model_conflicts(sold, l)]
+            if swap:
+                w = swap[0]["_wrongChassis"]
+                out.append(_billing_row(
+                    sold, BUCKET_REVIEW, None,
+                    f"{swap[0].get('leadId')} holds {w['chassis']}, which OEM billed as "
+                    f"{w.get('model') or 'another model'} — replace it with this chassis",
+                    candidates=same))
+                continue
             if any((l or {}).get("leadId") in claimed for l in same):
                 out.append(_billing_row(sold, BUCKET_UNMATCHED))
                 continue
@@ -3290,6 +3348,16 @@ def classify_oem_billing(sold_rows, leads):
                 candidates=empty))
             continue
         if same:
+            swap = [l for l in same
+                    if l.get("_wrongChassis") and not sold_model_conflicts(sold, l)]
+            if swap:
+                w = swap[0]["_wrongChassis"]
+                out.append(_billing_row(
+                    sold, BUCKET_REVIEW, None,
+                    f"{swap[0].get('leadId')} holds {w['chassis']}, which OEM billed as "
+                    f"{w.get('model') or 'another model'} — replace it with this chassis",
+                    candidates=same))
+                continue
             if any((l or {}).get("leadId") in claimed for l in same):
                 out.append(_billing_row(sold, BUCKET_UNMATCHED))
                 continue
