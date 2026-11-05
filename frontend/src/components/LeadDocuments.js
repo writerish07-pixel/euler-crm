@@ -28,7 +28,11 @@ export function acceptForKind(kind) {
 }
 
 export const DOC_MAX_BYTES = 8 * 1024 * 1024;
-const COMPRESS_FROM = 3.5 * 1024 * 1024;
+// Files are stored in MongoDB, so shrink every photo, not just huge ones.
+// 1600 px JPEG keeps Aadhaar / PAN / cheque text readable at a fraction of the size.
+const COMPRESS_FROM = 400 * 1024;
+const COMPRESS_TARGET = 700 * 1024;
+const COMPRESS_MAX_EDGE = 1600;
 
 export function hintForKind(kind) {
   return TALLY_ZIP_KINDS.has(kind) ? "Photo, PDF or ZIP, max 12 MB" : "Photo or PDF, max 8 MB";
@@ -40,7 +44,7 @@ function isZipFile(file) {
   return type.includes("zip") || name.endsWith(".zip");
 }
 
-/** Camera photos from the Windows desk often exceed 5 MB and then 25s-timeout as "Upload failed". */
+/** Shrink photos before upload: smaller uploads on mobile data, less storage. PDFs / ZIPs pass through (the server compresses PDFs). */
 export async function fitImageForUpload(file) {
   if (!file || file.size <= COMPRESS_FROM) return file;
   if (isZipFile(file)) return file;
@@ -52,7 +56,7 @@ export async function fitImageForUpload(file) {
   if (typeof createImageBitmap !== "function" || typeof document === "undefined") return file;
   try {
     const bitmap = await createImageBitmap(file);
-    const maxEdge = 2000;
+    const maxEdge = COMPRESS_MAX_EDGE;
     const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height, 1));
     const w = Math.max(1, Math.round(bitmap.width * scale));
     const h = Math.max(1, Math.round(bitmap.height * scale));
@@ -63,14 +67,15 @@ export async function fitImageForUpload(file) {
     if (!ctx) return file;
     ctx.drawImage(bitmap, 0, 0, w, h);
     if (bitmap.close) bitmap.close();
-    let quality = 0.82;
+    let quality = 0.72;
     let blob = null;
-    while (quality >= 0.55) {
+    while (quality >= 0.5) {
       blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
-      if (blob && blob.size <= DOC_MAX_BYTES) break;
-      quality -= 0.09;
+      if (blob && blob.size <= COMPRESS_TARGET) break;
+      quality -= 0.08;
     }
-    if (!blob) return file;
+    // Never upload something bigger than the original.
+    if (!blob || blob.size >= file.size) return file;
     const name = String(file.name || "oem-proof.jpg").replace(/\.[^.]+$/, "") + ".jpg";
     return new File([blob], name, { type: "image/jpeg", lastModified: Date.now() });
   } catch {

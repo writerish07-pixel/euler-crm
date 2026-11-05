@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse, PhoneCall } from "lucide-react";
+import { UserPlus, Trash2, CheckCircle2, XCircle, ExternalLink, Copy, RefreshCcw, Plus, ListPlus, KeyRound, MessageCircle, Ban, Users, Warehouse, PhoneCall, Archive } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, del, put, api, apiErrorMessage } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
@@ -324,6 +324,8 @@ export default function Settings() {
       </>
       )}
 
+      {isOwner && <DocumentStorageCard />}
+
       {isOwner && <CancelReasonsCard />}
 
       {isOwner && <MastersListCard gsEnabled={gs?.enabled} />}
@@ -434,6 +436,53 @@ const REVIVE_MODES = [
  * treatment. Chasing the second one every third day forever is how a WhatsApp
  * number earns a poor quality rating and loses template access.
  */
+function fmtMb(bytes) {
+  return `${(Number(bytes || 0) / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Shrink KYC / delivery / Tally files uploaded before compression existed. */
+function DocumentStorageCard() {
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState(null);
+  const run = async () => {
+    setBusy(true);
+    let saved = 0;
+    let shrunk = 0;
+    try {
+      // Batches keep each request short; stop when nothing is left.
+      for (let i = 0; i < 50; i += 1) {
+        const r = await post("/admin/compress-documents?limit=100", {}, { timeout: 120000, retry: false });
+        saved += Number(r.bytesSaved || 0);
+        shrunk += Number(r.shrunk || 0);
+        setLast({ saved, shrunk, remaining: r.remaining });
+        if (!r.remaining || !r.processed) break;
+      }
+      toast.success(`Documents compressed — ${shrunk} file(s) shrunk, ${fmtMb(saved)} saved`);
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not compress documents"));
+    } finally { setBusy(false); }
+  };
+  return (
+    <Card className="p-5 mb-6" data-testid="doc-storage-card">
+      <h3 className="font-heading font-bold text-ink mb-2">Document storage</h3>
+      <p className="text-sm text-ink-soft mb-3">
+        New uploads are compressed automatically (photos to 1600 px JPEG, scanned PDFs re-packed).
+        Run this once to shrink documents uploaded before that. Safe to run again.
+      </p>
+      <div className="flex flex-wrap items-center gap-3">
+        <Button variant="secondary" data-testid="compress-docs-btn" onClick={run} disabled={busy}>
+          <Archive size={14} /> {busy ? "Compressing…" : "Compress stored documents"}
+        </Button>
+        {last ? (
+          <span className="text-xs text-ink-faint" data-testid="compress-docs-result">
+            {last.shrunk} shrunk · {fmtMb(last.saved)} saved{last.remaining ? ` · ${last.remaining} left` : ""}
+          </span>
+        ) : null}
+      </div>
+    </Card>
+  );
+}
+
 function CancelReasonsCard() {
   const [rows, setRows] = useState([]);
   const [form, setForm] = useState({ reason: "", revive: "now", reviveAfterDays: 30 });
