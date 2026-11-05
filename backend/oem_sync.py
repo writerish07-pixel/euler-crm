@@ -1339,6 +1339,64 @@ async def refresh_sold_inventory(db, *, interactive=True):
     return n
 
 
+# Families that share a platform and whose names the OEM and CRM mix up:
+# OEM "HiLoad +" / "XR" is CRM Hi-Load in the catalog but HiCity to the scheme
+# engine. Treat them as one when deciding "different vehicle".
+_COMPATIBLE_FAMILIES = {"hiload": "hiload", "hicity": "hiload"}
+
+
+def _family_keys(pairs):
+    out = set()
+    for model, variant in pairs:
+        model, variant = str(model or ""), str(variant or "")
+        keys = {inventory_family_key(model, variant)}
+        alias = cat.MODEL_ALIASES.get(re.sub(r"[^a-z]", "", model.lower()))
+        if alias:
+            keys.add(inventory_family_key(alias, ""))
+        out.update(_COMPATIBLE_FAMILIES.get(k, k) for k in keys if k)
+    return out
+
+
+def sold_row_families(row):
+    """Model families a Sold row could be (catalog-mapped, raw and OEM names).
+
+    Several readings are kept on purpose: OEM "HiLoad +" / "XR" normalises to
+    HiCity on its own name, while the catalog maps it to CRM Hi-Load. A row is
+    only called a different vehicle when none of its readings fit the lead.
+    """
+    row = row or {}
+    try:
+        fields = sold_body_fields(row) or {}
+    except Exception:
+        fields = {}
+    return _family_keys([
+        (fields.get("model"), fields.get("variant")),
+        (row.get("model"), row.get("variant")),
+        (row.get("oemModel"), row.get("oemVariant")),
+    ])
+
+
+def lead_model_families(lead):
+    lead = lead or {}
+    pairs = [(lead.get("interestedModel") or lead.get("model"), lead.get("variant"))]
+    for unit in lead.get("units") or []:
+        if isinstance(unit, dict):
+            pairs.append((unit.get("model") or unit.get("interestedModel"), unit.get("variant")))
+    return _family_keys(pairs)
+
+
+def sold_model_conflicts(row, lead):
+    """True only when both sides name a vehicle and the families differ.
+
+    A Storm invoice must never land on a Turbo Max file just because the
+    customer's mobile matches (repeat buyers). Unknown on either side — Vehicle
+    Invoices rows carry no model, walk-in leads may have none — is not a conflict.
+    """
+    sold = sold_row_families(row)
+    want = lead_model_families(lead)
+    return bool(sold and want and not (sold & want))
+
+
 def sold_match_score(row, lead):
     """Higher is better. Mobile is required; model family is a tie-break."""
     if not row or not lead:
@@ -1346,6 +1404,8 @@ def sold_match_score(row, lead):
     want_m = _digits10(lead.get("mobile") or lead.get("altMobile"))
     got_m = _digits10(row.get("mobile"))
     if not want_m or len(want_m) != 10 or want_m != got_m:
+        return 0
+    if sold_model_conflicts(row, lead):
         return 0
     score = 1
     if inventory_row_matches_lead(row, lead.get("interestedModel"), lead.get("variant") or ""):
@@ -2012,11 +2072,15 @@ def sold_rows_for_lead(lead, sold_rows, occupied_chassis=None):
         if not ch or ch in seen or (ch in occupied and ch not in held):
             continue
         row_m = _digits10((row or {}).get("mobile"))
-        if mobile and len(mobile) == 10 and row_m == mobile:
+        by_mobile = bool(mobile and len(mobile) == 10 and row_m == mobile)
+        by_name = name_ok and _norm_person_name((row or {}).get("customerName")) == name_key
+        if (by_mobile or by_name) and sold_model_conflicts(row, lead):
+            continue
+        if by_mobile:
             seen.add(ch)
             out.append(row)
             continue
-        if name_ok and _norm_person_name((row or {}).get("customerName")) == name_key:
+        if by_name:
             seen.add(ch)
             out.append(row)
     return out
@@ -2128,6 +2192,8 @@ def _match_sold_by_name(lead, sold_rows, occupied_chassis=None):
         if not ch:
             continue
         if len(_digits10(row.get("mobile"))) != 10:
+            continue
+        if sold_model_conflicts(row, lead):
             continue
         hits.append(row)
     if len(hits) != 1:
@@ -2944,7 +3010,65 @@ def _lead_model_variant(lead, chassis=""):
     return model, variant
 
 
-def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None):
+def lead_has_free_chassis_slot(lead):
+    """Single file with no chassis yet, or a pack with a unit still waiting for one."""
+    if is_same_order_pack(lead):
+        units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+        return any(not _norm_chassis(u.get("chassisNumber")) for u in units)
+    return not lead_chassis_list(lead)
+
+
+def lead_accepts_new_unit(lead):
+    """Only an open deal can grow another vehicle. Delivered / closed / cancelled
+    files are settled — a repeat purchase is a new lead, not a unit."""
+    if not lead:
+        return False, "Lead not found"
+    if _lead_is_cancelled(lead):
+        return False, "Cancelled file — create a new lead for this vehicle"
+    if _lead_is_delivered(lead):
+        return False, "Delivered file — a repeat purchase stays a separate lead"
+    return True, ""
+
+
+def review_candidate(lead, sold):
+    """One choice on a Needs-review row: link here, or add as another unit."""
+    lead = lead or {}
+    conflict = sold_model_conflicts(sold, lead)
+    can_unit, unit_reason = lead_accepts_new_unit(lead)
+    free = lead_has_free_chassis_slot(lead)
+    link_reason = ""
+    if conflict:
+        link_reason = "Different vehicle model from the OEM invoice"
+    elif not free:
+        link_reason = "This file already has its chassis — add as another unit instead"
+    if can_unit and free:
+        # An empty slot is filled by Link; "another unit" would only fill it too.
+        can_unit, unit_reason = False, "No chassis on this file yet — use Link"
+    # A different model as an extra unit stays allowed (one order, mixed fleet)
+    # but is never the suggested choice — see review_candidates.
+    return {
+        **_pair_summary(lead),
+        "variant": lead.get("variant") or "",
+        "vehicleCount": vehicle_count(lead),
+        "modelMatches": not conflict,
+        "canLink": not conflict and free,
+        "linkBlockedReason": link_reason,
+        "canAddUnit": can_unit,
+        "addUnitBlockedReason": unit_reason,
+    }
+
+
+def review_candidates(leads, sold):
+    rows = [review_candidate(l, sold) for l in (leads or []) if (l or {}).get("leadId")]
+    rows.sort(key=lambda c: (not c["canLink"], not c["modelMatches"], not c["canAddUnit"],
+                             c["leadId"]))
+    if rows and rows[0]["canLink"]:
+        rows[0]["recommended"] = True
+    return rows
+
+
+def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None,
+                 candidates=None):
     sold_date = str((sold or {}).get("soldDate") or "").strip()[:10]
     holders = [_pair_summary(l) for l in (holder_leads or []) if l]
     keeper = resolve_chassis_holders(holder_leads or [])
@@ -3001,6 +3125,9 @@ def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None):
             h["leadId"] for h in holders
             if h.get("leadId") and h.get("leadId") != (keeper or {}).get("leadId")
         ],
+        # Needs review: the CRM files this chassis could belong to, with what
+        # staff may do on each (link / add as another unit).
+        "candidateLeads": review_candidates(candidates, sold) if candidates else [],
     }
 
 
@@ -3091,14 +3218,18 @@ def classify_oem_billing(sold_rows, leads):
         if len(uniq) > 1:
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
-                "more than one lead matches this Sold row"))
+                "more than one lead matches this Sold row",
+                candidates=list(uniq.values())))
             continue
         still.append(sold)
 
     def _empty_score(sold):
-        pool = _empty_unclaimed(_live_same_mobile(live, sold.get("mobile")), claimed)
+        def _pool(leads):
+            return [l for l in _empty_unclaimed(leads, claimed)
+                    if not sold_model_conflicts(sold, l)]
+        pool = _pool(_live_same_mobile(live, sold.get("mobile")))
         if not pool:
-            pool = _empty_unclaimed(_live_same_name(live, sold.get("customerName")), claimed)
+            pool = _pool(_live_same_name(live, sold.get("customerName")))
         if len(pool) != 1:
             return 0
         return sold_match_score(sold, pool[0]) or (
@@ -3111,14 +3242,18 @@ def classify_oem_billing(sold_rows, leads):
     for sold in still:
         chassis = _norm_chassis(sold.get("chassis"))
         same = _live_same_mobile(live, sold.get("mobile"))
-        empty = _empty_unclaimed(same, claimed)
+        # A lead for another model (repeat buyer: Storm delivered, Turbo booked)
+        # is never an empty slot for this chassis.
+        empty = [l for l in _empty_unclaimed(same, claimed)
+                 if not sold_model_conflicts(sold, l)]
         if len(empty) == 1:
             take(sold, empty[0], _bucket_for_matched_lead(empty[0]))
             continue
         if len(empty) > 1:
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
-                "same mobile, more than one lead without chassis"))
+                "same mobile, more than one lead without chassis",
+                candidates=empty))
             continue
         if same:
             if any((l or {}).get("leadId") in claimed for l in same):
@@ -3132,7 +3267,8 @@ def classify_oem_billing(sold_rows, leads):
                 continue
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
-                "same mobile already on a live lead"))
+                "same mobile already on a live lead",
+                candidates=same))
             continue
         leftover.append(sold)
 
@@ -3140,14 +3276,18 @@ def classify_oem_billing(sold_rows, leads):
     for sold in leftover:
         chassis = _norm_chassis(sold.get("chassis"))
         same = _live_same_name(live, sold.get("customerName"))
-        empty = _empty_unclaimed(same, claimed)
+        # A lead for another model (repeat buyer: Storm delivered, Turbo booked)
+        # is never an empty slot for this chassis.
+        empty = [l for l in _empty_unclaimed(same, claimed)
+                 if not sold_model_conflicts(sold, l)]
         if len(empty) == 1:
             take(sold, empty[0], _bucket_for_matched_lead(empty[0]))
             continue
         if len(empty) > 1:
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
-                "same name, more than one lead without chassis"))
+                "same name, more than one lead without chassis",
+                candidates=empty))
             continue
         if same:
             if any((l or {}).get("leadId") in claimed for l in same):
@@ -3161,7 +3301,8 @@ def classify_oem_billing(sold_rows, leads):
                 continue
             out.append(_billing_row(
                 sold, BUCKET_REVIEW, None,
-                "same name already on a live lead"))
+                "same name already on a live lead",
+                candidates=same))
             continue
         out.append(_billing_row(sold, BUCKET_UNMATCHED))
     return out

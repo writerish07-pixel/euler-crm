@@ -176,3 +176,51 @@ test("OEM billing load failure toasts instead of pretending billed files are zer
   await act(async () => { root.unmount(); });
   host.remove();
 });
+
+test("Needs review offers link / add-unit / new lead and explains blocked choices", async () => {
+  const reviewRow = {
+    chassis: "MD9EVDAD26K217971", invoiceNumber: "AF-122-I26270264", mobile: "9024073526",
+    customerName: "Mukesh sharma", model: "Turbo Max", variant: "Maxx (PV)",
+    soldDate: "2026-11-03", undated: false, bucket: "needs_review", leadId: "",
+    reviewReason: "more than one lead matches this Sold row",
+    candidateLeads: [
+      { leadId: "LD26000949", currentStatus: "Booked", model: "Turbo Max", variant: "Maxx (FB)",
+        chassis: "", vehicleCount: 1, modelMatches: true, canLink: true, linkBlockedReason: "",
+        canAddUnit: false, addUnitBlockedReason: "No chassis on this file yet — use Link", recommended: true },
+      { leadId: "LD26000062", currentStatus: "Delivered", model: "Storm", variant: "Storm LR (PV)",
+        chassis: "", vehicleCount: 1, modelMatches: false, canLink: false,
+        linkBlockedReason: "Different vehicle model from the OEM invoice",
+        canAddUnit: false, addUnitBlockedReason: "Delivered file — a repeat purchase stays a separate lead" },
+    ],
+  };
+  mockGet.mockImplementation((url) => {
+    if (String(url).includes("/oem-billing")) {
+      return Promise.resolve({ soldCount: 1, byDate: [], counts: { needs_review: 1 }, rows: [reviewRow], repair: {} });
+    }
+    return Promise.resolve({});
+  });
+  mockPost.mockResolvedValue({ ok: true, leadId: "LD26000949", vehicleCount: 1 });
+  const confirm = jest.spyOn(window, "confirm").mockReturnValue(true);
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<OemBilling />); });
+  await act(async () => { await Promise.resolve(); });
+  const q = (id) => host.querySelector(`[data-testid="${id}"]`);
+  expect(q("oem-review-MD9EVDAD26K217971")).toBeTruthy();
+  expect(host.textContent).toMatch(/Suggested/);
+  expect(host.textContent).toMatch(/Different vehicle from the OEM invoice/);
+  expect(host.textContent).toMatch(/repeat purchase stays a separate lead/);
+  expect(q("oem-review-link-MD9EVDAD26K217971-LD26000949").disabled).toBe(false);
+  expect(q("oem-review-link-MD9EVDAD26K217971-LD26000062").disabled).toBe(true);
+  expect(q("oem-review-unit-MD9EVDAD26K217971-LD26000062").disabled).toBe(true);
+  expect(q("oem-review-create-MD9EVDAD26K217971")).toBeTruthy();
+  await act(async () => { q("oem-review-link-MD9EVDAD26K217971-LD26000949").click(); });
+  await act(async () => { await Promise.resolve(); });
+  expect(mockPost).toHaveBeenCalledWith("/oem-billing/resolve",
+    { chassis: "MD9EVDAD26K217971", leadId: "LD26000949", action: "link" }, { retry: false });
+  expect(toast.success).toHaveBeenCalledWith("Linked to LD26000949");
+  confirm.mockRestore();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
