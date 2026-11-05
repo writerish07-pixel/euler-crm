@@ -7,6 +7,7 @@ the dealership.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 from datetime import datetime, timezone
@@ -16,8 +17,12 @@ from fastapi import HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 import auth as authmod
+import doc_compress
 
 MAX_BYTES = 8 * 1024 * 1024
+# Raw upload ceiling. Photos / PDFs above MAX_BYTES are accepted when compression
+# brings them under it; MAX_BYTES is what may actually be stored.
+RAW_MAX_BYTES = 25 * 1024 * 1024
 # Zip of Tally bills stays under Mongo's 16 MB BSON document limit.
 ZIP_MAX_BYTES = 12 * 1024 * 1024
 JPEG_MAGIC = b"\xff\xd8\xff"
@@ -341,10 +346,14 @@ async def read_upload(upload: UploadFile, *, kind: str = "") -> tuple[bytes, str
         raise HTTPException(422, "The file is empty.")
     ctype = _content_type(upload, kind=kind, data=data)
     limit = _max_bytes(ctype, kind)
-    if len(data) > limit:
+
+    def _too_big():
         if ctype == "application/zip":
-            raise HTTPException(422, "ZIP is over 12 MB. Send a smaller archive.")
-        raise HTTPException(422, "File is over 8 MB. Compress the photo or send a smaller PDF.")
+            return HTTPException(422, "ZIP is over 12 MB. Send a smaller archive.")
+        return HTTPException(422, "File is over 8 MB. Compress the photo or send a smaller PDF.")
+
+    if len(data) > (limit if ctype == "application/zip" else RAW_MAX_BYTES):
+        raise _too_big()
     if ctype == "application/zip" and not data.startswith(ZIP_MAGIC):
         raise HTTPException(422, "That file is not a ZIP. Export the Tally bills as a .zip.")
     filename = (upload.filename or "document").strip() or "document"
@@ -354,6 +363,11 @@ async def read_upload(upload: UploadFile, *, kind: str = "") -> tuple[bytes, str
         if ext and not filename.lower().endswith(ext):
             filename = f"oem-proof{ext}" if kind == EXTRA_SUPPORT_KIND else f"document{ext}"
     filename = re.sub(r"[^\w.\-]+", "_", filename)[:120]
+    # Files are stored in MongoDB, so every byte saved here is Atlas storage saved.
+    data, ctype, filename = await asyncio.to_thread(
+        doc_compress.compress_document, data, ctype, filename, kind)
+    if len(data) > limit:
+        raise _too_big()
     return data, ctype, filename
 
 
@@ -565,6 +579,8 @@ async def save_doc(db, *, next_id, user, kind: str, data: bytes, content_type: s
         "uploadedByName": (user or {}).get("name") or "",
         "uploadedAt": datetime.now(timezone.utc).isoformat(),
         "refundReceiptNumber": "",
+        # read_upload already ran doc_compress; the stored-file backfill skips it.
+        "compressedAt": datetime.now(timezone.utc).isoformat(),
         "data": Binary(data),
     }
     if len(snos) > 1:

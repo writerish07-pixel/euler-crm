@@ -164,3 +164,34 @@ test("fitImageForUpload leaves a large PDF alone even without a type", async () 
   const out = await fitImageForUpload(pdf);
   expect(out).toBe(pdf);
 });
+
+test("fitImageForUpload leaves an already-small photo alone", async () => {
+  const photo = new File([new Uint8Array(200 * 1024)], "pan.jpg", { type: "image/jpeg" });
+  expect(await fitImageForUpload(photo)).toBe(photo);
+});
+
+test("fitImageForUpload shrinks a 1 MB photo and never returns a bigger file", async () => {
+  const photo = new File([new Uint8Array(1024 * 1024)], "aadhaar.png", { type: "image/png" });
+  const bitmap = { width: 4000, height: 3000, close: jest.fn() };
+  const small = new Blob([new Uint8Array(150 * 1024)], { type: "image/jpeg" });
+  const origBitmap = global.createImageBitmap;
+  const origCreate = document.createElement.bind(document);
+  global.createImageBitmap = jest.fn().mockResolvedValue(bitmap);
+  const drawImage = jest.fn();
+  const spy = jest.spyOn(document, "createElement").mockImplementation((tag) => {
+    if (tag !== "canvas") return origCreate(tag);
+    return { width: 0, height: 0, getContext: () => ({ drawImage }), toBlob: (cb) => cb(small) };
+  });
+  try {
+    const out = await fitImageForUpload(photo);
+    expect(out).not.toBe(photo);
+    expect(out.type).toBe("image/jpeg");
+    expect(out.name).toBe("aadhaar.jpg");
+    expect(out.size).toBe(small.size);
+    // Long edge scaled to 1600 px.
+    expect(drawImage).toHaveBeenCalledWith(bitmap, 0, 0, 1600, 1200);
+  } finally {
+    spy.mockRestore();
+    global.createImageBitmap = origBitmap;
+  }
+});

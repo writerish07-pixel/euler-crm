@@ -34,6 +34,7 @@ import botspace as wa
 import exotel as exo
 import web_push
 import lead_docs
+import doc_compress
 import tally_pack
 import lead_gaps
 import tab_export
@@ -18344,6 +18345,47 @@ async def _migrate_insurance_rates():
         }})
         fixed += 1
     return fixed
+
+
+@api.post("/admin/compress-documents", dependencies=[Depends(owner_only)])
+async def compress_stored_documents(limit: int = 200, act=Depends(actor)):
+    """Shrink documents uploaded before compression existed. Idempotent.
+
+    Each row is marked `compressedAt` once processed (even when it could not be
+    made smaller), so repeated runs move on to the next batch. One file at a
+    time keeps memory flat; run again while `remaining` > 0.
+    """
+    limit = max(1, min(int(limit or 200), 500))
+    coll = db[lead_docs.COLLECTION]
+    pending = {"compressedAt": {"$exists": False}}
+    ids = [d["documentId"] async for d in coll.find(pending, {"documentId": 1, "_id": 0}).limit(limit)]
+    processed = shrunk = before_total = after_total = 0
+    for doc_id in ids:
+        doc = await coll.find_one({"documentId": doc_id})
+        if not doc:
+            continue
+        raw = bytes(doc.get("data") or b"")
+        ctype = doc.get("contentType") or ""
+        name = doc.get("filename") or "document"
+        packed, new_type, new_name = await asyncio.to_thread(
+            doc_compress.compress_document, raw, ctype, name, doc.get("kind") or "")
+        patch = {"compressedAt": now_iso()}
+        if len(packed) < len(raw):
+            patch.update({"data": lead_docs.Binary(packed), "size": len(packed),
+                          "contentType": new_type, "filename": new_name,
+                          "originalSize": len(raw)})
+            shrunk += 1
+        before_total += len(raw)
+        after_total += min(len(packed), len(raw))
+        await coll.update_one({"documentId": doc_id}, {"$set": patch})
+        processed += 1
+    remaining = await coll.count_documents(pending)
+    saved = before_total - after_total
+    await write_audit(act, "compress", "document",
+                      new={"processed": processed, "shrunk": shrunk, "bytesSaved": saved})
+    return {"ok": True, "processed": processed, "shrunk": shrunk,
+            "bytesBefore": before_total, "bytesAfter": after_total,
+            "bytesSaved": saved, "remaining": remaining}
 
 
 @api.post("/admin/migrate-insurance-rates", dependencies=[Depends(owner_only)])
