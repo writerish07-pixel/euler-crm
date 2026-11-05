@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { RefreshCcw } from "lucide-react";
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
@@ -137,19 +137,27 @@ export default function OemBilling() {
     }
   };
 
-  const resolveReview = async (r, action, leadId) => {
+  const resolveReview = async (r, action, leadId, manual = false) => {
+    const cand = (r.candidateLeads || []).find((c) => c.leadId === leadId) || {};
+    const wrong = cand.wrongChassis || {};
     const what = action === "create"
       ? `Create a NEW lead for ${r.model || "this vehicle"} ${r.chassis}? Use this for a separate purchase.`
-      : action === "add_unit"
+      : action === "replace"
+        ? `On ${leadId}, replace chassis ${wrong.chassis} (${wrong.model || "other model"}) with ${r.chassis} · invoice ${r.invoiceNumber || "—"}? The old number plate is cleared.`
+        : action === "add_unit"
         ? `Add ${r.model || "this vehicle"} ${r.chassis} as ANOTHER UNIT on ${leadId}? Only do this if it is the same order.`
         : `Link chassis ${r.chassis} (invoice ${r.invoiceNumber || "—"}) to ${leadId}?`;
     if (!window.confirm(what)) return;
     setResolving(r.chassis);
     try {
-      const res = await post("/oem-billing/resolve", { chassis: r.chassis, leadId, action }, { retry: false });
+      const body = { chassis: r.chassis, leadId, action };
+      if (manual) body.manual = true;
+      const res = await post("/oem-billing/resolve", body, { retry: false });
       toast.success(action === "create"
         ? `Created ${res.leadId}`
-        : action === "add_unit"
+        : action === "replace"
+          ? `Replaced ${res.removedChassis} with ${res.chassis} on ${res.leadId}`
+          : action === "add_unit"
           ? `Added as unit ${res.vehicleCount} on ${res.leadId}`
           : `Linked to ${res.leadId}`);
       load();
@@ -318,6 +326,10 @@ export default function OemBilling() {
                 <ReviewChoices row={r} busy={busy || resolving === r.chassis}
                   onResolve={resolveReview} onOpen={openLead} />
               )}
+              {canEditCommercials && (r.bucket === "needs_review" || r.bucket === "unmatched") && (
+                <ManualLeadLink row={r} busy={busy || resolving === r.chassis}
+                  onResolve={(row, action, leadId) => resolveReview(row, action, leadId, true)} />
+              )}
               {canEditCommercials && r.bucket === "unmatched" && (
                 <Button
                   variant="secondary"
@@ -412,7 +424,19 @@ export function ReviewChoices({ row, busy, onResolve, onOpen }) {
           {!c.modelMatches ? (
             <div className="text-[11px] text-rose-700 mt-0.5">Different vehicle from the OEM invoice ({row.model || "—"})</div>
           ) : null}
+          {c.canReplace && c.wrongChassis ? (
+            <div className="text-[11px] text-rose-700 mt-0.5" data-testid={`oem-review-wrong-${row.chassis}-${c.leadId}`}>
+              Holds {c.wrongChassis.chassis}, which OEM billed as {c.wrongChassis.model || "another model"}
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {c.canReplace ? (
+              <Button disabled={busy}
+                data-testid={`oem-review-replace-${row.chassis}-${c.leadId}`}
+                onClick={() => onResolve(row, "replace", c.leadId)}>
+                Replace wrong chassis
+              </Button>
+            ) : null}
             <Button variant="secondary" disabled={busy || !c.canLink} title={c.linkBlockedReason || ""}
               data-testid={`oem-review-link-${row.chassis}-${c.leadId}`}
               onClick={() => onResolve(row, "link", c.leadId)}>
@@ -436,6 +460,118 @@ export function ReviewChoices({ row, busy, onResolve, onOpen }) {
         onClick={() => onResolve(row, "create")}>
         Create new lead (separate purchase)
       </Button>
+    </div>
+  );
+}
+
+
+function isOpenLead(l) {
+  const status = String(l.currentStatus || "").toLowerCase();
+  const acct = String(l.accountStatus || "Active").toLowerCase();
+  if (l.dealCancelled || ["cancelled", "inactive", "archived", "closed"].includes(acct)) return false;
+  if (String(l.deliveryStatus || "").toLowerCase() === "delivered") return false;
+  return !(status === "delivered" || status.includes("close won"));
+}
+
+function leadChassis(l) {
+  const out = [];
+  [l.chassisNumber, ...((l.units || []).map((u) => u && u.chassisNumber))].forEach((c) => {
+    const v = String(c || "").trim();
+    if (v && !out.includes(v)) out.push(v);
+  });
+  return out;
+}
+
+/** Search any open CRM lead and put this OEM chassis on it — its KYC and
+ *  documents are already there, so no new lead is needed. */
+export function ManualLeadLink({ row, busy, onResolve }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [hits, setHits] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const seq = useRef(0);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const term = q.trim();
+    if (term.length < 3) { setHits([]); return undefined; }
+    const mine = ++seq.current;
+    const t = setTimeout(() => {
+      setSearching(true);
+      get("/leads", { q: term, limit: 25 })
+        .then((rows) => { if (mine === seq.current) setHits((rows || []).filter(isOpenLead).slice(0, 10)); })
+        .catch(() => { if (mine === seq.current) setHits([]); })
+        .finally(() => { if (mine === seq.current) setSearching(false); });
+    }, 300);
+    return () => clearTimeout(t);
+  }, [q, open]);
+
+  const start = () => {
+    setOpen(true);
+    setQ(row.mobile || row.customerName || "");
+  };
+
+  if (!open) {
+    return (
+      <Button variant="secondary" className="mt-2" disabled={busy}
+        data-testid={`oem-manual-open-${row.chassis}`} onClick={start}>
+        Link to an existing lead…
+      </Button>
+    );
+  }
+  return (
+    <div className="mt-2 rounded-lg ring-1 ring-inset ring-line p-2 bg-white min-w-[16rem]"
+      data-testid={`oem-manual-${row.chassis}`}>
+      <div className="text-[11px] text-ink-soft mb-1">
+        Open leads only. Search name, mobile or lead ID.
+      </div>
+      <input
+        className="w-full rounded-md ring-1 ring-inset ring-line px-2 py-1 text-sm"
+        value={q} onChange={(e) => setQ(e.target.value)} placeholder="Name / mobile / LD…"
+        data-testid={`oem-manual-q-${row.chassis}`} autoFocus />
+      {searching ? <div className="text-[11px] text-ink-faint mt-1">Searching…</div> : null}
+      {!searching && q.trim().length >= 3 && hits.length === 0 ? (
+        <div className="text-[11px] text-ink-faint mt-1">No open lead found</div>
+      ) : null}
+      <div className="space-y-1.5 mt-1.5">
+        {hits.map((l) => {
+          const held = leadChassis(l);
+          const mobileDiffers = row.mobile && l.mobile && String(l.mobile).slice(-10) !== String(row.mobile).slice(-10);
+          return (
+            <div key={l.leadId} className="rounded-md ring-1 ring-inset ring-line p-1.5"
+              data-testid={`oem-manual-hit-${row.chassis}-${l.leadId}`}>
+              <div className="text-xs font-semibold">{l.leadId} · {l.customerName || "—"}</div>
+              <div className="text-[11px] text-ink-soft">
+                {[l.interestedModel, l.variant].filter(Boolean).join(" · ") || "No vehicle"}
+                {` · ${l.currentStatus || "New"}`}
+                {held.length ? ` · has ${held.join(", ")}` : " · no chassis yet"}
+              </div>
+              {mobileDiffers ? (
+                <div className="text-[11px] text-amber-800">Mobile {l.mobile} differs from OEM invoice {row.mobile}</div>
+              ) : null}
+              <div className="flex flex-wrap gap-1.5 mt-1">
+                {held.length === 0 ? (
+                  <Button variant="secondary" disabled={busy}
+                    data-testid={`oem-manual-link-${row.chassis}-${l.leadId}`}
+                    onClick={() => onResolve(row, "link", l.leadId)}>
+                    Link here
+                  </Button>
+                ) : (
+                  <Button variant="secondary" disabled={busy}
+                    data-testid={`oem-manual-unit-${row.chassis}-${l.leadId}`}
+                    onClick={() => onResolve(row, "add_unit", l.leadId)}>
+                    Add as another unit
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <button type="button" className="text-[11px] text-ink-faint underline mt-1.5"
+        onClick={() => { setOpen(false); setHits([]); }}>
+        Cancel
+      </button>
     </div>
   );
 }

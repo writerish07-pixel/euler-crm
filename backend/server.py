@@ -12136,8 +12136,59 @@ class OemBillingResolveIn(BaseModel):
     chassis: str = ""
     leadId: str = ""
     # "link" = this chassis is that file's vehicle; "add_unit" = another vehicle
-    # on the same open order; "create" = a separate purchase, new lead.
+    # on the same open order; "replace" = the file holds another model's chassis
+    # by mistake, swap it for this one; "create" = a separate purchase, new lead.
     action: str = "link"
+    # True when staff searched the lead themselves instead of picking one of
+    # the suggestions — allowed on "Not in CRM" rows too.
+    manual: bool = False
+
+
+async def _replace_wrong_oem_chassis(lead, row, pick, act):
+    """Swap another model's chassis off this file for the billed one.
+
+    Only offered when OEM Sold says the held chassis is a different model and
+    this invoice is the file's own model. Delivered files are owner-only, like
+    every other delivery edit. The old values go into the audit log.
+    """
+    if not pick.get("canReplace") or not pick.get("wrongChassis"):
+        raise HTTPException(409, "This file does not hold a wrong-model chassis")
+    if _is_delivered(lead) and str((act or {}).get("role") or "").lower() != "owner":
+        raise HTTPException(403, "Delivered file — only the owner can change its chassis")
+    wrong = oem_sync._norm_chassis(pick["wrongChassis"].get("chassis"))
+    if oem_sync.lead_chassis_list(lead) != [wrong]:
+        raise HTTPException(409, "The chassis on this file changed — refresh OEM Billing")
+    chassis = oem_sync._norm_chassis(row.get("chassis"))
+    invoice = str(row.get("invoiceNumber") or "").strip()
+    # The old plate belongs to the other vehicle; keep none unless OEM sent one.
+    plate = str(row.get("numberPlate") or "").strip()
+    old = {k: lead.get(k) or "" for k in ("chassisNumber", "invoiceNumber", "numberPlate")}
+    patch = {"chassisNumber": chassis, "invoiceNumber": invoice, "numberPlate": plate,
+             "oemSoldSyncedAt": now_iso(), "lastUpdated": now_iso()}
+    units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
+    for u in units:
+        if oem_sync._norm_chassis(u.get("chassisNumber")) == wrong:
+            u.update({"chassisNumber": chassis, "invoiceNumber": invoice, "numberPlate": plate})
+            sold_date = str(row.get("soldDate") or "")[:10]
+            if sold_date:
+                u["soldDate"] = sold_date
+    if units:
+        patch["units"] = units
+    sku_patch = oem_sync.fill_lead_skus({**lead, **patch}, [row])
+    if sku_patch:
+        patch.update(sku_patch)
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    await db.deliveries.update_one(
+        {"leadId": lead["leadId"]},
+        {"$set": {k: patch[k] for k in ("chassisNumber", "invoiceNumber", "numberPlate")}})
+    updated = await db.leads.find_one({"leadId": lead["leadId"]})
+    await sheet_sync("leads", clean(dict(updated)))
+    await write_audit(act, "resolve", "oem-billing", leadId=lead["leadId"], old=old,
+                      new={"chassis": chassis, "invoiceNumber": invoice, "numberPlate": plate,
+                           "action": "replace",
+                           "removedModel": pick["wrongChassis"].get("model") or ""})
+    return {"ok": True, "leadId": lead["leadId"], "chassis": chassis, "action": "replace",
+            "removedChassis": wrong, "vehicleCount": oem_sync.vehicle_count(updated)}
 
 
 @api.post("/oem-billing/resolve", dependencies=[Depends(deal_desk_only)])
@@ -12152,8 +12203,8 @@ async def resolve_oem_billing_review(body: OemBillingResolveIn, act=Depends(acto
     chassis = oem_sync._norm_chassis(body.chassis)
     lead_id = str(body.leadId or "").strip()
     action = str(body.action or "").strip().lower()
-    if action not in ("link", "add_unit", "create"):
-        raise HTTPException(400, "Choose link, add_unit or create")
+    if action not in ("link", "add_unit", "create", "replace"):
+        raise HTTPException(400, "Choose link, add_unit, replace or create")
     if not chassis or (action != "create" and not lead_id):
         raise HTTPException(400, "Chassis and lead are required")
     sold = [r async for r in db.oem_sold.find({})]
@@ -12162,9 +12213,13 @@ async def resolve_oem_billing_review(body: OemBillingResolveIn, act=Depends(acto
     row = next((r for r in classified if oem_sync._norm_chassis(r.get("chassis")) == chassis), None)
     if not row:
         raise HTTPException(404, "That chassis is not on OEM Sold")
-    if row.get("bucket") != oem_sync.BUCKET_REVIEW:
+    open_buckets = (oem_sync.BUCKET_REVIEW, oem_sync.BUCKET_UNMATCHED)
+    if row.get("bucket") not in (open_buckets if body.manual else (oem_sync.BUCKET_REVIEW,)):
         raise HTTPException(409, "That chassis no longer needs review — refresh OEM Billing")
     if action == "create":
+        if row.get("bucket") != oem_sync.BUCKET_REVIEW:
+            # "Not in CRM" rows keep using Create lead and its split-files check.
+            raise HTTPException(409, "Use Create lead on this row")
         # Repeat purchase: its own Lead Register file, KYC copied from the sibling.
         created = await _insert_oem_billing_lead(row, sold)
         if not created:
@@ -12174,10 +12229,23 @@ async def resolve_oem_billing_review(body: OemBillingResolveIn, act=Depends(acto
         return {"ok": True, "leadId": created.get("leadId"), "chassis": chassis,
                 "action": "create", "vehicleCount": 1}
     pick = next((c for c in row.get("candidateLeads") or [] if c.get("leadId") == lead_id), None)
-    if not pick:
-        raise HTTPException(409, f"{lead_id} is not one of the leads this chassis could belong to")
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, act)
+    if not pick and body.manual:
+        # Staff chose this file by hand (its KYC / documents are already there).
+        # Same rules as a suggested lead, worked out for this file now.
+        if oem_sync._lead_is_cancelled(lead):
+            raise HTTPException(409, "Cancelled file — pick an open lead")
+        pick = oem_sync.review_candidate(lead, row)
+    if pick and not pick.get("modelMatches") and action in ("link", "replace"):
+        raise HTTPException(
+            409, f"{lead_id} is a {lead.get('interestedModel') or 'different vehicle'} — "
+                 f"OEM billed this chassis as {row.get('model') or 'another model'}. "
+                 f"Fix the lead's model first, or pick the right lead.")
+    if not pick:
+        raise HTTPException(409, f"{lead_id} is not one of the leads this chassis could belong to")
+    if action == "replace":
+        return await _replace_wrong_oem_chassis(lead, row, pick, act)
     if action == "link":
         if not pick.get("canLink"):
             raise HTTPException(409, pick.get("linkBlockedReason") or "Cannot link this chassis here")
@@ -12190,11 +12258,31 @@ async def resolve_oem_billing_review(body: OemBillingResolveIn, act=Depends(acto
     if not live or chassis not in set(oem_sync.lead_chassis_list(live)):
         raise HTTPException(409, "Could not put this chassis on the lead — nothing was changed")
     await write_audit(act, "resolve", "oem-billing", leadId=lead_id,
-                      new={"chassis": chassis, "action": action,
+                      new={"chassis": chassis, "action": action, "manual": bool(body.manual),
                            "invoiceNumber": row.get("invoiceNumber") or "",
                            "vehicleCount": oem_sync.vehicle_count(live)})
     return {"ok": True, "leadId": lead_id, "chassis": chassis, "action": action,
             "vehicleCount": oem_sync.vehicle_count(live)}
+
+
+def _split_files_message(row, leads):
+    """Name the files instead of only refusing — the fix is on one of them."""
+    same = oem_sync._live_same_mobile(leads, (row or {}).get("mobile")) or \
+        oem_sync._live_same_name(leads, (row or {}).get("customerName"))
+    files = []
+    for l in same[:4]:
+        bits = [l.get("interestedModel") or "", _lead_crm_status_label(l)]
+        held = oem_sync.lead_chassis_list(l)
+        bits.append(f"chassis {held[0]}" if held else "no chassis")
+        files.append(f"{l.get('leadId')} ({' · '.join(b for b in bits if b)})")
+    who = ", ".join(files) or "more than one file"
+    return (f"This customer already has {who}. Do not create another lead — open the file "
+            f"for this {row.get('model') or 'vehicle'}, fix its chassis on the Delivery tab, "
+            f"then Refresh.")
+
+
+def _lead_crm_status_label(lead):
+    return str((lead or {}).get("currentStatus") or "").strip()
 
 
 @api.post("/oem-billing/create", dependencies=[Depends(deal_desk_only)])
@@ -12217,7 +12305,7 @@ async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
         raise HTTPException(409, "That chassis already matches a CRM lead")
     target = _pack_target_for_sold(row, leads, sold, allow_delivered=True)
     if target is _PACK_DO_NOT_CREATE:
-        raise HTTPException(409, "This customer already has split files — do not mint another")
+        raise HTTPException(409, _split_files_message(row, leads))
     if target:
         live = await _connect_oem_sold(target, row)
         if live and chassis in set(oem_sync.lead_chassis_list(live)):
