@@ -8544,16 +8544,23 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
     # A single-vehicle file keeps a copy of its vehicle on units[0], and price
     # preview / scheme rules read that copy first. Move it to the new model /
     # variant too, or the scheme and deal sheet stay on the old vehicle.
-    if patch and not oem_sync.is_same_order_pack(lead):
+    # This runs even when Price Master has no row for the new vehicle (empty
+    # patch): the unit copy must still stop pointing at the old one.
+    if not oem_sync.is_same_order_pack(lead):
         units = list(lead.get("units") or [])
         if len(units) == 1 and isinstance(units[0], dict):
             merged = {**lead, **patch}
             u0 = dict(units[0])
-            u0["model"] = merged.get("interestedModel") or ""
-            u0["variant"] = merged.get("variant") or ""
-            _copy_unit_commercials(merged, u0)
-            units[0] = u0
-            patch["units"] = units
+            new_model = merged.get("interestedModel") or ""
+            new_variant = merged.get("variant") or ""
+            moved = (str(u0.get("model") or "") != new_model
+                     or str(u0.get("variant") or "") != new_variant)
+            if patch or moved:
+                u0["model"] = new_model
+                u0["variant"] = new_variant
+                _copy_unit_commercials(merged, u0)
+                units[0] = u0
+                patch["units"] = units
 
     if patch:
         patch["lastUpdated"] = now_iso()
