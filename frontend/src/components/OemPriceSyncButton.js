@@ -16,8 +16,14 @@ export default function OemPriceSyncButton({ onDone, testId = "oem-price-sync" }
     try {
       const r = await post("/integrations/coulson/sync", {});
       if (r.ok) {
+        const added = Number(r.liveModelsAdded || 0);
+        const schemes = Number(r.schemesAdded || 0);
+        const extra = [
+          added ? `${added} new model${added === 1 ? "" : "s"}` : "",
+          schemes ? `${schemes} scheme${schemes === 1 ? "" : "s"}` : "",
+        ].filter(Boolean).join(" · ");
         toast.success(
-          `Price Master updated from OEM · ${r.pricesUpdated || 0} list prices · ${r.inventoryCount || 0} in yard`,
+          `Price Master updated from OEM · ${r.pricesUpdated || 0} list prices · ${r.inventoryCount || 0} in yard${extra ? ` · ${extra}` : ""}`,
         );
       } else {
         toast.error(r.reason === "not_configured"

@@ -1137,8 +1137,14 @@ function coulsonSyncOkToast(r) {
   const n = ids.updated || 0;
   const m = ids.mobilesUpdated || 0;
   const extra = m ? ` · ${m} mobiles` : "";
+  const added = Number(r.liveModelsAdded || 0);
+  const schemes = Number(r.schemesAdded || 0);
+  const catalog = [
+    added ? `${added} new model${added === 1 ? "" : "s"}` : "",
+    schemes ? `${schemes} scheme${schemes === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(" · ");
   toast.success(
-    `Pulled ${r.inventoryCount || 0} in yard · ${r.soldCount || 0} billed · ${r.receivedCount || 0} received · ${r.pricesUpdated || 0} prices · ${n} leads chassis/invoice${extra}`,
+    `Pulled ${r.inventoryCount || 0} in yard · ${r.soldCount || 0} billed · ${r.receivedCount || 0} received · ${r.pricesUpdated || 0} prices · ${n} leads chassis/invoice${extra}${catalog ? ` · ${catalog}` : ""}`,
   );
 }
 
@@ -1408,6 +1414,9 @@ function CoulsonCard() {
       {cfg?.lastSyncAt && (
         <div className="text-xs text-ink-faint mt-3">
           Last sync {cfg.lastSyncOk === false ? "failed" : "ok"} · {cfg.inventoryCount || 0} in yard
+          {cfg.liveModelsAdded ? ` · ${cfg.liveModelsAdded} new models` : ""}
+          {cfg.schemesAdded ? ` · ${cfg.schemesAdded} schemes` : ""}
+          {cfg.oemReadsFailed ? ` · ${cfg.oemReadsOk || 0} OEM reads ok, ${cfg.oemReadsFailed} failed` : ""}
           {cfg.lastError ? ` · ${cfg.lastError}` : ""}
         </div>
       )}
