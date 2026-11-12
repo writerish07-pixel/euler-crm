@@ -341,7 +341,8 @@ def sku_for_oem_row(oem: dict):
 def jaipur_price(oem: dict):
     """Coulson invoice 'Base Price' for this dealer (Jaipur = non-Delhi)."""
     for key in ("showroom_price_non_delhi", "showroom_price_delhi",
-                "ex_showroom_price", "base_price", "showroom_price"):
+                "ex_showroom_price", "base_price", "showroom_price",
+                "invoice_amount"):
         v = (oem or {}).get(key)
         if v in (None, ""):
             continue

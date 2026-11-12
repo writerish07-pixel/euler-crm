@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover — stdlib on 3.9+
     IST = timezone(timedelta(hours=5, minutes=30))
 
 import oem_catalog as cat
+import oem_live_catalog as oem_live
 import coulson as coulson_client
 import commercial as ce
 
@@ -143,6 +144,12 @@ async def apply_catalog(db, *, overwrite_ex_showroom=True):
     return {"added": added, "updated": updated, "deactivated": deactivated,
             "migratedLeads": migrated_leads, "catalogSize": len(cat.CATALOG),
             "changedPriceIds": changed_ids}
+
+
+def _is_coulson_session(token) -> bool:
+    """A saved Coulson login is a JWT. Tests use a short stand-in and must not call Euler."""
+    parts = str(token or "").split(".")
+    return len(parts) == 3 and all(len(part) >= 8 for part in parts)
 
 
 def looks_masked_username(username):
@@ -410,6 +417,23 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         if abs(old_ex - float(price or 0)) > 0.005:
             changed_ids.append(existing["priceId"])
 
+    live_import = {
+        "liveModelsAdded": 0, "liveModelsUpdated": 0, "unpricedModels": 0,
+        "schemesAdded": 0, "schemesUpdated": 0, "schemesKept": 0,
+        "oemReadsOk": 0, "oemReadsFailed": 0,
+    }
+    if _is_coulson_session(token):
+        try:
+            desk = await asyncio.to_thread(coulson_client.fetch_dealer_desk, token)
+            planned = oem_live.plan_live_import(oem_models, desk)
+            if planned.get("schemeQueries"):
+                extra_schemes = await asyncio.to_thread(
+                    coulson_client.fetch_scheme_amounts, token, planned["schemeQueries"])
+                planned["schemeItems"] = list(planned.get("schemeItems") or []) + list(extra_schemes or [])
+            live_import = await oem_live.apply_live_import(db, planned)
+        except Exception:
+            log.exception("OEM model catalog and scheme import failed")
+
     inv_docs = []
     oem_by_id = {m.get("id"): m for m in oem_models if m.get("id")}
     for v in vehicles:
@@ -495,6 +519,14 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         "oemModelCount": len(oem_models),
         "pricesUpdated": prices_updated,
         "unmatchedOemSkus": unmatched_oem,
+        "liveModelsAdded": live_import.get("liveModelsAdded") or 0,
+        "liveModelsUpdated": live_import.get("liveModelsUpdated") or 0,
+        "unpricedModels": live_import.get("unpricedModels") or 0,
+        "schemesAdded": live_import.get("schemesAdded") or 0,
+        "schemesUpdated": live_import.get("schemesUpdated") or 0,
+        "schemesKept": live_import.get("schemesKept") or 0,
+        "oemReadsOk": live_import.get("oemReadsOk") or 0,
+        "oemReadsFailed": live_import.get("oemReadsFailed") or 0,
         "credentialSource": src,
         "changedPriceIds": list(dict.fromkeys(
             (catalog_result.get("changedPriceIds") or []) + changed_ids)),

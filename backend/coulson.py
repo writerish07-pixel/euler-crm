@@ -304,11 +304,11 @@ def _bearer(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def get_json(token: str, path: str, params: Optional[dict] = None):
+def get_json(token: str, path: str, params: Optional[dict] = None, timeout=None):
     url = f"{api_url()}/{path.lstrip('/')}"
     if params:
         url += "?" + urllib.parse.urlencode(params, doseq=True)
-    status, payload = _request(url, headers=_bearer(token))
+    status, payload = _request(url, headers=_bearer(token), timeout=timeout)
     if not payload.get("success", True) and status >= 400:
         raise CoulsonError(payload.get("message") or "Coulson request failed", status=status)
     return payload
@@ -318,6 +318,138 @@ def fetch_sap_models(token: str):
     payload = get_json(token, "sap-vehicle-models")
     data = payload.get("data") or []
     return data if isinstance(data, list) else []
+
+
+def _payload_data(payload):
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("data")
+
+
+def showroom_id_of(row) -> str:
+    if isinstance(row, str):
+        return row.strip()
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("id") or row.get("showroom_id") or row.get("showroomId") or "").strip()
+
+
+def _read(token, name, path, params=None, timeout=25):
+    """One dealer-desk GET. A miss is recorded; it does not stop the sync."""
+    try:
+        payload = get_json(token, path, params, timeout=timeout)
+    except CoulsonError as e:
+        return None, {
+            "name": name, "path": path, "ok": False,
+            "status": int(getattr(e, "status", 0) or 0),
+            "detail": str(e)[:180],
+        }
+    return payload, {"name": name, "path": path, "ok": True, "status": 200, "detail": ""}
+
+
+def fetch_dealer_desk(token: str) -> dict:
+    """Read the upgraded dealer screens: order catalog, model list, schemes.
+
+    These are the routes the Nov 2026 Coulson SPA uses for Vehicle Orders
+    (`sap-vehicle-models/catalog`) and Dealer Scheme (`dealer/scheme`,
+    `dealer/scheme-package`). Service, warranty, and workshop routes are not called.
+    """
+    checks = []
+    showrooms_payload, check = _read(token, "Showrooms", "allowed-showrooms")
+    checks.append(check)
+    showrooms = _payload_data(showrooms_payload)
+    showroom_id = ""
+    if isinstance(showrooms, list):
+        for row in showrooms:
+            showroom_id = showroom_id_of(row)
+            if showroom_id:
+                break
+    elif isinstance(showrooms, dict):
+        showroom_id = showroom_id_of(showrooms)
+    catalog_params = {"showroom_id": showroom_id} if showroom_id else None
+    catalog_payload, check = _read(
+        token, "Order catalog", "sap-vehicle-models/catalog", catalog_params)
+    checks.append(check)
+    meta_payload, check = _read(token, "Model list", "sap-vehicle-models/metadata")
+    checks.append(check)
+    variant_payload, check = _read(token, "Model variants", "model-variant")
+    checks.append(check)
+    _, check = _read(token, "Variant list", "model-variant/list")
+    checks.append(check)
+    _, check = _read(token, "Model facets", "sap-vehicle-models/facets")
+    checks.append(check)
+    scheme_payload, check = _read(
+        token, "Schemes", "dealer/scheme", {"scheme_list": "true"})
+    checks.append(check)
+    package_payload, check = _read(token, "Scheme packages", "dealer/scheme-package")
+    checks.append(check)
+    if showroom_id:
+        _, check = _read(
+            token, "Invoices with schemes", "invoices-with-schemes",
+            {"showroom_id": showroom_id})
+        checks.append(check)
+    else:
+        checks.append({
+            "name": "Invoices with schemes", "path": "invoices-with-schemes",
+            "ok": False, "status": 0, "detail": "No showroom on this login",
+        })
+    _, check = _read(
+        token, "Vehicle orders", "dealer/vehicle-order",
+        {"limit": "1", "offset": "0"})
+    checks.append(check)
+    _, check = _read(
+        token, "Vehicle bookings", "dealer/vehicle-booking",
+        {"limit": "1", "offset": "0"})
+    checks.append(check)
+    _, check = _read(token, "Showroom profile", "showrooms/profile")
+    checks.append(check)
+    catalog = _payload_data(catalog_payload)
+    metadata = _payload_data(meta_payload)
+    variants = _payload_data(variant_payload)
+    schemes = _payload_data(scheme_payload)
+    packages = _payload_data(package_payload)
+    if isinstance(packages, dict):
+        packages = [packages]
+    return {
+        "showroomId": showroom_id,
+        "catalog": catalog if isinstance(catalog, (list, dict)) else [],
+        "metadata": metadata if isinstance(metadata, (dict, list)) else {},
+        "variants": variants if isinstance(variants, list) else [],
+        "schemes": schemes if isinstance(schemes, list) else [],
+        "packages": packages if isinstance(packages, list) else [],
+        "checks": checks,
+    }
+
+
+def fetch_scheme_amounts(token: str, pairs) -> list:
+    """Schemes for specific models when the scheme list has names but no rupees."""
+    out = []
+    seen = set()
+    for model, variant in list(pairs or [])[:25]:
+        model = str(model or "").strip()
+        variant = str(variant or "").strip()
+        if not model or (model, variant) in seen:
+            continue
+        seen.add((model, variant))
+        params = {"model": model}
+        if variant:
+            params["variant"] = variant
+        try:
+            payload = get_json(token, "dealer/scheme", params, timeout=25)
+        except CoulsonError:
+            continue
+        data = _payload_data(payload)
+        if not isinstance(data, list):
+            continue
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            stamped = dict(item)
+            stamped.setdefault("model", model)
+            if variant:
+                stamped.setdefault("variant", variant)
+            out.append(stamped)
+    return out
 
 
 def _row_page_key(row):
@@ -448,15 +580,17 @@ def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
 # GET /api/v1/dealer/invoice/vehicle — Created and Cancelled rows together.
 #
 # Oct 2026 Coulson SPA (dealer login) vs Euler:
-#   CONNECTED — sap-vehicle-models (Price Master), PRESENT (Yard),
-#     IN_TRANSIT, SOLD + Invoice List Created, debit-note claims (line
-#     items + header Linked Vehicles chassis).
+#   CONNECTED — sap-vehicle-models (Price Master), the dealer order catalog
+#     and model list (new models and variants), dealer/scheme when Euler
+#     sends a rupee amount, PRESENT (Yard), IN_TRANSIT, SOLD + Invoice List
+#     Created, debit-note claims (line items + header Linked Vehicles chassis).
 #   THIS SYNC — Invoice List CANCELLED (drop those chassis from leads),
 #     BOOKED / PILOT / DEMO as held (not sellable yard).
 #   NOT YET — Create Quotation, Quotation List, Stock Transfer, Vehicle
-#     E-POD, Vehicle Orders, KYC amendments, Inbound/Prime tickets,
-#     Euler Assured, AMC/EW offers, Warranty Parts, Analytics,
-#     Announcements, Complaint Management, Downloads.
+#     E-POD, Vehicle Order documents (the order catalog of models is read),
+#     KYC amendments, Inbound/Prime tickets, Euler Assured, AMC/EW offers,
+#     Warranty Parts, service Analytics, Announcements, Complaint Management,
+#     Downloads. Workshop and warranty routes stay out of this sales sync.
 SOLD_INVENTORY_STATUSES = ("SOLD",)
 TRANSIT_INVENTORY_STATUSES = ("IN_TRANSIT",)
 # Vehicle Inventory left filter (Oct 2026 SPA `cDt`): Present, In Transit,

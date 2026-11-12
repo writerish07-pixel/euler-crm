@@ -13211,6 +13211,10 @@ async def _coulson_status_payload(viewer=None):
         "inventoryCount": count,
         "catalogSize": cat_doc.get("catalogSize") or len(oem_cat.CATALOG),
         "pricesUpdated": doc.get("pricesUpdated"),
+        "liveModelsAdded": doc.get("liveModelsAdded") or 0,
+        "schemesAdded": doc.get("schemesAdded") or 0,
+        "oemReadsOk": doc.get("oemReadsOk") or 0,
+        "oemReadsFailed": doc.get("oemReadsFailed") or 0,
         # A claim mirror that is short is worse than one that is missing: it looks
         # like an answer. Say so on the same card that reports the yard sync.
         "claimsMirrored": doc.get("claimsMirrored"),
