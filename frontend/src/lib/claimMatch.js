@@ -218,6 +218,34 @@ export function claimsHref({ leadId } = {}) {
   return qs ? `/claims?${qs}` : "/claims";
 }
 
+/** Tick = Euler is asking. Cross = no line is in query. This is not a file-attached mark. */
+export function QueryMark({ on, remark, explain = false }) {
+  const asking = !!on;
+  const title = asking
+    ? "Euler is asking. Fix the description, amount, or chassis in the OEM app. Upload a file there only if the remark asks for one."
+    : "No line is in query. This cross does not mean a file was attached.";
+  return (
+    <div className="flex flex-col items-start gap-0.5" data-testid={asking ? "in-query-yes" : "in-query-no"} title={title}>
+      <span className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ring-1 ring-inset ${
+        asking ? "bg-orange-50 text-orange-800 ring-orange-600/30" : "bg-zinc-100 text-zinc-500 ring-zinc-400/30"
+      }`}>
+        <span aria-hidden="true">{asking ? "✓" : "✕"}</span>
+        {asking ? "Euler is asking" : "No query"}
+      </span>
+      {asking && remark ? (
+        <span className="text-[10px] text-orange-800 max-w-[180px] leading-tight whitespace-normal">{remark}</span>
+      ) : null}
+      {explain ? (
+        <span className="text-[10px] text-ink-faint max-w-[240px] leading-tight whitespace-normal">
+          {asking
+            ? "A tick means Euler is asking about the description, amount, or chassis. Upload a document in the OEM app only when the remark asks for one. Answer there. This app does not send the reply."
+            : "A cross means no line is in query. It does not mean a file was attached."}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function DocFlag({ yes, url, count, lines, documented }) {
   const on = !!yes;
   const n = Number(count) || 0;

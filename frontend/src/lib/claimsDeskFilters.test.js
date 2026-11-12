@@ -56,3 +56,12 @@ test("euler list keeps settled claims and leaves missing chassis for its own job
   expect(eulerRowVisible(settled, { view: "euler", chassis: "OTHER" })).toBe(false);
   expect(eulerRowVisible(missing, { view: "euler", q: "no vehicle" })).toBe(true);
 });
+
+test("euler is asking shows only claims with the in-query tick", () => {
+  const asking = { ...settled, claimNumber: "DN-ASK", hasInQuery: true, queryRemark: "Upload RC" };
+  const quiet = { ...settled, claimNumber: "DN-QUIET", hasInQuery: false };
+  expect(eulerRowVisible(asking, { view: "euler", job: "in_query" })).toBe(true);
+  expect(eulerRowVisible(quiet, { view: "euler", job: "in_query" })).toBe(false);
+  expect(eulerRowVisible(asking, { view: "euler" })).toBe(true);
+  expect(eulerRowVisible(asking, { view: "euler", q: "upload rc" })).toBe(true);
+});

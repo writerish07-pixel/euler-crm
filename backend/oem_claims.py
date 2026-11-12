@@ -529,6 +529,41 @@ def _item_document_count(item):
     return max(counts) if counts else 0
 
 
+def _truthy_flag(value):
+    """Coulson's list column `has_in_query`. Only a real true counts.
+
+    The dealer app paints a red tick when this is true (at least one line is
+    In Query) and a grey cross otherwise. A cross is not "a file was attached".
+    """
+    if value is True or value == 1:
+        return True
+    return isinstance(value, str) and value.strip().lower() == "true"
+
+
+def _query_remark(item):
+    """Latest RAISE_QUERY remark. History itself is not stored."""
+    if not isinstance(item, dict):
+        return ""
+    history = item.get("history")
+    if not isinstance(history, list):
+        return ""
+    for entry in reversed(history):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("action") or "").strip() != "RAISE_QUERY":
+            continue
+        return str(entry.get("remarks") or "").strip()
+    return ""
+
+
+def _line_in_query(line):
+    if not isinstance(line, dict):
+        return False
+    if line.get("inQuery") is True:
+        return True
+    return str(line.get("status") or "").strip() == "In Query"
+
+
 def _first_text(*vals):
     for v in vals:
         s = str(v or "").strip()
@@ -594,6 +629,8 @@ def normalise_line_item(item):
         item.get("approved_by"), item.get("approvedBy"), item.get("approved_by_name"),
     )
     chassis_list = _line_chassis_list(item)
+    status = str(item.get("status") or "").strip()
+    in_query = status == "In Query"
     return {
         "lineId": str(item.get("id") or item.get("line_id") or item.get("lineId") or ""),
         "claimType": claim_type,
@@ -605,7 +642,9 @@ def normalise_line_item(item):
         "sourceInvoiceNumber": _line_invoice(item),
         "model": str(item.get("model") or "").strip(),
         "variant": str(item.get("variant") or "").strip(),
-        "status": str(item.get("status") or "").strip(),
+        "status": status,
+        "inQuery": in_query,
+        "queryRemark": _query_remark(item) if in_query else "",
         "baseAmount": round2(item.get("base_amount") or item.get("baseAmount")),
         "totalAmount": round2(item.get("total_amount") or item.get("totalAmount")),
         "rejectedBy": str(item.get("rejected_by") or item.get("rejectedBy") or "") or "",
@@ -794,6 +833,11 @@ def _lines_have_vehicle(lines):
         for li in (lines or []) if isinstance(li, dict))
 
 
+def _lines_have_chassis(lines):
+    """A source invoice is not a chassis. Euler attaches the chassis later."""
+    return any(line_chassis_list(li) for li in (lines or []) if isinstance(li, dict))
+
+
 def claim_lines(doc):
     return [li for li in (doc.get("lineItems") or []) if isinstance(li, dict)]
 
@@ -831,6 +875,34 @@ def stamp_document_flag(doc):
     return doc
 
 
+def stamp_query_flag(doc, from_journey=False):
+    """In Query is Euler asking a question. It is not the Docs column.
+
+    A journey that names line statuses is fresher than the list tick. If those
+    lines have no status at all, leave the list flag alone. The remark is the
+    latest RAISE_QUERY note.
+    """
+    doc = doc if isinstance(doc, dict) else {}
+    lines = claim_lines(doc)
+    queried = [li for li in lines if _line_in_query(li)]
+    doc["queryLineCount"] = len(queried)
+    statuses = [str(li.get("status") or "").strip() for li in lines]
+    remark = next(
+        (str(li.get("queryRemark") or "").strip() for li in queried
+         if str(li.get("queryRemark") or "").strip()),
+        "",
+    )
+    if from_journey and lines and any(statuses):
+        doc["hasInQuery"] = bool(queried)
+        doc["queryRemark"] = remark
+        doc["queryCheckedAt"] = now_iso()
+    elif queried:
+        doc["hasInQuery"] = True
+        if remark:
+            doc["queryRemark"] = remark
+    return doc
+
+
 def claim_doc_from_row(row):
     """The list row. Chassis usually lives only on the journey, but some list
     payloads already include line items — keep them so a failed journey does not
@@ -856,6 +928,7 @@ def claim_doc_from_row(row):
         "createdDate": date_ist(created),
         "claimAgeingDays": 0 if is_terminal(status) else days_since(created),
         "terminal": is_terminal(status),
+        "hasInQuery": _truthy_flag(row.get("has_in_query") if isinstance(row, dict) else None),
         "syncedAt": now_iso(),
     }
     lines = _normalise_lines(coulson_client.pick_line_items(row if isinstance(row, dict) else {}))
@@ -864,7 +937,7 @@ def claim_doc_from_row(row):
     apply_linked_vehicles(lines, row if isinstance(row, dict) else {})
     if lines:
         doc["lineItems"] = lines
-    return stamp_document_flag(doc)
+    return stamp_query_flag(stamp_document_flag(doc))
 
 
 def merge_detail(doc, detail):
@@ -884,8 +957,9 @@ def merge_detail(doc, detail):
         apply_linked_vehicles(lines, header)
         apply_linked_vehicles(lines, detail)
         doc["lineItems"] = lines
-        # Journey is where the SPA reads `documents[]` for the Docs column.
+        # Journey is where the Docs column and a later chassis both appear.
         doc["docsCheckedAt"] = now_iso()
+        doc["chassisCheckedAt"] = now_iso()
     if isinstance(detail.get("timeline"), dict):
         doc.update(stage_progress(detail.get("timeline")))
     if header:
@@ -908,7 +982,10 @@ def merge_detail(doc, detail):
         pdf = str(header.get("debit_note_s3_link") or header.get("debitNoteS3Link") or "")
         if pdf:
             doc["claimDocumentUrl"] = pdf
-    return stamp_document_flag(doc)
+    doc = stamp_document_flag(doc)
+    if lines:
+        doc = stamp_query_flag(doc, from_journey=True)
+    return doc
 
 
 def needs_detail(existing, row_doc):
@@ -938,6 +1015,21 @@ def needs_detail(existing, row_doc):
             row_doc.get("status") if isinstance(row_doc, dict) else "") or ""
         if not is_terminal(status):
             return True
+    # An invoice alone used to count as "has a vehicle", so a chassis Euler
+    # attached later never landed and never joined a lead. Ask once. A check
+    # that comes back with no chassis stops the loop until status, amount, or
+    # the In Query tick changes.
+    status = existing.get("status") or (
+        row_doc.get("status") if isinstance(row_doc, dict) else "") or ""
+    if (not is_terminal(status)
+            and not _lines_have_chassis(existing.get("lineItems"))
+            and not existing.get("chassisCheckedAt")):
+        return True
+    row_flag = bool(row_doc.get("hasInQuery")) if isinstance(row_doc, dict) else False
+    if bool(existing.get("hasInQuery")) != row_flag:
+        return True
+    if row_flag and not existing.get("queryCheckedAt"):
+        return True
     return False
 
 
@@ -1195,6 +1287,48 @@ async def link_claim_lines(db, doc, index=None):
     return doc
 
 
+async def release_claims_on_removed_chassis(db, lead_id, removed_chassis):
+    """Drop this lead from claim lines that were joined by a chassis Replace removed.
+
+    The money on the claim stays. A manual join of that same chassis is dropped
+    too, because it was only possible while this file held the other vehicle.
+    Lines for a different chassis on this lead are left alone. Linking then
+    stamps whoever holds the removed chassis now.
+    """
+    lead_id = str(lead_id or "").strip()
+    removed = oem_sync._norm_chassis(removed_chassis)
+    if not lead_id or not removed:
+        return 0
+    index = await build_lead_index(db)
+    released = 0
+    async for row in db[CLAIMS_COLLECTION].find({"leadIds": lead_id}):
+        coerce_line_items(row)
+        touched = False
+        for line in row.get("lineItems") or []:
+            if removed not in line_chassis_list(line):
+                continue
+            if lead_id not in line_lead_ids(line):
+                continue
+            _drop_line_lead(line, lead_id)
+            if not line_lead_ids(line):
+                line["matchedBy"] = ""
+            touched = True
+        if not touched:
+            continue
+        updated = await link_claim_lines(db, row, index)
+        await db[CLAIMS_COLLECTION].update_one(
+            {"_id": row["_id"]},
+            {"$set": {
+                "lineItems": updated.get("lineItems") or [],
+                "leadIds": updated.get("leadIds") or [],
+                "linkedLineCount": updated.get("linkedLineCount") or 0,
+                "unlinkedLineCount": updated.get("unlinkedLineCount") or 0,
+                "invoiceConflicts": updated.get("invoiceConflicts") or [],
+            }})
+        released += 1
+    return released
+
+
 # ---------------------------------------------------------------- sync
 async def sync_claims(db, *, detail_budget=250, token=None):
     """Mirror the Claim Settlements List into db.oem_portal_claims.
@@ -1226,14 +1360,25 @@ async def sync_claims(db, *, detail_budget=250, token=None):
     held_by_id = {}
     async for held in coll.find({}, {"debitNoteId": 1, "lineItems": 1, "detailFetchedAt": 1,
                                      "detailStatusAtFetch": 1, "detailAmountAtFetch": 1,
-                                     "docsCheckedAt": 1, "status": 1, "terminal": 1}):
+                                     "docsCheckedAt": 1, "chassisCheckedAt": 1,
+                                     "queryCheckedAt": 1, "hasInQuery": 1,
+                                     "status": 1, "terminal": 1}):
         held_by_id[held.get("debitNoteId")] = held
 
-    def _need_chassis_first(row):
+    def _detail_rank(row):
+        """Chassis Euler added later, then claims they are asking about."""
         rid = str(row.get("id") or "")
-        return 0 if needs_detail(held_by_id.get(rid) or {}, claim_doc_from_row(row)) else 1
+        held = held_by_id.get(rid) or {}
+        row_doc = claim_doc_from_row(row)
+        if not needs_detail(held, row_doc):
+            return 3
+        if not _lines_have_chassis(held.get("lineItems")) and not held.get("chassisCheckedAt"):
+            return 0
+        if row_doc.get("hasInQuery") and not held.get("queryCheckedAt"):
+            return 1
+        return 2
 
-    rows = sorted(rows, key=_need_chassis_first)
+    rows = sorted(rows, key=_detail_rank)
     for row in rows:
         row_doc = claim_doc_from_row(row)
         note_id = row_doc["debitNoteId"]
@@ -1443,6 +1588,9 @@ def _absorb_line(entry, row, line):
         "hasDocument": _as_int(line.get("documentCount")) > 0,
         "documentCount": _as_int(line.get("documentCount")),
         "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
+        "inQuery": _line_in_query(line),
+        "hasInQuery": bool(row.get("hasInQuery")) or _line_in_query(line),
+        "queryRemark": str(line.get("queryRemark") or row.get("queryRemark") or ""),
     }
     if status == "Rejected" and row.get("needsResubmission"):
         entry["rejectedOpen"].append(hit)
@@ -1515,6 +1663,9 @@ async def register_match_index(db, *, relink=True):
                 "lineItemCount": _as_int(row.get("lineItemCount")),
                 "documentedLineCount": _as_int(row.get("documentedLineCount")),
                 "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
+                "hasInQuery": bool(row.get("hasInQuery")),
+                "inQuery": bool(row.get("hasInQuery")),
+                "queryRemark": str(row.get("queryRemark") or ""),
             }
         for line in coerce_line_items(row):
             for lead_id in line_lead_ids(line):
@@ -1544,6 +1695,9 @@ async def register_match_index(db, *, relink=True):
                     "hasDocument": _as_int(line.get("documentCount")) > 0,
                     "documentCount": _as_int(line.get("documentCount")),
                     "claimDocumentUrl": str(row.get("claimDocumentUrl") or ""),
+                    "inQuery": _line_in_query(line),
+                    "hasInQuery": bool(row.get("hasInQuery")) or _line_in_query(line),
+                    "queryRemark": str(line.get("queryRemark") or row.get("queryRemark") or ""),
                 }
                 by_line[f"{num}:{lid}"] = hit
     return {"byLead": by_lead, "byChassis": by_chassis, "byInvoice": by_invoice,
@@ -1601,6 +1755,12 @@ def _state_from_hits(hits):
         "hasDocument": bool(hits) and all(h.get("hasDocument") for h in hits),
         "documentCount": max((_as_int(h.get("documentCount")) for h in hits), default=0),
         "claimDocumentUrl": next((h.get("claimDocumentUrl") for h in hits if h.get("claimDocumentUrl")), "") or "",
+        "hasInQuery": any(h.get("hasInQuery") or h.get("inQuery") for h in hits),
+        "queryRemark": next(
+            (str(h.get("queryRemark") or "").strip() for h in hits
+             if str(h.get("queryRemark") or "").strip()),
+            "",
+        ),
         "detail": detail,
     }
 
@@ -1671,6 +1831,12 @@ def match_state(index, lead_id, component_key, chassis="", invoice="",
                 "oemStatus": "", "filedAmount": round2(entry["filedTotal"]),
                 "hasDocument": any(h.get("hasDocument") for h in um),
                 "documentCount": max((_as_int(h.get("documentCount")) for h in um), default=0),
+                "hasInQuery": any(h.get("hasInQuery") or h.get("inQuery") for h in um),
+                "queryRemark": next(
+                    (str(h.get("queryRemark") or "").strip() for h in um
+                     if str(h.get("queryRemark") or "").strip()),
+                    "",
+                ),
                 "detail": "This lead has claims in Euler, but none of them names this "
                           "component. Check before treating it as unclaimed.",
             }
@@ -2035,6 +2201,8 @@ def _claim_matches_query(row, *, q="", chassis="", invoice=""):
             " ".join(str(li.get("sourceInvoiceNumber") or "") for li in lines),
             " ".join(str(li.get("leadCustomer") or "") for li in lines),
             " ".join(str(li.get("description") or "") for li in lines),
+            " ".join(str(li.get("queryRemark") or "") for li in lines),
+            str(row.get("queryRemark") or ""),
         ]).lower()
         if needle not in blob:
             return False
@@ -2050,7 +2218,7 @@ def oem_claim_is_unmatched(row):
 async def list_claims(db, *, status="", lead_id="", unlinked=False,
                       q="", chassis="", invoice="", missing_doc=False,
                       missing_vehicle=False, exclude_missing_vehicle=False,
-                      unmatched_only=False):
+                      unmatched_only=False, in_query=False):
     filt = {}
     if status:
         filt["status"] = status
@@ -2061,6 +2229,8 @@ async def list_claims(db, *, status="", lead_id="", unlinked=False,
         rows = [r for r in rows if not (r.get("linkedLineCount") or 0)]
     if missing_doc:
         rows = [r for r in rows if not stamp_document_flag(r).get("hasDocument")]
+    if in_query:
+        rows = [r for r in rows if r.get("hasInQuery")]
     if missing_vehicle:
         rows = [r for r in rows if not _lines_have_vehicle(r.get("lineItems"))]
     elif exclude_missing_vehicle:
@@ -2166,10 +2336,13 @@ async def claims_summary(db):
     total = 0
     with_vehicle = 0
     missing_doc = 0
+    in_query = 0
     async for row in db[CLAIMS_COLLECTION].find({}):
         row.pop("_id", None)
         total += 1
         stamp_document_flag(row)
+        if row.get("hasInQuery"):
+            in_query += 1
         if not row.get("hasDocument") and str(row.get("status") or "") != "Cancelled":
             missing_doc += 1
         if _lines_have_vehicle(row.get("lineItems")):
@@ -2239,6 +2412,7 @@ async def claims_summary(db):
             "withVehicle": with_vehicle,
             "missingVehicle": max(0, total - with_vehicle),
             "missingDocument": missing_doc,
+            "inQuery": in_query,
         },
     }
 

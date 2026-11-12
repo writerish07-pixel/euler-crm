@@ -5,7 +5,7 @@ import { AlertTriangle, FileText, HandCoins, Link2Off, Plus, RefreshCw, RotateCc
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
 import {
-  OEM_MATCH, REGISTER_MATCH, DocFlag, claimHasVehicle, componentLabel, eulerClaimJob,
+  OEM_MATCH, REGISTER_MATCH, DocFlag, QueryMark, claimHasVehicle, componentLabel, eulerClaimJob,
   lineChassisList, lineLeadIds, lineLeadLabel, lineNeedsCreate, looksCombinedSupport, oemLineText, oemMatchOf,
   registerMatchOf, rowLeadIds, rowLineItems, schemeClaimJob,
 } from "../lib/claimMatch";
@@ -25,6 +25,7 @@ const JOBS = [
   { id: "rejected", view: "ours", label: "Euler rejected these", tone: "text-rose-700" },
   { id: "no_lead", view: "euler", label: "Euler has the claim. We have no lead.", tone: "text-violet-800" },
   { id: "missing_chassis", view: "euler", label: "Chassis is missing", tone: "text-amber-800" },
+  { id: "in_query", view: "euler", label: "Euler is asking", tone: "text-orange-800" },
 ];
 
 const SCHEME_MATCHES = ["accepted", "filed", "resubmitted", "unmapped", "rejected", "not_filed"];
@@ -156,7 +157,8 @@ export default function ClaimsDesk() {
   const rejected = schemeScoped.filter((row) => schemeClaimJob(row) === "rejected");
   const noLead = euler.filter((row) => eulerRowVisible(row, { ...scope, view: "euler", job: "no_lead", status: "", unlinked: false, missingDoc: false, registerMatch: "" }));
   const missing = euler.filter((row) => eulerRowVisible(row, { ...scope, view: "euler", job: "missing_chassis", status: "", unlinked: false, missingDoc: false, registerMatch: "" }));
-  const jobRows = { not_claimed: notClaimed, rejected, no_lead: noLead, missing_chassis: missing };
+  const asking = euler.filter((row) => eulerRowVisible(row, { ...scope, view: "euler", job: "in_query", status: "", unlinked: false, missingDoc: false, registerMatch: "" }));
+  const jobRows = { not_claimed: notClaimed, rejected, no_lead: noLead, missing_chassis: missing, in_query: asking };
   const jobMoney = (id) => {
     const rows = jobRows[id] || [];
     if (id === "not_claimed" || id === "rejected") return rows.reduce((s, r) => s + Number(r.eligibleClaim || 0), 0);
@@ -213,7 +215,7 @@ export default function ClaimsDesk() {
   const title = jobMeta ? jobMeta.label : view === "ours" ? "Our claims" : view === "euler" ? "Euler claims" : "Claims";
   const outstandingRows = scheme.filter((r) => outstandingOf(r) > 0.01);
   const showScheme = view === "ours" || job === "not_claimed" || job === "rejected";
-  const showEuler = view === "euler" || job === "no_lead" || job === "missing_chassis";
+  const showEuler = view === "euler" || job === "no_lead" || job === "missing_chassis" || job === "in_query";
   const showBooks = view === "work" || view === "ours" || job === "not_claimed" || job === "rejected";
 
   return (
@@ -358,6 +360,8 @@ export default function ClaimsDesk() {
       {view === "work" && !job ? (
         <p className="mt-3 text-xs text-ink-faint">
           Not filed and rejected follow the month above. Euler jobs are every claim in the mirror.
+          Euler is asking is the OEM app’s In Query tick. Answer that remark in the OEM app.
+          Sync from Euler pulls the chassis now sitting on those claims and joins them here.
           Old claim screens puts the three registers back.
         </p>
       ) : null}
@@ -515,6 +519,7 @@ export default function ClaimsDesk() {
                 <div className="flex flex-col items-start gap-1">
                   <Badge tone={claimStatusTone(r.claimStatus)}>{r.claimStatus || "—"}</Badge>
                   {eulerState.label ? <Badge tone={eulerState.tone}>{eulerState.label}</Badge> : null}
+                  {r.oemMatch?.hasInQuery ? <QueryMark on remark={r.oemMatch.queryRemark} /> : null}
                 </div>
               );
             } },
@@ -564,6 +569,7 @@ export default function ClaimsDesk() {
                   {!r.terminal && r.stageLabel ? (
                     <span className={`text-xs ${stageTone(r.stageDays)}`}>{r.stageDays}d at {r.stageLabel}</span>
                   ) : null}
+                  {r.hasInQuery ? <QueryMark on remark={r.queryRemark} /> : null}
                 </div>
               );
             } },
@@ -677,6 +683,9 @@ function SchemeDetail({ row, isMoneyDesk, onMatch, onReceipt, onSettle, onDrop, 
             {!row.manual ? (
               <DocFlag yes={row.oemMatch?.hasDocument} url={row.oemMatch?.claimDocumentUrl} count={row.oemMatch?.documentCount} />
             ) : null}
+            {row.oemMatch?.hasInQuery ? (
+              <QueryMark on remark={row.oemMatch.queryRemark} explain />
+            ) : null}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -730,6 +739,7 @@ function EulerDetail({ row, onMatch, onDone, onClose }) {
             : null}
         <DocFlag yes={row.hasDocument} url={row.claimDocumentUrl} count={row.documentCount}
           lines={row.lineItemCount} documented={row.documentedLineCount} />
+        <QueryMark on={row.hasInQuery} remark={row.queryRemark} explain />
       </div>
       <div className="mt-3 space-y-3">
         {(lines.length ? lines : [{}]).map((line, i) => (
@@ -758,6 +768,9 @@ function EulerDetail({ row, onMatch, onDone, onClose }) {
             <div className={(line.documentCount || 0) > 0 ? "text-emerald-700 text-xs" : "text-rose-600 text-xs"}>
               {(line.documentCount || 0) > 0 ? `${line.documentCount} doc${line.documentCount === 1 ? "" : "s"}` : "No docs"}
             </div>
+            {line.inQuery || line.queryRemark ? (
+              <div className="text-[10px] text-orange-800 mt-1">Euler is asking{line.queryRemark ? `: ${line.queryRemark}` : ""}</div>
+            ) : null}
             <div className="flex flex-wrap gap-2 mt-2">
               <Button data-testid={`claims-desk-link-${line.lineId || i}`} onClick={() => onMatch(line, false)}>
                 {lineLeadIds(line).length ? "Add lead" : "Match"}

@@ -4,7 +4,7 @@ import { RefreshCw, AlertTriangle, FileText, Clock, XCircle, Link2Off, ExternalL
 import { toast } from "sonner";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate } from "../lib/format";
-import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, lineChassisList, looksCombinedSupport, matchRegisterLeadRows, matchableExtraUnitRows, extraSupportLeadOptions, extraSupportMatchUnitSnos, isOpenRegisterRow, isRelinkableRegisterRow, registerMatchKeys, rowLeadIds, rowLineItems } from "../lib/claimMatch";
+import { REGISTER_MATCH, registerMatchOf, claimsHref, componentLabel, DocFlag, QueryMark, oemLineText, lineNeedsCreate, lineLeadIds, lineLeadLabel, lineChassisList, looksCombinedSupport, matchRegisterLeadRows, matchableExtraUnitRows, extraSupportLeadOptions, extraSupportMatchUnitSnos, isOpenRegisterRow, isRelinkableRegisterRow, registerMatchKeys, rowLeadIds, rowLineItems } from "../lib/claimMatch";
 import { Card, PageHeader, StatCard, Table, Badge, Button, Select, Input, Modal, Field } from "../components/ui";
 import ReportActions from "../components/ReportActions";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
@@ -39,6 +39,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
   const [status, setStatus] = useState("");
   const [unlinked, setUnlinked] = useState(false);
   const [missingDoc, setMissingDoc] = useState(false);
+  const [inQuery, setInQuery] = useState(false);
   const [matchFilter, setMatchFilter] = useState("");
   const [q, setQ] = useState(params.get("q") || "");
   const [syncing, setSyncing] = useState(false);
@@ -56,6 +57,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
       ...(status ? { status } : {}),
       ...(unlinked ? { unlinked: true } : {}),
       ...(missingDoc ? { missingDoc: true } : {}),
+      ...(inQuery ? { inQuery: true } : {}),
       ...(missingVehicleOnly ? { missingVehicle: true } : {}),
       ...(!missingVehicleOnly && !qParam && !chassis && !invoice && !leadId
         ? { excludeMissingVehicle: true } : {}),
@@ -65,7 +67,7 @@ export default function OemClaims({ missingVehicleOnly = false }) {
       ...(leadId ? { leadId } : {}),
     }).then((r) => setRows(Array.isArray(r) ? r : [])).catch(() => setRows([])),
     ]);
-  }, [status, unlinked, missingDoc, qParam, chassis, invoice, leadId, missingVehicleOnly]);
+  }, [status, unlinked, missingDoc, inQuery, qParam, chassis, invoice, leadId, missingVehicleOnly]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { setQ(qParam); }, [qParam]);
@@ -349,6 +351,11 @@ export default function OemClaims({ missingVehicleOnly = false }) {
           onClick={() => setMissingDoc((v) => !v)}>
           <FileText size={16} /> No document
         </Button>
+        <Button type="button" variant={inQuery ? "primary" : "secondary"}
+          data-testid="oem-in-query-filter"
+          onClick={() => setInQuery((v) => !v)}>
+          Euler is asking
+        </Button>
       </form>
 
       <Table
@@ -454,6 +461,11 @@ export default function OemClaims({ missingVehicleOnly = false }) {
                       ? `${li.documentCount} doc${li.documentCount === 1 ? "" : "s"}`
                       : "No docs"}
                   </div>
+                  {li.inQuery || li.queryRemark ? (
+                    <div className="text-[10px] text-orange-800">
+                      Euler is asking{li.queryRemark ? `: ${li.queryRemark}` : ""}
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-2 mt-0.5">
                     <button type="button"
                       data-testid={`oem-manual-match-${r.claimNumber}-${li.lineId || i}`}
@@ -485,6 +497,9 @@ export default function OemClaims({ missingVehicleOnly = false }) {
           { key: "doc", label: "Docs", render: (r) => (
             <DocFlag yes={r.hasDocument} url={r.claimDocumentUrl} count={r.documentCount}
               lines={r.lineItemCount} documented={r.documentedLineCount} />
+          )},
+          { key: "inQuery", label: "In query", render: (r) => (
+            <QueryMark on={r.hasInQuery} remark={r.queryRemark} />
           )},
           { key: "match", label: "", render: (r) => (
             rowLineItems(r).length > 1 ? (
