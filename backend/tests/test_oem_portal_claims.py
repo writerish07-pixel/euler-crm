@@ -295,6 +295,107 @@ def test_needs_detail_when_chassis_never_landed():
     assert oem_claims.needs_detail(blank, row) is True
 
 
+def test_list_has_in_query_is_only_a_real_true():
+    on = oem_claims.claim_doc_from_row({**list_row("n1", "AF-999-CL0001"), "has_in_query": True})
+    assert on["hasInQuery"] is True
+    word = oem_claims.claim_doc_from_row({**list_row("n1", "AF-999-CL0001"), "has_in_query": "True"})
+    assert word["hasInQuery"] is True
+    off = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
+    assert off["hasInQuery"] is False
+    assert oem_claims.claim_doc_from_row(
+        {**list_row("n1", "AF-999-CL0001"), "has_in_query": "yes"})["hasInQuery"] is False
+
+
+def test_in_query_line_keeps_the_latest_remark_and_drops_history():
+    raw = journey("n1", "AF-999-CL0001")["line_items"][0]
+    raw["status"] = "In Query"
+    raw["history"] = [
+        {"action": "RAISE_QUERY", "remarks": "Old ask"},
+        {"action": "OTHER", "remarks": "ignore"},
+        {"action": "RAISE_QUERY", "remarks": "Upload RC"},
+    ]
+    line = oem_claims.normalise_line_item(raw)
+    assert line["inQuery"] is True
+    assert line["queryRemark"] == "Upload RC"
+    assert "history" not in line
+    assert "photo1.jpeg" not in str(line)
+    quiet = oem_claims.normalise_line_item(journey("n1", "AF-999-CL0001")["line_items"][0])
+    assert quiet["inQuery"] is False
+    assert quiet["queryRemark"] == ""
+
+
+def test_needs_detail_when_an_invoice_only_claim_has_not_been_checked_for_chassis():
+    """A source invoice used to stop the journey fetch, so a later chassis never joined."""
+    row = oem_claims.claim_doc_from_row(list_row("n1", "AF-999-CL0001"))
+    invoice_only = {
+        "detailFetchedAt": "x", "docsCheckedAt": "x", "hasInQuery": False,
+        "lineItems": [{"chassis": "", "sourceInvoiceNumber": INVOICE, "documentCount": 1}],
+        "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0,
+        "status": "RM Approval Pending",
+    }
+    assert oem_claims.needs_detail(invoice_only, row) is True
+    checked = {**invoice_only, "chassisCheckedAt": "x"}
+    assert oem_claims.needs_detail(checked, row) is False
+
+
+def test_needs_detail_when_the_in_query_tick_flips():
+    base = {
+        "detailFetchedAt": "x", "docsCheckedAt": "x", "chassisCheckedAt": "x",
+        "hasInQuery": False,
+        "lineItems": [{"chassis": CHASSIS, "documentCount": 1, "status": "In Review"}],
+        "detailStatusAtFetch": "RM Approval Pending", "detailAmountAtFetch": 0.0,
+        "status": "RM Approval Pending",
+    }
+    asking = oem_claims.claim_doc_from_row(
+        {**list_row("n1", "AF-999-CL0001"), "has_in_query": True})
+    assert oem_claims.needs_detail(base, asking) is True
+    seen = {**base, "hasInQuery": True, "queryCheckedAt": "x"}
+    assert oem_claims.needs_detail(seen, asking) is False
+
+
+def test_merge_detail_stores_the_chassis_check_and_the_query_remark():
+    raw = journey("n1", "AF-999-CL0001")
+    raw["line_items"][0]["status"] = "In Query"
+    raw["line_items"][0]["history"] = [{"action": "RAISE_QUERY", "remarks": "Upload RC"}]
+    doc = oem_claims.merge_detail(
+        {"hasInQuery": True, "lineItems": [{"sourceInvoiceNumber": INVOICE, "documentCount": 2}]},
+        raw,
+    )
+    assert doc["lineItems"][0]["chassis"] == CHASSIS
+    assert doc["chassisCheckedAt"]
+    assert doc["hasInQuery"] is True
+    assert doc["queryRemark"] == "Upload RC"
+    assert doc["queryCheckedAt"]
+    assert "history" not in doc["lineItems"][0]
+
+
+def test_a_journey_that_is_not_in_query_clears_the_list_tick():
+    doc = oem_claims.merge_detail({"hasInQuery": True}, journey("n1", "AF-999-CL0001"))
+    assert doc["hasInQuery"] is False
+    assert doc["queryCheckedAt"]
+    assert doc["queryRemark"] == ""
+
+
+def test_match_state_carries_the_query_without_changing_the_amount():
+    entry = oem_claims._empty_match_entry()
+    oem_claims._absorb_line(entry, {
+        "status": "RM Approval Pending", "claimNumber": "DN1", "hasInQuery": True,
+    }, {
+        "claimType": "Scheme Claim",
+        "description": "Referral Commission for invoice AF-999-I1",
+        "totalAmount": 1000,
+        "status": "In Query",
+        "inQuery": True,
+        "queryRemark": "Upload RC",
+        "documentCount": 1,
+    })
+    state = oem_claims._state_from_hits(entry["byComponent"]["referralBonus"])
+    assert state["hasInQuery"] is True
+    assert state["queryRemark"] == "Upload RC"
+    assert state["filedAmount"] == 1000.0
+    assert state["state"] == "filed"
+
+
 def test_empty_journey_does_not_wipe_list_line_items():
     doc = oem_claims.claim_doc_from_row({
         **list_row("n1", "AF-122-CL2627127"),
@@ -689,6 +790,77 @@ async def test_sync_does_not_block_the_event_loop(client, monkeypatch):
         beat.cancel()
     assert result["claimDetailCalls"] == 5
     assert ticks["n"] > 5, "the event loop was blocked for the whole claim sync"
+
+
+@pytest.mark.asyncio
+async def test_invoice_only_claim_picks_up_a_later_chassis_and_the_query(client, monkeypatch):
+    """Chassis now sitting on an open Euler claim must join the lead on the next sync."""
+    lead_id = await _delivered_lead(client)
+    await server.db[oem_claims.CLAIMS_COLLECTION].insert_one({
+        "debitNoteId": "n-late",
+        "claimNumber": "AF-999-CLLATE",
+        "status": "RM Approval Pending",
+        "terminal": False,
+        "claimedAmount": 5000.0,
+        "approvedAmount": 0.0,
+        "detailFetchedAt": "2026-09-01T00:00:00+05:30",
+        "docsCheckedAt": "2026-09-01T00:00:00+05:30",
+        "detailStatusAtFetch": "RM Approval Pending",
+        "detailAmountAtFetch": 0.0,
+        "hasInQuery": False,
+        "hasDocument": True,
+        "lineItems": [{
+            "lineId": "line-1",
+            "claimType": "Scheme Claim",
+            "description": f"Referral Commission for invoice {INVOICE}",
+            "chassis": "",
+            "chassisList": [],
+            "sourceInvoiceNumber": INVOICE,
+            "status": "In Review",
+            "documentCount": 2,
+            "totalAmount": 5000.0,
+            "leadId": "",
+            "leadIds": [],
+        }],
+    })
+    calls = {"n": 0}
+
+    def fake_journey(token, note_id):
+        calls["n"] += 1
+        body = journey(note_id, "AF-999-CLLATE", chassis=CHASSIS, invoice=INVOICE)
+        body["line_items"][0]["status"] = "In Query"
+        body["line_items"][0]["history"] = [
+            {"action": "RAISE_QUERY", "remarks": "Attach the chassis"},
+        ]
+        return body
+
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+    monkeypatch.setattr(
+        coulson_client, "fetch_debit_notes",
+        lambda t, status="", limit=100, max_rows=5000: (
+            [{**list_row("n-late", "AF-999-CLLATE"), "has_in_query": True}], 1))
+    monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+    monkeypatch.setattr(coulson_client, "fetch_claim_journey", fake_journey)
+    await server.db["system"].update_one(
+        {"_id": "coulson"},
+        {"$set": {"username": "tester", "password": "pw", "sessionToken": ""}},
+        upsert=True)
+
+    await client.post("/api/integrations/coulson/sync-claims")
+    assert calls["n"] == 1
+    rows = (await client.get("/api/oem-claims", params={"leadId": lead_id})).json()
+    assert rows and rows[0]["claimNumber"] == "AF-999-CLLATE"
+    assert rows[0]["lineItems"][0]["chassis"] == CHASSIS
+    assert rows[0]["lineItems"][0]["matchedBy"] == "chassis"
+    assert rows[0]["hasInQuery"] is True
+    assert rows[0]["queryRemark"] == "Attach the chassis"
+    assert "history" not in rows[0]["lineItems"][0]
+    assert rows[0]["claimedAmount"] == 5000.0
+    asking = (await client.get("/api/oem-claims", params={"inQuery": True})).json()
+    assert [r["claimNumber"] for r in asking] == ["AF-999-CLLATE"]
+
+    await client.post("/api/integrations/coulson/sync-claims")
+    assert calls["n"] == 1, "a checked chassis and a stored query must not be fetched again"
 
 
 @pytest.mark.asyncio

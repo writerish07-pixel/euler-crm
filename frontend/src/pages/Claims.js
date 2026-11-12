@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { HandCoins, Plus, AlertTriangle, RotateCcw, ExternalLink, Link2 } from "lucide-react";
 import { get, post, apiErrorMessage } from "../lib/api";
 import { inr, fmtDate, todayISO } from "../lib/format";
-import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, oemLineText, rowLeadIds, rowLineItems, lineLeadIds } from "../lib/claimMatch";
+import { OEM_MATCH, oemMatchOf, oemClaimsHref, DocFlag, QueryMark, oemLineText, rowLeadIds, rowLineItems, lineLeadIds } from "../lib/claimMatch";
 import { PageHeader, Table, Badge, Button, Field, Input, Select, Card, StatCard, Modal } from "../components/ui";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { useAuth } from "../context/AuthContext";
@@ -209,6 +209,9 @@ export default function Claims() {
                 ) : null}
                 {r.oemMatch?.manual ? (
                   <span className="text-[10px] text-cobalt">Manual match</span>
+                ) : null}
+                {r.oemMatch?.hasInQuery ? (
+                  <QueryMark on remark={r.oemMatch.queryRemark} />
                 ) : null}
                 {!r.manual ? (
                   <button type="button" data-testid={`claim-manual-match-${r.claimId}`}

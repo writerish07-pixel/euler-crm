@@ -294,10 +294,31 @@ def test_turbo_invoice_becomes_a_replace_review_not_not_in_crm():
 async def test_resolve_replace_swaps_the_wrong_chassis(client):
     storm = _storm_lead(chassisNumber=STORM_ROW["chassis"], invoiceNumber=STORM_ROW["invoiceNumber"])
     await _seed([storm, _turbo_holding_storm()], [STORM_ROW, TURBO_ROW])
+    await server.db.oem_portal_claims.insert_one({
+        "debitNoteId": "dn-storm",
+        "claimNumber": "AF-STORM-CL1",
+        "status": "RM Approval Pending",
+        "claimedAmount": 4000.0,
+        "approvedAmount": 0.0,
+        "leadIds": ["LD-TURBO"],
+        "lineItems": [{
+            "lineId": "line-storm",
+            "chassis": STORM_ROW["chassis"],
+            "chassisList": [STORM_ROW["chassis"]],
+            "sourceInvoiceNumber": STORM_ROW["invoiceNumber"],
+            "totalAmount": 4000.0,
+            "leadId": "LD-TURBO",
+            "leadIds": ["LD-TURBO"],
+            "matchedBy": "chassis",
+            "documentCount": 1,
+            "status": "In Review",
+        }],
+    })
     r = await client.post("/api/oem-billing/resolve", json={
         "chassis": TURBO_ROW["chassis"], "leadId": "LD-TURBO", "action": "replace"})
     assert r.status_code == 200, r.text
     assert r.json()["removedChassis"] == STORM_ROW["chassis"]
+    assert r.json()["claimsReleased"] == 1
     turbo = await server.db.leads.find_one({"leadId": "LD-TURBO"})
     assert oem_sync.lead_chassis_list(turbo) == [TURBO_ROW["chassis"]]
     assert turbo["invoiceNumber"] == TURBO_ROW["invoiceNumber"]
@@ -306,6 +327,12 @@ async def test_resolve_replace_swaps_the_wrong_chassis(client):
         [STORM_ROW, TURBO_ROW], [await server.db.leads.find_one({"leadId": "LD-STORM"}), turbo])
     assert _row(rows, TURBO_ROW["chassis"])["leadId"] == "LD-TURBO"
     assert _row(rows, STORM_ROW["chassis"])["leadId"] == "LD-STORM"
+    claim = await server.db.oem_portal_claims.find_one({"claimNumber": "AF-STORM-CL1"})
+    assert "LD-TURBO" not in (claim.get("leadIds") or [])
+    assert claim["lineItems"][0]["matchedBy"] == "chassis"
+    assert "LD-STORM" in (claim.get("leadIds") or [])
+    assert claim["claimedAmount"] == 4000.0
+    await server.db.oem_portal_claims.delete_many({"claimNumber": "AF-STORM-CL1"})
     audit = await server.db.audit_log.find_one({"leadId": "LD-TURBO", "action": "resolve"},
                                               sort=[("timestamp", -1)])
     assert audit and audit["oldValue"]["chassisNumber"] == STORM_ROW["chassis"]

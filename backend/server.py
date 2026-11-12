@@ -12243,14 +12243,18 @@ async def _replace_wrong_oem_chassis(lead, row, pick, act):
     await db.deliveries.update_one(
         {"leadId": lead["leadId"]},
         {"$set": {k: patch[k] for k in ("chassisNumber", "invoiceNumber", "numberPlate")}})
+    released_claims = await oem_claims.release_claims_on_removed_chassis(
+        db, lead["leadId"], wrong)
     updated = await db.leads.find_one({"leadId": lead["leadId"]})
     await sheet_sync("leads", clean(dict(updated)))
     await write_audit(act, "resolve", "oem-billing", leadId=lead["leadId"], old=old,
                       new={"chassis": chassis, "invoiceNumber": invoice, "numberPlate": plate,
                            "action": "replace",
-                           "removedModel": pick["wrongChassis"].get("model") or ""})
+                           "removedModel": pick["wrongChassis"].get("model") or "",
+                           "claimsReleased": released_claims})
     return {"ok": True, "leadId": lead["leadId"], "chassis": chassis, "action": "replace",
-            "removedChassis": wrong, "vehicleCount": oem_sync.vehicle_count(updated)}
+            "removedChassis": wrong, "claimsReleased": released_claims,
+            "vehicleCount": oem_sync.vehicle_count(updated)}
 
 
 @api.post("/oem-billing/resolve", dependencies=[Depends(deal_desk_only)])
@@ -13436,12 +13440,12 @@ async def list_oem_portal_claims(status: str = "", leadId: str = "", unlinked: b
                                  q: str = "", chassis: str = "", invoice: str = "",
                                  missingDoc: bool = False, missingVehicle: bool = False,
                                  excludeMissingVehicle: bool = False,
-                                 unmatchedOnly: bool = False):
+                                 unmatchedOnly: bool = False, inQuery: bool = False):
     return await oem_claims.list_claims(
         db, status=status, lead_id=leadId, unlinked=unlinked,
         q=q, chassis=chassis, invoice=invoice, missing_doc=missingDoc,
         missing_vehicle=missingVehicle, exclude_missing_vehicle=excludeMissingVehicle,
-        unmatched_only=unmatchedOnly)
+        unmatched_only=unmatchedOnly, in_query=inQuery)
 
 
 @api.get("/oem-claims/summary", dependencies=[Depends(oem_claim_desk_only)])

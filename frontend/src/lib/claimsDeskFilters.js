@@ -20,6 +20,8 @@ function lineBlob(row) {
     lines.map((li) => li.sourceInvoiceNumber || "").join(" "),
     lines.map((li) => li.leadCustomer || li.customerName || "").join(" "),
     lines.map((li) => li.description || "").join(" "),
+    row?.queryRemark,
+    lines.map((li) => li.queryRemark || "").join(" "),
   ].join(" ").toLowerCase();
 }
 
@@ -64,6 +66,7 @@ export function eulerRowVisible(row, {
   if (q && !lineBlob(row).includes(String(q).trim().toLowerCase())) return false;
   if (job === "missing_chassis") return eulerClaimJob(row) === "missing_chassis";
   if (job === "no_lead") return eulerClaimJob(row) === "no_lead";
+  if (job === "in_query") return Boolean(row?.hasInQuery);
   if (view !== "euler") return false;
   const join = Boolean(String(q || "").trim() || chassis || invoice || leadId);
   if (!join && eulerClaimJob(row) === "missing_chassis") return false;
