@@ -283,33 +283,29 @@ def test_a_later_sync_does_not_wipe_a_part_already_marked_missing():
     assert merged["advances"]["10412"] == 18400
 
 
-def test_service_sync_uses_the_pasted_session_not_a_password(monkeypatch):
-    import jwt as pyjwt
+def test_service_sync_signs_in_with_the_login_id_and_password(monkeypatch):
     import workshop_api
 
-    token = pyjwt.encode(
-        {"application": "coulson", "username": "service.user", "exp": 9999999999},
-        "unused",
-        algorithm="HS256",
-    )
-    if isinstance(token, bytes):
-        token = token.decode()
-    assert workshop_api._usable_service_token(f'  "Bearer {token}"  ') == token
+    seen = {}
+
+    def fake_login(username, password):
+        seen["username"] = username
+        seen["password"] = password
+        return "issued-token"
 
     def fake_get(tok, path, params=None, timeout=None):
-        assert tok == token
+        assert tok == "issued-token"
         if path == "store/allowed":
             return {"data": [{"id": "store-1"}]}
         if path.endswith("analytics") or path.endswith("analytics-summary"):
             return {"data": {}}
         return {"data": []}
 
-    def refuse_password(*_args, **_kwargs):
-        raise AssertionError("service sync must not call the password login")
-
+    monkeypatch.setattr(coulson_client, "login", fake_login)
     monkeypatch.setattr(coulson_client, "get_json", fake_get)
-    monkeypatch.setattr(coulson_client, "login_service", refuse_password)
-    snapshot = workshop_api.pull_service(token)
+    snapshot = workshop_api.pull_service("service.user", "secret")
+    assert seen["username"] == "service.user"
+    assert seen["password"] == hashlib.sha256(b"secret").hexdigest()
     assert isinstance(snapshot["lines"], list)
 
 

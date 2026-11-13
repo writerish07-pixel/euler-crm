@@ -40,7 +40,8 @@ export default function Workshop() {
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [fileTo, setFileTo] = useState("");
-  const [session, setSession] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [payRequest, setPayRequest] = useState("");
   const [payUtr, setPayUtr] = useState("");
   const [payAmount, setPayAmount] = useState("");
@@ -50,6 +51,7 @@ export default function Workshop() {
 
   const load = useCallback(() => get("/workshop").then((data) => {
     setDesk(data);
+    if (data?.serviceLogin?.username) setUsername(data.serviceLogin.username);
     return data;
   }).catch((err) => {
     toast.error(apiErrorMessage(err, "Could not open the workshop desk"));
@@ -59,6 +61,7 @@ export default function Workshop() {
 
   const apply = (data) => {
     setDesk(data);
+    if (data?.serviceLogin?.username) setUsername(data.serviceLogin.username);
   };
   const run = (path, payload) => post(path, payload || {}, path === "/workshop/sync" ? { timeout: 90000 } : {})
     .then((data) => {
@@ -467,37 +470,28 @@ export default function Workshop() {
 
       {tab === "rules" && (
         <Card className="p-4 max-w-xl">
-          <h2 className="font-heading font-bold text-lg">Service Coulson session</h2>
+          <h2 className="font-heading font-bold text-lg">Service Coulson login</h2>
           <p className="text-sm text-ink-soft mt-1 mb-4">
-            Sign in at coulson.eulerlogistics.com with the service user. Open the browser console, run the line below, then paste the copied session here. Sync uses that session. The password is not used.
+            Saved in the same database as the sales app. The password is not shown again. Sync signs in with this login id and password, then reads stock, open requests, warranty claims, service due, and jobs.
           </p>
           {isOwner ? (
             <>
-              {desk?.serviceLogin?.configured && (
-                <p className="text-sm mb-3">Session saved{desk.serviceLogin.username ? ` for ${desk.serviceLogin.username}` : ""}.</p>
-              )}
-              {desk?.serviceLogin?.sessionExpired && (
-                <p className="text-sm text-amber-800 mb-3">That session has expired. Sign in again and paste a new one.</p>
-              )}
-              <Field label="Paste coulson_auth">
-                <textarea
-                  className="block w-full rounded-lg border-0 py-2 px-3 text-sm text-ink ring-1 ring-inset ring-line focus:ring-2 focus:ring-cobalt min-h-24 font-mono"
-                  value={session}
-                  onChange={(e) => setSession(e.target.value)}
-                  placeholder='copy(localStorage.getItem("coulson_auth"))'
-                />
+              <Field label="Login id">
+                <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Service login id" />
               </Field>
-              <p className="text-xs text-ink-faint mb-3 font-mono">copy(localStorage.getItem("coulson_auth"))</p>
-              <Button onClick={() => put("/workshop/service-login", { sessionToken: session }).then((data) => {
+              <Field label="Password">
+                <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Leave blank to keep the saved password" />
+              </Field>
+              <Button onClick={() => put("/workshop/service-login", { username, password }).then((data) => {
                 apply(data);
-                setSession("");
-                toast.success(data?.serviceLogin?.configured ? "Service session saved" : "Saved");
-              }).catch((err) => toast.error(apiErrorMessage(err, "Could not save the session")))}>
-                Save session
+                setPassword("");
+                toast.success(data?.serviceLogin?.configured ? "Service login saved" : "Saved");
+              }).catch((err) => toast.error(apiErrorMessage(err, "Could not save the login")))}>
+                Save login
               </Button>
             </>
           ) : (
-            <p className="text-sm">The owner pastes the service session. You can still work the desk.</p>
+            <p className="text-sm">The owner saves the service login. You can still work the desk.</p>
           )}
           <h2 className="font-heading font-bold text-lg mt-8">Gmail</h2>
           <p className="text-sm text-ink-soft mt-1 mb-4">

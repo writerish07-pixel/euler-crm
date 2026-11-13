@@ -141,8 +141,8 @@ test("workshop desk loads this morning and opens the mail, the part, and the war
   expect(host.textContent).toContain("10412");
 
   await act(async () => { host.querySelector('[data-testid="workshop-tab-rules"]').click(); });
-  expect(host.textContent).toContain("Service Coulson session");
-  expect(host.textContent).toContain("coulson_auth");
+  expect(host.textContent).toContain("Service Coulson login");
+  expect(host.querySelector('input[type="password"]')).toBeTruthy();
 
   act(() => { root.unmount(); });
   host.remove();
