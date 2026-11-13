@@ -28,7 +28,10 @@ STAGE_LABEL = {
 OPEN_MISSING = ("short", "reorder")
 EARLY = ("need", "asked", "onpi", "paid")
 
-_TICKET_RE = re.compile(r"\b(?:ticket|request)\s*#?\s*(\d{4,7})\b", re.I)
+_TICKET_RE = re.compile(
+    r"\b(?:ticket|request)(?:\s+(?:id|no\.?|number))?\s*[:#-]?\s*(\d{4,7})\b",
+    re.I,
+)
 _PI_RE = re.compile(r"\b(PI/[A-Z0-9]+(?:/[A-Z0-9]+)+)\b", re.I)
 _UTR_RE = re.compile(r"\bUTR\s*[:#-]?\s*([A-Z0-9]{6,})\b", re.I)
 _CODE_RE = re.compile(r"\b([A-Z]{2,}[A-Z0-9]*\d[A-Z0-9]{3,})\b")
@@ -666,6 +669,38 @@ def mark_posted(state, mail_id, gmail_id=""):
         if proof.get("mailId") == mail_id:
             proof["posted"] = True
     return state
+
+
+def request_mail(subject, body, sender=""):
+    """A mailbox message belongs on the desk only when it names one request.
+
+    Bank alerts, GitHub notices, and other inbox mail do not. The sender is
+    ignored except to drop GitHub, which can mention a pull request number.
+    """
+    sender = str(sender or "").lower()
+    if "github.com" in sender:
+        return ""
+    nos = parse_mail(subject, body)["request_nos"]
+    if len(nos) != 1:
+        return ""
+    return nos[0]
+
+
+def drop_unmatched_gmail(state):
+    """Remove mail the mailbox pull saved when it does not name one request.
+
+    A mail a person pasted has no gmail id and stays, even with no request.
+    """
+    state = deepcopy(state)
+    kept = []
+    dropped = 0
+    for mail in state.get("mails") or []:
+        if mail.get("gmailId") and not request_mail(mail.get("subject"), mail.get("body")):
+            dropped += 1
+            continue
+        kept.append(mail)
+    state["mails"] = kept
+    return state, dropped
 
 
 def add_mail(state, subject, body, direction="Received from the company", meta=None):

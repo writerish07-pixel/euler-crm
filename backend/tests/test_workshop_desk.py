@@ -145,6 +145,31 @@ def test_this_morning_only_fills_an_empty_desk():
     assert desk.desk_has_work(desk.sample_state()) is True
 
 
+def test_mailbox_pull_keeps_only_a_mail_with_one_request_number():
+    assert desk.request_mail("Re: Ticket 10412 — dispatch", "Ticket 10412\nCD4C001800 is not dispatched") == "10412"
+    assert desk.request_mail("Parts update", "Request id: 10526\nAA28000800 bush") == "10526"
+    assert desk.request_mail("You have done a UPI txn. Check details!", "A payment was made using your Credit Card") == ""
+    assert desk.request_mail(
+        "Re: [writerish07-pixel/euler-crm] Restore Service Coulson login (PR #281)",
+        "pull request #281",
+        "notifications@github.com",
+    ) == ""
+    assert desk.request_mail("Re: two tickets", "Ticket 10412 and ticket 10526") == ""
+
+    state = desk.empty_state()
+    state, _ = desk.add_mail(state, "You have done a UPI txn", "Check details", meta={"gmailId": "bank"})
+    state, _ = desk.add_mail(
+        state, "Re: Ticket 10412", "Ticket 10412 is not dispatched", meta={"gmailId": "parts"},
+    )
+    state, _ = desk.add_mail(state, "Note for the desk", "No request on this one")
+    state, dropped = desk.drop_unmatched_gmail(state)
+    subjects = [mail["subject"] for mail in state["mails"]]
+    assert dropped == 1
+    assert "You have done a UPI txn" not in subjects
+    assert "Re: Ticket 10412" in subjects
+    assert "Note for the desk" in subjects
+
+
 def test_a_mail_with_no_ticket_is_left_for_a_person():
     parsed = desk.parse_mail("Bank account update", "Please update the bank mandate form.")
     assert parsed["kind"] == "unmatched"
