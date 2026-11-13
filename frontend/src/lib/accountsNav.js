@@ -26,9 +26,11 @@ export function keepNavItem(i, flags = {}) {
     isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk,
     canViewFinance, canEditCommercials, canManageShowroom, canManageStaff,
     isSalesGm, canApproveLeads, isExecutive, isTeamLead, canViewMonthly,
-    canMatchOemClaims,
+    canMatchOemClaims, serviceAreas,
   } = flags;
-  if (isAccounts && !isSalesStaff && !isField && !ACCOUNTS_NAV_PATHS.has(i.to)) return false;
+  if (isAccounts && !isSalesStaff && !isField && !ACCOUNTS_NAV_PATHS.has(i.to)) {
+    if (!(i.serviceDesk && (serviceAreas || []).length)) return false;
+  }
   if (i.ownerOnly && !isOwner) return false;
   if (i.salesOnly && !isSalesStaff) return false;
   if (i.moneyDesk && !isMoneyDesk) return false;
@@ -36,6 +38,7 @@ export function keepNavItem(i, flags = {}) {
   if (i.financeView && !canViewFinance) return false;
   if (i.dealDesk && !canEditCommercials) return false;
   if (i.showroomDesk && !canManageShowroom) return false;
+  if (i.serviceDesk && !isOwner && !(serviceAreas || []).length) return false;
   if (i.staffDesk && !canManageStaff) return false;
   if (i.accountsHome && !isAccounts && !isOwner) return false;
   if (i.fieldHome && !isField && !isOwner) return false;

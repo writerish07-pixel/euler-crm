@@ -45,6 +45,7 @@ import scheme_circulars
 import deal_sheet_pdf
 import team_scope
 import inventory_check
+import workshop_api
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -19304,6 +19305,9 @@ async def _apply_turbo_sept_uplift_to_open_leads():
 async def shutdown():
     client.close()
 
+
+# Workshop Desk uses the same /api router and the same Mongo database.
+workshop_api.register(api, db, current_user)
 
 # Routers included LAST so every @api route above is registered
 app.include_router(auth_router)
