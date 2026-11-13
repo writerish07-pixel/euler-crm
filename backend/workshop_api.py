@@ -208,6 +208,14 @@ async def _create_staff_login(db, staff, password):
     return user_id
 
 
+def payment_post_allowed(user):
+    """The owner, or f.manager, Rishab Akar, or Euler Akar, may send a proof."""
+    user = user or {}
+    if (user.get("serviceAccess") or {}).get("owner"):
+        return True
+    return desk.sender_can_post_payment(user.get("name"), user.get("email"))
+
+
 def register(api, db, current_user):
     async def access_for(user):
         grants = await db.workshop_access.find({}, {"_id": 0}).to_list(300)
@@ -270,6 +278,7 @@ def register(api, db, current_user):
             await service_login_view(db, user),
             access,
             _gmail_public(secret, bool(access.get("owner"))),
+            actor=user,
         )
 
     async def _token():
@@ -643,15 +652,31 @@ def register(api, db, current_user):
         user=Depends(workshop_user),
     ):
         _need(user, "payments")
+        if not payment_post_allowed(user):
+            raise HTTPException(
+                status_code=403,
+                detail="Only f.manager@akarfourwheel.com, Rishab Akar, or Euler Akar can post a payment proof.",
+            )
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="Attach the payment proof.")
         if len(data) > 8 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Payment proof must be under 8 MB.")
         content_type = str(file.content_type or "").split(";")[0].strip().lower()
-        if content_type not in ("image/jpeg", "image/png", "image/webp", "application/pdf"):
-            raise HTTPException(status_code=422, detail="Payment proof should be a photo or a PDF.")
+        if content_type not in (
+            "image/jpeg", "image/png", "image/webp", "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "text/plain", "text/csv",
+        ):
+            raise HTTPException(status_code=422, detail="Payment proof should be a photo, a PDF, a Word file, or a spreadsheet.")
         filename = os.path.basename(str(file.filename or "payment-proof")) or "payment-proof"
+        read_text = gmail.attachment_text(filename, content_type, data)
+        parsed = desk.parse_mail(filename, read_text)
+        if not str(amount or "").strip() and parsed.get("amount") is not None:
+            amount = str(parsed["amount"])
+        if not re.sub(r"\s+", "", str(utr or "")) and parsed.get("utr"):
+            utr = parsed["utr"]
         file_id = os.urandom(8).hex()
         state = await load_state(db)
         try:
@@ -680,6 +705,11 @@ def register(api, db, current_user):
     @api.post("/workshop/payments/{mail_id}/post")
     async def workshop_payment_post(mail_id: str, user=Depends(workshop_user)):
         _need(user, "payments")
+        if not payment_post_allowed(user):
+            raise HTTPException(
+                status_code=403,
+                detail="Only f.manager@akarfourwheel.com, Rishab Akar, or Euler Akar can post a payment proof.",
+            )
         state = await load_state(db)
         state, post_error = await _post_mail(state, mail_id)
         await save_state(db, state)

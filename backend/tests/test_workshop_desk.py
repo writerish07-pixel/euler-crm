@@ -530,6 +530,106 @@ def test_a_mail_naming_two_requests_is_not_filed_onto_either():
     assert state["lines"][1]["stage"] == "asked"
 
 
+def test_payment_proof_from_the_allowed_senders_sets_the_money_on_a_dropped_part():
+    assert desk.sender_can_post_payment("F Manager", "f.manager@akarfourwheel.com")
+    assert desk.sender_can_post_payment("RISHAB AKAR", "")
+    assert desk.sender_can_post_payment("Euler Akar", "desk@euler.com")
+    assert not desk.sender_can_post_payment("Kuber", "kuber@eulermotors.com")
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "short", source="coulson"),
+        desk._line("12428", "EM2001", "Blade fuse", 2, "asked", source="coulson"),
+    ]
+    state, mail_id = desk.add_mail(
+        state,
+        "Payment of order confirmation - request 11880",
+        "Amount to be paid is 173,363.03 INR.\nUTR HDFC11880.",
+    )
+    mail = next(item for item in state["mails"] if item["id"] == mail_id)
+    mail["fromName"] = "F Manager"
+    mail["fromEmail"] = "f.manager@akarfourwheel.com"
+    mail["requestNo"] = "11880"
+    mail["jobs"] = ["payment"]
+    proofs = {row["requestNo"]: row for row in desk.recognized_proofs(state)}
+    assert proofs["11880"]["amount"] == 173363.03
+    assert "12428" not in proofs
+    missing = [row["requestNo"] for row in desk.requests_missing_proof(state)]
+    assert missing == ["12428"]
+    money = desk.money_rows(state)
+    assert money[0]["requestNo"] == "11880"
+    assert money[0]["amount"] == 173363.03
+    assert "Front bump stopper" in money[0]["parts"]
+
+
+def test_a_parked_dispatch_amount_beats_the_full_payment():
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("10412", "CD4C001800", "WH AC charging gun", 10, "short", source="coulson"),
+    ]
+    state["advances"] = {"10412": 18400}
+    state["proofs"] = [{
+        "id": "proof-1",
+        "requestNo": "10412",
+        "utr": "HDFC10412",
+        "amount": 173363.03,
+        "filename": "proof.pdf",
+        "posted": True,
+        "fromName": "F Manager",
+    }]
+    money = desk.money_rows(state)
+    assert money[0]["amount"] == 18400
+    assert money[0]["source"] == "From the dispatch mail"
+    view = desk.public_view(state)
+    assert view["advanceTotal"] == 18400
+
+
+def test_a_saved_proof_can_be_posted_again_only_by_the_named_people():
+    import workshop_api
+
+    owner = {"name": "Owner", "email": "owner@akar.com", "serviceAccess": {"owner": True}}
+    manager = {"name": "F Manager", "email": "f.manager@akarfourwheel.com", "serviceAccess": {"areas": ["payments"]}}
+    other = {"name": "Kuber", "email": "kuber@eulermotors.com", "serviceAccess": {"areas": ["payments"]}}
+    assert workshop_api.payment_post_allowed(owner)
+    assert workshop_api.payment_post_allowed(manager)
+    assert not workshop_api.payment_post_allowed(other)
+
+
+def test_a_word_file_on_the_trail_is_read():
+    import io
+    import zipfile
+    import workshop_gmail as gmail
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as book:
+        book.writestr("word/document.xml", "<w:p><w:t>Amount to be paid is 5000</w:t></w:p>")
+    text = gmail.attachment_text(
+        "proof.docx",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        buffer.getvalue(),
+    )
+    assert "5000" in text
+
+
+def test_warranty_claims_show_how_old_they_are():
+    aged = desk.age_warranty(desk.snapshot_from_coulson(
+        [], [],
+        [{"claim_number": 14315, "claim_total_amount": 10, "claim_status": "Approved", "created_at": "2026-08-01"}],
+        {}, [], [], [],
+    )["warranty"])
+    assert aged["rows"][0]["ageDays"] > 30
+    assert "month" in aged["rows"][0]["age"]
+    assert any(row["label"] == "Over 30 days" and row["count"] == 1 for row in aged["ageing"])
+
+
+def test_today_keeps_only_the_newest_waiting_mail():
+    state = desk.empty_state()
+    for number in range(12):
+        state, _ = desk.add_mail(state, f"Unread {number}", f"Request {10000 + number}")
+    today = [item for item in desk.build_today(state) if item.get("mailId")]
+    assert len(today) == 5
+    assert today[0]["title"] == "Unread 11"
+
+
 def test_pasted_mail_stays_unread_until_someone_reads_it():
     state, mail_id = desk.add_mail(desk.empty_state(), "Re: Ticket 10412", DISPATCH)
     mail = next(item for item in state["mails"] if item["id"] == mail_id)
