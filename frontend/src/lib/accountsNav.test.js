@@ -36,7 +36,7 @@ const ITEMS = [
   { to: "/whatsapp", salesOnly: true },
   { to: "/", salesOnly: true, end: true },
   { to: "/staff", staffDesk: true },
-  { to: "/workshop", showroomDesk: true },
+  { to: "/service", serviceDesk: true },
 ];
 
 test("accounts desk keeps dashboard, money pages and both lead registers", () => {
@@ -57,5 +57,5 @@ test("accounts desk does not keep bookings, approvals or WhatsApp", () => {
   expect(kept).not.toContain("/whatsapp");
   expect(kept).not.toContain("/");
   expect(kept).not.toContain("/staff");
-  expect(kept).not.toContain("/workshop");
+  expect(kept).not.toContain("/service");
 });

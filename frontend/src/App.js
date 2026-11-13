@@ -60,7 +60,7 @@ function homePath(auth) {
   return "/";
 }
 
-function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, accountsOk, oemOk, dealDesk, showroomDesk, staffDesk, gmHome, monthlyOk, oemClaimDesk }) {
+function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fieldOk, fieldOnly, accountsHome, accountsOk, oemOk, dealDesk, showroomDesk, staffDesk, gmHome, monthlyOk, oemClaimDesk, serviceDesk }) {
   const auth = useAuth();
   const { user, isOwner, isSalesStaff, isField, isMoneyDesk, isAccounts, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = auth;
   const loc = useLocation();
@@ -84,6 +84,7 @@ function Protected({ children, ownerOnly, salesOnly, moneyDesk, financeView, fie
   if (ownerOnly && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (dealDesk && !canEditCommercials) return <Navigate to={homePath(auth)} replace />;
   if (showroomDesk && !canManageShowroom) return <Navigate to={homePath(auth)} replace />;
+  if (serviceDesk && !isOwner && !(user?.serviceAccess?.areas || []).length) return <Navigate to={homePath(auth)} replace />;
   if (staffDesk && !canManageStaff) return <Navigate to={homePath(auth)} replace />;
   if (fieldOnly && !isField && !isOwner) return <Navigate to={homePath(auth)} replace />;
   if (gmHome && !isSalesGm && !isOwner) return <Navigate to={homePath(auth)} replace />;
@@ -135,6 +136,7 @@ function AppRoutes() {
       oemOk={opts.oemOk}
       dealDesk={opts.dealDesk}
       showroomDesk={opts.showroomDesk}
+      serviceDesk={opts.serviceDesk}
       staffDesk={opts.staffDesk}
       gmHome={opts.gmHome}
       monthlyOk={opts.monthlyOk}
@@ -194,7 +196,8 @@ function AppRoutes() {
       <Route path="/deal-verify" element={P(<DealVerify />, { showroomDesk: true })} />
       <Route path="/price-list" element={P(<PriceList />, { salesOnly: true, fieldOk: true })} />
       <Route path="/inventory" element={P(<Inventory />)} />
-      <Route path="/workshop" element={P(<Workshop />, { showroomDesk: true })} />
+      <Route path="/service" element={P(<Workshop />, { serviceDesk: true })} />
+      <Route path="/workshop" element={P(<Workshop />, { serviceDesk: true })} />
       <Route path="/price-master" element={P(<PriceMaster />, { ownerOnly: true })} />
       <Route path="/staff" element={P(<Staff />, { staffDesk: true })} />
       <Route path="/settings" element={P(<Settings />)} />

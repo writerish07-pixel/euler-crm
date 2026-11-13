@@ -283,6 +283,20 @@ class ChangePasswordIn(BaseModel):
     newPassword: str
 
 
+async def _with_service_access(db, user):
+    """Tell the sales app which parts of Service this login may open."""
+    import workshop_desk
+    try:
+        grants = await db.workshop_access.find({}, {"_id": 0}).to_list(300)
+    except Exception:
+        grants = []
+    out = dict(user or {})
+    out.pop("passwordHash", None)
+    out.pop("passwordPlain", None)
+    out["serviceAccess"] = workshop_desk.resolve_access(out, grants)
+    return out
+
+
 def build_router(db):
     router = APIRouter(prefix="/api/auth")
 
@@ -427,7 +441,7 @@ def build_router(db):
                 await db.users.update_one({"userId": user["userId"]}, {"$set": patch})
                 user.update(patch)
             token = create_token(user)
-            return {"token": token, "user": _public_session_user(user)}
+            return {"token": token, "user": await _with_service_access(db, _public_session_user(user))}
         except HTTPException:
             raise
         except Exception:
@@ -437,7 +451,7 @@ def build_router(db):
 
     @router.get("/me")
     async def me(user=Depends(current_user)):
-        return user
+        return await _with_service_access(db, user)
 
     @router.post("/change-password")
     async def change_password(body: ChangePasswordIn, user=Depends(current_user)):

@@ -172,12 +172,14 @@ test("a failed paste keeps the mail in the box", async () => {
   host.remove();
 });
 
-test("a showroom admin does not see the password field", async () => {
+test("a person granted only Today does not see People or Gmail", async () => {
   mockAuth.current = { isOwner: false };
+  mockGet.mockResolvedValue({ ...EMPTY, access: { owner: false, areas: ["today"] } });
   const { host, root } = await render();
-  await act(async () => { host.querySelector('[data-testid="workshop-tab-rules"]').click(); });
-  expect(host.textContent).toContain("The owner saves the service login");
-  expect(host.querySelector('input[type="password"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="workshop-tab-today"]')).toBeTruthy();
+  expect(host.querySelector('[data-testid="workshop-tab-people"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="workshop-tab-rules"]')).toBeFalsy();
+  expect(host.querySelector('[data-testid="workshop-tab-payments"]')).toBeFalsy();
   act(() => { root.unmount(); });
   host.remove();
 });

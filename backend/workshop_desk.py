@@ -82,6 +82,103 @@ def empty_state():
         },
         "syncedAt": "",
         "syncError": "",
+        "proofs": [],
+    }
+
+
+SERVICE_AREAS = (
+    ("today", "Today"),
+    ("mail", "Mail"),
+    ("buy", "Buy parts"),
+    ("warranty", "Warranty"),
+    ("jobs", "Jobs"),
+    ("money", "Money"),
+    ("payments", "Payment proof"),
+)
+OWNER_AREAS = ("users", "gmail")
+_AREA_KEYS = {key for key, _label in SERVICE_AREAS}
+
+# What a staff role is offered. The owner can untick any of these before saving.
+PRESETS = {
+    "executive": ["today", "buy", "jobs"],
+    "team_lead": ["today", "mail", "buy", "warranty", "jobs"],
+    "tl": ["today", "mail", "buy", "warranty", "jobs", "money", "payments"],
+    "accounts": ["today", "money", "payments"],
+    "asm": ["today", "jobs", "warranty"],
+    "rm": ["today", "jobs", "warranty"],
+    "sales_gm": ["today", "mail", "buy", "warranty", "jobs", "money", "payments"],
+}
+
+
+def preset_for_role(role):
+    return list(PRESETS.get(str(role or "").strip().lower(), ["today"]))
+
+
+def clean_areas(areas):
+    cleaned = []
+    for area in areas or []:
+        key = str(area or "").strip()
+        if key in _AREA_KEYS and key not in cleaned:
+            cleaned.append(key)
+    return cleaned
+
+
+def resolve_access(user, grants):
+    """Owner sees the whole service desk. Everyone else sees only a saved grant."""
+    role = str((user or {}).get("role") or "").strip().lower()
+    name = str((user or {}).get("name") or "").strip()
+    if role == "owner":
+        return {
+            "owner": True,
+            "areas": [key for key, _label in SERVICE_AREAS] + list(OWNER_AREAS),
+            "staffId": "",
+            "name": name or "Owner",
+        }
+    uid = str((user or {}).get("userId") or "")
+    email = str((user or {}).get("email") or "").strip().lower()
+    name_key = name.lower()
+    hit = None
+    for grant in grants or []:
+        if uid and str(grant.get("userId") or "") == uid:
+            hit = grant
+            break
+        if email and str(grant.get("email") or "").strip().lower() == email:
+            hit = grant
+            break
+        if name_key and str(grant.get("name") or "").strip().lower() == name_key:
+            hit = grant
+            break
+    if not hit:
+        return {"owner": False, "areas": [], "staffId": "", "name": ""}
+    return {
+        "owner": False,
+        "areas": clean_areas(hit.get("areas")),
+        "staffId": str(hit.get("staffId") or ""),
+        "name": str(hit.get("name") or ""),
+    }
+
+
+def people_row(staff, grant, users):
+    email = str((staff or {}).get("email") or "").strip().lower()
+    name = str((staff or {}).get("name") or "").strip()
+    login = None
+    for person in users or []:
+        if email and str(person.get("email") or "").strip().lower() == email:
+            login = person
+            break
+        if name and str(person.get("name") or "").strip().lower() == name.lower():
+            login = person
+            break
+    role = str((staff or {}).get("role") or "executive")
+    return {
+        "staffId": (staff or {}).get("staffId") or "",
+        "name": name,
+        "role": role,
+        "email": (staff or {}).get("email") or "",
+        "preset": preset_for_role(role),
+        "areas": clean_areas((grant or {}).get("areas")),
+        "hasLogin": bool(login),
+        "userId": (login or {}).get("userId") or "",
     }
 
 
@@ -490,7 +587,88 @@ def receive_line(state, line_id):
     return state
 
 
-def add_mail(state, subject, body, direction="Received from the company"):
+def record_payment(state, request_no, utr, amount, filename, file_id):
+    """File a payment on one ticket and prepare the reply for that ticket's mail."""
+    state = deepcopy(state)
+    request_no = str(request_no or "").strip()
+    utr = re.sub(r"\s+", "", str(utr or "")).upper()
+    if not re.fullmatch(r"\d{4,7}", request_no):
+        raise ValueError("Choose a ticket number.")
+    if not re.fullmatch(r"[A-Z0-9]{6,}", utr):
+        raise ValueError("Enter the payment reference from the bank.")
+    lines = [line for line in state["lines"] if line.get("requestNo") == request_no]
+    if not lines:
+        raise ValueError("That ticket is not on the desk yet.")
+    try:
+        amount = round(float(amount), 2) if amount not in (None, "") else None
+    except (TypeError, ValueError):
+        amount = None
+    for line in lines:
+        if line.get("stage") in EARLY:
+            line["stage"] = "paid"
+        line["note"] = f"Payment proof {filename} filed here. UTR {utr}."
+    thread = None
+    for mail in reversed(state["mails"]):
+        if mail.get("requestNo") == request_no and mail.get("gmailThreadId"):
+            thread = mail
+            break
+    subject = f"Ticket {request_no} — payment done"
+    if thread and thread.get("subject"):
+        prior = str(thread["subject"]).strip()
+        subject = prior if prior.lower().startswith("re:") else f"Re: {prior}"
+    body_lines = [f"Payment done for ticket {request_no}.", f"UTR {utr}."]
+    if amount:
+        body_lines.append(f"Amount {inr(amount)}.")
+    body_lines.append(f"Payment proof {filename} is attached.")
+    seq = max([m.get("seq") or 0 for m in state["mails"]] or [0]) + 1
+    mail_id = _new_id()
+    mail = {
+        "id": mail_id,
+        "seq": seq,
+        "direction": "Sent by the workshop",
+        "when": "Just filed",
+        "subject": subject,
+        "body": "\n".join(body_lines),
+        "requestNo": request_no,
+        "status": "joined",
+        "applied": True,
+        "kind": "payment",
+        "finds": [["Request number", request_no], ["Payment reference", utr]],
+        "result": f"Payment proof filed on ticket {request_no}.",
+        "posted": False,
+        "fileId": file_id,
+        "gmailThreadId": (thread or {}).get("gmailThreadId") or "",
+        "replyTo": (thread or {}).get("replyTo") or "",
+        "rfcMessageId": (thread or {}).get("rfcMessageId") or "",
+    }
+    state["mails"].append(mail)
+    state.setdefault("proofs", []).append({
+        "id": file_id,
+        "requestNo": request_no,
+        "utr": utr,
+        "amount": amount,
+        "filename": filename,
+        "mailId": mail_id,
+        "posted": False,
+    })
+    return state, mail_id
+
+
+def mark_posted(state, mail_id, gmail_id=""):
+    state = deepcopy(state)
+    for mail in state["mails"]:
+        if mail.get("id") == mail_id:
+            mail["posted"] = True
+            if gmail_id:
+                mail["gmailId"] = gmail_id
+            mail["result"] = f"Posted onto the mail for ticket {mail.get('requestNo')}."
+    for proof in state.get("proofs") or []:
+        if proof.get("mailId") == mail_id:
+            proof["posted"] = True
+    return state
+
+
+def add_mail(state, subject, body, direction="Received from the company", meta=None):
     state = deepcopy(state)
     parsed = parse_mail(subject, body)
     seq = max([m.get("seq") or 0 for m in state["mails"]] or [0]) + 1
@@ -507,7 +685,11 @@ def add_mail(state, subject, body, direction="Received from the company"):
         "kind": parsed["kind"],
         "finds": parsed["finds"],
         "result": parsed["preview"],
+        "posted": False,
     }
+    for key in ("gmailId", "gmailThreadId", "replyTo", "rfcMessageId"):
+        if (meta or {}).get(key):
+            mail[key] = meta[key]
     state["mails"].append(mail)
     # Reading happens when the person presses Read, except we return the mail
     # sitting unread so Today can show it. The caller may apply immediately.
@@ -641,13 +823,26 @@ def build_today(state):
     return items
 
 
-def public_view(state, service_login=None):
+def _today_visible(item, areas):
+    if item.get("mailId"):
+        return "mail" in areas
+    if item.get("lineId"):
+        return "buy" in areas
+    item_id = str(item.get("id") or "")
+    if item_id.startswith("war"):
+        return "warranty" in areas
+    if item_id.startswith("jobs"):
+        return "jobs" in areas
+    return "today" in areas
+
+
+def public_view(state, service_login=None, access=None, gmail=None):
     state = deepcopy(state or empty_state())
     paint_advances(state["lines"], state.get("advances") or {})
     for line in state["lines"]:
         line["stageLabel"] = STAGE_LABEL.get(line.get("stage"), line.get("stage") or "")
     mails = sorted(state["mails"], key=lambda m: m.get("seq") or 0)
-    return {
+    view = {
         "lines": state["lines"],
         "mails": mails,
         "advances": advance_rows(state),
@@ -655,10 +850,38 @@ def public_view(state, service_login=None):
         "warranty": state.get("warranty") or empty_state()["warranty"],
         "jobs": state.get("jobs") or empty_state()["jobs"],
         "today": build_today(state),
+        "proofs": list(state.get("proofs") or []),
         "syncedAt": state.get("syncedAt") or "",
         "syncError": state.get("syncError") or "",
         "serviceLogin": service_login or {"configured": False, "username": ""},
+        "access": access or {"owner": False, "areas": []},
+        "gmail": gmail or {"connected": False, "email": ""},
     }
+    if not access or access.get("owner"):
+        return view
+    areas = set(access.get("areas") or [])
+    if "mail" not in areas:
+        view["mails"] = []
+    if "buy" not in areas and "payments" not in areas:
+        view["lines"] = []
+    if "money" not in areas and "payments" not in areas:
+        view["advances"] = []
+        view["advanceTotal"] = 0
+    if "payments" not in areas:
+        view["proofs"] = []
+    if "warranty" not in areas:
+        view["warranty"] = empty_state()["warranty"]
+    if "jobs" not in areas:
+        view["jobs"] = empty_state()["jobs"]
+    if "today" not in areas:
+        view["today"] = []
+    else:
+        view["today"] = [item for item in view["today"] if _today_visible(item, areas)]
+    view["serviceLogin"] = {
+        "configured": bool((view.get("serviceLogin") or {}).get("configured")),
+        "username": "",
+    }
+    return view
 
 
 def snapshot_from_coulson(store_rows, stale_rows, claim_rows, claim_analytics, due_rows, complaint_rows, ticket_rows):

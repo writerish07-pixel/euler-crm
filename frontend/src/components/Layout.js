@@ -76,7 +76,7 @@ const NAV = [
     { to: "/erp-audit", label: "ERP Production Audit", icon: ShieldCheck, ownerOnly: true },
   ]},
   { section: "Service", items: [
-    { to: "/workshop", label: "Workshop Desk", icon: Wrench, showroomDesk: true },
+    { to: "/service", label: "Service", icon: Wrench, serviceDesk: true },
   ]},
   { section: "Catalogue & Admin", items: [
     { to: "/price-list", label: "Price List", icon: Tag, salesOnly: true },
@@ -97,7 +97,7 @@ const OEM_NAV = [
   ]},
 ];
 
-function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, pendingApprovals, open, onNavigate, onClose }) {
+function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, serviceAreas, pendingApprovals, open, onNavigate, onClose }) {
   const claimsDesk = useClaimsDeskMode();
   const deskLabel = isOemFinance ? "OEM finance desk"
     : isAccounts ? "Accounts desk" : isField ? "Field desk" : isSalesGm ? "Sales GM desk"
@@ -136,7 +136,7 @@ function Sidebar({ isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canV
             isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk,
             canViewFinance, canEditCommercials, canManageShowroom, canManageStaff,
             isSalesGm, canApproveLeads, isExecutive, isTeamLead, canViewMonthly,
-            canMatchOemClaims,
+            canMatchOemClaims, serviceAreas,
           }));
           if (!items.length) return null;
           return (
@@ -414,7 +414,7 @@ function Topbar({ onMenuOpen }) {
 }
 
 export default function Layout({ children }) {
-  const { isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
+  const { user, isOwner, isAccounts, isSalesStaff, isField, isMoneyDesk, canViewFinance, isOemFinance, canEditCommercials, canManageShowroom, canManageStaff, isSalesGm, canApproveLeads, isExecutive, isTl, isTeamLead, canViewMonthly, canMatchOemClaims, sessionError, retrySession } = useAuth();
   const [navOpen, setNavOpen] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState(0);
   const location = useLocation();
@@ -472,6 +472,7 @@ export default function Layout({ children }) {
         isTeamLead={isTeamLead}
         canViewMonthly={canViewMonthly}
         canMatchOemClaims={canMatchOemClaims}
+        serviceAreas={user?.serviceAccess?.areas || []}
         pendingApprovals={pendingApprovals}
         open={navOpen}
         onClose={() => setNavOpen(false)}

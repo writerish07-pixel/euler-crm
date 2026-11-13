@@ -63,6 +63,83 @@ def test_a_mail_that_names_two_tickets_is_not_joined():
     assert "10412" in mail["result"] and "10526" in mail["result"]
 
 
+def test_owner_sees_service_and_a_store_person_sees_only_their_grant():
+    owner = desk.resolve_access({"role": "owner", "name": "Akar"}, [])
+    assert owner["owner"] is True
+    assert "users" in owner["areas"]
+    assert "gmail" in owner["areas"]
+    store = desk.resolve_access(
+        {"role": "executive", "name": "Ravi", "userId": "u-ravi"},
+        [{"userId": "u-ravi", "staffId": "ST1", "name": "Ravi", "areas": ["today", "buy", "jobs", "users"]}],
+    )
+    assert store["owner"] is False
+    assert store["areas"] == ["today", "buy", "jobs"]
+    assert desk.preset_for_role("accounts") == ["today", "money", "payments"]
+    view = desk.public_view(desk.sample_state(), None, store)
+    assert view["mails"] == []
+    assert view["proofs"] == []
+    assert any(line["code"] == "CD4C001800" for line in view["lines"])
+
+
+def test_payment_proof_stays_on_its_ticket_and_prepares_the_reply():
+    state = desk.sample_state()
+    state["mails"][0]["gmailThreadId"] = "thread-10412"
+    state["mails"][0]["replyTo"] = "parts@example.com"
+    state["mails"][0]["rfcMessageId"] = "<m@example.com>"
+    state["mails"][0]["requestNo"] = "10412"
+    state, mail_id = desk.record_payment(state, "10412", "HDFC26110412", 18400, "utr.jpg", "file1")
+    gun = next(line for line in state["lines"] if line["code"] == "CD4C001800")
+    shoe = next(line for line in state["lines"] if line["code"] == "AAS20004")
+    assert gun["stage"] == "paid"
+    assert shoe["stage"] == "short"
+    mail = next(item for item in state["mails"] if item["id"] == mail_id)
+    assert mail["requestNo"] == "10412"
+    assert mail["posted"] is False
+    assert mail["gmailThreadId"] == "thread-10412"
+    assert mail["replyTo"] == "parts@example.com"
+    assert "HDFC26110412" in mail["body"]
+    assert state["proofs"][0]["filename"] == "utr.jpg"
+    state = desk.mark_posted(state, mail_id, "gmail-sent")
+    assert state["proofs"][0]["posted"] is True
+    try:
+        desk.record_payment(state, "99999", "HDFC26110412", None, "utr.jpg", "file2")
+    except ValueError as exc:
+        assert "not on the desk" in str(exc)
+    else:
+        raise AssertionError("a missing ticket should be refused")
+
+
+def test_gmail_reply_carries_the_proof_and_the_thread():
+    import base64
+    from email import message_from_bytes
+    import workshop_gmail as gmail
+    url = gmail.auth_url("client", "https://crm.example/service", "state1")
+    assert "gmail.modify" in url
+    assert "state1" in url
+    raw = gmail.build_raw(
+        "parts@example.com",
+        "Re: Ticket 10412",
+        "Payment done for ticket 10412.\nUTR HDFC26110412.",
+        in_reply_to="<m@example.com>",
+        filename="utr.jpg",
+        data=b"jpeg",
+        content_type="image/jpeg",
+    )
+    message = message_from_bytes(base64.urlsafe_b64decode(raw.encode()))
+    assert message["To"] == "parts@example.com"
+    assert message["In-Reply-To"] == "<m@example.com>"
+    body = ""
+    attachment = b""
+    for part in message.walk():
+        if part.get_content_type() == "text/plain":
+            body += part.get_payload(decode=True).decode()
+        if part.get_filename() == "utr.jpg":
+            attachment = part.get_payload(decode=True)
+    assert "ticket 10412" in body.lower()
+    assert "HDFC26110412" in body
+    assert attachment == b"jpeg"
+
+
 def test_this_morning_only_fills_an_empty_desk():
     assert desk.desk_has_work(desk.empty_state()) is False
     assert desk.desk_has_work(desk.sample_state()) is True

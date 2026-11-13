@@ -1,18 +1,20 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { get, post, put, apiErrorMessage } from "../lib/api";
+import { get, post, put, del, postForm, apiErrorMessage } from "../lib/api";
 import { inr } from "../lib/format";
 import { PageHeader, Table, Badge, Button, Card, Field, Input } from "../components/ui";
 import { useAuth } from "../context/AuthContext";
 
 const TABS = [
-  ["today", "Today"],
-  ["mail", "Mail"],
-  ["buy", "Buy parts"],
-  ["warranty", "Warranty"],
-  ["jobs", "Jobs"],
-  ["money", "Money"],
-  ["rules", "Rules"],
+  ["today", "Today", "today"],
+  ["mail", "Mail", "mail"],
+  ["buy", "Buy parts", "buy"],
+  ["warranty", "Warranty", "warranty"],
+  ["jobs", "Jobs", "jobs"],
+  ["money", "Money", "money"],
+  ["payments", "Payment proof", "payments"],
+  ["people", "People", "users"],
+  ["rules", "Rules", "gmail"],
 ];
 
 const TONE = {
@@ -40,6 +42,12 @@ export default function Workshop() {
   const [fileTo, setFileTo] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [payRequest, setPayRequest] = useState("");
+  const [payUtr, setPayUtr] = useState("");
+  const [payAmount, setPayAmount] = useState("");
+  const [payFile, setPayFile] = useState(null);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
 
   const load = useCallback(() => get("/workshop").then((data) => {
     setDesk(data);
@@ -66,6 +74,22 @@ export default function Workshop() {
       return null;
     });
 
+  useEffect(() => {
+    const query = new URLSearchParams(window.location.search);
+    const code = query.get("code");
+    const state = query.get("state");
+    if (!code || !state) return;
+    post("/workshop/gmail/finish", {
+      code,
+      state,
+      redirectUri: `${window.location.origin}/service`,
+    }).then((data) => {
+      apply(data);
+      toast.success(data?.gmail?.email ? `Gmail connected as ${data.gmail.email}` : "Gmail connected");
+      window.history.replaceState({}, "", "/service");
+    }).catch((err) => toast.error(apiErrorMessage(err, "Could not connect Gmail")));
+  }, []);
+
   const lines = desk?.lines || [];
   const mails = desk?.mails || [];
   const mail = mails.find((item) => item.id === selectedMail) || mails.find((item) => item.status === "unread") || mails[0];
@@ -75,18 +99,20 @@ export default function Workshop() {
   return (
     <div data-testid="workshop-desk">
       <PageHeader
-        title="Workshop Desk"
-        subtitle="One place for parts the store buys, warranty parts coming back, and the service mailbox. Same app, same database."
+        title="Service"
+        subtitle="The service desk. The owner adds people from the staff list. A payment proof filed here is posted onto that request’s mail."
         actions={
           <>
-            {!lines.length && !mails.length && (
+            {(desk?.access?.owner || isOwner) && !lines.length && !mails.length && (
               <Button variant="secondary" onClick={() => run("/workshop/sample").then((data) => data && toast.success("Loaded this morning’s workshop"))}>
                 Load this morning
               </Button>
             )}
-            <Button onClick={() => run("/workshop/sync").then((data) => data && toast.success("Synced from Service Coulson"))}>
-              Sync from Coulson
-            </Button>
+            {(desk?.access?.owner || isOwner) && (
+              <Button onClick={() => run("/workshop/sync").then((data) => data && toast.success("Synced from Service Coulson"))}>
+                Sync from Coulson
+              </Button>
+            )}
           </>
         }
       />
@@ -98,7 +124,12 @@ export default function Workshop() {
       )}
 
       <div className="flex flex-wrap gap-2 mb-4">
-        {TABS.map(([id, label]) => (
+        {TABS.filter(([, , area]) => {
+          const access = desk?.access;
+          if (!access) return isOwner || area === "today";
+          if (access.owner) return true;
+          return (access.areas || []).includes(area);
+        }).map(([id, label]) => (
             <button
             key={id}
             type="button"
@@ -183,6 +214,11 @@ export default function Workshop() {
                   placeholder={"Ticket 10412\nCD4C001800 is not dispatched\n₹18,400 is parked as advance."}
                 />
               </Field>
+              {(desk?.gmail?.connected || desk?.access?.owner) && (
+                <Button variant="secondary" className="mb-3" onClick={() => run("/workshop/gmail/pull").then((data) => data && toast.success("Mailbox pulled onto the desk"))}>
+                  Pull the mailbox
+                </Button>
+              )}
               <Button onClick={() => run("/workshop/mails", { subject, body }).then((data) => {
                 if (!data) return;
                 setSubject("");
@@ -368,6 +404,70 @@ export default function Workshop() {
         </div>
       )}
 
+      {tab === "payments" && (
+        <Card className="p-4 max-w-xl">
+          <h2 className="font-heading font-bold text-lg">Payment proof</h2>
+          <p className="text-sm text-ink-soft mt-1 mb-4">
+            The proof is saved on this ticket and posted onto the company mail for that request. One place updates the desk and the thread.
+          </p>
+          <Field label="Ticket">
+            <Input value={payRequest} onChange={(e) => setPayRequest(e.target.value)} placeholder={requests[0] ? `Ticket ${requests[0]}` : "Ticket number"} />
+          </Field>
+          <Field label="Payment reference">
+            <Input value={payUtr} onChange={(e) => setPayUtr(e.target.value)} placeholder="UTR from the bank" />
+          </Field>
+          <Field label="Amount">
+            <Input value={payAmount} onChange={(e) => setPayAmount(e.target.value)} placeholder="Optional" />
+          </Field>
+          <Field label="Proof">
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              className="block w-full text-sm"
+              onChange={(e) => setPayFile(e.target.files && e.target.files[0])}
+            />
+          </Field>
+          <Button onClick={() => {
+            if (!payFile) {
+              toast.error("Attach the payment proof.");
+              return;
+            }
+            const form = new FormData();
+            form.append("requestNo", payRequest);
+            form.append("utr", payUtr);
+            form.append("amount", payAmount);
+            form.append("file", payFile);
+            return postForm("/workshop/payments", form, { timeout: 60000 }).then((data) => {
+              apply(data);
+              setPayUtr("");
+              setPayAmount("");
+              setPayFile(null);
+              if (data?.posted) toast.success("Proof posted onto the request mail");
+              else toast.success(data?.postError || "Proof saved on the desk");
+            }).catch((err) => toast.error(apiErrorMessage(err, "Could not file the proof")));
+          }}>
+            Post onto the request mail
+          </Button>
+          <div className="mt-4">
+            <Table
+              columns={[
+                { key: "requestNo", label: "Ticket" },
+                { key: "utr", label: "Reference" },
+                { key: "filename", label: "Proof" },
+                { key: "posted", label: "Mail", render: (row) => row.posted ? "Posted" : "Waiting" },
+              ]}
+              rows={desk?.proofs || []}
+              rowKey="id"
+              empty="No payment proof filed yet."
+            />
+          </div>
+        </Card>
+      )}
+
+      {tab === "people" && (
+        <PeoplePanel />
+      )}
+
       {tab === "rules" && (
         <Card className="p-4 max-w-xl">
           <h2 className="font-heading font-bold text-lg">Service Coulson login</h2>
@@ -393,14 +493,123 @@ export default function Workshop() {
           ) : (
             <p className="text-sm">The owner saves the service login. You can still sync and work the desk.</p>
           )}
+          <h2 className="font-heading font-bold text-lg mt-8">Gmail</h2>
+          <p className="text-sm text-ink-soft mt-1 mb-4">
+            {desk?.gmail?.connected
+              ? `Connected as ${desk.gmail.email}. Pulled mail joins a ticket number, and a payment proof is replied onto that thread.`
+              : "Save the Google client, then connect the service mailbox. Add this return address in Google: "}
+            {!desk?.gmail?.connected && <span className="font-mono text-xs">{typeof window !== "undefined" ? `${window.location.origin}/service` : "/service"}</span>}
+          </p>
+          <Field label="Client id">
+            <Input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder={desk?.gmail?.clientId || "Google client id"} />
+          </Field>
+          <Field label="Client secret">
+            <Input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Leave blank to keep the saved secret" />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => put("/workshop/gmail", { clientId, clientSecret }).then((data) => {
+              apply(data);
+              setClientSecret("");
+              toast.success("Gmail client saved");
+            }).catch((err) => toast.error(apiErrorMessage(err, "Could not save Gmail")))}>
+              Save Gmail client
+            </Button>
+            <Button variant="secondary" onClick={() => post("/workshop/gmail/start", { redirectUri: `${window.location.origin}/service` }).then((data) => {
+              if (data?.url) window.location.href = data.url;
+            }).catch((err) => toast.error(apiErrorMessage(err, "Could not start Gmail")))}>
+              Connect mailbox
+            </Button>
+          </div>
           <ul className="mt-5 text-sm text-ink-soft space-y-2 list-disc pl-5">
             <li>A mail joins a request when it says ticket and the Coulson request number.</li>
             <li>Not dispatched, plus a part code, marks that part missing and parks the paid amount as advance.</li>
             <li>The follow-up mail asks the company to send the same part against that advance. It does not raise a new PI.</li>
-            <li>A mail with no ticket number waits until a person files it.</li>
+            <li>A mail with no ticket number, or two ticket numbers, waits until a person files it.</li>
+            <li>A payment proof is posted onto the mail for that ticket.</li>
             <li>A suggested order quantity that is not usable waits. It is not mailed.</li>
           </ul>
         </Card>
+      )}
+    </div>
+  );
+}
+
+function PeoplePanel() {
+  const [pack, setPack] = useState(null);
+  const [drafts, setDrafts] = useState({});
+  const [passwords, setPasswords] = useState({});
+  const loadPeople = useCallback(() => get("/workshop/people").then((data) => {
+    setPack(data);
+    const next = {};
+    (data?.people || []).forEach((person) => {
+      next[person.staffId] = person.areas && person.areas.length ? person.areas : person.preset;
+    });
+    setDrafts(next);
+  }).catch((err) => toast.error(apiErrorMessage(err, "Could not load the staff list"))), []);
+  useEffect(() => { loadPeople(); }, [loadPeople]);
+  const toggle = (staffId, area) => {
+    setDrafts((cur) => {
+      const have = new Set(cur[staffId] || []);
+      if (have.has(area)) have.delete(area);
+      else have.add(area);
+      return { ...cur, [staffId]: [...have] };
+    });
+  };
+  return (
+    <div className="space-y-3" data-testid="service-people">
+      <p className="text-sm text-ink-soft">
+        Pick someone from the staff list. They keep their sales login and only see the parts of Service you open. A password is used only when that person has no login yet.
+      </p>
+      {(pack?.people || []).map((person) => (
+        <Card key={person.staffId} className="p-4">
+          <div className="font-medium">{person.name}</div>
+          <div className="text-xs text-ink-faint mt-0.5">{person.role}{person.hasLogin ? " · has a login" : " · no login yet"}</div>
+          <div className="flex flex-wrap gap-2 mt-3">
+            {(pack.areas || []).map((area) => {
+              const on = (drafts[person.staffId] || []).includes(area.id);
+              return (
+                <button
+                  key={area.id}
+                  type="button"
+                  onClick={() => toggle(person.staffId, area.id)}
+                  className={on
+                    ? "rounded-full bg-cobalt px-3 py-1 text-xs font-medium text-white"
+                    : "rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-ink-soft"}
+                >
+                  {area.label}
+                </button>
+              );
+            })}
+          </div>
+          {!person.hasLogin && (
+            <Field label="First password">
+              <Input type="password" value={passwords[person.staffId] || ""} onChange={(e) => setPasswords((cur) => ({ ...cur, [person.staffId]: e.target.value }))} placeholder="At least 6 characters" />
+            </Field>
+          )}
+          <div className="flex flex-wrap gap-2 mt-3">
+            <Button onClick={() => put(`/workshop/people/${person.staffId}`, {
+              areas: drafts[person.staffId] || [],
+              password: passwords[person.staffId] || "",
+            }).then((data) => {
+              setPack(data);
+              setPasswords((cur) => ({ ...cur, [person.staffId]: "" }));
+              toast.success(`${person.name} can open Service`);
+            }).catch((err) => toast.error(apiErrorMessage(err, "Could not save access")))}>
+              Save access
+            </Button>
+            {!!person.areas?.length && (
+              <Button variant="secondary" onClick={() => del(`/workshop/people/${person.staffId}`).then((data) => {
+                setPack(data);
+                toast.success("Service access removed");
+              }).catch((err) => toast.error(apiErrorMessage(err, "Could not remove access")))}>
+                Remove
+              </Button>
+            )}
+          </div>
+        </Card>
+      ))}
+      {pack && !(pack.people || []).length && (
+        <p className="text-sm text-ink-faint">No active staff yet. Add them on Staff and Reports, then come back here.</p>
       )}
     </div>
   );
