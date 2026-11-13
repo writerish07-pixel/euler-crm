@@ -79,9 +79,11 @@ export default function Workshop() {
         subtitle="One place for parts the store buys, warranty parts coming back, and the service mailbox. Same app, same database."
         actions={
           <>
-            <Button variant="secondary" onClick={() => run("/workshop/sample").then((data) => data && toast.success("Loaded this morning’s workshop"))}>
-              Load this morning
-            </Button>
+            {!lines.length && !mails.length && (
+              <Button variant="secondary" onClick={() => run("/workshop/sample").then((data) => data && toast.success("Loaded this morning’s workshop"))}>
+                Load this morning
+              </Button>
+            )}
             <Button onClick={() => run("/workshop/sync").then((data) => data && toast.success("Synced from Service Coulson"))}>
               Sync from Coulson
             </Button>
@@ -181,7 +183,12 @@ export default function Workshop() {
                   placeholder={"Ticket 10412\nCD4C001800 is not dispatched\n₹18,400 is parked as advance."}
                 />
               </Field>
-              <Button onClick={() => run("/workshop/mails", { subject, body }).then(() => { setSubject(""); setBody(""); setTab("mail"); })}>
+              <Button onClick={() => run("/workshop/mails", { subject, body }).then((data) => {
+                if (!data) return;
+                setSubject("");
+                setBody("");
+                setTab("mail");
+              })}>
                 Add to the desk
               </Button>
             </Card>
@@ -254,12 +261,12 @@ export default function Workshop() {
               )}
               <div className="flex flex-wrap gap-2 mt-4">
                 {line.stage === "short" && (
-                  <Button onClick={() => run(`/workshop/lines/${line.id}/reorder`).then(() => toast.success("Follow-up mail is on the thread"))}>
+                  <Button onClick={() => run(`/workshop/lines/${line.id}/reorder`).then((data) => data && toast.success("Follow-up mail is on the thread"))}>
                     Approve the follow-up mail
                   </Button>
                 )}
                 {(line.stage === "reorder" || line.stage === "transit") && (
-                  <Button onClick={() => run(`/workshop/lines/${line.id}/receive`).then(() => toast.success("Counted into the store"))}>
+                  <Button onClick={() => run(`/workshop/lines/${line.id}/receive`).then((data) => data && toast.success("Counted into the store"))}>
                     Count into the store
                   </Button>
                 )}

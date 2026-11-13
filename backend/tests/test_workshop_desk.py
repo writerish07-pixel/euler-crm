@@ -44,6 +44,30 @@ def test_one_mail_can_send_some_parts_and_hold_others():
     assert parsed["advance"] == 4200
 
 
+def test_a_mail_that_names_two_tickets_is_not_joined():
+    body = (
+        "Ticket 10412 and ticket 10526.\n"
+        "Not dispatched: CD4C001800, 10 nos.\n"
+        "₹18,400 is parked as advance."
+    )
+    parsed = desk.parse_mail("Re: two tickets", body)
+    assert parsed["request_nos"] == ["10412", "10526"]
+    assert parsed["kind"] == "unmatched"
+    state, mail_id = desk.add_mail(desk.empty_state(), "Re: two tickets", body)
+    state = desk.read_mail(state, mail_id)
+    assert state["lines"] == []
+    assert state["advances"] == {}
+    mail = state["mails"][0]
+    assert mail["status"] == "unmatched"
+    assert mail["requestNo"] == ""
+    assert "10412" in mail["result"] and "10526" in mail["result"]
+
+
+def test_this_morning_only_fills_an_empty_desk():
+    assert desk.desk_has_work(desk.empty_state()) is False
+    assert desk.desk_has_work(desk.sample_state()) is True
+
+
 def test_a_mail_with_no_ticket_is_left_for_a_person():
     parsed = desk.parse_mail("Bank account update", "Please update the bank mandate form.")
     assert parsed["kind"] == "unmatched"

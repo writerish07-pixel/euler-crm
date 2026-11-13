@@ -155,9 +155,9 @@ def parse_mail(subject, body):
                 break
     amount = amounts[0] if amounts else None
     low = text.lower()
-    # A ticket number is what joins a mail. Without one, the desk waits for a person
-    # even when the wording looks like a dispatch or a payment.
-    if not request_nos:
+    # A single ticket number is what joins a mail. None, or more than one, waits
+    # for a person even when the wording looks like a dispatch or a payment.
+    if len(request_nos) != 1:
         kind = "unmatched"
     elif missing or "not dispatched" in low or "not available" in low:
         kind = "dispatch"
@@ -197,8 +197,13 @@ def parse_mail(subject, body):
     elif amount is not None:
         finds.append(["Amount", inr(amount)])
 
-    if kind == "unmatched":
-        preview = "No ticket number and no part code the desk can trust. It waits for a person."
+    if len(request_nos) > 1:
+        preview = (
+            f"This mail names tickets {', '.join(request_nos)}. "
+            "A person has to split it before any part or money moves."
+        )
+    elif kind == "unmatched":
+        preview = "No ticket number. It waits until a person files it."
     elif kind == "dispatch" and missing:
         parked = inr(advance if advance is not None else amount) or "the amount already paid"
         preview = (
@@ -300,8 +305,8 @@ def apply_parsed(state, mail):
     mail["kind"] = parsed["kind"]
     mail["finds"] = parsed["finds"]
     request_nos = parsed["request_nos"]
-    mail["requestNo"] = request_nos[0] if request_nos else ""
-    if parsed["kind"] == "unmatched" or not request_nos:
+    mail["requestNo"] = request_nos[0] if len(request_nos) == 1 else ""
+    if parsed["kind"] == "unmatched" or len(request_nos) != 1:
         mail["status"] = "unmatched"
         mail["applied"] = True
         mail["result"] = parsed["preview"]
@@ -496,7 +501,7 @@ def add_mail(state, subject, body, direction="Received from the company"):
         "when": "Just pasted",
         "subject": str(subject or "").strip() or "(no subject)",
         "body": str(body or "").strip(),
-        "requestNo": parsed["request_nos"][0] if parsed["request_nos"] else "",
+        "requestNo": parsed["request_nos"][0] if len(parsed["request_nos"]) == 1 else "",
         "status": "unread",
         "applied": False,
         "kind": parsed["kind"],
@@ -507,6 +512,17 @@ def add_mail(state, subject, body, direction="Received from the company"):
     # Reading happens when the person presses Read, except we return the mail
     # sitting unread so Today can show it. The caller may apply immediately.
     return state, mail["id"]
+
+
+def desk_has_work(state):
+    """True once the shared desk holds a part, a mail, or an advance."""
+    state = state or {}
+    if state.get("lines") or state.get("mails"):
+        return True
+    advances = state.get("advances") or {}
+    if isinstance(advances, dict):
+        return any(advances.values())
+    return bool(advances)
 
 
 def advance_rows(state):
@@ -886,7 +902,7 @@ def sample_state():
             "when": when,
             "subject": subject,
             "body": body,
-            "requestNo": parsed["request_nos"][0] if parsed["request_nos"] else "",
+            "requestNo": parsed["request_nos"][0] if len(parsed["request_nos"]) == 1 else "",
             "status": status,
             "applied": applied,
             "kind": parsed["kind"],

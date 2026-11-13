@@ -159,9 +159,12 @@ def register(api, db, current_user):
     @api.post("/workshop/sample")
     async def workshop_sample(user=Depends(workshop_user)):
         current = await load_state(db)
+        if desk.desk_has_work(current):
+            raise HTTPException(
+                status_code=409,
+                detail="The desk already has workshop work. Load this morning only fills an empty desk.",
+            )
         sample = desk.sample_state()
-        # Keep a live sync stamp if they already pulled Coulson, but the sample
-        # is the walk-through they asked to click.
         sample["syncedAt"] = current.get("syncedAt") or ""
         await save_state(db, sample)
         return await view(user)

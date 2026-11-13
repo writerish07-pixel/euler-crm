@@ -148,6 +148,30 @@ test("workshop desk loads this morning and opens the mail, the part, and the war
   host.remove();
 });
 
+test("a failed paste keeps the mail in the box", async () => {
+  mockPost.mockRejectedValueOnce(new Error("offline"));
+  const { host, root } = await render();
+  await act(async () => { host.querySelector('[data-testid="workshop-tab-mail"]').click(); });
+  const subject = host.querySelector("input");
+  const body = host.querySelector("textarea");
+  const setValue = (el, value) => {
+    const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  await act(async () => {
+    setValue(subject, "Re: Ticket 10412");
+    setValue(body, "Ticket 10412\nCD4C001800 is not dispatched");
+  });
+  const add = [...host.querySelectorAll("button")].find((btn) => btn.textContent.includes("Add to the desk"));
+  await act(async () => { add.click(); });
+  await act(async () => { await Promise.resolve(); });
+  expect(host.querySelector("input").value).toBe("Re: Ticket 10412");
+  expect(host.querySelector("textarea").value).toContain("CD4C001800");
+  act(() => { root.unmount(); });
+  host.remove();
+});
+
 test("a showroom admin does not see the password field", async () => {
   mockAuth.current = { isOwner: false };
   const { host, root } = await render();
