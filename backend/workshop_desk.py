@@ -239,9 +239,11 @@ def find_pi(text):
         if re.search(r"proforma|(^|[^A-Za-z])pi([^A-Za-z]|$)|invoice", name, re.I):
             numbered = re.search(r"(PI[/A-Z0-9-]{3,})", name, re.I)
             return numbered.group(1).upper() if numbered else "PI attached"
-    if re.search(r"please raise a proforma", raw, re.I) and not _PI_RE.search(raw):
-        return ""
-    if re.search(r"\binvoice is attached\b|\bproforma invoice\b", raw, re.I):
+    if re.search(r"\binvoice is attached\b", raw, re.I) and not re.search(
+        r"please raise|waiting for|awaiting|yet to (receive|get)|not (yet )?attached",
+        raw,
+        re.I,
+    ):
         return "PI attached"
     return ""
 

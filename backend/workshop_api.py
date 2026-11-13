@@ -14,6 +14,19 @@ import workshop_gmail as gmail
 _LIST = {"view_type": "table", "sort": '["id","DESC"]', "limit": "100"}
 
 
+def thread_needs_fetch(message_id, thread_id, known_ids, seen):
+    """A later reply in a thread already read still has to be fetched.
+
+    Skip a message only when that exact Gmail id is already stored, or when
+    this pull has already opened the thread.
+    """
+    if message_id and message_id in (known_ids or set()):
+        return False
+    if thread_id and thread_id in (seen or set()):
+        return False
+    return True
+
+
 class MailIn(BaseModel):
     subject: str = ""
     body: str = ""
@@ -537,11 +550,7 @@ def register(api, db, current_user):
         except gmail.GmailError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         state = await load_state(db)
-        examined = {
-            mail.get("gmailThreadId")
-            for mail in state["mails"]
-            if mail.get("examined") and mail.get("gmailThreadId")
-        }
+        known = {mail.get("gmailId") for mail in state["mails"] if mail.get("gmailId")}
         seen = set()
         added = 0
         for message_id in ids:
@@ -550,7 +559,7 @@ def register(api, db, current_user):
             except gmail.GmailError:
                 continue
             thread_id = head.get("threadId") or ""
-            if thread_id and (thread_id in seen or thread_id in examined):
+            if not thread_needs_fetch(message_id, thread_id, known, seen):
                 continue
             if thread_id:
                 seen.add(thread_id)

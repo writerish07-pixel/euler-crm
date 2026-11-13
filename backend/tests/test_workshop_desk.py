@@ -172,6 +172,8 @@ def test_mailbox_pull_keeps_only_a_mail_with_one_request_number():
 
 def test_a_pi_in_the_mail_trail_or_a_pdf_moves_the_whole_request():
     assert desk.find_pi("Please raise a proforma invoice for ticket 10412.") == ""
+    assert desk.find_pi("Waiting for the proforma invoice on ticket 11880.") == ""
+    assert desk.find_pi("The proforma invoice will be shared for ticket 11880.") == ""
     assert desk.find_pi("Proforma Invoice No. PI/EL/26/5001") == "PI/EL/26/5001"
     assert desk.find_pi("Attachment: PI-11880.pdf") == "PI-11880"
 
@@ -189,6 +191,30 @@ def test_a_pi_in_the_mail_trail_or_a_pdf_moves_the_whole_request():
     state = desk.apply_request_trail(state, "11880")
     assert {line["stage"] for line in state["lines"]} == {"onpi"}
     assert {line["pi"] for line in state["lines"]} == {"PI/EL/26/5001"}
+
+
+def test_asking_for_a_pi_does_not_mark_the_request_as_on_the_pi():
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "asked", source="coulson"),
+    ]
+    state, _ = desk.add_mail(
+        state,
+        "Ticket 11880",
+        "Waiting for the proforma invoice on ticket 11880.",
+    )
+    state = desk.apply_request_trail(state, "11880")
+    assert state["lines"][0]["stage"] == "asked"
+    assert not state["lines"][0].get("pi")
+
+
+def test_a_new_reply_in_a_read_thread_is_still_fetched():
+    import workshop_api
+
+    known = {"old-msg"}
+    assert workshop_api.thread_needs_fetch("old-msg", "thread-1", known, set()) is False
+    assert workshop_api.thread_needs_fetch("new-msg", "thread-1", known, set()) is True
+    assert workshop_api.thread_needs_fetch("new-msg", "thread-1", known, {"thread-1"}) is False
 
 
 def test_a_dispatch_names_the_dropped_part_even_without_a_code():
