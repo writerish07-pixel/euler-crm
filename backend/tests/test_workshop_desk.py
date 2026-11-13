@@ -561,6 +561,39 @@ def test_payment_proof_from_the_allowed_senders_sets_the_money_on_a_dropped_part
     assert "Front bump stopper" in money[0]["parts"]
 
 
+def test_a_parked_dispatch_amount_beats_the_full_payment():
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("10412", "CD4C001800", "WH AC charging gun", 10, "short", source="coulson"),
+    ]
+    state["advances"] = {"10412": 18400}
+    state["proofs"] = [{
+        "id": "proof-1",
+        "requestNo": "10412",
+        "utr": "HDFC10412",
+        "amount": 173363.03,
+        "filename": "proof.pdf",
+        "posted": True,
+        "fromName": "F Manager",
+    }]
+    money = desk.money_rows(state)
+    assert money[0]["amount"] == 18400
+    assert money[0]["source"] == "From the dispatch mail"
+    view = desk.public_view(state)
+    assert view["advanceTotal"] == 18400
+
+
+def test_a_saved_proof_can_be_posted_again_only_by_the_named_people():
+    import workshop_api
+
+    owner = {"name": "Owner", "email": "owner@akar.com", "serviceAccess": {"owner": True}}
+    manager = {"name": "F Manager", "email": "f.manager@akarfourwheel.com", "serviceAccess": {"areas": ["payments"]}}
+    other = {"name": "Kuber", "email": "kuber@eulermotors.com", "serviceAccess": {"areas": ["payments"]}}
+    assert workshop_api.payment_post_allowed(owner)
+    assert workshop_api.payment_post_allowed(manager)
+    assert not workshop_api.payment_post_allowed(other)
+
+
 def test_a_word_file_on_the_trail_is_read():
     import io
     import zipfile

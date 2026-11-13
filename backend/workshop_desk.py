@@ -1361,8 +1361,19 @@ def requests_missing_proof(state):
     return [{"requestNo": request_no} for request_no in missing]
 
 
+def _parked_amount(raw):
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def money_rows(state):
-    """Money already sent for parts that were not dispatched."""
+    """Money already sent for parts that were not dispatched.
+
+    A dispatch mail that parks a smaller amount for the dropped parts wins
+    over the full transfer on the payment proof.
+    """
     lines = (state or {}).get("lines") or []
     paid = {}
     for proof in recognized_proofs(state):
@@ -1381,14 +1392,13 @@ def money_rows(state):
             for item in lines
             if item.get("requestNo") == request_no and item.get("stage") in OPEN_MISSING
         ]
-        if request_no in paid:
+        parked = _parked_amount(advances.get(request_no))
+        if parked > 0:
+            amount, source, who = parked, "From the dispatch mail", ""
+        elif request_no in paid:
             amount, source, who = paid[request_no]
         else:
-            try:
-                amount = float(advances.get(request_no) or 0)
-            except (TypeError, ValueError):
-                amount = 0
-            source, who = "From the dispatch mail", ""
+            amount, source, who = 0, "From the dispatch mail", ""
         if amount <= 0:
             continue
         rows.append({

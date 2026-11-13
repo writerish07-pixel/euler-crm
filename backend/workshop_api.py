@@ -208,6 +208,14 @@ async def _create_staff_login(db, staff, password):
     return user_id
 
 
+def payment_post_allowed(user):
+    """The owner, or f.manager, Rishab Akar, or Euler Akar, may send a proof."""
+    user = user or {}
+    if (user.get("serviceAccess") or {}).get("owner"):
+        return True
+    return desk.sender_can_post_payment(user.get("name"), user.get("email"))
+
+
 def register(api, db, current_user):
     async def access_for(user):
         grants = await db.workshop_access.find({}, {"_id": 0}).to_list(300)
@@ -644,7 +652,7 @@ def register(api, db, current_user):
         user=Depends(workshop_user),
     ):
         _need(user, "payments")
-        if not (user.get("serviceAccess") or {}).get("owner") and not desk.sender_can_post_payment(user.get("name"), user.get("email")):
+        if not payment_post_allowed(user):
             raise HTTPException(
                 status_code=403,
                 detail="Only f.manager@akarfourwheel.com, Rishab Akar, or Euler Akar can post a payment proof.",
@@ -697,6 +705,11 @@ def register(api, db, current_user):
     @api.post("/workshop/payments/{mail_id}/post")
     async def workshop_payment_post(mail_id: str, user=Depends(workshop_user)):
         _need(user, "payments")
+        if not payment_post_allowed(user):
+            raise HTTPException(
+                status_code=403,
+                detail="Only f.manager@akarfourwheel.com, Rishab Akar, or Euler Akar can post a payment proof.",
+            )
         state = await load_state(db)
         state, post_error = await _post_mail(state, mail_id)
         await save_state(db, state)
