@@ -1143,10 +1143,25 @@ def request_mail(subject, body, sender=""):
     sender = str(sender or "").lower()
     if "github.com" in sender:
         return ""
-    nos = parse_mail(subject, body)["request_nos"]
-    if len(nos) != 1:
+    return request_for_mail("", f"{subject or ''}\n{body or ''}")
+
+
+def request_for_mail(target, text):
+    """The one request a mail belongs to.
+
+    A search for 11880 may claim a payment mail that only carries that number.
+    A mail that names two request numbers stays unmatched, so it is not filed
+    onto either request and the other request can still read its own mail.
+    """
+    nos = list(dict.fromkeys(_TICKET_RE.findall(str(text or ""))))
+    if len(nos) > 1:
         return ""
-    return nos[0]
+    if len(nos) == 1:
+        return nos[0]
+    target = str(target or "").strip()
+    if target and text_has_request(text, target):
+        return target
+    return ""
 
 
 def apply_request_trail(state, request_no):
@@ -1163,7 +1178,10 @@ def apply_request_trail(state, request_no):
     for mail in state.get("mails") or []:
         reading = mail_reading(mail)
         parsed_one = parse_mail(mail.get("subject"), reading)
-        if mail.get("requestNo") == request_no or request_no in parsed_one["request_nos"]:
+        nos = parsed_one["request_nos"]
+        if len(nos) > 1:
+            continue
+        if mail.get("requestNo") == request_no or nos == [request_no]:
             chunks.append(f"{mail.get('subject') or ''}\n{reading}")
     text = "\n".join(chunks).strip()
     if not text:

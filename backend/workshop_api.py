@@ -577,26 +577,12 @@ def register(api, db, current_user):
                     messages = await asyncio.to_thread(gmail.get_thread, token, thread_id) if thread_id else [head]
                 except gmail.GmailError:
                     messages = [head]
-                combined = []
-                sender = ""
                 usable = []
                 for message in messages:
-                    if "github.com" in str(message.get("replyTo") or "").lower():
+                    if "github.com" in str(message.get("fromEmail") or message.get("replyTo") or "").lower():
                         continue
                     usable.append(message)
-                    sender = sender or (message.get("replyTo") or "")
-                    bits = [message.get("subject") or "", message.get("body") or "", gmail.html_to_text(message.get("html") or "")]
-                    for doc in message.get("documents") or []:
-                        bits.append(f"Attachment: {doc.get('name') or ''}")
-                        bits.append(doc.get("text") or "")
-                    combined.append("\n".join(bits))
-                trail = "\n".join(combined)
-                if target and desk.text_has_request(trail, target):
-                    request_no = target
-                else:
-                    request_no = desk.request_mail("Trail", trail, sender)
-                if not request_no:
-                    continue
+                touched = set()
                 for message in usable:
                     body = "\n".join([
                         message.get("body") or "",
@@ -606,6 +592,13 @@ def register(api, db, current_user):
                         {"name": doc.get("name") or "document", "kind": doc.get("kind") or "file", "text": doc.get("text") or ""}
                         for doc in (message.get("documents") or [])
                     ]
+                    bits = [message.get("subject") or "", body]
+                    for doc in documents:
+                        bits.append(f"Attachment: {doc.get('name') or ''}")
+                        bits.append(doc.get("text") or "")
+                    request_no = desk.request_for_mail(target, "\n".join(bits))
+                    if not request_no:
+                        continue
                     existing = next((mail for mail in state["mails"] if mail.get("gmailId") == message.get("id")), None)
                     if existing:
                         mail = existing
@@ -629,7 +622,9 @@ def register(api, db, current_user):
                         mail["gmailThreadId"] = thread_id
                     desk.remember_sender(mail, message, mailbox)
                     known.add(message.get("id"))
-                state = desk.apply_request_trail(state, request_no)
+                    touched.add(request_no)
+                for request_no in touched:
+                    state = desk.apply_request_trail(state, request_no)
         for request_no in desk.request_ids(state):
             state = desk.apply_request_trail(state, request_no)
         state, dropped = desk.drop_unmatched_gmail(state)

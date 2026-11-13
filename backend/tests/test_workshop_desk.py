@@ -506,6 +506,30 @@ def test_each_sender_is_learned_and_the_open_step_names_who_is_holding_it():
     assert paid["11880"]["stage"] == "onpi"
 
 
+def test_a_mail_naming_two_requests_is_not_filed_onto_either():
+    assert desk.request_for_mail("11880", "Request 11880 and request 12428. Invoice-PQIN262766148") == ""
+    assert desk.request_for_mail("11880", "Payment of order confirmation - 11880") == "11880"
+    assert desk.request_for_mail("11880", "Request ID : 12428 dispatch update") == "12428"
+    assert desk.request_for_mail("11880", "Request ID : 11880 Invoice-PQIN262766148") == "11880"
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "asked", source="coulson"),
+        desk._line("12428", "EM2001", "Blade fuse", 2, "asked", source="coulson"),
+    ]
+    state, _ = desk.add_mail(
+        state,
+        "Request 11880 and request 12428",
+        "Invoice-PQIN262766148 covers both.",
+    )
+    state["mails"][0]["requestNo"] = "11880"
+    state = desk.apply_request_trail(state, "11880")
+    state = desk.apply_request_trail(state, "12428")
+    assert not state["lines"][0]["pi"]
+    assert not state["lines"][1]["pi"]
+    assert state["lines"][0]["stage"] == "asked"
+    assert state["lines"][1]["stage"] == "asked"
+
+
 def test_pasted_mail_stays_unread_until_someone_reads_it():
     state, mail_id = desk.add_mail(desk.empty_state(), "Re: Ticket 10412", DISPATCH)
     mail = next(item for item in state["mails"] if item["id"] == mail_id)
