@@ -62,6 +62,19 @@ def _money(raw):
         return None
 
 
+def _amounts_in(text):
+    found = [_money(match) for match in _MONEY_RE.findall(text or "")]
+    for match in re.finditer(r"(\d[\d,]*(?:\.\d{1,2})?)\s*inr\b", text or "", re.I):
+        found.append(_money(match.group(1)))
+    for match in re.finditer(
+        r"amount(?:\s+to\s+be\s+paid)?\s*(?:is|:)\s*(\d[\d,]*(?:\.\d{1,2})?)",
+        text or "",
+        re.I,
+    ):
+        found.append(_money(match.group(1)))
+    return [number for number in found if number is not None]
+
+
 def inr(amount):
     if amount is None:
         return ""
@@ -353,13 +366,11 @@ def parse_mail(subject, body):
         code for code in _codes(scanned) if code not in missing and code not in sent
     ]))
 
-    amounts = [_money(m) for m in _MONEY_RE.findall(text)]
-    amounts = [n for n in amounts if n is not None]
+    amounts = _amounts_in(text)
     advance = None
     for line in text.splitlines():
         if re.search(r"advance|parked", line, re.I):
-            found = [_money(m) for m in _MONEY_RE.findall(line)]
-            found = [n for n in found if n is not None]
+            found = _amounts_in(line)
             if found:
                 advance = found[-1]
                 break
@@ -1274,9 +1285,241 @@ def advance_rows(state):
     return rows
 
 
+def sender_can_post_payment(name, email):
+    """f.manager@akarfourwheel.com, Rishab Akar, and Euler Akar may file a proof."""
+    blob = f"{name or ''} {email or ''}".lower()
+    compact = re.sub(r"[^a-z0-9@.]+", "", blob)
+    if "f.manager@" in compact or compact.startswith("f.manager") or "fmanager@" in compact:
+        return True
+    if "rishab" in blob:
+        return True
+    if "euler" in blob and "akar" in blob:
+        return True
+    return False
+
+
+def _mail_is_payment(mail):
+    jobs = mail.get("jobs") or []
+    if "payment" in jobs or mail.get("kind") == "payment" or mail.get("senderJob") == "payment":
+        return True
+    text = f"{mail.get('subject') or ''}\n{mail_reading(mail)}".lower()
+    return bool(re.search(r"payment done|payment of order|payment proof|\butr\b", text))
+
+
+def recognized_proofs(state):
+    """Proofs filed on the desk, plus a payment mail from someone allowed to post one."""
+    rows = []
+    seen = set()
+    for proof in (state or {}).get("proofs") or []:
+        request_no = str(proof.get("requestNo") or "").strip()
+        if not request_no or request_no in seen:
+            continue
+        seen.add(request_no)
+        rows.append({
+            "id": proof.get("id") or request_no,
+            "requestNo": request_no,
+            "utr": proof.get("utr") or "",
+            "amount": proof.get("amount"),
+            "filename": proof.get("filename") or "Payment proof",
+            "posted": bool(proof.get("posted")),
+            "fromName": proof.get("fromName") or "",
+            "source": "Filed on the desk",
+        })
+    for mail in (state or {}).get("mails") or []:
+        request_no = str(mail.get("requestNo") or "").strip()
+        if not request_no or request_no in seen:
+            continue
+        if not sender_can_post_payment(mail.get("fromName"), mail.get("fromEmail")):
+            continue
+        if not _mail_is_payment(mail):
+            continue
+        parsed = parse_mail(mail.get("subject"), mail_reading(mail))
+        names = [doc.get("name") for doc in (mail.get("documents") or []) if doc.get("name")]
+        seen.add(request_no)
+        rows.append({
+            "id": mail.get("id") or request_no,
+            "requestNo": request_no,
+            "utr": parsed.get("utr") or "",
+            "amount": parsed.get("amount") if parsed.get("amount") is not None else parsed.get("advance"),
+            "filename": ", ".join(names) or "Payment mail",
+            "posted": True,
+            "fromName": mail.get("fromName") or mail.get("fromEmail") or "",
+            "source": "From the payment mail",
+        })
+    return rows
+
+
+def requests_missing_proof(state):
+    """Every request on the desk that still has no payment proof."""
+    proved = {row["requestNo"] for row in recognized_proofs(state)}
+    missing = []
+    for line in (state or {}).get("lines") or []:
+        request_no = str(line.get("requestNo") or "").strip()
+        if not re.fullmatch(r"\d{4,7}", request_no) or request_no in proved or request_no in missing:
+            continue
+        missing.append(request_no)
+    return [{"requestNo": request_no} for request_no in missing]
+
+
+def money_rows(state):
+    """Money already sent for parts that were not dispatched."""
+    lines = (state or {}).get("lines") or []
+    paid = {}
+    for proof in recognized_proofs(state):
+        if proof.get("amount"):
+            paid[proof["requestNo"]] = (float(proof["amount"]), "From the payment proof", proof.get("fromName") or "")
+    advances = (state or {}).get("advances") or {}
+    rows = []
+    seen = set()
+    for line in lines:
+        request_no = str(line.get("requestNo") or "").strip()
+        if not request_no or request_no in seen or line.get("stage") not in OPEN_MISSING:
+            continue
+        seen.add(request_no)
+        parts = [
+            item.get("part") or item.get("code")
+            for item in lines
+            if item.get("requestNo") == request_no and item.get("stage") in OPEN_MISSING
+        ]
+        if request_no in paid:
+            amount, source, who = paid[request_no]
+        else:
+            try:
+                amount = float(advances.get(request_no) or 0)
+            except (TypeError, ValueError):
+                amount = 0
+            source, who = "From the dispatch mail", ""
+        if amount <= 0:
+            continue
+        rows.append({
+            "requestNo": request_no,
+            "amount": round(amount, 2),
+            "parts": parts,
+            "source": source,
+            "fromName": who,
+        })
+    return rows
+
+
+def mail_trails(mails):
+    """Every document on a request, kept with the mail it came from."""
+    groups = {}
+    order = []
+    for mail in mails or []:
+        key = str(mail.get("requestNo") or mail.get("gmailThreadId") or mail.get("id") or "")
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(mail)
+    trails = []
+    for key in order:
+        rows = groups[key]
+        documents = []
+        for mail in rows:
+            for doc in mail.get("documents") or []:
+                documents.append({
+                    "name": doc.get("name") or "document",
+                    "kind": doc.get("kind") or "file",
+                    "text": str(doc.get("text") or "")[:2000],
+                    "from": mail.get("fromName") or mail.get("fromEmail") or "",
+                    "when": mail.get("when") or "",
+                    "subject": mail.get("subject") or "",
+                    "mailId": mail.get("id") or "",
+                })
+        trails.append({
+            "id": key,
+            "requestNo": str(rows[0].get("requestNo") or ""),
+            "mailIds": [mail.get("id") for mail in rows if mail.get("id")],
+            "documents": documents,
+        })
+    return trails
+
+
+def _parse_opened(raw):
+    text = str(raw or "").strip()
+    if re.match(r"\d{4}-\d{2}-\d{2}", text):
+        return text[:10]
+    match = re.match(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+    if not match:
+        return ""
+    day, month, year = match.groups()
+    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+
+
+def _age_days(opened):
+    opened = _parse_opened(opened)
+    if not opened:
+        return None
+    from datetime import datetime, timedelta, timezone
+    year, month, day = (int(part) for part in opened.split("-"))
+    start = datetime(year, month, day, tzinfo=timezone.utc).date()
+    today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
+    return max(0, (today - start).days)
+
+
+def _age_label(days):
+    if not isinstance(days, int):
+        return ""
+    if days <= 0:
+        return "Today"
+    if days == 1:
+        return "1 day"
+    if days < 30:
+        return f"{days} days"
+    months = max(1, days // 30)
+    return "1 month" if months == 1 else f"{months} months"
+
+
+_CLAIM_DATE_KEYS = (
+    "created_at", "claim_created_at", "claim_date", "raised_at", "raised_date",
+    "submitted_at", "submission_date", "created_on", "claim_raised_date", "date",
+)
+
+
+def claim_opened(row):
+    for key in _CLAIM_DATE_KEYS:
+        opened = _parse_opened((row or {}).get(key))
+        if opened:
+            return opened
+    return ""
+
+
+def age_warranty(warranty):
+    warranty = dict(warranty or {})
+    rows = []
+    for row in warranty.get("rows") or []:
+        item = dict(row)
+        opened = item.get("opened") or ""
+        days = _age_days(opened) if opened else None
+        item["opened"] = opened
+        item["ageDays"] = days
+        item["age"] = _age_label(days) or "No date"
+        rows.append(item)
+    rows.sort(key=lambda item: -(item["ageDays"] if isinstance(item["ageDays"], int) else -1))
+    buckets = {"Under 7 days": 0, "8 to 30 days": 0, "Over 30 days": 0, "No date": 0}
+    for item in rows:
+        days = item.get("ageDays")
+        if not isinstance(days, int):
+            buckets["No date"] += 1
+        elif days <= 7:
+            buckets["Under 7 days"] += 1
+        elif days <= 30:
+            buckets["8 to 30 days"] += 1
+        else:
+            buckets["Over 30 days"] += 1
+    warranty["rows"] = rows
+    warranty["ageing"] = [{"label": label, "count": count} for label, count in buckets.items()]
+    return warranty
+
+
 def build_today(state):
+    """The newest waiting items, not the whole history of the desk."""
     items = []
-    for mail in state.get("mails") or []:
+    mails = sorted(state.get("mails") or [], key=lambda mail: int(mail.get("sentAt") or mail.get("seq") or 0), reverse=True)
+    shown_mail = 0
+    for mail in mails:
+        if shown_mail >= 5:
+            break
         if mail.get("status") == "unread" or not mail.get("applied"):
             items.append({
                 "id": f"mail-{mail.get('id')}",
@@ -1285,6 +1528,7 @@ def build_today(state):
                 "tone": "warning",
                 "mailId": mail.get("id"),
             })
+            shown_mail += 1
         elif mail.get("status") == "unmatched":
             items.append({
                 "id": f"mail-{mail.get('id')}",
@@ -1293,13 +1537,22 @@ def build_today(state):
                 "tone": "warning",
                 "mailId": mail.get("id"),
             })
-    for line in state.get("lines") or []:
+            shown_mail += 1
+    seen_requests = set()
+    shown_lines = 0
+    for line in reversed(state.get("lines") or []):
+        if shown_lines >= 8:
+            break
         stage = line.get("stage")
+        request_no = str(line.get("requestNo") or "")
+        if request_no and request_no in seen_requests:
+            continue
         if stage == "short":
+            count = sum(1 for item in state["lines"] if item.get("requestNo") == request_no and item.get("stage") == "short")
             items.append({
                 "id": f"line-{line.get('id')}",
-                "title": f"{line.get('part')} missing, ticket {line.get('requestNo') or '—'}",
-                "detail": "Approve one follow-up mail. It uses the advance. It does not ask for a new PI.",
+                "title": f"{count} part{'s' if count != 1 else ''} missing, ticket {request_no or '—'}",
+                "detail": "The money already sent stays against the parts that were not dispatched.",
                 "tone": "danger",
                 "lineId": line.get("id"),
                 "action": "reorder",
@@ -1307,8 +1560,8 @@ def build_today(state):
         elif stage == "reorder":
             items.append({
                 "id": f"line-{line.get('id')}",
-                "title": f"{line.get('part')} ordered again, ticket {line.get('requestNo') or '—'}",
-                "detail": "When the box arrives, count it in. That clears the advance for this part if nothing else on the ticket is still missing.",
+                "title": f"{line.get('part')} ordered again, ticket {request_no or '—'}",
+                "detail": "When the box arrives, count it in.",
                 "tone": "info",
                 "lineId": line.get("id"),
                 "action": "receive",
@@ -1317,7 +1570,7 @@ def build_today(state):
             items.append({
                 "id": f"line-{line.get('id')}",
                 "title": f"{line.get('part')} is on the truck",
-                "detail": line.get("requestNo") and f"Ticket {line.get('requestNo')}. Count the box." or "Count the box.",
+                "detail": f"Ticket {request_no}. Count the box." if request_no else "Count the box.",
                 "tone": "info",
                 "lineId": line.get("id"),
                 "action": "receive",
@@ -1333,19 +1586,20 @@ def build_today(state):
                 "tone": "warning",
                 "lineId": line.get("id"),
             })
-    warranty = state.get("warranty") or {}
-    for row in warranty.get("breakdown") or []:
-        label = row.get("label") or ""
-        count = row.get("count") or 0
-        if not count:
+        else:
             continue
-        if "challan" in label.lower() or "approval" in label.lower() or "pickup" in label.lower():
-            items.append({
-                "id": f"war-{label}",
-                "title": f"{count} warranty claims",
-                "detail": label,
-                "tone": "warning",
-            })
+        if request_no:
+            seen_requests.add(request_no)
+        shown_lines += 1
+    warranty = age_warranty(state.get("warranty") or {})
+    oldest = next((row for row in warranty.get("rows") or [] if isinstance(row.get("ageDays"), int)), None)
+    if oldest:
+        items.append({
+            "id": "war-oldest",
+            "title": f"Claim {oldest.get('claimNumber')} is {oldest.get('age')}",
+            "detail": oldest.get("status") or "Open warranty claim.",
+            "tone": "warning",
+        })
     jobs = state.get("jobs") or {}
     if jobs.get("overdue"):
         items.append({
@@ -1387,7 +1641,7 @@ def request_senders_known(state, request_no):
     return bool(rows) and all(mail.get("fromEmail") for mail in rows)
 
 
-def public_view(state, service_login=None, access=None, gmail=None, mailbox=""):
+def public_view(state, service_login=None, access=None, gmail=None, mailbox="", actor=None):
     state = deepcopy(state or empty_state())
     paint_advances(state["lines"], state.get("advances") or {})
     for line in state["lines"]:
@@ -1395,15 +1649,20 @@ def public_view(state, service_login=None, access=None, gmail=None, mailbox=""):
     mails = sorted(state["mails"], key=lambda m: m.get("seq") or 0)
     mailbox = mailbox or (gmail or {}).get("email") or ""
     holds = request_holds(state, mailbox)
+    money = money_rows(state)
+    actor = actor or {}
     view = {
         "lines": state["lines"],
         "mails": mails,
-        "advances": advance_rows(state),
-        "advanceTotal": round(sum(row["amount"] for row in advance_rows(state)), 2),
-        "warranty": state.get("warranty") or empty_state()["warranty"],
+        "advances": money,
+        "advanceTotal": round(sum(row["amount"] for row in money), 2),
+        "warranty": age_warranty(state.get("warranty") or empty_state()["warranty"]),
         "jobs": state.get("jobs") or empty_state()["jobs"],
         "today": build_today(state),
-        "proofs": list(state.get("proofs") or []),
+        "proofs": recognized_proofs(state),
+        "missingProofs": requests_missing_proof(state),
+        "trails": mail_trails(mails),
+        "canPostPayment": bool((access or {}).get("owner")) or sender_can_post_payment(actor.get("name"), actor.get("email")),
         "syncedAt": state.get("syncedAt") or "",
         "syncError": state.get("syncError") or "",
         "serviceLogin": service_login or {"configured": False, "username": ""},
@@ -1428,6 +1687,8 @@ def public_view(state, service_login=None, access=None, gmail=None, mailbox=""):
         view["advanceTotal"] = 0
     if "payments" not in areas:
         view["proofs"] = []
+        view["missingProofs"] = []
+        view["canPostPayment"] = False
     if "warranty" not in areas:
         view["warranty"] = empty_state()["warranty"]
     if "jobs" not in areas:
@@ -1502,6 +1763,8 @@ def snapshot_from_coulson(store_rows, stale_rows, claim_rows, claim_analytics, d
             "claimNumber": row.get("claim_number"),
             "amount": round(claim_amount, 2),
             "status": row.get("claim_status") or "",
+            "opened": claim_opened(row),
+            "part": row.get("part_name") or row.get("part") or "",
         })
     breakdown = []
     analytics = claim_analytics if isinstance(claim_analytics, dict) else {}
@@ -1696,8 +1959,8 @@ def sample_state():
         "total": 18,
         "amount": 147807.97,
         "rows": [
-            {"claimNumber": 14315, "amount": 5337.82, "status": "SPD Pickup Requested", "part": "Front leaf spring, qty 2, received 0"},
-            {"claimNumber": 15451, "amount": 5166.70, "status": "Approved", "part": "Challan not entered"},
+            {"claimNumber": 14315, "amount": 5337.82, "status": "SPD Pickup Requested", "part": "Front leaf spring, qty 2, received 0", "opened": "2026-08-01"},
+            {"claimNumber": 15451, "amount": 5166.70, "status": "Approved", "part": "Challan not entered", "opened": "2026-11-01"},
         ],
         "breakdown": [
             {"label": "Waiting for the area service manager", "count": 2},

@@ -185,21 +185,51 @@ def image_text(data):
 def attachment_text(filename, mime, data):
     mime = str(mime or "").lower()
     name = str(filename or "")
-    if mime == "application/pdf" or name.lower().endswith(".pdf"):
+    lower = name.lower()
+    if mime == "application/pdf" or lower.endswith(".pdf"):
         return pdf_text(data)
-    if mime.startswith("text/") or name.lower().endswith((".txt", ".csv", ".htm", ".html")):
-        if mime == "text/html" or name.lower().endswith((".htm", ".html")):
-            try:
-                return html_to_text(data.decode("utf-8", errors="replace"))
-            except Exception:
-                return ""
+    if "wordprocessingml" in mime or lower.endswith(".docx"):
+        return _office_xml_text(data, "word/")
+    if "spreadsheetml" in mime or lower.endswith(".xlsx"):
+        return _office_xml_text(data, "xl/")
+    if mime.startswith("text/") or lower.endswith((
+        ".txt", ".csv", ".htm", ".html", ".json", ".xml", ".eml", ".log", ".md",
+    )):
         try:
-            return data.decode("utf-8", errors="replace").strip()
+            raw = data.decode("utf-8", errors="replace")
         except Exception:
             return ""
-    if mime.startswith("image/") or name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        if mime == "text/html" or lower.endswith((".htm", ".html")):
+            return html_to_text(raw)
+        return raw.strip()
+    if mime.startswith("image/") or lower.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")):
         return image_text(data)
+    # An unknown file may still be plain text, such as a renamed invoice.
+    try:
+        raw = data.decode("utf-8")
+    except Exception:
+        return ""
+    if raw and sum(ch.isprintable() or ch in "\n\r\t" for ch in raw[:500]) > len(raw[:500]) * 0.9:
+        return raw.strip()
     return ""
+
+
+def _office_xml_text(data, prefix):
+    """Read the words out of a Word or Excel file without an extra library."""
+    import io
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as book:
+            names = [name for name in book.namelist() if name.startswith(prefix) and name.endswith(".xml")]
+            chunks = []
+            for name in names[:8]:
+                raw = book.read(name).decode("utf-8", errors="replace")
+                raw = re.sub(r"</w:p>", "\n", raw)
+                raw = re.sub(r"<[^>]+>", " ", raw)
+                chunks.append(re.sub(r"[ \t]+", " ", raw))
+            return "\n".join(chunk for chunk in chunks if chunk.strip()).strip()[:20000]
+    except Exception:
+        return ""
 
 
 def _plain_parts(payload):
@@ -263,18 +293,16 @@ def _message_view(token, body, *, read_files=False):
             continue
         if not read_files:
             continue
-        if not filename and not mime.startswith("image/") and mime != "application/pdf":
-            continue
-        if filename and mime.startswith("text/") and not filename.lower().endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp", ".htm", ".html")):
+        if not filename and not (mime.startswith("image/") or mime == "application/pdf"):
             continue
         data = _attachment_bytes(token, message_id, part)
         if not data or len(data) > 8 * 1024 * 1024:
             continue
         text = attachment_text(filename or mime, mime, data)
         documents.append({
-            "name": filename or mime,
+            "name": filename or mime or "document",
             "kind": "pdf" if "pdf" in mime or filename.lower().endswith(".pdf") else (
-                "image" if mime.startswith("image/") else "file"
+                "image" if mime.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")) else "file"
             ),
             "text": (text or "")[:20000],
         })

@@ -17,6 +17,10 @@ const TABS = [
   ["rules", "Rules", "gmail"],
 ];
 
+function DeskTable(props) {
+  return <Table maxHeight {...props} />;
+}
+
 const TONE = {
   warning: "bg-amber-50 text-amber-800 ring-amber-600/20",
   danger: "bg-red-50 text-red-700 ring-red-600/20",
@@ -87,7 +91,7 @@ function BuyParts({ lines, holds, selectedRequest, setSelectedRequest, run }) {
     <div className="space-y-4">
       <div className="grid gap-4 lg:grid-cols-5">
         <div className="lg:col-span-3">
-          <Table
+          <DeskTable
             columns={[
               { key: "title", label: "Request" },
               { key: "summary", label: "Parts", render: (row) => `${row.parts.length} · ${row.summary}` },
@@ -102,7 +106,7 @@ function BuyParts({ lines, holds, selectedRequest, setSelectedRequest, run }) {
           />
         </div>
         {group && (
-          <Card className="p-4 lg:col-span-2">
+          <Card className="p-4 lg:col-span-2 max-h-[28rem] overflow-y-auto overscroll-contain">
             <div className="text-xs text-ink-faint">{group.title}{group.pi ? ` · ${group.pi}` : ""}</div>
             <h2 className="font-heading font-bold text-lg">{group.summary || "Parts on this request"}</h2>
             <div className="mt-2"><Badge tone={stageTone(group.stage)}>{group.stageLabel}</Badge></div>
@@ -144,7 +148,7 @@ function BuyParts({ lines, holds, selectedRequest, setSelectedRequest, run }) {
         <p className="text-sm text-ink-soft mt-1 mb-3">
           These parts were on a request and were left out when the box was sent. The money already paid stays against that request, so they can be ordered again without a new PI.
         </p>
-        <Table
+        <DeskTable
           columns={[
             { key: "part", label: "Part" },
             { key: "requestNo", label: "Request", render: (row) => row.requestNo || "—" },
@@ -291,7 +295,7 @@ export default function Workshop() {
       </div>
 
       {tab === "today" && (
-        <Table
+        <DeskTable
           columns={[
             { key: "title", label: "Waiting" },
             { key: "detail", label: "Why it is here" },
@@ -315,12 +319,12 @@ export default function Workshop() {
         <div className="grid gap-4 lg:grid-cols-2">
           <div>
             {(desk?.senders || []).length > 0 && (
-              <Card className="p-4 mb-4">
+              <Card className="p-4 mb-4 max-h-[28rem] overflow-y-auto overscroll-contain">
                 <h2 className="font-heading font-bold text-lg">Who writes</h2>
                 <p className="text-sm text-ink-soft mt-1 mb-3">
                   Learned from the mail itself. The request list uses this to show who an open request is waiting on.
                 </p>
-                <Table
+                <DeskTable
                   columns={[
                     { key: "name", label: "Person" },
                     { key: "email", label: "Address" },
@@ -332,7 +336,7 @@ export default function Workshop() {
                 />
               </Card>
             )}
-            <Table
+            <DeskTable
               columns={[
                 { key: "fromName", label: "From", render: (row) => row.fromName || row.fromEmail || "—" },
                 { key: "subject", label: "Mail" },
@@ -347,7 +351,7 @@ export default function Workshop() {
               onRowClick={(row) => setSelectedMail(row.id)}
               empty="No mail yet. Paste one below, or load this morning’s thread."
             />
-            <Card className="p-4 mt-4">
+            <Card className="p-4 mt-4 max-h-[28rem] overflow-y-auto overscroll-contain">
               <div className="font-medium mb-2">Paste a mail from the service mailbox</div>
               <p className="text-sm text-ink-soft mb-3">
                 Pull looks up each request number in Gmail for the past year, including the PDF invoice on that trail. Bank alerts and other mail stay out.
@@ -385,12 +389,12 @@ export default function Workshop() {
             </Card>
           </div>
           {mail && (
-            <Card className="p-4">
+            <Card className="p-4 max-h-[28rem] overflow-y-auto overscroll-contain">
               <div className="text-xs text-ink-faint">{mail.direction} · {mail.when}</div>
               <h2 className="font-heading font-bold text-lg mt-1">{mail.subject}</h2>
-              <pre className="mt-3 whitespace-pre-wrap text-sm text-ink font-sans">{mail.body}</pre>
+              <pre className="mt-3 whitespace-pre-wrap text-sm text-ink font-sans max-h-40 overflow-y-auto">{mail.body}</pre>
               <div className="mt-4">
-                <Table
+                <DeskTable
                   columns={[
                     { key: "name", label: "In the mail" },
                     { key: "value", label: "Read as" },
@@ -400,11 +404,26 @@ export default function Workshop() {
                 />
               </div>
               <p className="text-sm text-ink-soft mt-3">{mail.result}</p>
-              {(mail.documents || []).length > 0 && (
-                <p className="text-sm text-ink-soft mt-2">
-                  Read {mail.documents.map((doc) => doc.name).filter(Boolean).join(", ")} from this mail.
-                </p>
-              )}
+              {(() => {
+                const trail = (desk?.trails || []).find((item) => (item.mailIds || []).includes(mail.id))
+                  || { documents: mail.documents || [] };
+                const docs = trail.documents || [];
+                if (!docs.length) return null;
+                return (
+                  <div className="mt-4">
+                    <h3 className="font-medium text-sm">Documents on this trail{trail.requestNo ? ` · request ${trail.requestNo}` : ""}</h3>
+                    <div className="mt-2 max-h-64 overflow-y-auto overscroll-contain space-y-2">
+                      {docs.map((doc, index) => (
+                        <div key={`${doc.mailId}-${doc.name}-${index}`} className="border border-line rounded-lg p-2">
+                          <div className="text-sm font-medium">{doc.name}</div>
+                          <div className="text-xs text-ink-faint">{[doc.from, doc.when, doc.kind].filter(Boolean).join(" · ")}</div>
+                          {doc.text && <pre className="mt-1 whitespace-pre-wrap text-xs text-ink font-sans max-h-24 overflow-y-auto">{doc.text}</pre>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="flex flex-wrap gap-2 mt-3">
                 {!mail.applied && (
                   <Button onClick={() => run(`/workshop/mails/${mail.id}/read`)}>
@@ -440,19 +459,20 @@ export default function Workshop() {
             {desk?.warranty?.total || 0} inbound claims, {inr(desk?.warranty?.amount || 0)}. These parts come off a job. They are not a purchase.
             The credit note is the sign the company has agreed the money.
           </p>
-          <Table
+          <DeskTable
             columns={[
-              { key: "label", label: "Where the claim sits" },
+              { key: "label", label: "Age" },
               { key: "count", label: "Claims", align: "right" },
             ]}
-            rows={desk?.warranty?.breakdown || []}
+            rows={desk?.warranty?.ageing || []}
             empty="Sync Service Coulson to load warranty claims."
           />
-          <Table
+          <DeskTable
             columns={[
               { key: "claimNumber", label: "Claim" },
               { key: "part", label: "Note" },
               { key: "status", label: "Status" },
+              { key: "age", label: "Age" },
               { key: "amount", label: "Amount", align: "right", render: (row) => inr(row.amount) },
             ]}
             rows={desk?.warranty?.rows || []}
@@ -463,7 +483,7 @@ export default function Workshop() {
 
       {tab === "jobs" && (
         <div className="space-y-4">
-          <Table
+          <DeskTable
             columns={[
               { key: "ticketId", label: "Ticket" },
               { key: "type", label: "Type" },
@@ -487,7 +507,7 @@ export default function Workshop() {
             ))}
           </div>
           {(desk?.jobs?.coverage || []).length > 0 && (
-            <Table
+            <DeskTable
               columns={[
                 { key: "label", label: "Finished-job coverage" },
                 { key: "count", label: "Lines", align: "right" },
@@ -502,7 +522,7 @@ export default function Workshop() {
         <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <Card className="p-4">
-              <div className="text-xs uppercase tracking-wider text-ink-faint">Advance with the company</div>
+              <div className="text-xs uppercase tracking-wider text-ink-faint">Paid and not received</div>
               <div className="text-2xl font-heading font-extrabold">{inr(desk?.advanceTotal || 0)}</div>
             </Card>
             <Card className="p-4">
@@ -514,76 +534,101 @@ export default function Workshop() {
               <div className="text-2xl font-heading font-extrabold">{(desk?.advances || []).length}</div>
             </Card>
           </div>
-          <Table
+          <DeskTable
             columns={[
               { key: "requestNo", label: "Ticket" },
-              { key: "parts", label: "Parts still tied to the advance", render: (row) => (row.parts || []).join(", ") },
-              { key: "amount", label: "Advance", align: "right", render: (row) => inr(row.amount) },
+              { key: "parts", label: "Not dispatched", render: (row) => (row.parts || []).join(", ") },
+              { key: "amount", label: "Paid and still out", align: "right", render: (row) => inr(row.amount) },
+              { key: "source", label: "Read from", render: (row) => row.fromName ? `${row.source} · ${row.fromName}` : (row.source || "—") },
             ]}
             rows={desk?.advances || []}
-            empty="No advance. A missing paid part will show here after its dispatch mail is read."
+            empty="No extra money. A paid part that was not dispatched will show here once the payment proof is read."
           />
         </div>
       )}
 
       {tab === "payments" && (
-        <Card className="p-4 max-w-xl">
-          <h2 className="font-heading font-bold text-lg">Payment proof</h2>
-          <p className="text-sm text-ink-soft mt-1 mb-4">
-            The proof is saved on this ticket and posted onto the company mail for that request. One place updates the desk and the thread.
-          </p>
-          <Field label="Ticket">
-            <Input value={payRequest} onChange={(e) => setPayRequest(e.target.value)} placeholder={requests[0] ? `Ticket ${requests[0]}` : "Ticket number"} />
-          </Field>
-          <Field label="Payment reference">
-            <Input value={payUtr} onChange={(e) => setPayUtr(e.target.value)} placeholder="UTR from the bank" />
-          </Field>
-          <Field label="Amount">
-            <Input value={payAmount} onChange={(e) => setPayAmount(e.target.value)} placeholder="Optional" />
-          </Field>
-          <Field label="Proof">
-            <input
-              type="file"
-              accept="image/jpeg,image/png,image/webp,application/pdf"
-              className="block w-full text-sm"
-              onChange={(e) => setPayFile(e.target.files && e.target.files[0])}
-            />
-          </Field>
-          <Button onClick={() => {
-            if (!payFile) {
-              toast.error("Attach the payment proof.");
-              return;
-            }
-            const form = new FormData();
-            form.append("requestNo", payRequest);
-            form.append("utr", payUtr);
-            form.append("amount", payAmount);
-            form.append("file", payFile);
-            return postForm("/workshop/payments", form, { timeout: 60000 }).then((data) => {
-              apply(data);
-              setPayUtr("");
-              setPayAmount("");
-              setPayFile(null);
-              if (data?.posted) toast.success("Proof posted onto the request mail");
-              else toast.success(data?.postError || "Proof saved on the desk");
-            }).catch((err) => toast.error(apiErrorMessage(err, "Could not file the proof")));
-          }}>
-            Post onto the request mail
-          </Button>
-          <div className="mt-4">
-            <Table
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="space-y-4">
+            <Card className="p-4">
+              <h2 className="font-heading font-bold text-lg">Requests with no payment proof</h2>
+              <p className="text-sm text-ink-soft mt-1 mb-3">
+                A proof on the mail from f.manager@akarfourwheel.com, Rishab Akar, or Euler Akar already counts. These requests still have none.
+              </p>
+              <DeskTable
+                columns={[
+                  { key: "requestNo", label: "Request" },
+                ]}
+                rows={desk?.missingProofs || []}
+                rowKey="requestNo"
+                onRowClick={(row) => setPayRequest(row.requestNo)}
+                empty="Every request on the desk has a payment proof."
+              />
+            </Card>
+            <DeskTable
               columns={[
                 { key: "requestNo", label: "Ticket" },
                 { key: "utr", label: "Reference" },
+                { key: "amount", label: "Amount", align: "right", render: (row) => row.amount ? inr(row.amount) : "—" },
                 { key: "filename", label: "Proof" },
-                { key: "posted", label: "Mail", render: (row) => row.posted ? "Posted" : "Waiting" },
+                { key: "fromName", label: "From", render: (row) => row.fromName || "—" },
               ]}
               rows={desk?.proofs || []}
               rowKey="id"
               empty="No payment proof filed yet."
             />
           </div>
-        </Card>
+          <Card className="p-4 max-h-[28rem] overflow-y-auto overscroll-contain">
+            <h2 className="font-heading font-bold text-lg">Post a proof</h2>
+            <p className="text-sm text-ink-soft mt-1 mb-4">
+              f.manager@akarfourwheel.com, Rishab Akar, or Euler Akar can post it. The amount is read from the proof when the box is left blank.
+            </p>
+            {desk?.canPostPayment ? (
+              <>
+                <Field label="Ticket">
+                  <Input value={payRequest} onChange={(e) => setPayRequest(e.target.value)} placeholder="Choose a request from the list" />
+                </Field>
+                <Field label="Payment reference">
+                  <Input value={payUtr} onChange={(e) => setPayUtr(e.target.value)} placeholder="UTR from the bank, or leave blank to read it" />
+                </Field>
+                <Field label="Amount">
+                  <Input value={payAmount} onChange={(e) => setPayAmount(e.target.value)} placeholder="Leave blank to read it from the proof" />
+                </Field>
+                <Field label="Proof">
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,application/pdf,.docx,.xlsx,.csv,.txt"
+                    className="block w-full text-sm"
+                    onChange={(e) => setPayFile(e.target.files && e.target.files[0])}
+                  />
+                </Field>
+                <Button onClick={() => {
+                  if (!payFile) {
+                    toast.error("Attach the payment proof.");
+                    return;
+                  }
+                  const form = new FormData();
+                  form.append("requestNo", payRequest);
+                  form.append("utr", payUtr);
+                  form.append("amount", payAmount);
+                  form.append("file", payFile);
+                  return postForm("/workshop/payments", form, { timeout: 60000 }).then((data) => {
+                    apply(data);
+                    setPayUtr("");
+                    setPayAmount("");
+                    setPayFile(null);
+                    if (data?.posted) toast.success("Proof posted onto the request mail");
+                    else toast.success(data?.postError || "Proof saved on the desk");
+                  }).catch((err) => toast.error(apiErrorMessage(err, "Could not file the proof")));
+                }}>
+                  Post onto the request mail
+                </Button>
+              </>
+            ) : (
+              <p className="text-sm">This login cannot post a proof. f.manager@akarfourwheel.com, Rishab Akar, or Euler Akar can.</p>
+            )}
+          </Card>
+        </div>
       )}
 
       {tab === "people" && (
@@ -591,7 +636,7 @@ export default function Workshop() {
       )}
 
       {tab === "rules" && (
-        <Card className="p-4 max-w-xl">
+        <Card className="p-4 max-w-xl max-h-[28rem] overflow-y-auto overscroll-contain">
           <h2 className="font-heading font-bold text-lg">Service Coulson login</h2>
           <p className="text-sm text-ink-soft mt-1 mb-4">
             Saved in the same database as the sales app. The password is not shown again. Sync signs in with this login id and password, then reads stock, open requests, warranty claims, service due, and jobs.
