@@ -27,6 +27,7 @@ class FileIn(BaseModel):
 class ServiceLoginIn(BaseModel):
     username: str = ""
     password: str = ""
+    sessionToken: str = ""
 
 
 class GrantIn(BaseModel):
@@ -81,22 +82,38 @@ async def _service_doc(db):
     return await db.system.find_one({"_id": "service_coulson"}) or {}
 
 
+def _usable_service_token(raw):
+    token = coulson_client.clean_session_token(raw or "")
+    if not token:
+        return ""
+    coulson_client.parse_session_token(token)
+    return token
+
+
 async def service_login_view(db, user):
     doc = await _service_doc(db)
     username = (doc.get("username") or os.environ.get("SERVICE_COULSON_USERNAME") or "").strip()
-    password = doc.get("password") or os.environ.get("SERVICE_COULSON_PASSWORD") or ""
+    raw = doc.get("sessionToken") or os.environ.get("SERVICE_COULSON_SESSION") or ""
+    usable = ""
+    try:
+        usable = _usable_service_token(raw)
+    except coulson_client.CoulsonError:
+        usable = ""
     owner = str((user or {}).get("role") or "") == "owner"
     return {
-        "configured": bool(username and password),
+        "configured": bool(usable),
         "username": _mask(username, owner),
+        "sessionExpired": bool(str(raw or "").strip()) and not usable,
     }
 
 
-async def _service_secret(db):
+async def _service_token(db):
     doc = await _service_doc(db)
-    username = (doc.get("username") or os.environ.get("SERVICE_COULSON_USERNAME") or "").strip()
-    password = doc.get("password") or os.environ.get("SERVICE_COULSON_PASSWORD") or ""
-    return username, password
+    raw = doc.get("sessionToken") or os.environ.get("SERVICE_COULSON_SESSION") or ""
+    try:
+        return _usable_service_token(raw)
+    except coulson_client.CoulsonError:
+        return ""
 
 
 def _rows(payload):
@@ -129,8 +146,8 @@ def _pages(token, path, extra=None, pages=3):
     return rows
 
 
-def pull_service(username, password):
-    token = coulson_client.login_service(username, password)
+def pull_service(token):
+    """Read the service portal with a browser JWT. Password login is not used."""
     stores = _rows(coulson_client.get_json(token, "store/allowed", dict(_LIST), timeout=30))
     if not stores:
         raise coulson_client.CoulsonError("This service login has no store.")
@@ -375,16 +392,42 @@ def register(api, db, current_user):
     async def workshop_save_login(body: ServiceLoginIn, user=Depends(workshop_user)):
         if str(user.get("role") or "") != "owner":
             raise HTTPException(status_code=403, detail="Only the owner can save the service login.")
-        username = str(body.username or "").strip()
-        if not username:
-            raise HTTPException(status_code=400, detail="Enter the service Coulson username.")
-        existing = await _service_doc(db)
-        password = body.password if body.password not in (None, "") else (existing.get("password") or "")
-        if not password and not os.environ.get("SERVICE_COULSON_PASSWORD"):
-            raise HTTPException(status_code=400, detail="Enter the service Coulson password.")
+        typed = (body.sessionToken or "").strip()
+        if not typed:
+            raise HTTPException(
+                status_code=400,
+                detail="Paste the service Coulson session. Sign in on their site, then copy coulson_auth.",
+            )
+        try:
+            claims = coulson_client.parse_session_token(typed)
+        except coulson_client.CoulsonError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        token = coulson_client.clean_session_token(typed)
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    coulson_client.get_json, token, "store/allowed",
+                    {"view_type": "table", "limit": "1"}, 20,
+                ),
+                timeout=25,
+            )
+        except asyncio.TimeoutError:
+            pass
+        except coulson_client.CoulsonError as exc:
+            if exc.status in (401, 403):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Coulson did not accept that session. Sign in with the service user and paste coulson_auth again.",
+                )
+        username = (body.username or "").strip() or coulson_client.session_username(claims)
         await db.system.update_one(
             {"_id": "service_coulson"},
-            {"$set": {"username": username, "password": password, "updatedAt": _now()}},
+            {"$set": {
+                "username": username,
+                "sessionToken": token,
+                "sessionExpiresAt": coulson_client.session_expires_iso(claims),
+                "updatedAt": _now(),
+            }},
             upsert=True,
         )
         return await view(user)
@@ -392,15 +435,15 @@ def register(api, db, current_user):
     @api.post("/workshop/sync")
     async def workshop_sync(user=Depends(workshop_user)):
         _owner(user)
-        username, password = await _service_secret(db)
-        if not username or not password:
+        token = await _service_token(db)
+        if not token:
             raise HTTPException(
                 status_code=400,
-                detail="Save the service Coulson login on Rules, then sync.",
+                detail="Paste the service Coulson session on Rules, then sync.",
             )
         try:
             snapshot = await asyncio.wait_for(
-                asyncio.to_thread(pull_service, username, password),
+                asyncio.to_thread(pull_service, token),
                 timeout=90,
             )
         except coulson_client.CoulsonError as exc:
