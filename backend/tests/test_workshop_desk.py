@@ -170,6 +170,56 @@ def test_mailbox_pull_keeps_only_a_mail_with_one_request_number():
     assert "Note for the desk" in subjects
 
 
+def test_a_pi_in_the_mail_trail_or_a_pdf_moves_the_whole_request():
+    assert desk.find_pi("Please raise a proforma invoice for ticket 10412.") == ""
+    assert desk.find_pi("Proforma Invoice No. PI/EL/26/5001") == "PI/EL/26/5001"
+    assert desk.find_pi("Attachment: PI-11880.pdf") == "PI-11880"
+
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "asked", source="coulson"),
+        desk._line("11880", "EM2201", "Throttle", 1, "asked", source="coulson"),
+    ]
+    state, _ = desk.add_mail(state, "Ticket 11880", "Please supply the parts on ticket 11880.")
+    state["mails"][0]["documents"] = [{
+        "name": "PI-11880.pdf",
+        "kind": "pdf",
+        "text": "Proforma Invoice No. PI/EL/26/5001\nTicket 11880\nFront bump stopper\nThrottle",
+    }]
+    state = desk.apply_request_trail(state, "11880")
+    assert {line["stage"] for line in state["lines"]} == {"onpi"}
+    assert {line["pi"] for line in state["lines"]} == {"PI/EL/26/5001"}
+
+
+def test_a_dispatch_names_the_dropped_part_even_without_a_code():
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "paid", source="coulson"),
+        desk._line("11880", "EM2201", "Throttle", 1, "paid", source="coulson"),
+    ]
+    state, _ = desk.add_mail(
+        state,
+        "Dispatch ticket 11880",
+        "Ticket 11880\nDispatched: Throttle\nNot dispatched: Front bump stopper",
+    )
+    state = desk.read_mail(state, state["mails"][0]["id"])
+    stopper = next(line for line in state["lines"] if line["part"] == "Front bump stopper")
+    throttle = next(line for line in state["lines"] if line["part"] == "Throttle")
+    assert stopper["stage"] == "short"
+    assert throttle["stage"] != "short"
+
+
+def test_html_mail_text_keeps_the_request_and_the_pi():
+    import workshop_gmail as gmail
+
+    text = gmail.html_to_text(
+        "<p>Ticket 11880</p><p>Proforma Invoice No. PI/EL/26/5001</p><p>Not dispatched: Front bump stopper</p>"
+    )
+    assert "11880" in text
+    assert desk.find_pi(text) == "PI/EL/26/5001"
+    assert "Front bump stopper" in text
+
+
 def test_a_mail_with_no_ticket_is_left_for_a_person():
     parsed = desk.parse_mail("Bank account update", "Please update the bank mandate form.")
     assert parsed["kind"] == "unmatched"

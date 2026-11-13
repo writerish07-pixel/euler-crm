@@ -32,7 +32,16 @@ _TICKET_RE = re.compile(
     r"\b(?:ticket|request)(?:\s+(?:id|no\.?|number))?\s*[:#-]?\s*(\d{4,7})\b",
     re.I,
 )
-_PI_RE = re.compile(r"\b(PI/[A-Z0-9]+(?:/[A-Z0-9]+)+)\b", re.I)
+_PI_RE = re.compile(
+    r"\b(PI/[A-Z0-9]+(?:/[A-Z0-9]+)+)\b"
+    r"|\bPI\s*(?:No\.?|Number|#|:|-)\s*([A-Z0-9][A-Z0-9./-]{2,24})\b"
+    r"|\bProforma(?:\s+Invoice)?\s*(?:No\.?|Number|#|:|-)\s*([A-Z0-9][A-Z0-9./-]{2,24})\b",
+    re.I,
+)
+_DROP_LINE = re.compile(
+    r"not dispatched|not available|not supplied|not sent|short dispatch|dropped|balance qty|pending qty",
+    re.I,
+)
 _UTR_RE = re.compile(r"\bUTR\s*[:#-]?\s*([A-Z0-9]{6,})\b", re.I)
 _CODE_RE = re.compile(r"\b([A-Z]{2,}[A-Z0-9]*\d[A-Z0-9]{3,})\b")
 _MONEY_RE = re.compile(r"(?:₹|Rs\.?)\s*([0-9][0-9,]*(?:\.\d{1,2})?)")
@@ -204,14 +213,69 @@ def _qty_for(text, code):
     return None
 
 
+def find_pi(text):
+    """A proforma invoice number, or a clear sign the invoice is in the mail."""
+    raw = str(text or "")
+    found = []
+    for match in _PI_RE.finditer(raw):
+        if match.group(1):
+            found.append(match.group(1).upper())
+            continue
+        token = next(group for group in match.groups() if group)
+        token = re.sub(r"\.(PDF|PNG|JPE?G|WEBP)$", "", token, flags=re.I).upper()
+        lead = match.group(0).upper()
+        if lead.startswith("PI"):
+            joiner = "-" if lead.startswith("PI-") else " "
+            token = f"PI{joiner}{token}"
+        found.append(token)
+    if found:
+        return next((item for item in found if "/" in item), found[0])
+    for line in raw.splitlines():
+        if not line.lower().startswith("attachment:"):
+            continue
+        name = line.split(":", 1)[1].strip()
+        if re.search(r"payment|receipt|utr", name, re.I):
+            continue
+        if re.search(r"proforma|(^|[^A-Za-z])pi([^A-Za-z]|$)|invoice", name, re.I):
+            numbered = re.search(r"(PI[/A-Z0-9-]{3,})", name, re.I)
+            return numbered.group(1).upper() if numbered else "PI attached"
+    if re.search(r"please raise a proforma", raw, re.I) and not _PI_RE.search(raw):
+        return ""
+    if re.search(r"\binvoice is attached\b|\bproforma invoice\b", raw, re.I):
+        return "PI attached"
+    return ""
+
+
+def dropped_part_names(text, part_names):
+    """Part names written in a 'not dispatched' section of a mail or a document."""
+    wanted = []
+    for name in part_names or []:
+        cleaned = re.sub(r"\s+", " ", str(name or "").strip().lower())
+        if len(cleaned) >= 4:
+            wanted.append(cleaned)
+    hits = []
+    mode = None
+    for line in str(text or "").splitlines():
+        if _DROP_LINE.search(line):
+            mode = "drop"
+        elif re.search(r"\bdispatched\b", line, re.I):
+            mode = "sent"
+        if mode != "drop":
+            continue
+        flat = re.sub(r"\s+", " ", line.lower())
+        for name in wanted:
+            if name in flat and name not in hits:
+                hits.append(name)
+    return hits
+
+
 def parse_mail(subject, body):
     """Read a mail the way the desk will read the service mailbox."""
     subject = str(subject or "").strip()
     body = str(body or "").strip()
     text = f"{subject}\n{body}".strip()
     request_nos = list(dict.fromkeys(_TICKET_RE.findall(text)))
-    pi_match = _PI_RE.search(text)
-    pi = pi_match.group(1).upper() if pi_match else ""
+    pi = find_pi(text)
     utr_match = _UTR_RE.search(text)
     utr = utr_match.group(1).upper() if utr_match else ""
     scanned = text
@@ -395,32 +459,28 @@ def _ensure(lines, request_no, code, parsed, stage):
     return line
 
 
-def apply_parsed(state, mail):
-    """Join one mail onto its request and move the parts. Idempotent."""
-    state = deepcopy(state)
-    if mail.get("applied"):
-        return state
-    parsed = parse_mail(mail.get("subject"), mail.get("body"))
-    mail = dict(mail)
-    mail["kind"] = parsed["kind"]
-    mail["finds"] = parsed["finds"]
-    request_nos = parsed["request_nos"]
-    mail["requestNo"] = request_nos[0] if len(request_nos) == 1 else ""
-    if parsed["kind"] == "unmatched" or len(request_nos) != 1:
-        mail["status"] = "unmatched"
-        mail["applied"] = True
-        mail["result"] = parsed["preview"]
-        _replace_mail(state, mail)
-        return state
+def mail_reading(mail):
+    """Body plus the text read from a PDF, a screenshot, or another file."""
+    chunks = [str((mail or {}).get("body") or "")]
+    for doc in (mail or {}).get("documents") or []:
+        chunks.append(f"Attachment: {doc.get('name') or 'document'}")
+        chunks.append(str(doc.get("text") or ""))
+    return "\n".join(chunk for chunk in chunks if chunk).strip()
 
+
+def _apply_to_request(state, request_no, parsed, source_text):
+    """Move the parts on one request from a parsed trail. Mutates state."""
     lines = state["lines"]
     advances = dict(state.get("advances") or {})
-    request_no = request_nos[0]
     notes = []
     if parsed["pi"]:
         for line in lines:
-            if line.get("requestNo") == request_no and not line.get("pi"):
+            if line.get("requestNo") != request_no:
+                continue
+            if not line.get("pi"):
                 line["pi"] = parsed["pi"]
+            if line.get("stage") in ("need", "asked"):
+                line["stage"] = "onpi"
         notes.append(f"PI {parsed['pi']} filed on ticket {request_no}.")
     if parsed["kind"] == "pi":
         for code in parsed["mentioned_codes"]:
@@ -456,6 +516,17 @@ def apply_parsed(state, mail):
             f"{', '.join(parsed['missing_codes'])} missing from the box. "
             f"{inr(parked) + ' parked as advance.' if parked else 'The paid amount stays as advance.'}"
         )
+    named = dropped_part_names(source_text, [
+        line.get("part") for line in lines if line.get("requestNo") == request_no
+    ])
+    for line in lines:
+        cleaned = re.sub(r"\s+", " ", str(line.get("part") or "").strip().lower())
+        if line.get("requestNo") == request_no and cleaned in named:
+            if line.get("stage") not in ("received", "reorder"):
+                line["stage"] = "short"
+                line["note"] = "The dispatch left this part out. It was on this request and was not sent."
+            if parsed["pi"] and not line.get("pi"):
+                line["pi"] = parsed["pi"]
     for code in parsed["sent_codes"]:
         line = _ensure(lines, request_no, code, parsed, "transit")
         if line["stage"] not in ("received", "short", "reorder"):
@@ -467,10 +538,35 @@ def apply_parsed(state, mail):
                 line["stage"] = "reorder"
                 line["note"] = "Asked again on the same ticket, against the advance. No new proforma invoice."
         notes.append(f"Ticket {request_no} asked again against the advance.")
-
+    if named:
+        notes.append("Parts named as not dispatched are on the dropped list.")
     paint_advances(lines, advances)
     state["advances"] = {k: v for k, v in advances.items() if _open_missing(lines, k)}
     paint_advances(lines, state["advances"])
+    return notes
+
+
+def apply_parsed(state, mail):
+    """Join one mail onto its request and move the parts. Idempotent."""
+    state = deepcopy(state)
+    if mail.get("applied"):
+        return state
+    reading = mail_reading(mail)
+    parsed = parse_mail(mail.get("subject"), reading)
+    mail = dict(mail)
+    mail["kind"] = parsed["kind"]
+    mail["finds"] = parsed["finds"]
+    request_nos = parsed["request_nos"]
+    mail["requestNo"] = request_nos[0] if len(request_nos) == 1 else ""
+    if parsed["kind"] == "unmatched" or len(request_nos) != 1:
+        mail["status"] = "unmatched"
+        mail["applied"] = True
+        mail["result"] = parsed["preview"]
+        _replace_mail(state, mail)
+        return state
+
+    request_no = request_nos[0]
+    notes = _apply_to_request(state, request_no, parsed, f"{mail.get('subject')}\n{reading}")
     mail["status"] = "joined"
     mail["applied"] = True
     mail["result"] = " ".join(notes) or parsed["preview"]
@@ -686,6 +782,32 @@ def request_mail(subject, body, sender=""):
     return nos[0]
 
 
+def apply_request_trail(state, request_no):
+    """Read every saved mail and document for one request and update its parts.
+
+    A PI in a later reply, a PDF, or a screenshot moves the request off
+    'Asked, no PI yet'. Parts the dispatch left out become the dropped list.
+    """
+    state = deepcopy(state)
+    request_no = str(request_no or "").strip()
+    if not request_no:
+        return state
+    chunks = []
+    for mail in state.get("mails") or []:
+        reading = mail_reading(mail)
+        parsed_one = parse_mail(mail.get("subject"), reading)
+        if mail.get("requestNo") == request_no or request_no in parsed_one["request_nos"]:
+            chunks.append(f"{mail.get('subject') or ''}\n{reading}")
+    text = "\n".join(chunks).strip()
+    if not text:
+        return state
+    parsed = parse_mail(f"Ticket {request_no}", text)
+    if parsed["request_nos"] and set(parsed["request_nos"]) != {request_no}:
+        return state
+    _apply_to_request(state, request_no, parsed, text)
+    return state
+
+
 def drop_unmatched_gmail(state):
     """Remove mail the mailbox pull saved when it does not name one request.
 
@@ -695,7 +817,7 @@ def drop_unmatched_gmail(state):
     kept = []
     dropped = 0
     for mail in state.get("mails") or []:
-        if mail.get("gmailId") and not request_mail(mail.get("subject"), mail.get("body")):
+        if mail.get("gmailId") and not mail.get("requestNo") and not request_mail(mail.get("subject"), mail.get("body")):
             dropped += 1
             continue
         kept.append(mail)
