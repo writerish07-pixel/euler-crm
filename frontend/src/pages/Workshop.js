@@ -189,7 +189,7 @@ export default function Workshop() {
     setDesk(data);
     if (data?.serviceLogin?.username) setUsername(data.serviceLogin.username);
   };
-  const run = (path, payload) => post(path, payload || {}, path === "/workshop/sync" ? { timeout: 90000 } : {})
+  const run = (path, payload) => post(path, payload || {}, path === "/workshop/sync" ? { timeout: 90000 } : path === "/workshop/gmail/pull" ? { timeout: 180000 } : {})
     .then((data) => {
       apply(data);
       return data;
@@ -326,7 +326,7 @@ export default function Workshop() {
             <Card className="p-4 mt-4">
               <div className="font-medium mb-2">Paste a mail from the service mailbox</div>
               <p className="text-sm text-ink-soft mb-3">
-                Pull brings in only a mail that names one request number, such as ticket 10412. Bank alerts, GitHub, and other mail stay in Gmail. A mail you paste here is still added as you typed it.
+                Pull looks up each request number in Gmail for the past year, including the PDF invoice on that trail. Bank alerts and other mail stay out.
               </p>
               <Field label="Subject">
                 <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Re: Ticket 10412 — dispatch update" />
@@ -344,8 +344,8 @@ export default function Workshop() {
                   if (!data) return;
                   const pulled = data.pulled || 0;
                   toast.success(pulled
-                    ? `Brought in ${pulled} mail${pulled === 1 ? "" : "s"} with a request number`
-                    : "No mail with a request number in this pull");
+                    ? `Brought in ${pulled} mail${pulled === 1 ? "" : "s"} and matched them to the request`
+                    : "Checked Gmail for each request");
                 })}>
                   Pull the mailbox
                 </Button>

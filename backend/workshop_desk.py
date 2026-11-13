@@ -34,6 +34,9 @@ _TICKET_RE = re.compile(
 )
 _PI_RE = re.compile(
     r"\b(PI/[A-Z0-9]+(?:/[A-Z0-9]+)+)\b"
+    r"|\b(PI-\d{4,8})\b"
+    r"|\b(PQIN\d{6,})\b"
+    r"|\bInvoice[- ]([A-Z]{2,}\d{5,})\b"
     r"|\bPI\s*(?:No\.?|Number|#|:|-)\s*([A-Z0-9][A-Z0-9./-]{2,24})\b"
     r"|\bProforma(?:\s+Invoice)?\s*(?:No\.?|Number|#|:|-)\s*([A-Z0-9][A-Z0-9./-]{2,24})\b",
     re.I,
@@ -224,7 +227,7 @@ def find_pi(text):
         token = next(group for group in match.groups() if group)
         token = re.sub(r"\.(PDF|PNG|JPE?G|WEBP)$", "", token, flags=re.I).upper()
         lead = match.group(0).upper()
-        if lead.startswith("PI"):
+        if lead.startswith("PI") and not token.startswith("PI"):
             joiner = "-" if lead.startswith("PI-") else " "
             token = f"PI{joiner}{token}"
         found.append(token)
@@ -236,8 +239,8 @@ def find_pi(text):
         name = line.split(":", 1)[1].strip()
         if re.search(r"payment|receipt|utr", name, re.I):
             continue
-        if re.search(r"proforma|(^|[^A-Za-z])pi([^A-Za-z]|$)|invoice", name, re.I):
-            numbered = re.search(r"(PI[/A-Z0-9-]{3,})", name, re.I)
+        if re.search(r"proforma|invoice|pqin\d|(^|[^A-Za-z])pi([^A-Za-z]|$)", name, re.I):
+            numbered = re.search(r"((?:PI[-/]|PQIN)\d{4,}|PI[/A-Z0-9-]{3,})", name, re.I)
             return numbered.group(1).upper() if numbered else "PI attached"
     if re.search(r"\binvoice is attached\b", raw, re.I) and not re.search(
         r"please raise|waiting for|awaiting|yet to (receive|get)|not (yet )?attached",
@@ -767,6 +770,41 @@ def mark_posted(state, mail_id, gmail_id=""):
         if proof.get("mailId") == mail_id:
             proof["posted"] = True
     return state
+
+
+def request_ids(state):
+    """Request numbers on the desk. Ones still missing a PI come first."""
+    missing, ready = [], []
+    seen = set()
+    by_request = {}
+    for line in (state or {}).get("lines") or []:
+        number = str(line.get("requestNo") or "").strip()
+        if not re.fullmatch(r"\d{4,7}", number):
+            continue
+        by_request.setdefault(number, []).append(line)
+    for number, rows in by_request.items():
+        if number in seen:
+            continue
+        seen.add(number)
+        if any(row.get("pi") for row in rows):
+            ready.append(number)
+        else:
+            missing.append(number)
+    return missing + ready
+
+
+def request_has_pi(state, request_no):
+    request_no = str(request_no or "").strip()
+    if not request_no:
+        return False
+    return any(
+        str(line.get("requestNo") or "") == request_no and line.get("pi")
+        for line in (state or {}).get("lines") or []
+    )
+
+
+def text_has_request(text, request_no):
+    return bool(re.search(rf"\b{re.escape(str(request_no or ''))}\b", str(text or "")))
 
 
 def request_mail(subject, body, sender=""):

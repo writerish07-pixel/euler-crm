@@ -173,7 +173,14 @@ def test_mailbox_pull_keeps_only_a_mail_with_one_request_number():
 def test_a_pi_in_the_mail_trail_or_a_pdf_moves_the_whole_request():
     assert desk.find_pi("Please raise a proforma invoice for ticket 10412.") == ""
     assert desk.find_pi("Waiting for the proforma invoice on ticket 11880.") == ""
-    assert desk.find_pi("The proforma invoice will be shared for ticket 11880.") == ""
+    subject = (
+        "Kindly raise a PI for urgently required parts ,(Request ID : 11880) "
+        "- Invoice-PQIN262766148. Shipment completed in Coulson."
+    )
+    assert desk.find_pi(subject) == "PQIN262766148"
+    assert desk.find_pi("Attachment: PI-70714 Akar.pdf") == "PI-70714"
+    assert desk.find_pi("Attachment: PQIN262766148.pdf") == "PQIN262766148"
+    assert desk.text_has_request("Payment of order confirmation no.-70714 - 11880", "11880")
     assert desk.find_pi("Proforma Invoice No. PI/EL/26/5001") == "PI/EL/26/5001"
     assert desk.find_pi("Attachment: PI-11880.pdf") == "PI-11880"
 
@@ -215,6 +222,26 @@ def test_a_new_reply_in_a_read_thread_is_still_fetched():
     assert workshop_api.thread_needs_fetch("old-msg", "thread-1", known, set()) is False
     assert workshop_api.thread_needs_fetch("new-msg", "thread-1", known, set()) is True
     assert workshop_api.thread_needs_fetch("new-msg", "thread-1", known, {"thread-1"}) is False
+
+
+def test_invoice_number_on_the_request_mail_is_the_pi():
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "CA26000700", "Front bump stopper", 4, "asked", source="coulson"),
+    ]
+    state, _ = desk.add_mail(
+        state,
+        "Kindly raise a PI for urgently required parts ,(Request ID : 11880) - Invoice-PQIN262766148",
+        "Shipment completed in Coulson. Request ID : 11880.",
+    )
+    state["mails"][0]["documents"] = [{
+        "name": "PQIN262766148.pdf",
+        "kind": "pdf",
+        "text": "Invoice PQIN262766148\nRequest ID : 11880",
+    }]
+    state = desk.apply_request_trail(state, "11880")
+    assert state["lines"][0]["pi"] == "PQIN262766148"
+    assert state["lines"][0]["stage"] == "onpi"
 
 
 def test_a_dispatch_names_the_dropped_part_even_without_a_code():
