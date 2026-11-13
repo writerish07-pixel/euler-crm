@@ -5,6 +5,7 @@ Tokens and client secrets stay with the caller. This module only talks to Google
 from __future__ import annotations
 
 import base64
+import os
 import re
 from email import encoders
 from email.mime.base import MIMEBase
@@ -115,15 +116,98 @@ def _decode(data):
         return ""
 
 
-def _plain_parts(payload):
+def _walk(payload):
     if not isinstance(payload, dict):
         return
-    mime = str(payload.get("mimeType") or "")
-    data = ((payload.get("body") or {}).get("data")) or ""
-    if data and mime.startswith("text/plain"):
-        yield _decode(data)
+    yield payload
     for part in payload.get("parts") or []:
-        yield from _plain_parts(part)
+        yield from _walk(part)
+
+
+def html_to_text(html):
+    raw = str(html or "")
+    raw = re.sub(r"(?is)<(script|style)\b.*?>.*?</\1>", " ", raw)
+    raw = re.sub(r"(?i)<br\s*/?>", "\n", raw)
+    raw = re.sub(r"(?i)</(p|div|tr|h\d|li)>", "\n", raw)
+    raw = re.sub(r"(?i)</td>", " ", raw)
+    raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+    raw = raw.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    raw = re.sub(r"[ \t]+\n", "\n", raw)
+    raw = re.sub(r"\n{3,}", "\n\n", raw)
+    return raw.strip()
+
+
+def pdf_text(data):
+    if not data:
+        return ""
+    try:
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        return "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+    except Exception:
+        return ""
+
+
+def image_text(data):
+    """Read a screenshot when the tesseract program is installed."""
+    if not data:
+        return ""
+    import shutil
+    import subprocess
+    import tempfile
+    if not shutil.which("tesseract"):
+        return ""
+    path = ""
+    try:
+        import io
+        from PIL import Image
+        image = Image.open(io.BytesIO(data))
+        handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        path = handle.name
+        handle.close()
+        image.save(path, format="PNG")
+        done = subprocess.run(
+            ["tesseract", path, "stdout"],
+            capture_output=True, timeout=25, check=False,
+        )
+        return (done.stdout or b"").decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    finally:
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def attachment_text(filename, mime, data):
+    mime = str(mime or "").lower()
+    name = str(filename or "")
+    if mime == "application/pdf" or name.lower().endswith(".pdf"):
+        return pdf_text(data)
+    if mime.startswith("text/") or name.lower().endswith((".txt", ".csv", ".htm", ".html")):
+        if mime == "text/html" or name.lower().endswith((".htm", ".html")):
+            try:
+                return html_to_text(data.decode("utf-8", errors="replace"))
+            except Exception:
+                return ""
+        try:
+            return data.decode("utf-8", errors="replace").strip()
+        except Exception:
+            return ""
+    if mime.startswith("image/") or name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        return image_text(data)
+    return ""
+
+
+def _plain_parts(payload):
+    for part in _walk(payload):
+        mime = str(part.get("mimeType") or "")
+        data = ((part.get("body") or {}).get("data")) or ""
+        if data and mime.startswith("text/plain"):
+            yield _decode(data)
 
 
 def _header(headers, name):
@@ -133,7 +217,82 @@ def _header(headers, name):
     return ""
 
 
-def get_message(token, message_id):
+def _attachment_bytes(token, message_id, part):
+    body = part.get("body") or {}
+    encoded = body.get("data") or ""
+    if encoded:
+        pad = "=" * (-len(encoded) % 4)
+        try:
+            return base64.urlsafe_b64decode(encoded + pad)
+        except Exception:
+            return b""
+    attachment_id = str(body.get("attachmentId") or "")
+    if not token or not attachment_id:
+        return b""
+    try:
+        response = httpx.get(
+            f"{GMAIL}/messages/{message_id}/attachments/{attachment_id}",
+            headers=_headers(token),
+            timeout=40,
+        )
+    except httpx.HTTPError as exc:
+        raise GmailError("Could not reach Gmail.") from exc
+    if response.status_code >= 400:
+        return b""
+    raw = str((response.json() or {}).get("data") or "")
+    pad = "=" * (-len(raw) % 4)
+    try:
+        return base64.urlsafe_b64decode(raw + pad)
+    except Exception:
+        return b""
+
+
+def _message_view(token, body, *, read_files=False):
+    payload = body.get("payload") or {}
+    headers = payload.get("headers") or []
+    message_id = str(body.get("id") or "")
+    plain = "\n".join(part for part in _plain_parts(payload) if part).strip()
+    html = []
+    documents = []
+    for part in _walk(payload):
+        mime = str(part.get("mimeType") or "").lower()
+        filename = str(part.get("filename") or "")
+        encoded = ((part.get("body") or {}).get("data")) or ""
+        if mime == "text/html" and encoded and not filename:
+            html.append(_decode(encoded))
+            continue
+        if not read_files:
+            continue
+        if not filename and not mime.startswith("image/") and mime != "application/pdf":
+            continue
+        if filename and mime.startswith("text/") and not filename.lower().endswith((".pdf", ".png", ".jpg", ".jpeg", ".webp", ".htm", ".html")):
+            continue
+        data = _attachment_bytes(token, message_id, part)
+        if not data or len(data) > 8 * 1024 * 1024:
+            continue
+        text = attachment_text(filename or mime, mime, data)
+        documents.append({
+            "name": filename or mime,
+            "kind": "pdf" if "pdf" in mime or filename.lower().endswith(".pdf") else (
+                "image" if mime.startswith("image/") else "file"
+            ),
+            "text": (text or "")[:20000],
+        })
+    if not plain:
+        plain = html_to_text("\n".join(html))
+    return {
+        "id": message_id,
+        "threadId": str(body.get("threadId") or ""),
+        "subject": _header(headers, "Subject"),
+        "body": plain,
+        "html": "\n".join(html),
+        "documents": documents,
+        "replyTo": _address(_header(headers, "From")),
+        "rfcMessageId": _header(headers, "Message-ID") or _header(headers, "Message-Id"),
+    }
+
+
+def get_message(token, message_id, read_files=True):
     try:
         response = httpx.get(
             f"{GMAIL}/messages/{message_id}",
@@ -145,20 +304,23 @@ def get_message(token, message_id):
         raise GmailError("Could not reach Gmail.") from exc
     if response.status_code >= 400:
         raise GmailError("Gmail did not open that message.")
-    body = response.json() or {}
-    payload = body.get("payload") or {}
-    headers = payload.get("headers") or []
-    text = "\n".join(part for part in _plain_parts(payload) if part).strip()
-    if not text:
-        text = _decode((payload.get("body") or {}).get("data") or "")
-    return {
-        "id": str(body.get("id") or message_id),
-        "threadId": str(body.get("threadId") or ""),
-        "subject": _header(headers, "Subject"),
-        "body": text,
-        "replyTo": _address(_header(headers, "From")),
-        "rfcMessageId": _header(headers, "Message-ID") or _header(headers, "Message-Id"),
-    }
+    return _message_view(token, response.json() or {}, read_files=read_files)
+
+
+def get_thread(token, thread_id):
+    try:
+        response = httpx.get(
+            f"{GMAIL}/threads/{thread_id}",
+            headers=_headers(token),
+            params={"format": "full"},
+            timeout=40,
+        )
+    except httpx.HTTPError as exc:
+        raise GmailError("Could not reach Gmail.") from exc
+    if response.status_code >= 400:
+        raise GmailError("Gmail did not open that mail trail.")
+    rows = (response.json() or {}).get("messages") or []
+    return [_message_view(token, row, read_files=True) for row in rows[:20]]
 
 
 def _address(value):

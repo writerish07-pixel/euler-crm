@@ -31,12 +31,138 @@ function stageTone(stage) {
   return TONE.warning;
 }
 
+function requestGroups(lines) {
+  const map = new Map();
+  for (const line of lines || []) {
+    const key = line.requestNo || "";
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(line);
+  }
+  return [...map.entries()].map(([requestNo, parts]) => {
+    const pi = parts.map((part) => part.pi).find(Boolean) || "";
+    const dropped = parts.filter((part) => part.stage === "short" || part.stage === "reorder");
+    let stage = "asked";
+    let stageLabel = pi ? "On the PI" : "Asked, no PI yet";
+    if (!requestNo) {
+      stage = "need";
+      stageLabel = "To order";
+    } else if (dropped.length) {
+      stage = "short";
+      stageLabel = dropped.length === parts.length ? "Dropped on dispatch" : `${dropped.length} dropped`;
+    } else if (parts.every((part) => part.stage === "received")) {
+      stage = "received";
+      stageLabel = "In the store";
+    } else if (parts.some((part) => part.stage === "transit")) {
+      stage = "transit";
+      stageLabel = "On the truck";
+    } else if (pi || parts.some((part) => part.stage === "onpi")) {
+      stage = "onpi";
+      stageLabel = "On the PI";
+    } else if (parts.some((part) => part.stage === "paid")) {
+      stage = "paid";
+      stageLabel = "Paid, waiting for dispatch";
+    }
+    const names = parts.map((part) => part.part).filter(Boolean);
+    return {
+      id: requestNo || "none",
+      requestNo,
+      parts,
+      pi,
+      dropped,
+      stage,
+      stageLabel,
+      title: requestNo ? `Request ${requestNo}` : "Not asked yet",
+      summary: names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3}` : ""),
+    };
+  });
+}
+
+function BuyParts({ lines, selectedRequest, setSelectedRequest, run }) {
+  const groups = requestGroups(lines);
+  const group = groups.find((item) => item.id === selectedRequest) || groups[0];
+  const dropped = (lines || []).filter((line) => line.stage === "short" || line.stage === "reorder");
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-4 lg:grid-cols-5">
+        <div className="lg:col-span-3">
+          <Table
+            columns={[
+              { key: "title", label: "Request" },
+              { key: "summary", label: "Parts", render: (row) => `${row.parts.length} · ${row.summary}` },
+              { key: "pi", label: "PI", render: (row) => row.pi || (row.requestNo ? "No PI yet" : "—") },
+              { key: "stageLabel", label: "Stage", render: (row) => <Badge tone={stageTone(row.stage)}>{row.stageLabel}</Badge> },
+            ]}
+            rows={groups}
+            rowKey="id"
+            onRowClick={(row) => setSelectedRequest(row.id)}
+            empty="No parts yet. Sync Service Coulson, or load this morning."
+          />
+        </div>
+        {group && (
+          <Card className="p-4 lg:col-span-2">
+            <div className="text-xs text-ink-faint">{group.title}{group.pi ? ` · ${group.pi}` : ""}</div>
+            <h2 className="font-heading font-bold text-lg">{group.summary || "Parts on this request"}</h2>
+            <div className="mt-2"><Badge tone={stageTone(group.stage)}>{group.stageLabel}</Badge></div>
+            <div className="mt-4 space-y-3">
+              {group.parts.map((part) => (
+                <div key={part.id} className="border-t border-line pt-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="font-medium">{part.part}</div>
+                      <div className="text-xs text-ink-faint">{part.code}{part.qty ? ` · qty ${part.qty}` : ""}</div>
+                    </div>
+                    <Badge tone={stageTone(part.stage)}>{part.stageLabel}</Badge>
+                  </div>
+                  {part.note && <p className="text-sm text-ink-soft mt-1">{part.note}</p>}
+                  {part.overCap && (
+                    <p className="text-sm text-amber-800 mt-1">Suggested quantity {part.suggestedQty} is not usable. It will not be mailed until a person sets it.</p>
+                  )}
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    {part.stage === "short" && (
+                      <Button onClick={() => run(`/workshop/lines/${part.id}/reorder`).then((data) => data && toast.success("Follow-up mail is on the thread"))}>
+                        Order again against the advance
+                      </Button>
+                    )}
+                    {(part.stage === "reorder" || part.stage === "transit") && (
+                      <Button onClick={() => run(`/workshop/lines/${part.id}/receive`).then((data) => data && toast.success("Counted into the store"))}>
+                        Count into the store
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+      </div>
+      <Card className="p-4">
+        <h2 className="font-heading font-bold text-lg">Dropped on dispatch</h2>
+        <p className="text-sm text-ink-soft mt-1 mb-3">
+          These parts were on a request and were left out when the box was sent. The money already paid stays against that request, so they can be ordered again without a new PI.
+        </p>
+        <Table
+          columns={[
+            { key: "part", label: "Part" },
+            { key: "requestNo", label: "Request", render: (row) => row.requestNo || "—" },
+            { key: "qty", label: "Qty", align: "right", render: (row) => row.qty || "—" },
+            { key: "stageLabel", label: "Stage", render: (row) => <Badge tone={stageTone(row.stage)}>{row.stageLabel}</Badge> },
+          ]}
+          rows={dropped}
+          rowKey="id"
+          onRowClick={(row) => setSelectedRequest(row.requestNo || "none")}
+          empty="No dropped part yet. A dispatch mail that names what was not sent will list it here."
+        />
+      </Card>
+    </div>
+  );
+}
+
 export default function Workshop() {
   const { isOwner } = useAuth();
   const [tab, setTab] = useState("today");
   const [desk, setDesk] = useState(null);
   const [selectedMail, setSelectedMail] = useState("");
-  const [selectedLine, setSelectedLine] = useState("");
+  const [selectedRequest, setSelectedRequest] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [fileTo, setFileTo] = useState("");
@@ -93,7 +219,6 @@ export default function Workshop() {
   const lines = desk?.lines || [];
   const mails = desk?.mails || [];
   const mail = mails.find((item) => item.id === selectedMail) || mails.find((item) => item.status === "unread") || mails[0];
-  const line = lines.find((item) => item.id === selectedLine) || lines[0];
   const requests = [...new Set(lines.map((item) => item.requestNo).filter(Boolean))];
 
   return (
@@ -251,6 +376,11 @@ export default function Workshop() {
                 />
               </div>
               <p className="text-sm text-ink-soft mt-3">{mail.result}</p>
+              {(mail.documents || []).length > 0 && (
+                <p className="text-sm text-ink-soft mt-2">
+                  Read {mail.documents.map((doc) => doc.name).filter(Boolean).join(", ")} from this mail.
+                </p>
+              )}
               <div className="flex flex-wrap gap-2 mt-3">
                 {!mail.applied && (
                   <Button onClick={() => run(`/workshop/mails/${mail.id}/read`)}>
@@ -277,45 +407,7 @@ export default function Workshop() {
       )}
 
       {tab === "buy" && (
-        <div className="grid gap-4 lg:grid-cols-5">
-          <div className="lg:col-span-3">
-            <Table
-              columns={[
-                { key: "part", label: "Part" },
-                { key: "requestNo", label: "Ticket", render: (row) => row.requestNo || "Not asked yet" },
-                { key: "stageLabel", label: "Stage", render: (row) => <Badge tone={stageTone(row.stage)}>{row.stageLabel}</Badge> },
-                { key: "advance", label: "Advance", align: "right", render: (row) => row.advance ? inr(row.advance) : "—" },
-              ]}
-              rows={lines}
-              rowKey="id"
-              onRowClick={(row) => setSelectedLine(row.id)}
-              empty="No parts yet. Sync Service Coulson, or load this morning."
-            />
-          </div>
-          {line && (
-            <Card className="p-4 lg:col-span-2">
-              <div className="text-xs text-ink-faint">{line.code}{line.requestNo ? ` · ticket ${line.requestNo}` : ""}{line.pi ? ` · ${line.pi}` : ""}</div>
-              <h2 className="font-heading font-bold text-lg">{line.part}</h2>
-              <div className="mt-2"><Badge tone={stageTone(line.stage)}>{line.stageLabel}</Badge></div>
-              <p className="text-sm text-ink-soft mt-3">{line.note}</p>
-              {line.overCap && (
-                <p className="text-sm text-amber-800 mt-2">Suggested quantity {line.suggestedQty} is not usable. It will not be mailed until a person sets it.</p>
-              )}
-              <div className="flex flex-wrap gap-2 mt-4">
-                {line.stage === "short" && (
-                  <Button onClick={() => run(`/workshop/lines/${line.id}/reorder`).then((data) => data && toast.success("Follow-up mail is on the thread"))}>
-                    Approve the follow-up mail
-                  </Button>
-                )}
-                {(line.stage === "reorder" || line.stage === "transit") && (
-                  <Button onClick={() => run(`/workshop/lines/${line.id}/receive`).then((data) => data && toast.success("Counted into the store"))}>
-                    Count into the store
-                  </Button>
-                )}
-              </div>
-            </Card>
-          )}
-        </div>
+        <BuyParts lines={lines} selectedRequest={selectedRequest} setSelectedRequest={setSelectedRequest} run={run} />
       )}
 
       {tab === "warranty" && (
