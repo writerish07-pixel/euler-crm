@@ -173,7 +173,14 @@ def test_mailbox_pull_keeps_only_a_mail_with_one_request_number():
 def test_a_pi_in_the_mail_trail_or_a_pdf_moves_the_whole_request():
     assert desk.find_pi("Please raise a proforma invoice for ticket 10412.") == ""
     assert desk.find_pi("Waiting for the proforma invoice on ticket 11880.") == ""
-    assert desk.find_pi("The proforma invoice will be shared for ticket 11880.") == ""
+    subject = (
+        "Kindly raise a PI for urgently required parts ,(Request ID : 11880) "
+        "- Invoice-PQIN262766148. Shipment completed in Coulson."
+    )
+    assert desk.find_pi(subject) == "PQIN262766148"
+    assert desk.find_pi("Attachment: PI-70714 Akar.pdf") == "PI-70714"
+    assert desk.find_pi("Attachment: PQIN262766148.pdf") == "PQIN262766148"
+    assert desk.text_has_request("Payment of order confirmation no.-70714 - 11880", "11880")
     assert desk.find_pi("Proforma Invoice No. PI/EL/26/5001") == "PI/EL/26/5001"
     assert desk.find_pi("Attachment: PI-11880.pdf") == "PI-11880"
 
@@ -215,6 +222,26 @@ def test_a_new_reply_in_a_read_thread_is_still_fetched():
     assert workshop_api.thread_needs_fetch("old-msg", "thread-1", known, set()) is False
     assert workshop_api.thread_needs_fetch("new-msg", "thread-1", known, set()) is True
     assert workshop_api.thread_needs_fetch("new-msg", "thread-1", known, {"thread-1"}) is False
+
+
+def test_invoice_number_on_the_request_mail_is_the_pi():
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "CA26000700", "Front bump stopper", 4, "asked", source="coulson"),
+    ]
+    state, _ = desk.add_mail(
+        state,
+        "Kindly raise a PI for urgently required parts ,(Request ID : 11880) - Invoice-PQIN262766148",
+        "Shipment completed in Coulson. Request ID : 11880.",
+    )
+    state["mails"][0]["documents"] = [{
+        "name": "PQIN262766148.pdf",
+        "kind": "pdf",
+        "text": "Invoice PQIN262766148\nRequest ID : 11880",
+    }]
+    state = desk.apply_request_trail(state, "11880")
+    assert state["lines"][0]["pi"] == "PQIN262766148"
+    assert state["lines"][0]["stage"] == "onpi"
 
 
 def test_a_dispatch_names_the_dropped_part_even_without_a_code():
@@ -423,6 +450,84 @@ def test_service_login_sends_the_password_hash_the_portal_expects(monkeypatch):
     assert seen["username"] == "Rishabh.Akar"
     assert seen["password"] == hashlib.sha256(b"secret").hexdigest()
     assert seen["password"] != "secret"
+
+
+def test_each_sender_is_learned_and_the_open_step_names_who_is_holding_it():
+    import workshop_gmail as gmail
+
+    people = gmail._people('Kuber <kuber@eulermotors.com>, "Akar Manager" <manager@akarfourwheel.com>')
+    assert people[0]["email"] == "kuber@eulermotors.com"
+    assert people[1]["name"] == "Akar Manager"
+    name, email = gmail._name_and_address("Gourav Kumar <gourav@eulermotors.com>")
+    assert name == "Gourav Kumar"
+    assert email == "gourav@eulermotors.com"
+
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "asked", source="coulson"),
+        desk._line("12428", "EM2001", "Blade fuse", 2, "paid", pi="PI-70001", source="coulson"),
+    ]
+    mailbox = "akareulerservice@gmail.com"
+    trail = [
+        ("m1", "Kindly raise a PI for request 11880", "Please raise the PI for request 11880.",
+         "akareulerservice@gmail.com", "Akar Service", [{"name": "Gourav Kumar", "email": "gourav@eulermotors.com"}], "1000"),
+        ("m2", "Request for Dispatch of Pending Spare Parts – Request ID 12428", "Pending spare parts on request 12428.",
+         "akareulerservice@gmail.com", "Akar Service", [{"name": "Kuber", "email": "kuber@eulermotors.com"}], "2000"),
+        ("m3", "Payment of order confirmation no.-70714 - request 13205", "Payment done for order confirmation. UTR HDFC13205.",
+         "manager@akarfourwheel.com", "Akar Manager", [{"name": "Euler Accounts", "email": "accounts@eulermotors.com"}], "3000"),
+    ]
+    for mid, subject, body, sender, sender_name, to_people, sent_at in trail:
+        state, mail_id = desk.add_mail(state, subject, body)
+        mail = next(item for item in state["mails"] if item["id"] == mail_id)
+        desk.remember_sender(mail, {
+            "fromEmail": sender,
+            "fromName": sender_name,
+            "toPeople": to_people,
+            "sentAt": sent_at,
+        }, mailbox)
+    book = {row["email"]: row for row in desk.sender_book(state, mailbox)}
+    assert book["manager@akarfourwheel.com"]["does"] == "Pays the order"
+    assert book[mailbox]["does"] == "This mailbox"
+    holds = {row["requestNo"]: row for row in desk.request_holds(state, mailbox)}
+    assert holds["11880"]["email"] == "gourav@eulermotors.com"
+    assert holds["11880"]["waiting"] is True
+    assert "PI" in holds["11880"]["why"]
+    assert holds["12428"]["email"] == "kuber@eulermotors.com"
+    assert "Kuber" in holds["12428"]["label"]
+    assert "dispatch" in holds["12428"]["why"]
+    today = desk.public_view(state, mailbox=mailbox)["today"]
+    assert any("Gourav Kumar" in item["title"] for item in today)
+    assert any("Kuber" in item["title"] for item in today)
+
+    state["lines"][0]["stage"] = "onpi"
+    state["lines"][0]["pi"] = "PQIN262766148"
+    paid = {row["requestNo"]: row for row in desk.request_holds(state, mailbox)}
+    assert paid["11880"]["email"] == "manager@akarfourwheel.com"
+    assert paid["11880"]["stage"] == "onpi"
+
+
+def test_a_mail_naming_two_requests_is_not_filed_onto_either():
+    assert desk.request_for_mail("11880", "Request 11880 and request 12428. Invoice-PQIN262766148") == ""
+    assert desk.request_for_mail("11880", "Payment of order confirmation - 11880") == "11880"
+    assert desk.request_for_mail("11880", "Request ID : 12428 dispatch update") == "12428"
+    assert desk.request_for_mail("11880", "Request ID : 11880 Invoice-PQIN262766148") == "11880"
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "asked", source="coulson"),
+        desk._line("12428", "EM2001", "Blade fuse", 2, "asked", source="coulson"),
+    ]
+    state, _ = desk.add_mail(
+        state,
+        "Request 11880 and request 12428",
+        "Invoice-PQIN262766148 covers both.",
+    )
+    state["mails"][0]["requestNo"] = "11880"
+    state = desk.apply_request_trail(state, "11880")
+    state = desk.apply_request_trail(state, "12428")
+    assert not state["lines"][0]["pi"]
+    assert not state["lines"][1]["pi"]
+    assert state["lines"][0]["stage"] == "asked"
+    assert state["lines"][1]["stage"] == "asked"
 
 
 def test_pasted_mail_stays_unread_until_someone_reads_it():

@@ -280,6 +280,8 @@ def _message_view(token, body, *, read_files=False):
         })
     if not plain:
         plain = html_to_text("\n".join(html))
+    from_name, from_email = _name_and_address(_header(headers, "From"))
+    sent_at = str(body.get("internalDate") or "").strip()
     return {
         "id": message_id,
         "threadId": str(body.get("threadId") or ""),
@@ -287,7 +289,11 @@ def _message_view(token, body, *, read_files=False):
         "body": plain,
         "html": "\n".join(html),
         "documents": documents,
-        "replyTo": _address(_header(headers, "From")),
+        "fromName": from_name,
+        "fromEmail": from_email,
+        "toPeople": _people(_header(headers, "To")),
+        "sentAt": sent_at if sent_at.isdigit() else "",
+        "replyTo": from_email,
         "rfcMessageId": _header(headers, "Message-ID") or _header(headers, "Message-Id"),
     }
 
@@ -323,11 +329,37 @@ def get_thread(token, thread_id):
     return [_message_view(token, row, read_files=True) for row in rows[:20]]
 
 
-def _address(value):
-    match = re.search(r"<([^>]+)>", value or "")
+def _name_and_address(value):
+    raw = str(value or "").strip()
+    match = re.search(r"^(.*)<([^>]+)>", raw)
     if match:
-        return match.group(1).strip()
-    return str(value or "").strip()
+        name = match.group(1).strip().strip('"').strip()
+        return name, match.group(2).strip().lower()
+    if "@" in raw:
+        return "", raw.strip().lower()
+    return raw, ""
+
+
+def _people(value):
+    people = []
+    seen = set()
+    pattern = re.compile(
+        r'(?:"([^"]+)"|([^<",]+))?\s*<([^>]+)>|([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})',
+        re.I,
+    )
+    for match in pattern.finditer(str(value or "")):
+        name = (match.group(1) or match.group(2) or "").strip().strip('"')
+        email = (match.group(3) or match.group(4) or "").strip().lower()
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        people.append({"name": name, "email": email})
+    return people
+
+
+def _address(value):
+    _name, email = _name_and_address(value)
+    return email or str(value or "").strip()
 
 
 def build_raw(to, subject, body, *, in_reply_to="", filename="", data=b"", content_type="application/octet-stream"):

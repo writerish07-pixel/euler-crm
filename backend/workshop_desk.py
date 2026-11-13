@@ -34,6 +34,9 @@ _TICKET_RE = re.compile(
 )
 _PI_RE = re.compile(
     r"\b(PI/[A-Z0-9]+(?:/[A-Z0-9]+)+)\b"
+    r"|\b(PI-\d{4,8})\b"
+    r"|\b(PQIN\d{6,})\b"
+    r"|\bInvoice[- ]([A-Z]{2,}\d{5,})\b"
     r"|\bPI\s*(?:No\.?|Number|#|:|-)\s*([A-Z0-9][A-Z0-9./-]{2,24})\b"
     r"|\bProforma(?:\s+Invoice)?\s*(?:No\.?|Number|#|:|-)\s*([A-Z0-9][A-Z0-9./-]{2,24})\b",
     re.I,
@@ -224,7 +227,7 @@ def find_pi(text):
         token = next(group for group in match.groups() if group)
         token = re.sub(r"\.(PDF|PNG|JPE?G|WEBP)$", "", token, flags=re.I).upper()
         lead = match.group(0).upper()
-        if lead.startswith("PI"):
+        if lead.startswith("PI") and not token.startswith("PI"):
             joiner = "-" if lead.startswith("PI-") else " "
             token = f"PI{joiner}{token}"
         found.append(token)
@@ -236,8 +239,8 @@ def find_pi(text):
         name = line.split(":", 1)[1].strip()
         if re.search(r"payment|receipt|utr", name, re.I):
             continue
-        if re.search(r"proforma|(^|[^A-Za-z])pi([^A-Za-z]|$)|invoice", name, re.I):
-            numbered = re.search(r"(PI[/A-Z0-9-]{3,})", name, re.I)
+        if re.search(r"proforma|invoice|pqin\d|(^|[^A-Za-z])pi([^A-Za-z]|$)", name, re.I):
+            numbered = re.search(r"((?:PI[-/]|PQIN)\d{4,}|PI[/A-Z0-9-]{3,})", name, re.I)
             return numbered.group(1).upper() if numbered else "PI attached"
     if re.search(r"\binvoice is attached\b", raw, re.I) and not re.search(
         r"please raise|waiting for|awaiting|yet to (receive|get)|not (yet )?attached",
@@ -246,6 +249,47 @@ def find_pi(text):
     ):
         return "PI attached"
     return ""
+
+
+_JOB_LABEL = {
+    "dispatch": "Dispatches the parts",
+    "payment": "Pays the order",
+    "pi": "Raises the PI",
+    "short": "Reports what was left out",
+    "ask_dispatch": "Chases dispatch",
+    "ask_pi": "Chases the PI",
+    "ask": "Writes on the request",
+}
+_DOING_JOBS = ("dispatch", "payment", "pi", "short")
+
+
+def describe_sender(subject, body):
+    """What this one mail shows its sender doing."""
+    text = f"{subject or ''}\n{body or ''}"
+    low = text.lower()
+    jobs = []
+    if re.search(r"not dispatched|not available|not supplied|not sent|short dispatch|dropped", low):
+        jobs.append("short")
+    if re.search(r"(?<!not )\b(dispatched|shipment completed|shipped)\b", low):
+        jobs.append("dispatch")
+    if _UTR_RE.search(text) or re.search(
+        r"payment done|payment of order|order confirmation|amount to be paid|payment proof",
+        low,
+    ):
+        jobs.append("payment")
+    # A payment mail names the PI it is paying. That does not make the sender
+    # the person who raises invoices.
+    if "payment" not in jobs and (find_pi(text) or re.search(r"invoice is attached", low)):
+        jobs.append("pi")
+    if re.search(r"kindly raise a pi|please raise|raise a (?:proforma|pi)\b", low):
+        jobs.append("ask_pi")
+    if re.search(r"request for dispatch|pending spare|pending part|kindly dispatch", low):
+        jobs.append("ask_dispatch")
+    if not jobs and _TICKET_RE.search(text):
+        jobs.append("ask")
+    order = ("short", "dispatch", "payment", "pi", "ask_dispatch", "ask_pi", "ask")
+    headline = next((job for job in order if job in jobs), "")
+    return {"jobs": jobs, "job": headline}
 
 
 def dropped_part_names(text, part_names):
@@ -769,6 +813,327 @@ def mark_posted(state, mail_id, gmail_id=""):
     return state
 
 
+def request_ids(state):
+    """Request numbers on the desk. Ones still missing a PI come first."""
+    missing, ready = [], []
+    seen = set()
+    by_request = {}
+    for line in (state or {}).get("lines") or []:
+        number = str(line.get("requestNo") or "").strip()
+        if not re.fullmatch(r"\d{4,7}", number):
+            continue
+        by_request.setdefault(number, []).append(line)
+    for number, rows in by_request.items():
+        if number in seen:
+            continue
+        seen.add(number)
+        if any(row.get("pi") for row in rows):
+            ready.append(number)
+        else:
+            missing.append(number)
+    return missing + ready
+
+
+def request_has_pi(state, request_no):
+    request_no = str(request_no or "").strip()
+    if not request_no:
+        return False
+    return any(
+        str(line.get("requestNo") or "") == request_no and line.get("pi")
+        for line in (state or {}).get("lines") or []
+    )
+
+
+def text_has_request(text, request_no):
+    return bool(re.search(rf"\b{re.escape(str(request_no or ''))}\b", str(text or "")))
+
+
+def _same_address(left, right):
+    return bool(left) and str(left).strip().lower() == str(right or "").strip().lower()
+
+
+def _mail_people(mail):
+    """Addresses on one saved mail, the sender first."""
+    people = []
+    email = str(mail.get("fromEmail") or mail.get("replyTo") or "").strip().lower()
+    if email:
+        people.append({"name": str(mail.get("fromName") or "").strip(), "email": email, "sent": True})
+    for person in mail.get("toPeople") or []:
+        addr = str((person or {}).get("email") or "").strip().lower()
+        if not addr:
+            continue
+        people.append({
+            "name": str((person or {}).get("name") or "").strip(),
+            "email": addr,
+            "sent": False,
+        })
+    return people
+
+
+def remember_sender(mail, message, mailbox=""):
+    """Keep who sent this mail, who it was sent to, and what the sender did."""
+    email = str((message or {}).get("fromEmail") or (message or {}).get("replyTo") or "").strip().lower()
+    name = str((message or {}).get("fromName") or "").strip()
+    mail["fromEmail"] = email
+    mail["fromName"] = name
+    mail["toPeople"] = [
+        {"name": str(person.get("name") or "").strip(), "email": str(person.get("email") or "").strip().lower()}
+        for person in ((message or {}).get("toPeople") or [])
+        if str((person or {}).get("email") or "").strip()
+    ]
+    sent_at = str((message or {}).get("sentAt") or "").strip()
+    if sent_at.isdigit():
+        mail["sentAt"] = int(sent_at)
+        mail["when"] = _mail_when(int(sent_at))
+    action = describe_sender(mail.get("subject"), mail_reading(mail) or mail.get("body"))
+    mail["jobs"] = action["jobs"]
+    mail["senderJob"] = action["job"]
+    if mailbox and _same_address(email, mailbox):
+        mail["direction"] = "Sent by the workshop"
+        external = [person for person in mail["toPeople"] if not _same_address(person.get("email"), mailbox)]
+        if external:
+            mail["replyTo"] = external[0]["email"]
+    elif email:
+        mail["direction"] = "Received"
+        mail["replyTo"] = email
+    return mail
+
+
+def _mail_when(sent_at):
+    from datetime import datetime, timedelta, timezone
+    moment = datetime.fromtimestamp(int(sent_at) / 1000, tz=timezone.utc) + timedelta(hours=5, minutes=30)
+    return f"{moment.day} {moment.strftime('%b %Y')}"
+
+
+def _jobs_of(mail):
+    saved = mail.get("jobs")
+    if isinstance(saved, list) and saved:
+        return saved
+    return describe_sender(mail.get("subject"), mail_reading(mail) or mail.get("body"))["jobs"]
+
+
+def sender_book(state, mailbox=""):
+    """What each address does, learned from the mail that address sent."""
+    book = {}
+    for mail in (state or {}).get("mails") or []:
+        email = str(mail.get("fromEmail") or mail.get("replyTo") or "").strip().lower()
+        if not email or "github.com" in email:
+            continue
+        row = book.setdefault(email, {
+            "email": email,
+            "name": "",
+            "counts": {},
+            "own": _same_address(email, mailbox),
+        })
+        name = str(mail.get("fromName") or "").strip()
+        if name:
+            row["name"] = name
+        for job in _jobs_of(mail):
+            row["counts"][job] = row["counts"].get(job, 0) + 1
+    rows = []
+    for row in book.values():
+        counts = row["counts"]
+        doing = [(job, counts.get(job, 0)) for job in _DOING_JOBS if counts.get(job, 0)]
+        doing.sort(key=lambda item: (-item[1], _DOING_JOBS.index(item[0])))
+        if row["own"]:
+            does = "This mailbox"
+        elif doing:
+            lead = doing[0][1]
+            chosen = [job for job, count in doing if count == lead]
+            does = " and ".join(_JOB_LABEL[job][0].lower() + _JOB_LABEL[job][1:] for job in chosen)
+            does = does[0].upper() + does[1:]
+        else:
+            chase = next((job for job in ("ask_dispatch", "ask_pi", "ask") if counts.get(job)), "")
+            does = _JOB_LABEL.get(chase, "Writes on the request")
+        rows.append({
+            "email": row["email"],
+            "name": row["name"] or row["email"],
+            "does": does,
+            "own": row["own"],
+            "counts": counts,
+        })
+    rows.sort(key=lambda item: (item["own"], item["name"].lower()))
+    return rows
+
+
+def request_stage(parts):
+    """The same stage the parts list shows for one request."""
+    parts = list(parts or [])
+    if not parts or not any(part.get("requestNo") for part in parts):
+        return "need"
+    if any(part.get("stage") in ("short", "reorder") for part in parts):
+        return "short"
+    if all(part.get("stage") == "received" for part in parts):
+        return "received"
+    if any(part.get("stage") == "transit" for part in parts):
+        return "transit"
+    if any(part.get("stage") == "paid" for part in parts):
+        return "paid"
+    if any(part.get("pi") or part.get("stage") == "onpi" for part in parts):
+        return "onpi"
+    return "asked"
+
+
+def _request_mails(state, request_no):
+    rows = []
+    for mail in (state or {}).get("mails") or []:
+        if str(mail.get("requestNo") or "") == request_no:
+            rows.append(mail)
+            continue
+        if request_no and request_no in (parse_mail(mail.get("subject"), mail_reading(mail)).get("request_nos") or []):
+            rows.append(mail)
+    rows.sort(key=lambda mail: (int(mail.get("sentAt") or 0), int(mail.get("seq") or 0)))
+    return rows
+
+
+def _display_name(person, book_by_email):
+    email = str((person or {}).get("email") or "").strip().lower()
+    known = book_by_email.get(email) or {}
+    return (person or {}).get("name") or known.get("name") or email
+
+
+def request_holds(state, mailbox=""):
+    """Who an open request is waiting on, from the people on its mail."""
+    book = sender_book(state, mailbox)
+    by_email = {row["email"]: row for row in book}
+    grouped = {}
+    for line in (state or {}).get("lines") or []:
+        number = str(line.get("requestNo") or "").strip()
+        if not re.fullmatch(r"\d{4,7}", number):
+            continue
+        grouped.setdefault(number, []).append(line)
+    holds = []
+    needed_for = {
+        "asked": ("pi", "for the PI"),
+        "onpi": ("payment", "to pay"),
+        "paid": ("dispatch", "to dispatch"),
+        "reorder": ("dispatch", "to send the dropped part"),
+        "short": ("dispatch", "to send the dropped part"),
+    }
+    for request_no, parts in grouped.items():
+        stage = request_stage(parts)
+        mails = _request_mails(state, request_no)
+        if stage == "transit":
+            sender = _last_actor(mails, "dispatch", mailbox)
+            if not sender:
+                continue
+            name = _display_name(sender, by_email)
+            holds.append({
+                "requestNo": request_no,
+                "stage": stage,
+                "waiting": False,
+                "email": sender.get("email") or "",
+                "name": name,
+                "label": f"Sent by {name}",
+            })
+            continue
+        if stage not in needed_for:
+            continue
+        job, phrase = needed_for[stage]
+        person = _person_holding(mails, job, by_email, mailbox)
+        if not person:
+            continue
+        name = _display_name(person, by_email)
+        known = by_email.get(person.get("email") or "") or {}
+        does = known.get("does") or ""
+        why = f"Waiting on {name} {phrase}."
+        if does and not known.get("own"):
+            why = f"{why} {does}."
+        holds.append({
+            "requestNo": request_no,
+            "stage": stage,
+            "waiting": True,
+            "email": person.get("email") or "",
+            "name": name,
+            "label": f"Waiting on {name}",
+            "why": why,
+        })
+    return holds
+
+
+def _last_actor(mails, job, mailbox):
+    found = None
+    for mail in mails:
+        email = str(mail.get("fromEmail") or mail.get("replyTo") or "").strip().lower()
+        if not email or _same_address(email, mailbox):
+            continue
+        if job in _jobs_of(mail):
+            found = {"name": str(mail.get("fromName") or "").strip(), "email": email}
+    return found
+
+
+def _person_holding(mails, job, book_by_email, mailbox):
+    """The address the open step is sitting with.
+
+    A chase mail names that person in To. Otherwise it is the address that
+    usually does this job. The workshop mailbox itself is never the delay.
+    """
+    chase = {"pi": "ask_pi", "dispatch": "ask_dispatch"}.get(job)
+    asked = []
+    did = set()
+    for mail in mails:
+        email = str(mail.get("fromEmail") or mail.get("replyTo") or "").strip().lower()
+        jobs = _jobs_of(mail)
+        if email and not _same_address(email, mailbox) and job in jobs:
+            did.add(email)
+        if chase and chase in jobs:
+            for person in _mail_people(mail):
+                if person.get("sent") or _same_address(person.get("email"), mailbox):
+                    continue
+                asked.append(person)
+    for person in reversed(asked):
+        if person.get("email") not in did:
+            return person
+    best = None
+    best_count = 0
+    for row in book_by_email.values():
+        count = (row.get("counts") or {}).get(job) or 0
+        if row.get("own") or not count or row["email"] in did:
+            continue
+        on_request = any(
+            person.get("email") == row["email"]
+            for mail in mails
+            for person in _mail_people(mail)
+        )
+        if asked and not on_request:
+            continue
+        if count > best_count:
+            best = row
+            best_count = count
+    if best:
+        return {"name": best.get("name") or "", "email": best["email"]}
+    for mail in reversed(mails):
+        email = str(mail.get("fromEmail") or mail.get("replyTo") or "").strip().lower()
+        if email and not _same_address(email, mailbox) and email not in did:
+            return {"name": str(mail.get("fromName") or "").strip(), "email": email}
+    return None
+
+
+def delay_groups(holds):
+    """One Today line per person who is holding requests up."""
+    grouped = {}
+    for hold in holds or []:
+        if not hold.get("waiting"):
+            continue
+        key = hold.get("email") or hold.get("name") or ""
+        if not key:
+            continue
+        bucket = grouped.setdefault(key, {"name": hold.get("name") or key, "requests": [], "why": hold.get("why") or ""})
+        bucket["requests"].append(hold.get("requestNo"))
+    items = []
+    for key, bucket in grouped.items():
+        count = len(bucket["requests"])
+        noun = "request" if count == 1 else "requests"
+        items.append({
+            "id": f"delay-{key}",
+            "title": f"{count} {noun} waiting on {bucket['name']}",
+            "detail": f"{', '.join(bucket['requests'])}. {bucket['why']}",
+            "tone": "warning",
+        })
+    items.sort(key=lambda item: item["title"])
+    return items
+
+
 def request_mail(subject, body, sender=""):
     """A mailbox message belongs on the desk only when it names one request.
 
@@ -778,10 +1143,25 @@ def request_mail(subject, body, sender=""):
     sender = str(sender or "").lower()
     if "github.com" in sender:
         return ""
-    nos = parse_mail(subject, body)["request_nos"]
-    if len(nos) != 1:
+    return request_for_mail("", f"{subject or ''}\n{body or ''}")
+
+
+def request_for_mail(target, text):
+    """The one request a mail belongs to.
+
+    A search for 11880 may claim a payment mail that only carries that number.
+    A mail that names two request numbers stays unmatched, so it is not filed
+    onto either request and the other request can still read its own mail.
+    """
+    nos = list(dict.fromkeys(_TICKET_RE.findall(str(text or ""))))
+    if len(nos) > 1:
         return ""
-    return nos[0]
+    if len(nos) == 1:
+        return nos[0]
+    target = str(target or "").strip()
+    if target and text_has_request(text, target):
+        return target
+    return ""
 
 
 def apply_request_trail(state, request_no):
@@ -798,7 +1178,10 @@ def apply_request_trail(state, request_no):
     for mail in state.get("mails") or []:
         reading = mail_reading(mail)
         parsed_one = parse_mail(mail.get("subject"), reading)
-        if mail.get("requestNo") == request_no or request_no in parsed_one["request_nos"]:
+        nos = parsed_one["request_nos"]
+        if len(nos) > 1:
+            continue
+        if mail.get("requestNo") == request_no or nos == [request_no]:
             chunks.append(f"{mail.get('subject') or ''}\n{reading}")
     text = "\n".join(chunks).strip()
     if not text:
@@ -995,12 +1378,23 @@ def _today_visible(item, areas):
     return "today" in areas
 
 
-def public_view(state, service_login=None, access=None, gmail=None):
+def request_senders_known(state, request_no):
+    """True once every pulled mail for this request records who sent it."""
+    rows = [
+        mail for mail in (state or {}).get("mails") or []
+        if str(mail.get("requestNo") or "") == str(request_no or "") and mail.get("gmailId")
+    ]
+    return bool(rows) and all(mail.get("fromEmail") for mail in rows)
+
+
+def public_view(state, service_login=None, access=None, gmail=None, mailbox=""):
     state = deepcopy(state or empty_state())
     paint_advances(state["lines"], state.get("advances") or {})
     for line in state["lines"]:
         line["stageLabel"] = STAGE_LABEL.get(line.get("stage"), line.get("stage") or "")
     mails = sorted(state["mails"], key=lambda m: m.get("seq") or 0)
+    mailbox = mailbox or (gmail or {}).get("email") or ""
+    holds = request_holds(state, mailbox)
     view = {
         "lines": state["lines"],
         "mails": mails,
@@ -1015,7 +1409,10 @@ def public_view(state, service_login=None, access=None, gmail=None):
         "serviceLogin": service_login or {"configured": False, "username": ""},
         "access": access or {"owner": False, "areas": []},
         "gmail": gmail or {"connected": False, "email": ""},
+        "senders": sender_book(state, mailbox),
+        "holds": holds,
     }
+    view["today"] = delay_groups(holds) + view["today"]
     if not access or access.get("owner"):
         return view
     areas = set(access.get("areas") or [])
@@ -1023,6 +1420,9 @@ def public_view(state, service_login=None, access=None, gmail=None):
         view["mails"] = []
     if "buy" not in areas and "payments" not in areas:
         view["lines"] = []
+        view["holds"] = []
+    if "mail" not in areas:
+        view["senders"] = []
     if "money" not in areas and "payments" not in areas:
         view["advances"] = []
         view["advanceTotal"] = 0

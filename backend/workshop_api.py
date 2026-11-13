@@ -541,89 +541,91 @@ def register(api, db, current_user):
         _need(user, "mail")
         try:
             token = await _token()
-            ids = await asyncio.to_thread(
-                gmail.list_message_ids,
-                token,
-                'newer_than:21d (ticket OR request) -from:github.com -from:notifications.github.com',
-                50,
-            )
         except gmail.GmailError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         state = await load_state(db)
+        mailbox = (await _gmail_secret()).get("email") or ""
         known = {mail.get("gmailId") for mail in state["mails"] if mail.get("gmailId")}
         seen = set()
         added = 0
-        for message_id in ids:
+        targets = desk.request_ids(state) or [""]
+        for target in targets:
+            has_pi = desk.request_has_pi(state, target)
+            senders_known = desk.request_senders_known(state, target)
+            query = (
+                f'"{target}" newer_than:365d -from:github.com -from:notifications.github.com'
+                if target else
+                'newer_than:21d (ticket OR request) -from:github.com -from:notifications.github.com'
+            )
             try:
-                head = await asyncio.to_thread(gmail.get_message, token, message_id, False)
+                ids = await asyncio.to_thread(gmail.list_message_ids, token, query, 8 if target else 20)
             except gmail.GmailError:
                 continue
-            thread_id = head.get("threadId") or ""
-            if not thread_needs_fetch(message_id, thread_id, known, seen):
-                continue
-            if thread_id:
-                seen.add(thread_id)
-            try:
-                messages = await asyncio.to_thread(gmail.get_thread, token, thread_id) if thread_id else [head]
-            except gmail.GmailError:
-                messages = [head]
-            combined = []
-            sender = ""
-            usable = []
-            for message in messages:
-                if "github.com" in str(message.get("replyTo") or "").lower():
+            for message_id in ids:
+                try:
+                    head = await asyncio.to_thread(gmail.get_message, token, message_id, False)
+                except gmail.GmailError:
                     continue
-                usable.append(message)
-                sender = sender or (message.get("replyTo") or "")
-                bits = [message.get("subject") or "", message.get("body") or "", gmail.html_to_text(message.get("html") or "")]
-                for doc in message.get("documents") or []:
-                    bits.append(f"Attachment: {doc.get('name') or ''}")
-                    bits.append(doc.get("text") or "")
-                combined.append("\n".join(bits))
-            request_no = desk.request_mail("Trail", "\n".join(combined), sender)
-            if not request_no:
-                continue
-            for message in usable:
-                body = "\n".join([
-                    message.get("body") or "",
-                    gmail.html_to_text(message.get("html") or ""),
-                ]).strip()
-                documents = [
-                    {"name": doc.get("name") or "document", "kind": doc.get("kind") or "file", "text": doc.get("text") or ""}
-                    for doc in (message.get("documents") or [])
-                ]
-                existing = next((mail for mail in state["mails"] if mail.get("gmailId") == message.get("id")), None)
-                if existing:
-                    existing["body"] = body or existing.get("body") or ""
-                    existing["documents"] = documents
-                    existing["requestNo"] = request_no
-                    existing["examined"] = True
+                thread_id = head.get("threadId") or ""
+                if thread_id and thread_id in seen:
+                    continue
+                if message_id in known and has_pi and senders_known:
+                    continue
+                if thread_id:
+                    seen.add(thread_id)
+                try:
+                    messages = await asyncio.to_thread(gmail.get_thread, token, thread_id) if thread_id else [head]
+                except gmail.GmailError:
+                    messages = [head]
+                usable = []
+                for message in messages:
+                    if "github.com" in str(message.get("fromEmail") or message.get("replyTo") or "").lower():
+                        continue
+                    usable.append(message)
+                touched = set()
+                for message in usable:
+                    body = "\n".join([
+                        message.get("body") or "",
+                        gmail.html_to_text(message.get("html") or ""),
+                    ]).strip()
+                    documents = [
+                        {"name": doc.get("name") or "document", "kind": doc.get("kind") or "file", "text": doc.get("text") or ""}
+                        for doc in (message.get("documents") or [])
+                    ]
+                    bits = [message.get("subject") or "", body]
+                    for doc in documents:
+                        bits.append(f"Attachment: {doc.get('name') or ''}")
+                        bits.append(doc.get("text") or "")
+                    request_no = desk.request_for_mail(target, "\n".join(bits))
+                    if not request_no:
+                        continue
+                    existing = next((mail for mail in state["mails"] if mail.get("gmailId") == message.get("id")), None)
+                    if existing:
+                        mail = existing
+                    else:
+                        state, mail_id = desk.add_mail(
+                            state, message.get("subject"), body or message.get("subject"),
+                            meta={
+                                "gmailId": message.get("id"),
+                                "gmailThreadId": thread_id,
+                                "replyTo": message.get("replyTo"),
+                                "rfcMessageId": message.get("rfcMessageId"),
+                            },
+                        )
+                        mail = next(item for item in state["mails"] if item.get("id") == mail_id)
+                        added += 1
+                    mail["body"] = body or mail.get("body") or ""
+                    mail["documents"] = documents
+                    mail["requestNo"] = request_no
+                    mail["examined"] = True
                     if thread_id:
-                        existing["gmailThreadId"] = thread_id
-                    continue
-                state, mail_id = desk.add_mail(
-                    state, message.get("subject"), body or message.get("subject"),
-                    meta={
-                        "gmailId": message.get("id"),
-                        "gmailThreadId": thread_id,
-                        "replyTo": message.get("replyTo"),
-                        "rfcMessageId": message.get("rfcMessageId"),
-                    },
-                )
-                for mail in state["mails"]:
-                    if mail.get("id") == mail_id:
-                        mail["documents"] = documents
-                        mail["requestNo"] = request_no
-                        mail["examined"] = True
-                        mail["body"] = body or mail.get("body") or ""
-                added += 1
-            state = desk.apply_request_trail(state, request_no)
-        joined = {
-            mail.get("requestNo")
-            for mail in state["mails"]
-            if mail.get("requestNo")
-        }
-        for request_no in joined:
+                        mail["gmailThreadId"] = thread_id
+                    desk.remember_sender(mail, message, mailbox)
+                    known.add(message.get("id"))
+                    touched.add(request_no)
+                for request_no in touched:
+                    state = desk.apply_request_trail(state, request_no)
+        for request_no in desk.request_ids(state):
             state = desk.apply_request_trail(state, request_no)
         state, dropped = desk.drop_unmatched_gmail(state)
         await save_state(db, state)
