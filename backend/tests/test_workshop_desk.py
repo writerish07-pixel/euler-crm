@@ -452,6 +452,60 @@ def test_service_login_sends_the_password_hash_the_portal_expects(monkeypatch):
     assert seen["password"] != "secret"
 
 
+def test_each_sender_is_learned_and_the_open_step_names_who_is_holding_it():
+    import workshop_gmail as gmail
+
+    people = gmail._people('Kuber <kuber@eulermotors.com>, "Akar Manager" <manager@akarfourwheel.com>')
+    assert people[0]["email"] == "kuber@eulermotors.com"
+    assert people[1]["name"] == "Akar Manager"
+    name, email = gmail._name_and_address("Gourav Kumar <gourav@eulermotors.com>")
+    assert name == "Gourav Kumar"
+    assert email == "gourav@eulermotors.com"
+
+    state = desk.empty_state()
+    state["lines"] = [
+        desk._line("11880", "EM1064", "Front bump stopper", 4, "asked", source="coulson"),
+        desk._line("12428", "EM2001", "Blade fuse", 2, "paid", pi="PI-70001", source="coulson"),
+    ]
+    mailbox = "akareulerservice@gmail.com"
+    trail = [
+        ("m1", "Kindly raise a PI for request 11880", "Please raise the PI for request 11880.",
+         "akareulerservice@gmail.com", "Akar Service", [{"name": "Gourav Kumar", "email": "gourav@eulermotors.com"}], "1000"),
+        ("m2", "Request for Dispatch of Pending Spare Parts – Request ID 12428", "Pending spare parts on request 12428.",
+         "akareulerservice@gmail.com", "Akar Service", [{"name": "Kuber", "email": "kuber@eulermotors.com"}], "2000"),
+        ("m3", "Payment of order confirmation no.-70714 - request 13205", "Payment done for order confirmation. UTR HDFC13205.",
+         "manager@akarfourwheel.com", "Akar Manager", [{"name": "Euler Accounts", "email": "accounts@eulermotors.com"}], "3000"),
+    ]
+    for mid, subject, body, sender, sender_name, to_people, sent_at in trail:
+        state, mail_id = desk.add_mail(state, subject, body)
+        mail = next(item for item in state["mails"] if item["id"] == mail_id)
+        desk.remember_sender(mail, {
+            "fromEmail": sender,
+            "fromName": sender_name,
+            "toPeople": to_people,
+            "sentAt": sent_at,
+        }, mailbox)
+    book = {row["email"]: row for row in desk.sender_book(state, mailbox)}
+    assert book["manager@akarfourwheel.com"]["does"] == "Pays the order"
+    assert book[mailbox]["does"] == "This mailbox"
+    holds = {row["requestNo"]: row for row in desk.request_holds(state, mailbox)}
+    assert holds["11880"]["email"] == "gourav@eulermotors.com"
+    assert holds["11880"]["waiting"] is True
+    assert "PI" in holds["11880"]["why"]
+    assert holds["12428"]["email"] == "kuber@eulermotors.com"
+    assert "Kuber" in holds["12428"]["label"]
+    assert "dispatch" in holds["12428"]["why"]
+    today = desk.public_view(state, mailbox=mailbox)["today"]
+    assert any("Gourav Kumar" in item["title"] for item in today)
+    assert any("Kuber" in item["title"] for item in today)
+
+    state["lines"][0]["stage"] = "onpi"
+    state["lines"][0]["pi"] = "PQIN262766148"
+    paid = {row["requestNo"]: row for row in desk.request_holds(state, mailbox)}
+    assert paid["11880"]["email"] == "manager@akarfourwheel.com"
+    assert paid["11880"]["stage"] == "onpi"
+
+
 def test_pasted_mail_stays_unread_until_someone_reads_it():
     state, mail_id = desk.add_mail(desk.empty_state(), "Re: Ticket 10412", DISPATCH)
     mail = next(item for item in state["mails"] if item["id"] == mail_id)

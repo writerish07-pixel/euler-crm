@@ -31,7 +31,8 @@ function stageTone(stage) {
   return TONE.warning;
 }
 
-function requestGroups(lines) {
+function requestGroups(lines, holds) {
+  const waiting = new Map((holds || []).map((hold) => [hold.requestNo, hold]));
   const map = new Map();
   for (const line of lines || []) {
     const key = line.requestNo || "";
@@ -55,12 +56,12 @@ function requestGroups(lines) {
     } else if (parts.some((part) => part.stage === "transit")) {
       stage = "transit";
       stageLabel = "On the truck";
-    } else if (pi || parts.some((part) => part.stage === "onpi")) {
-      stage = "onpi";
-      stageLabel = "On the PI";
     } else if (parts.some((part) => part.stage === "paid")) {
       stage = "paid";
       stageLabel = "Paid, waiting for dispatch";
+    } else if (pi || parts.some((part) => part.stage === "onpi")) {
+      stage = "onpi";
+      stageLabel = "On the PI";
     }
     const names = parts.map((part) => part.part).filter(Boolean);
     return {
@@ -71,14 +72,15 @@ function requestGroups(lines) {
       dropped,
       stage,
       stageLabel,
+      hold: waiting.get(requestNo) || null,
       title: requestNo ? `Request ${requestNo}` : "Not asked yet",
       summary: names.slice(0, 3).join(", ") + (names.length > 3 ? ` +${names.length - 3}` : ""),
     };
   });
 }
 
-function BuyParts({ lines, selectedRequest, setSelectedRequest, run }) {
-  const groups = requestGroups(lines);
+function BuyParts({ lines, holds, selectedRequest, setSelectedRequest, run }) {
+  const groups = requestGroups(lines, holds);
   const group = groups.find((item) => item.id === selectedRequest) || groups[0];
   const dropped = (lines || []).filter((line) => line.stage === "short" || line.stage === "reorder");
   return (
@@ -91,6 +93,7 @@ function BuyParts({ lines, selectedRequest, setSelectedRequest, run }) {
               { key: "summary", label: "Parts", render: (row) => `${row.parts.length} · ${row.summary}` },
               { key: "pi", label: "PI", render: (row) => row.pi || (row.requestNo ? "No PI yet" : "—") },
               { key: "stageLabel", label: "Stage", render: (row) => <Badge tone={stageTone(row.stage)}>{row.stageLabel}</Badge> },
+              { key: "hold", label: "With", render: (row) => row.hold?.label || "—" },
             ]}
             rows={groups}
             rowKey="id"
@@ -103,6 +106,7 @@ function BuyParts({ lines, selectedRequest, setSelectedRequest, run }) {
             <div className="text-xs text-ink-faint">{group.title}{group.pi ? ` · ${group.pi}` : ""}</div>
             <h2 className="font-heading font-bold text-lg">{group.summary || "Parts on this request"}</h2>
             <div className="mt-2"><Badge tone={stageTone(group.stage)}>{group.stageLabel}</Badge></div>
+            {group.hold?.why && <p className="text-sm text-ink-soft mt-2">{group.hold.why}</p>}
             <div className="mt-4 space-y-3">
               {group.parts.map((part) => (
                 <div key={part.id} className="border-t border-line pt-3">
@@ -296,6 +300,7 @@ export default function Workshop() {
                 if (row.mailId) { setSelectedMail(row.mailId); setTab("mail"); }
                 else if (row.lineId) { setSelectedLine(row.lineId); setTab("buy"); }
                 else if (String(row.id || "").startsWith("war")) setTab("warranty");
+                else if (String(row.id || "").startsWith("delay")) setTab("buy");
                 else setTab("jobs");
               }}>Open</Button>
             ) },
@@ -309,8 +314,27 @@ export default function Workshop() {
       {tab === "mail" && (
         <div className="grid gap-4 lg:grid-cols-2">
           <div>
+            {(desk?.senders || []).length > 0 && (
+              <Card className="p-4 mb-4">
+                <h2 className="font-heading font-bold text-lg">Who writes</h2>
+                <p className="text-sm text-ink-soft mt-1 mb-3">
+                  Learned from the mail itself. The request list uses this to show who an open request is waiting on.
+                </p>
+                <Table
+                  columns={[
+                    { key: "name", label: "Person" },
+                    { key: "email", label: "Address" },
+                    { key: "does", label: "Does" },
+                  ]}
+                  rows={desk.senders}
+                  rowKey="email"
+                  empty="Pull the mailbox to see who writes."
+                />
+              </Card>
+            )}
             <Table
               columns={[
+                { key: "fromName", label: "From", render: (row) => row.fromName || row.fromEmail || "—" },
                 { key: "subject", label: "Mail" },
                 { key: "status", label: "Join", render: (row) => (
                   <Badge tone={row.status === "unmatched" ? TONE.warning : row.applied ? TONE.success : TONE.warning}>
@@ -407,7 +431,7 @@ export default function Workshop() {
       )}
 
       {tab === "buy" && (
-        <BuyParts lines={lines} selectedRequest={selectedRequest} setSelectedRequest={setSelectedRequest} run={run} />
+        <BuyParts lines={lines} holds={desk?.holds || []} selectedRequest={selectedRequest} setSelectedRequest={setSelectedRequest} run={run} />
       )}
 
       {tab === "warranty" && (
