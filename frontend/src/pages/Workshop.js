@@ -201,7 +201,7 @@ export default function Workshop() {
             <Card className="p-4 mt-4">
               <div className="font-medium mb-2">Paste a mail from the service mailbox</div>
               <p className="text-sm text-ink-soft mb-3">
-                The desk reads the ticket number, the part codes, and the words “not dispatched”. A direct mailbox connection will use this same reader.
+                Pull brings in only a mail that names one request number, such as ticket 10412. Bank alerts, GitHub, and other mail stay in Gmail. A mail you paste here is still added as you typed it.
               </p>
               <Field label="Subject">
                 <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Re: Ticket 10412 — dispatch update" />
@@ -215,7 +215,13 @@ export default function Workshop() {
                 />
               </Field>
               {(desk?.gmail?.connected || desk?.access?.owner) && (
-                <Button variant="secondary" className="mb-3" onClick={() => run("/workshop/gmail/pull").then((data) => data && toast.success("Mailbox pulled onto the desk"))}>
+                <Button variant="secondary" className="mb-3" onClick={() => run("/workshop/gmail/pull").then((data) => {
+                  if (!data) return;
+                  const pulled = data.pulled || 0;
+                  toast.success(pulled
+                    ? `Brought in ${pulled} mail${pulled === 1 ? "" : "s"} with a request number`
+                    : "No mail with a request number in this pull");
+                })}>
                   Pull the mailbox
                 </Button>
               )}

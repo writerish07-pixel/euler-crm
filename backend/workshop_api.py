@@ -528,7 +528,12 @@ def register(api, db, current_user):
         _need(user, "mail")
         try:
             token = await _token()
-            ids = await asyncio.to_thread(gmail.list_message_ids, token)
+            ids = await asyncio.to_thread(
+                gmail.list_message_ids,
+                token,
+                'newer_than:21d (ticket OR request) -from:github.com -from:notifications.github.com',
+                50,
+            )
         except gmail.GmailError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         state = await load_state(db)
@@ -541,6 +546,8 @@ def register(api, db, current_user):
                 message = await asyncio.to_thread(gmail.get_message, token, message_id)
             except gmail.GmailError:
                 continue
+            if not desk.request_mail(message.get("subject"), message.get("body"), message.get("replyTo")):
+                continue
             state, _mail_id = desk.add_mail(
                 state, message.get("subject"), message.get("body"),
                 meta={
@@ -551,9 +558,11 @@ def register(api, db, current_user):
                 },
             )
             added += 1
+        state, dropped = desk.drop_unmatched_gmail(state)
         await save_state(db, state)
         payload = await view(user)
         payload["pulled"] = added
+        payload["dropped"] = dropped
         return payload
 
     @api.post("/workshop/payments")
