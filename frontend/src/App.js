@@ -14,6 +14,7 @@ import Leads from "./pages/Leads";
 import PriceMaster from "./pages/PriceMaster";
 import PriceList from "./pages/PriceList";
 import Inventory from "./pages/Inventory";
+import Workshop from "./pages/Workshop";
 import Cancellations from "./pages/Cancellations";
 import SchemeMaster from "./pages/SchemeMaster";
 import IncentiveMaster from "./pages/IncentiveMaster";
@@ -193,6 +194,7 @@ function AppRoutes() {
       <Route path="/deal-verify" element={P(<DealVerify />, { showroomDesk: true })} />
       <Route path="/price-list" element={P(<PriceList />, { salesOnly: true, fieldOk: true })} />
       <Route path="/inventory" element={P(<Inventory />)} />
+      <Route path="/workshop" element={P(<Workshop />, { showroomDesk: true })} />
       <Route path="/price-master" element={P(<PriceMaster />, { ownerOnly: true })} />
       <Route path="/staff" element={P(<Staff />, { staffDesk: true })} />
       <Route path="/settings" element={P(<Settings />)} />

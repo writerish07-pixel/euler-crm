@@ -171,6 +171,21 @@ def login_headers(username: str, password: str) -> dict:
     }
 
 
+def login_service(username: str, password: str) -> str:
+    """Sign in to the service portal.
+
+    The live Coulson page sends SHA256(password) inside the Basic token.
+    The sales login still sends the password as typed. This helper is only
+    for the service workshop desk.
+    """
+    import hashlib
+    username, password = clean_credential(username), clean_credential(password)
+    if not username or not password:
+        raise CoulsonError("Coulson username and password are required")
+    digest = hashlib.sha256(password.encode()).hexdigest()
+    return login(username, digest)
+
+
 def login(username: str, password: str) -> str:
     """Log in the same way coulson.eulerlogistics.com does.
 

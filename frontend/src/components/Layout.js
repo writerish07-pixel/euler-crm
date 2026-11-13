@@ -6,7 +6,7 @@ import {
   Coins, Activity, Search, Zap, Settings as SettingsIcon, LogOut, Download, TrendingUp,
   BarChart3, ShieldAlert, PieChart, ScrollText, Calculator, Map, Menu, X, Handshake, UserCog,
   MessageCircle, SlidersHorizontal, Ban, Landmark as LandmarkIcon, UserCheck, Warehouse, Bell,
-  FileCheck, Scale, CalendarDays, PhoneCall,
+  FileCheck, Scale, CalendarDays, PhoneCall, Wrench,
 } from "lucide-react";
 import { cx, Button } from "./ui";
 import { useAuth } from "../context/AuthContext";
@@ -74,6 +74,9 @@ const NAV = [
     { to: "/claim-reconciliation", label: "Claim Reconciliation", icon: Scale, ownerOnly: true },
     { to: "/audit-log", label: "Audit Trail", icon: ScrollText, ownerOnly: true },
     { to: "/erp-audit", label: "ERP Production Audit", icon: ShieldCheck, ownerOnly: true },
+  ]},
+  { section: "Service", items: [
+    { to: "/workshop", label: "Workshop Desk", icon: Wrench, showroomDesk: true },
   ]},
   { section: "Catalogue & Admin", items: [
     { to: "/price-list", label: "Price List", icon: Tag, salesOnly: true },
