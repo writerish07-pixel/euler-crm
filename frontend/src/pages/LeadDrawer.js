@@ -2532,25 +2532,41 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
           numberPlate: u.numberPlate || "",
         }));
         const taken = new Set();
+        const carryFrom = [...(cur || []), ...(lead.units || [])];
         return rows.map((row, idx) => {
-          if (String(row.chassisNumber || "").trim()) return { ...row, sno: idx + 1 };
-          const hit = family.find((u, i) => {
-            if (taken.has(i)) return false;
-            const ch = u.chassis || u.chassisNumber;
-            if (!ch) return false;
-            taken.add(i);
-            return true;
+          let next = { ...row, sno: idx + 1 };
+          if (!String(next.chassisNumber || "").trim()) {
+            const hit = family.find((u, i) => {
+              if (taken.has(i)) return false;
+              const ch = u.chassis || u.chassisNumber;
+              if (!ch) return false;
+              taken.add(i);
+              return true;
+            });
+            if (hit) {
+              next = {
+                ...next,
+                chassisNumber: hit.chassis || hit.chassisNumber || "",
+                invoiceNumber: next.invoiceNumber || hit.invoiceNumber || "",
+                numberPlate: next.numberPlate || hit.numberPlate || "",
+                model: next.model || hit.model || "",
+                variant: next.variant || hit.variant || "",
+              };
+            }
+          }
+          const ch = String(next.chassisNumber || "").replace(/\s+/g, "").toUpperCase();
+          const src = carryFrom.find((u) => {
+            const c = String(u.chassisNumber || "").replace(/\s+/g, "").toUpperCase();
+            return ch && c === ch;
+          }) || carryFrom.find((u) => (u.sno || 0) === next.sno) || {};
+          ["delivered", "deliveryStatus", "insurance", "registration", "invoice", "pdi",
+            "insurerName", "insuranceAgentId", "customerPayable", "totalReceived",
+            "customerOutstanding", "excessReceived", "insuranceAmount"].forEach((k) => {
+            if ((next[k] == null || next[k] === "") && src[k] != null && src[k] !== "") {
+              next[k] = src[k];
+            }
           });
-          if (!hit) return { ...row, sno: idx + 1 };
-          return {
-            ...row,
-            sno: idx + 1,
-            chassisNumber: hit.chassis || hit.chassisNumber || "",
-            invoiceNumber: row.invoiceNumber || hit.invoiceNumber || "",
-            numberPlate: row.numberPlate || hit.numberPlate || "",
-            model: row.model || hit.model || "",
-            variant: row.variant || hit.variant || "",
-          };
+          return next;
         });
       });
     }
@@ -2586,6 +2602,11 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
     // The agent decides the payout slab; the server rejects a blank one too.
     if (form.delivered === "Yes" && !form.insuranceAgentId && !selfArranged) {
       return toast.error("Select the insurance agent before marking delivered");
+    }
+    if (form.delivered === "Yes" && packList && unitOutstanding > 0.01) {
+      return toast.error(
+        `Unit ${focusSno} still has ${inr(unitOutstanding)} outstanding. Clear it before marking delivered.`,
+      );
     }
     try {
       await put(`/leads/${lead.leadId}/delivery`, {

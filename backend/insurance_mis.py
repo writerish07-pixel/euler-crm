@@ -237,12 +237,25 @@ def unique_by_chassis(rows):
     return out, dupes
 
 
+def _lead_chassis_numbers(lead):
+    found = []
+    top = _norm_chassis((lead or {}).get("chassisNumber"))
+    if top:
+        found.append(top)
+    for unit in (lead or {}).get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        ch = _norm_chassis(unit.get("chassisNumber"))
+        if ch and ch not in found:
+            found.append(ch)
+    return found
+
+
 def attach_lead_hint(unmatched, leads):
     """When chassis misses a payout entry, still fetch the lead so the desk sees who it is."""
     by_ch = {}
     for lead in leads or []:
-        ch = _norm_chassis(lead.get("chassisNumber"))
-        if ch:
+        for ch in _lead_chassis_numbers(lead):
             by_ch.setdefault(ch, lead)
     for r in unmatched or []:
         if r.get("reason") not in ("chassis_not_found", "no_payout_amount", "duplicate_chassis"):
@@ -333,6 +346,15 @@ def match_row(row, indexes):
         hits = by_name_prem.get(nm) or []
         if prem > 0:
             hits = [e for e in hits if abs(ce.num(e.get("insuranceAmount")) - prem) < 1]
+        row_mobile = _digits(row.get("mobile"))
+        if len(row_mobile) == 10:
+            hits = [
+                e for e in hits
+                if not (
+                    len(_digits(e.get("mobile"))) == 10
+                    and _digits(e.get("mobile")) != row_mobile
+                )
+            ]
         picked, why = _pick(hits, "customer", "ambiguous_customer")
         if picked or why:
             return picked, why

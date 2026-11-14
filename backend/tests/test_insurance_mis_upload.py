@@ -103,6 +103,32 @@ def test_chassis_not_found_stays_unmatched():
     assert out["unmatchedMis"][0]["reason"] == "chassis_not_found"
 
 
+def test_name_match_does_not_join_a_different_mobile():
+    entries = [{
+        "entryId": "INS-A", "customerName": "Mohan Lal Yadav", "mobile": "7742654865",
+        "insuranceAmount": 19000, "expectedPayout": 9000, "status": "Pending",
+    }, {
+        "entryId": "INS-B", "customerName": "Mohan Lal Yadav", "mobile": "8058520061",
+        "insuranceAmount": 19000, "expectedPayout": 8000, "status": "Pending",
+    }]
+    row = {"customerName": "Mohan Lal Yadav", "mobile": "8058614001",
+           "insuranceAmount": 19000, "misAmount": 1000}
+    out = ins_mis.match_file([row], entries)
+    assert out["matched"] == []
+
+
+def test_lead_hint_reads_a_pack_unit_chassis():
+    unmatched = [{"_row": 2, "chassisNumber": "MD9UNIT6",
+                  "reason": "chassis_not_found", "customerName": ""}]
+    ins_mis.attach_lead_hint(unmatched, [{
+        "leadId": "LD-PACK", "chassisNumber": "MD9UNIT1",
+        "customerName": "Messenger SCS",
+        "units": [{"sno": 6, "chassisNumber": "md9unit6"}],
+    }])
+    assert unmatched[0]["reason"] == "no_payout_entry"
+    assert unmatched[0]["leadId"] == "LD-PACK"
+
+
 def test_lead_hint_fetches_details_when_payout_row_is_missing():
     unmatched = [{"_row": 2, "chassisNumber": "MD9EMVDL26G217350",
                   "reason": "chassis_not_found", "customerName": ""}]
@@ -662,3 +688,73 @@ async def test_preview_explicit_month_overrides_file(client):
     assert body["period"]["months"] == ["2026-09"]
     ids = {e["entryId"] for e in body["unmatchedEntries"]}
     assert sep["entryId"] in ids
+
+
+@pytest.mark.asyncio
+async def test_pack_chassis_opens_its_own_payout_and_save_survives_recompute(client, monkeypatch):
+    lid = "LD-MIS-PACK"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.insurance.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Messenger SCS", "mobile": "8980143558",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "sameOrderMultiUnit": True, "insuranceAmount": 19000,
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "insuranceArrangedBy": "dealer",
+        "chassisNumber": "MD9PACKMIS01",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9PACKMIS01", "insuranceAmount": 17874,
+             "model": "Turbo Max", "variant": "Maxx (DV220)"},
+            {"sno": 6, "chassisNumber": "MD9PACKMIS06", "insuranceAmount": 19000,
+             "model": "Turbo Max", "variant": "Maxx (DV220)"},
+        ],
+    })
+    csv = "Chassis,Payout Amount,Customer Name\nMD9PACKMIS06,8158,Messenger SCS\n"
+    preview = await client.post("/api/insurance/mis/preview", files=_csv(csv))
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["totals"]["matched"] == 1
+    hit = body["matched"][0]
+    assert hit["chassisNumber"] == "MD9PACKMIS06"
+    rows = [row async for row in server.db.insurance.find({"leadId": lid})]
+    assert len(rows) == 1
+    assert rows[0]["chassisNumber"] == "MD9PACKMIS06"
+
+    async def boom(_lead_id):
+        raise RuntimeError("pack recompute")
+
+    monkeypatch.setattr(server, "recompute_lead", boom)
+    saved = await client.post("/api/insurance/mis/apply", json={
+        "items": [{
+            "entryId": hit["entryId"], "misAmount": 8158,
+            "chassisNumber": "MD9PACKMIS06",
+        }],
+    })
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["filled"] == 1
+    assert any(err.get("error") == "recompute_failed" for err in saved.json()["errors"])
+    doc = await server.db.insurance.find_one({"entryId": hit["entryId"]})
+    assert float(doc["misAmount"]) == 8158
+
+
+@pytest.mark.asyncio
+async def test_pack_unit_with_zero_premium_does_not_inherit_the_lead_payout(client):
+    lid = "LD-MIS-ZERO"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.insurance.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Messenger SCS", "mobile": "8980143558",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "sameOrderMultiUnit": True, "insuranceAmount": 19000,
+        "insuranceArrangedBy": "dealer",
+        "chassisNumber": "MD9ZERO01",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9ZERO01", "insuranceAmount": 19000},
+            {"sno": 2, "chassisNumber": "MD9ZERO02", "insuranceAmount": 0},
+        ],
+    })
+    csv = "Chassis,Payout Amount\nMD9ZERO02,1000\n"
+    preview = await client.post("/api/insurance/mis/preview", files=_csv(csv))
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["totals"]["matched"] == 0
+    assert await server.db.insurance.count_documents({"leadId": lid, "chassisNumber": "MD9ZERO02"}) == 0
