@@ -308,6 +308,47 @@ async def test_deliver_unit_one_leaves_unit_two_editable(client):
 
 
 @pytest.mark.asyncio
+async def test_paid_unit_delivers_while_sibling_outstanding_is_named(client):
+    lid, lead = await _seed_pack(client, "9813399555")
+    units = lead.get("units") or []
+    pay1 = ce.num(units[0].get("customerPayable"))
+    assert pay1 > 0
+    paid = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": pay1, "paymentMode": "UPI", "paymentReference": "UTROS1",
+        "date": "2026-10-02", "unitSnos": [1], "allocation": "separate",
+    })
+    assert paid.status_code == 200, paid.text
+    agent = await server.db.insurance_agents.find_one({"status": "Active"}) or {}
+    if not agent:
+        await server.db.insurance_agents.insert_one({
+            "agentId": "IA-LIFE-OS", "agentName": "Life Agent", "status": "Active",
+        })
+        agent = {"agentId": "IA-LIFE-OS"}
+    body = {
+        "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes",
+        "insurerName": "UIIC", "insuranceAgentId": agent["agentId"],
+        "delivered": "Yes", "deliveryDate": "2026-10-04",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Life A",
+             "chassisNumber": "MD9OS0001", "deliveryDate": "2026-10-04"},
+            {"sno": 2, "model": "Storm", "variant": "Life B",
+             "chassisNumber": "MD9OS0002"},
+        ],
+    }
+    d1 = await client.put(f"/api/leads/{lid}/delivery", json={**body, "unitSno": 1})
+    assert d1.status_code == 200, d1.text
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert server._unit_is_delivered(live, (live.get("units") or [])[0], 0) is True
+    assert server._is_delivered(live) is False
+    d2 = await client.put(f"/api/leads/{lid}/delivery", json={**body, "unitSno": 2})
+    assert d2.status_code == 422, d2.text
+    assert "Unit 2" in d2.json()["detail"]
+    assert "outstanding" in d2.json()["detail"].lower()
+    again = await server.db.leads.find_one({"leadId": lid})
+    assert server._unit_is_delivered(again, (again.get("units") or [])[1], 1) is False
+
+
+@pytest.mark.asyncio
 async def test_oem_create_on_delivered_file_mints_new_lead_with_kyc(client):
     mobile = "9813399444"
     lid, _lead = await _seed_pack(client, mobile)

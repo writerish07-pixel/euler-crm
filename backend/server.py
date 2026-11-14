@@ -11502,6 +11502,8 @@ async def _sibling_lead_for_docs(mobile="", name="", exclude_id=""):
             continue
         if oem_sync._norm_person_name(lead.get("customerName")) != key:
             continue
+        if mobile and oem_sync.mobiles_conflict({"mobile": mobile}, lead):
+            continue
         if await lead_docs.has_create_docs(db, lead.get("leadId") or ""):
             return lead
         return lead
@@ -11596,16 +11598,11 @@ async def _price_unit_from_master(model, variant, as_of=None):
 
 
 def _same_sold_person(a, b):
-    """True when two sold/lead dicts share a unique mobile or usable name."""
-    am = oem_sync._digits10(
-        (a or {}).get("mobile") or (a or {}).get("altMobile"))
-    bm = oem_sync._digits10(
-        (b or {}).get("mobile") or (b or {}).get("altMobile"))
-    if am and len(am) == 10 and am == bm:
-        return True
-    ak = oem_sync._norm_person_name((a or {}).get("customerName"))
-    bk = oem_sync._norm_person_name((b or {}).get("customerName"))
-    return bool(oem_sync._name_key_usable(ak) and ak == bk)
+    """Same customer: equal mobile, or the same usable name when a mobile is missing.
+
+    Different 10-digit mobiles are different customers even when the name matches.
+    """
+    return oem_sync.same_customer(a, b)
 
 
 # Leftover Sold matches already-split sibling files — do not mint a fourth id.
@@ -11625,7 +11622,8 @@ def _pack_target_for_sold(row, leads, sold_rows, *, allow_delivered=False):
             or oem_sync._lead_is_cancelled(l)]
     same = oem_sync._live_same_mobile(live, (row or {}).get("mobile"))
     if not same:
-        same = oem_sync._live_same_name(live, (row or {}).get("customerName"))
+        same = oem_sync._name_matches_without_mobile_conflict(
+            live, row)
     chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
     same = [l for l in same if chassis not in set(oem_sync.lead_chassis_list(l))]
     if not same:
@@ -11983,6 +11981,269 @@ async def list_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     return payload
 
 
+def _payment_unit_snos(payment):
+    out = []
+    for raw in (payment or {}).get("unitSnos") or []:
+        try:
+            out.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def _insert_split_customer_lead(source, unit, item):
+    """A different OEM mobile becomes its own booked file. No KYC is copied."""
+    chassis = item["chassis"]
+    mobile = item["mobile"]
+    name = item["customerName"] or (source or {}).get("customerName") or chassis
+    sold_date = item.get("soldDate") or str((source or {}).get("bookingDate") or "")[:10] or today()
+    lead_id = await next_id("lead", "LD26")
+    delivered = str((unit or {}).get("delivered") or "").lower() in ("yes", "true", "delivered", "1")
+    doc = {
+        "leadId": lead_id,
+        "customerName": name,
+        "mobile": mobile,
+        "altMobile": "",
+        "village": "",
+        "city": "",
+        "leadSource": "OEM Billing",
+        "interestedModel": item.get("model") or (unit or {}).get("model") or "",
+        "variant": item.get("variant") or (unit or {}).get("variant") or "",
+        "executive": (source or {}).get("executive") or "",
+        "currentStatus": "Delivered" if delivered else "Booked",
+        "priority": "Normal",
+        "budget": 0,
+        "remarks": "",
+        "financeRequired": "No",
+        "exchangeRequired": "No",
+        "createdDate": sold_date,
+        "bookingDate": sold_date,
+        "customerType": (source or {}).get("customerType") or "Individual",
+        "gstin": "",
+        "accountStatus": "Active",
+        "deliveryStatus": "Delivered" if delivered else "",
+        "deliveryDate": (unit or {}).get("deliveryDate") or "" if delivered else "",
+        "outstandingAmount": 0, "customerOutstanding": 0, "companyOutstanding": 0,
+        "totalReceived": 0, "customerPayable": 0, "grossVehicleCost": 0, "totalDiscount": 0,
+        "consumerDiscount": 0, "exchangeBonus": 0, "loyaltyBonus": 0, "referralBonus": 0,
+        "dsaDiscount": 0, "additionalDiscount": 0, "exShowroom": 0, "rto": 0, "insuranceAmount": 0,
+        "accessoriesAmount": 0, "handlingCharges": 0, "trc": 0, "fastag": 0, "extendedWarranty": 0,
+        "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(),
+        "oemExtraSupportReceived": 0, "oemExtraSupportPassed": 0,
+        "chassisNumber": chassis,
+        "invoiceNumber": item.get("invoiceNumber") or (unit or {}).get("invoiceNumber") or "",
+        "numberPlate": item.get("numberPlate") or (unit or {}).get("numberPlate") or "",
+        "oemBillingCreated": True,
+        "oemInvoiced": True,
+        "oemSoldSyncedAt": now_iso(),
+        "sameOrderMultiUnit": False,
+        "splitFromLeadId": (source or {}).get("leadId") or "",
+    }
+    for key in UNIT_COMMERCIAL_KEYS:
+        if key in (unit or {}):
+            doc[key] = unit[key]
+    unit_row = {
+        "sno": 1,
+        "model": doc["interestedModel"],
+        "variant": doc["variant"],
+        "chassisNumber": chassis,
+        "invoiceNumber": doc["invoiceNumber"],
+        "numberPlate": doc["numberPlate"],
+        "soldDate": sold_date,
+    }
+    for key in list(UNIT_COMMERCIAL_KEYS) + list(UNIT_RUNTIME_KEYS):
+        if key in (unit or {}):
+            unit_row[key] = unit[key]
+    unit_row["sno"] = 1
+    doc["units"] = [unit_row]
+    doc["vehicleCount"] = 1
+    await db.leads.insert_one(doc)
+    await recompute_lead(lead_id)
+    updated = clean(await db.leads.find_one({"leadId": lead_id}))
+    await sheet_sync("leads", updated)
+    return lead_id
+
+
+async def _graft_split_unit(dest, unit, item):
+    """Put this chassis on the lead that already has this mobile."""
+    dest = await _fresh_lead(dest)
+    chassis = item["chassis"]
+    if chassis in set(oem_sync.lead_chassis_list(dest)):
+        return dest["leadId"], 1
+    units = [dict(u) for u in (dest.get("units") or []) if isinstance(u, dict)]
+    if not units and oem_sync._norm_chassis(dest.get("chassisNumber")):
+        units = [_unit1_from_lead(dest)]
+    row = dict(unit or {})
+    row["chassisNumber"] = chassis
+    row["invoiceNumber"] = item.get("invoiceNumber") or row.get("invoiceNumber") or ""
+    row["numberPlate"] = item.get("numberPlate") or row.get("numberPlate") or ""
+    row["model"] = item.get("model") or row.get("model") or dest.get("interestedModel") or ""
+    row["variant"] = item.get("variant") or row.get("variant") or dest.get("variant") or ""
+    if item.get("soldDate"):
+        row["soldDate"] = item["soldDate"]
+    units.append(row)
+    for i, u in enumerate(units):
+        u["sno"] = i + 1
+    sno = len(units)
+    patch = {
+        "units": units,
+        "sameOrderMultiUnit": len(units) > 1,
+        "vehicleCount": len(units),
+        "lastUpdated": now_iso(),
+        "oemSoldSyncedAt": now_iso(),
+    }
+    if not oem_sync._norm_chassis(dest.get("chassisNumber")):
+        patch["chassisNumber"] = chassis
+        patch["invoiceNumber"] = row.get("invoiceNumber") or ""
+        patch["numberPlate"] = row.get("numberPlate") or ""
+    await db.leads.update_one({"leadId": dest["leadId"]}, {"$set": patch})
+    await recompute_lead(dest["leadId"])
+    return dest["leadId"], sno
+
+
+async def _place_split_unit(source, unit, item):
+    chassis = item["chassis"]
+    mobile = item["mobile"]
+    holder = await db.leads.find_one({
+        "leadId": {"$ne": source.get("leadId")},
+        "accountStatus": {"$ne": "Archived"},
+        "$or": [{"chassisNumber": chassis}, {"units.chassisNumber": chassis}],
+    })
+    if holder:
+        sno = 1
+        for i, u in enumerate(holder.get("units") or []):
+            if oem_sync._norm_chassis((u or {}).get("chassisNumber")) == chassis:
+                try:
+                    sno = int((u or {}).get("sno") or i + 1)
+                except (TypeError, ValueError):
+                    sno = i + 1
+                break
+        return holder["leadId"], sno
+    same = await db.leads.find_one({
+        "leadId": {"$ne": source.get("leadId")},
+        "mobile": mobile,
+        "accountStatus": "Active",
+    })
+    if same:
+        return await _graft_split_unit(same, unit, item)
+    new_id = await _insert_split_customer_lead(source, unit, item)
+    return new_id, 1
+
+
+async def _move_unit_scoped_rows(source_id, dest_id, old_sno, dest_sno, item):
+    """Move receipts, payout and copies that name only this unit. Clubbed money stays."""
+    name = item.get("customerName") or ""
+    mobile = item.get("mobile") or ""
+    async for payment in db.payments.find({"leadId": source_id}):
+        snos = _payment_unit_snos(payment)
+        if snos != [int(old_sno)]:
+            continue
+        await db.payments.update_one({"_id": payment["_id"]}, {"$set": {
+            "leadId": dest_id,
+            "unitSnos": [int(dest_sno)],
+            "customerName": name,
+            "mobile": mobile,
+        }})
+    chassis = item.get("chassis") or ""
+    if chassis:
+        await db.insurance.update_many(
+            {"leadId": source_id, "chassisNumber": chassis},
+            {"$set": {"leadId": dest_id, "mobile": mobile, "customerName": name,
+                      "lastUpdated": now_iso()}},
+        )
+    await db[lead_docs.COLLECTION].update_many(
+        {"leadId": source_id, "unitSno": int(old_sno)},
+        {"$set": {"leadId": dest_id, "unitSno": int(dest_sno)}},
+    )
+
+
+async def _remap_staying_payment_units(lead_id, old_to_new, moved_snos):
+    async for payment in db.payments.find({"leadId": lead_id}):
+        snos = _payment_unit_snos(payment)
+        if not snos:
+            continue
+        kept = [s for s in snos if s not in moved_snos]
+        if len(kept) == len(snos) and all(s in old_to_new and old_to_new[s] == s for s in snos):
+            continue
+        mapped = [old_to_new[s] for s in kept if s in old_to_new]
+        if mapped == snos:
+            continue
+        await db.payments.update_one(
+            {"_id": payment["_id"]}, {"$set": {"unitSnos": mapped}})
+
+
+async def _detach_foreign_mobile_units(lead, sold_rows):
+    lead = await _fresh_lead(lead)
+    plan = oem_sync.foreign_mobile_units(lead, sold_rows)
+    if not plan or not lead:
+        return []
+    units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
+    by_ch = {oem_sync._norm_chassis(u.get("chassisNumber")): u for u in units}
+    placed = []
+    move_chassis = set()
+    move_snos = set()
+    for item in plan:
+        unit = by_ch.get(item["chassis"])
+        if not unit:
+            continue
+        dest_id, dest_sno = await _place_split_unit(lead, unit, item)
+        if not dest_id or dest_id == lead.get("leadId"):
+            continue
+        await _move_unit_scoped_rows(
+            lead["leadId"], dest_id, int(item["sno"]), dest_sno, item)
+        placed.append(dest_id)
+        move_chassis.add(item["chassis"])
+        move_snos.add(int(item["sno"]))
+    if not move_chassis:
+        return []
+    remaining = [
+        u for u in units
+        if oem_sync._norm_chassis(u.get("chassisNumber")) not in move_chassis
+    ]
+    old_to_new = {}
+    for i, u in enumerate(remaining):
+        try:
+            old = int(u.get("sno") or 0)
+        except (TypeError, ValueError):
+            old = 0
+        u["sno"] = i + 1
+        if old:
+            old_to_new[old] = i + 1
+    patch = {
+        "units": remaining,
+        "vehicleCount": max(len(remaining), 1),
+        "sameOrderMultiUnit": len(remaining) > 1,
+        "lastUpdated": now_iso(),
+    }
+    if remaining:
+        patch["chassisNumber"] = remaining[0].get("chassisNumber") or ""
+        patch["invoiceNumber"] = remaining[0].get("invoiceNumber") or ""
+        patch["numberPlate"] = remaining[0].get("numberPlate") or ""
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    await _remap_staying_payment_units(lead["leadId"], old_to_new, move_snos)
+    await recompute_lead(lead["leadId"])
+    for dest_id in placed:
+        await recompute_lead(dest_id)
+    return placed
+
+
+async def _split_foreign_mobile_packs():
+    """Separate pack units that OEM billed under a different mobile."""
+    sold = [r async for r in db.oem_sold.find({})]
+    if not sold:
+        return []
+    placed = []
+    async for lead in db.leads.find({"units.0": {"$exists": True}}):
+        if not oem_sync.foreign_mobile_units(lead, sold):
+            continue
+        try:
+            placed.extend(await _detach_foreign_mobile_units(lead, sold))
+        except Exception:
+            logging.exception(
+                "Could not split different-mobile units on %s", lead.get("leadId"))
+    return placed
+
+
 @api.post("/oem-billing/sync", dependencies=[Depends(deal_desk_only)])
 async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = None,
                            act=Depends(actor)):
@@ -11999,6 +12260,12 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     except Exception as e:
         logging.exception("Coulson sold refresh failed for OEM billing")
         raise HTTPException(502, str(e) or "OEM Sold refresh failed") from e
+    split_ids = []
+    try:
+        split_ids = await _split_foreign_mobile_packs()
+    except Exception:
+        logging.exception("OEM billing could not split different-mobile units")
+        split_ids = []
     stamped = {}
     try:
         stamped = await _apply_sold_vehicle_ids()
@@ -12028,6 +12295,8 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
     payload = _oem_billing_payload(rows, period)
     payload["createdLeadIds"] = created
     payload["created"] = len(created)
+    payload["splitLeadIds"] = split_ids
+    payload["split"] = len(split_ids)
     payload["relinked"] = relinked
     payload["relinkedCount"] = len(relinked)
     payload["leadsVehicleIds"] = stamped
@@ -12450,15 +12719,28 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         for idx in targets:
             u = unit_docs[idx] if unit_docs else {}
             outstanding = u.get("customerOutstanding")
-            if outstanding is None:
-                outstanding = lead.get("customerOutstanding") if not pack_now else u.get("customerPayable")
+            if outstanding in (None, ""):
+                if pack_now:
+                    # A missing unit balance is payable minus what that unit
+                    # already received. It is not the full payable (that blocked
+                    # a paid unit whose form omitted the balance).
+                    outstanding = max(
+                        0.0,
+                        ce.num(u.get("customerPayable")) - ce.num(u.get("totalReceived")),
+                    )
+                else:
+                    outstanding = lead.get("customerOutstanding")
             arranged = u.get("insuranceArrangedBy") or lead.get("insuranceArrangedBy")
             errs = _validate_delivery_ready(
                 lead, body, outstanding=outstanding, arranged_by=arranged,
                 insurance_agent_id=body.insuranceAgentId or u.get("insuranceAgentId")
                 or lead.get("insuranceAgentId"))
             if errs:
-                raise HTTPException(422, "Cannot mark delivered:\n" + "\n".join("• " + e for e in errs))
+                who = f"Unit {target_sno}: " if target_sno else ""
+                raise HTTPException(
+                    422,
+                    "Cannot mark delivered:\n" + "\n".join("• " + who + e for e in errs),
+                )
     def _stamp_unit(rec, *, mark):
         rec = dict(rec)
         rec["insurance"] = body.insurance or rec.get("insurance") or ""
@@ -12541,10 +12823,29 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
                 "invoiceNumber": body.invoiceNumber, "chassisNumber": body.chassisNumber, "numberPlate": body.numberPlate,
             })
             await _upsert_incentive_register_on_delivery(lead_id, body.deliveryDate or today())
-        await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
-        await rebuild_finance_views()
-        await recompute_lead(lead_id)
-        await _upsert_delivery_billing_summary(lead_id)
+        try:
+            pack_saved = oem_sync.is_same_order_pack({**lead, "units": unit_docs})
+            if pack_saved and focus_idx is not None and unit_docs:
+                await _upsert_insurance_on_delivery(
+                    lead_id, body.deliveryDate or today(), unit=unit_docs[focus_idx])
+            elif pack_saved:
+                stamped = False
+                for i, rec in enumerate(unit_docs):
+                    if not _unit_is_delivered({**lead, "units": unit_docs}, rec, i):
+                        continue
+                    await _upsert_insurance_on_delivery(
+                        lead_id, rec.get("deliveryDate") or body.deliveryDate or today(),
+                        unit=rec)
+                    stamped = True
+                if not stamped:
+                    await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
+            else:
+                await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
+            await rebuild_finance_views()
+            await recompute_lead(lead_id)
+            await _upsert_delivery_billing_summary(lead_id)
+        except Exception:
+            logging.exception("delivery follow-up failed for %s", lead_id)
         if file_delivered and first_delivery:
             # WhatsApp delivery + review is fire-and-forget — must never fail this save.
             wa.schedule(wa.notify_delivery(lead_id))
@@ -12701,25 +13002,18 @@ async def get_billing_summary(lead_id: str, user=Depends(current_user)):
     return summary
 
 
-async def _upsert_insurance_on_delivery(lead_id, delivery_date):
+async def _upsert_insurance_on_delivery(lead_id, delivery_date, *, unit=None):
     """On Mark Delivered, open the insurance payout entry for the vehicle.
 
-    Nothing was creating these, so the Insurance Payouts screen stayed empty and the
-    Earnings Report's insurance column (which sums expectedPayout) was always 0 — even
-    though the premium, insurer and payout rate were all known.
-
-    No new business rule: the premium is the lead's own insuranceAmount, the insurer is
-    the one captured at delivery, and the rate/expected/outstanding/status come from the
-    existing _insurance_derive + suggested_insurance_payout_rate (49% Storm/Turbo,
-    36.5% others). Idempotent — one entry per lead, refreshed rather than duplicated.
-    An accepted agent MIS (misApproved / received cash / adopted MIS expected)
-    survives re-delivery."""
+    A single file keeps one entry. A same-order pack keeps one entry per chassis
+    so an agent MIS can match every vehicle, not only the chassis written on the
+    lead. An accepted agent MIS survives re-delivery.
+    """
     lead = await db.leads.find_one({"leadId": lead_id}) or {}
     # Customer-arranged insurance: dealer does not earn a payout.
     if ce.normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) == "self":
-        existing = await db.insurance.find_one({"leadId": lead_id})
-        if existing:
-            # Zero out any prior dealer payout so earnings stay clean after a switch to Self.
+        existing_rows = await db.insurance.find({"leadId": lead_id}).to_list(50)
+        for existing in existing_rows:
             cleared = {
                 "expectedPayout": 0,
                 "payoutOutstanding": 0,
@@ -12732,10 +13026,48 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
             await sheet_sync("insurance", {**clean(existing), **cleared,
                                           "payoutRatePct": 0})
         return None
-    premium = ce.num(lead.get("insuranceAmount"))
+    unit = unit if isinstance(unit, dict) else None
+    premium = ce.num((unit or {}).get("insuranceAmount")) or ce.num(lead.get("insuranceAmount"))
     if premium <= 0:
         return None          # no premium charged -> no payout is due; leave it absent
-    existing = await db.insurance.find_one({"leadId": lead_id})
+    chassis = oem_sync._norm_chassis(
+        (unit or {}).get("chassisNumber") or lead.get("chassisNumber"))
+    rows = await db.insurance.find({"leadId": lead_id}).to_list(50)
+    existing = None
+    if chassis:
+        for row in rows:
+            if oem_sync._norm_chassis(row.get("chassisNumber")) == chassis:
+                existing = row
+                break
+    if existing is None and unit is None and oem_sync.is_same_order_pack(lead) and len(rows) > 1:
+        last = None
+        for row in rows:
+            ch = oem_sync._norm_chassis(row.get("chassisNumber"))
+            match = next(
+                (u for u in (lead.get("units") or [])
+                 if isinstance(u, dict)
+                 and ch
+                 and oem_sync._norm_chassis(u.get("chassisNumber")) == ch),
+                None,
+            )
+            last = await _upsert_insurance_on_delivery(
+                lead_id, delivery_date,
+                unit=match or {
+                    "chassisNumber": ch,
+                    "insuranceAmount": row.get("insuranceAmount"),
+                },
+            )
+        return last
+    if existing is None and unit is None:
+        existing = rows[0] if rows else None
+    elif existing is None and unit is not None:
+        blanks = [r for r in rows if not oem_sync._norm_chassis(r.get("chassisNumber"))]
+        # The historical one-row pack entry can be claimed by this chassis.
+        # A sibling chassis already on another row must not be overwritten.
+        if len(rows) == 1 and blanks:
+            existing = blanks[0]
+        elif not rows:
+            existing = None
     # Agent chosen at delivery; fall back to whatever the entry already carries,
     # then to the default agent, so pre-agent leads still resolve a rate.
     agent = (await _get_insurance_agent(lead.get("insuranceAgentId"))
@@ -12745,11 +13077,15 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date):
         "leadId": lead_id,
         "customerName": lead.get("customerName", ""),
         "mobile": lead.get("mobile", ""),
-        "model": lead.get("interestedModel", ""),
-        "variant": lead.get("variant", ""),
-        "insuranceCompany": lead.get("insurerName", "") or (existing or {}).get("insuranceCompany", ""),
+        "model": (unit or {}).get("model") or lead.get("interestedModel", ""),
+        "variant": (unit or {}).get("variant") or lead.get("variant", ""),
+        "insuranceCompany": (
+            (unit or {}).get("insurerName")
+            or lead.get("insurerName", "")
+            or (existing or {}).get("insuranceCompany", "")
+        ),
         "policyNumber": (existing or {}).get("policyNumber", ""),
-        "chassisNumber": lead.get("chassisNumber", "") or (existing or {}).get("chassisNumber", ""),
+        "chassisNumber": chassis or (existing or {}).get("chassisNumber", ""),
         "insuranceAmount": premium,
         # Preserve a manually set rate / already-received money on re-delivery edits.
         "payoutRate": ce.num((existing or {}).get("payoutRate")),
@@ -14735,11 +15071,62 @@ def _mis_explicit_months(month=None, year=None):
     return None
 
 
+async def _ensure_pack_insurance_for_chassis(chassis_list):
+    """Open one payout row per pack chassis the agent file names.
+
+    A pack used to keep a single insurance row, so every sibling VIN showed
+    as "not in the register" and Save matches had nothing to write.
+    """
+    want = []
+    seen = set()
+    for raw in chassis_list or []:
+        ch = oem_sync._norm_chassis(raw)
+        if not ch or ch in seen:
+            continue
+        seen.add(ch)
+        want.append(ch)
+    if not want:
+        return []
+    opened = []
+    for ch in want:
+        lead = await db.leads.find_one({
+            "accountStatus": {"$ne": "Archived"},
+            "$or": [{"chassisNumber": ch}, {"units.chassisNumber": ch}],
+        })
+        if not lead or not oem_sync.is_same_order_pack(lead):
+            continue
+        if ce.normalize_insurance_arranged_by(lead.get("insuranceArrangedBy")) == "self":
+            continue
+        unit = next(
+            (u for u in (lead.get("units") or [])
+             if isinstance(u, dict) and oem_sync._norm_chassis(u.get("chassisNumber")) == ch),
+            None,
+        )
+        premium = ce.num((unit or {}).get("insuranceAmount")) or ce.num(lead.get("insuranceAmount"))
+        if premium <= 0:
+            continue
+        already = await db.insurance.find_one({"leadId": lead["leadId"], "chassisNumber": ch})
+        if already:
+            continue
+        data = await _upsert_insurance_on_delivery(
+            lead["leadId"],
+            (unit or {}).get("deliveryDate") or lead.get("deliveryDate") or today(),
+            unit=unit or {"chassisNumber": ch, "insuranceAmount": premium},
+        )
+        if data and data.get("entryId"):
+            opened.append(data["entryId"])
+    return opened
+
+
 @api.post("/insurance/mis/preview")
 async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[str] = Form(None),
                                 month: Optional[str] = Form(None), year: Optional[str] = Form(None),
                                 act=Depends(actor), _money=Depends(money_desk_only)):
-    """Parse the agent's MIS and match rows to Insurance Payout entries. No writes.
+    """Parse the agent's MIS and match rows to Insurance Payout entries.
+
+    A same-order pack is given one payout row per chassis in this file when
+    that vehicle has a premium and no row yet. Single-file leads are not created
+    here.
 
     Unmatched register rows are scoped to the file's month (policyDate, else
     deliveryDate). Pass month=YYYY-MM to override.
@@ -14752,21 +15139,28 @@ async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[
         _hdrs, rows = ins_mis.parse_rows(raw, mp)
     except Exception as e:
         raise HTTPException(400, f"Could not parse file: {e}")
+    await _ensure_pack_insurance_for_chassis(
+        [r.get("chassisNumber") for r in rows if r.get("chassisNumber")])
     entries = await db.insurance.find().to_list(8000)
     lead_ids = [e.get("leadId") for e in entries if e.get("leadId")]
     leads = []
     if lead_ids:
         leads = await db.leads.find(
             {"leadId": {"$in": lead_ids}},
-            {"leadId": 1, "chassisNumber": 1, "customerName": 1, "mobile": 1, "_id": 0},
+            {"leadId": 1, "chassisNumber": 1, "customerName": 1, "mobile": 1,
+             "units.chassisNumber": 1, "units.sno": 1, "_id": 0},
         ).to_list(8000)
     entries = ins_mis.enrich_entries_with_chassis(entries, leads)
     matched = ins_mis.match_file(rows, entries, months=_mis_explicit_months(month, year))
     need_ch = [r.get("chassisNumber") for r in matched["unmatchedMis"] if r.get("chassisNumber")]
     if need_ch:
         extra = await db.leads.find(
-            {"chassisNumber": {"$nin": ["", None]}},
-            {"leadId": 1, "chassisNumber": 1, "customerName": 1, "mobile": 1, "_id": 0},
+            {"$or": [
+                {"chassisNumber": {"$nin": ["", None]}},
+                {"units.chassisNumber": {"$nin": ["", None]}},
+            ]},
+            {"leadId": 1, "chassisNumber": 1, "customerName": 1, "mobile": 1,
+             "units.chassisNumber": 1, "units.sno": 1, "_id": 0},
         ).to_list(8000)
         ins_mis.attach_lead_hint(matched["unmatchedMis"], extra)
     is_owner = act.get("role") == "owner"
@@ -14906,6 +15300,8 @@ async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depend
     """Stamp MIS amount, overwrite expected payout, recast dealer earnings. No cash."""
     filled, errors = 0, []
     lead_ids = set()
+    await _ensure_pack_insurance_for_chassis(
+        [it.get("chassisNumber") for it in (body.items or []) if it.get("chassisNumber")])
     async with defer_sheet_writes():
         for item in body.items or []:
             eid = str(item.get("entryId") or "").strip()
@@ -14913,13 +15309,22 @@ async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depend
             if not entry:
                 errors.append({"entryId": eid, "error": "not_found"})
                 continue
-            await _fill_mis_item(entry, item.get("misAmount"),
-                                 item.get("reference") or "", item.get("policyNumber") or "")
+            try:
+                await _fill_mis_item(entry, item.get("misAmount"),
+                                     item.get("reference") or "", item.get("policyNumber") or "")
+            except Exception:
+                logging.exception("MIS save failed for %s", eid)
+                errors.append({"entryId": eid, "error": "save_failed"})
+                continue
             filled += 1
             if entry.get("leadId"):
                 lead_ids.add(entry["leadId"])
     for lid in lead_ids:
-        await recompute_lead(lid)
+        try:
+            await recompute_lead(lid)
+        except Exception:
+            logging.exception("MIS recompute failed for %s", lid)
+            errors.append({"leadId": lid, "error": "recompute_failed"})
     await write_audit(act, "mis-apply", "insurance", new={"filled": filled, "errors": len(errors)})
     return {"ok": True, "filled": filled, "errors": errors}
 

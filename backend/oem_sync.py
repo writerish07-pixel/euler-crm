@@ -2160,7 +2160,11 @@ def sold_rows_for_lead(lead, sold_rows, occupied_chassis=None):
             continue
         row_m = _digits10((row or {}).get("mobile"))
         by_mobile = bool(mobile and len(mobile) == 10 and row_m == mobile)
-        by_name = name_ok and _norm_person_name((row or {}).get("customerName")) == name_key
+        by_name = (
+            name_ok
+            and _norm_person_name((row or {}).get("customerName")) == name_key
+            and not mobiles_conflict(lead, row)
+        )
         if (by_mobile or by_name) and sold_model_conflicts(row, lead):
             continue
         if by_mobile:
@@ -2204,7 +2208,7 @@ async def match_sold_family_for_lead(db, lead):
     rows = [r async for r in db.oem_sold.find({})]
     leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads, (lead or {}).get("leadId"))
-    family = sold_rows_for_lead(lead, rows, occupied)
+    family = order_sold_like_lead(lead, sold_rows_for_lead(lead, rows, occupied))
     return _family_payload(lead, family)
 
 
@@ -2220,6 +2224,91 @@ def _name_key_usable(key):
     if not key or len(key) < 6:
         return False
     return len(key.split()) >= 2
+
+
+def mobiles_conflict(a, b):
+    """Both records have a 10-digit mobile and they are not the same number.
+
+    A blank mobile is not a conflict. Same name plus two different mobiles
+    is two customers (MOHAN LAL YADAV on 774…, 805… and 805…), not one pack.
+    """
+    am = _digits10((a or {}).get("mobile") or (a or {}).get("altMobile"))
+    bm = _digits10((b or {}).get("mobile") or (b or {}).get("altMobile"))
+    return len(am) == 10 and len(bm) == 10 and am != bm
+
+
+def same_customer(a, b):
+    """Same person: equal 10-digit mobile, or the same usable name when a mobile is missing.
+
+    Name never joins two records that both already have different mobiles.
+    Blank-mobile fleets (Messenger SCS with no OEM mobile) still pack.
+    """
+    if mobiles_conflict(a, b):
+        return False
+    am = _digits10((a or {}).get("mobile") or (a or {}).get("altMobile"))
+    bm = _digits10((b or {}).get("mobile") or (b or {}).get("altMobile"))
+    if len(am) == 10 and am == bm:
+        return True
+    ak = _norm_person_name((a or {}).get("customerName"))
+    bk = _norm_person_name((b or {}).get("customerName"))
+    return bool(_name_key_usable(ak) and ak == bk)
+
+
+def foreign_mobile_units(lead, sold_rows):
+    """Pack units whose OEM Sold mobile is a different 10-digit number.
+
+    The unit that matches the lead mobile stays. A file is never emptied:
+    if every unit conflicts, the lead's own chassis stays.
+    """
+    lead_m = _digits10((lead or {}).get("mobile") or (lead or {}).get("altMobile"))
+    if len(lead_m) != 10:
+        return []
+    by_ch = {}
+    for row in sold_rows or []:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if ch and ch not in by_ch:
+            by_ch[ch] = row
+    units = [u for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
+    foreign = []
+    keep = False
+    for i, unit in enumerate(units):
+        ch = _norm_chassis(unit.get("chassisNumber"))
+        row = by_ch.get(ch) if ch else None
+        if row and mobiles_conflict(lead, row):
+            foreign.append({
+                "index": i,
+                "sno": int(unit.get("sno") or i + 1),
+                "chassis": ch,
+                "mobile": _digits10(row.get("mobile")),
+                "customerName": str(
+                    row.get("customerName") or (lead or {}).get("customerName") or ""
+                ).strip(),
+                "invoiceNumber": str(
+                    row.get("invoiceNumber") or unit.get("invoiceNumber") or ""
+                ).strip(),
+                "numberPlate": str(
+                    row.get("numberPlate") or unit.get("numberPlate") or ""
+                ).strip(),
+                "soldDate": str(row.get("soldDate") or unit.get("soldDate") or "")[:10],
+                "model": unit.get("model") or row.get("model") or "",
+                "variant": unit.get("variant") or row.get("variant") or "",
+            })
+        else:
+            keep = True
+    if not keep and foreign:
+        lead_ch = _norm_chassis((lead or {}).get("chassisNumber"))
+        stay = next((f for f in foreign if f["chassis"] == lead_ch), foreign[0])
+        foreign = [f for f in foreign if f["chassis"] != stay["chassis"]]
+    return foreign
+
+
+def order_sold_like_lead(lead, family):
+    """Sold rows in the lead's unit order, so unit 1 is not a sibling chassis."""
+    rank = {ch: i for i, ch in enumerate(lead_chassis_list(lead))}
+    return sorted(list(family or []), key=lambda r: (
+        rank.get(_norm_chassis((r or {}).get("chassis")), 10 ** 6),
+        _norm_chassis((r or {}).get("chassis")),
+    ))
 
 
 def _match_sold_by_mobile(lead, sold_rows, occupied_chassis=None):
@@ -2279,6 +2368,8 @@ def _match_sold_by_name(lead, sold_rows, occupied_chassis=None):
         if not ch:
             continue
         if len(_digits10(row.get("mobile"))) != 10:
+            continue
+        if mobiles_conflict(lead, row):
             continue
         if sold_model_conflicts(row, lead):
             continue
@@ -3269,6 +3360,14 @@ def _live_same_name(live, name):
     return [l for l in live if _norm_person_name((l or {}).get("customerName")) == key]
 
 
+def _name_matches_without_mobile_conflict(live, sold):
+    """Usable-name leads that are not a different 10-digit mobile."""
+    return [
+        l for l in _live_same_name(live, (sold or {}).get("customerName"))
+        if not mobiles_conflict(l, sold)
+    ]
+
+
 def _empty_unclaimed(leads, claimed):
     return [
         l for l in leads
@@ -3364,7 +3463,7 @@ def classify_oem_billing(sold_rows, leads):
                     if not sold_model_conflicts(sold, l)]
         pool = _pool(_live_same_mobile(live, sold.get("mobile")))
         if not pool:
-            pool = _pool(_live_same_name(live, sold.get("customerName")))
+            pool = _pool(_name_matches_without_mobile_conflict(live, sold))
         if len(pool) != 1:
             return 0
         return sold_match_score(sold, pool[0]) or (
@@ -3420,7 +3519,7 @@ def classify_oem_billing(sold_rows, leads):
     leftover.sort(key=lambda s: (-_empty_score(s), _norm_chassis(s.get("chassis"))))
     for sold in leftover:
         chassis = _norm_chassis(sold.get("chassis"))
-        same = _live_same_name(live, sold.get("customerName"))
+        same = _name_matches_without_mobile_conflict(live, sold)
         # A lead for another model (repeat buyer: Storm delivered, Turbo booked)
         # is never an empty slot for this chassis.
         empty = [l for l in _empty_unclaimed(same, claimed)

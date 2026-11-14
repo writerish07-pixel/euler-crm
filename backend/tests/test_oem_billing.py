@@ -1654,3 +1654,143 @@ async def test_reopen_leaves_desk_complete_delivered(client):
     assert live["currentStatus"] == "Delivered"
     assert live.get("oemAutoDelivered") is True
     assert n == 0 or live["currentStatus"] == "Delivered"
+
+
+def test_different_mobiles_are_not_the_same_customer():
+    a = {"customerName": "Mohan Lal Yadav", "mobile": "7742654865"}
+    b = {"customerName": "Mohan Lal Yadav", "mobile": "8058520061"}
+    blank = {"customerName": "Messenger SCS", "mobile": ""}
+    assert oem_sync.mobiles_conflict(a, b) is True
+    assert oem_sync.same_customer(a, b) is False
+    assert oem_sync.same_customer(a, {"customerName": "Mohan Lal Yadav", "mobile": "7742654865"})
+    assert oem_sync.same_customer(blank, {"customerName": "Messenger SCS", "mobile": ""})
+    assert oem_sync.same_customer(blank, {"customerName": "Messenger SCS", "mobile": "8980143558"})
+
+
+def test_sold_family_skips_a_different_mobile_same_name():
+    lead = {
+        "leadId": "LD-MOHAN", "customerName": "Mohan Lal Yadav", "mobile": "7742654865",
+        "sameOrderMultiUnit": True,
+        "chassisNumber": "MD9KEEP",
+        "units": [{"sno": 1, "chassisNumber": "MD9KEEP"}],
+    }
+    sold = [
+        {"chassis": "MD9KEEP", "customerName": "Mohan Lal Yadav", "mobile": "7742654865"},
+        {"chassis": "MD9OTHER", "customerName": "Mohan Lal Yadav", "mobile": "8058520061"},
+        {"chassis": "MD9BLANK", "customerName": "Mohan Lal Yadav", "mobile": ""},
+    ]
+    family = oem_sync.sold_rows_for_lead(lead, sold, set())
+    chassis = {oem_sync._norm_chassis(r.get("chassis")) for r in family}
+    assert "MD9KEEP" in chassis
+    assert "MD9BLANK" in chassis
+    assert "MD9OTHER" not in chassis
+    plan = oem_sync.foreign_mobile_units({
+        **lead,
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9KEEP"},
+            {"sno": 2, "chassisNumber": "MD9OTHER"},
+            {"sno": 3, "chassisNumber": "MD9BLANK"},
+        ],
+    }, sold)
+    assert [p["chassis"] for p in plan] == ["MD9OTHER"]
+
+
+def test_classify_does_not_give_a_different_mobile_the_empty_lead():
+    sold = [{
+        "chassis": "MD9OTHER", "customerName": "Mohan Lal Yadav",
+        "mobile": "8058520061", "soldDate": "2026-10-28",
+    }]
+    leads = [{
+        "leadId": "LD-MOHAN", "customerName": "Mohan Lal Yadav", "mobile": "7742654865",
+        "accountStatus": "Active", "currentStatus": "Booked",
+    }]
+    rows = oem_sync.classify_oem_billing(sold, leads)
+    assert rows[0]["bucket"] == oem_sync.BUCKET_UNMATCHED
+    assert not rows[0]["leadId"]
+
+
+@pytest.mark.asyncio
+async def test_sync_splits_same_name_different_mobile_units(client):
+    lid = "LD-MOHAN-PACK"
+    name = "Mohan Lal Yadav"
+    await server.db.leads.delete_many({"customerName": name})
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.payments.delete_many({"leadId": lid})
+    await server.db.oem_sold.delete_many({"customerName": name})
+    await server.db[server.lead_docs.COLLECTION].delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": name, "mobile": "7742654865",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "sameOrderMultiUnit": True, "customerType": "Individual",
+        "executive": "Amit", "bookingDate": "2026-07-29",
+        "chassisNumber": "MD9MOHAN1", "invoiceNumber": "INV-M1",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9MOHAN1", "invoiceNumber": "INV-M1",
+             "customerPayable": 1000, "exShowroom": 1000, "insuranceAmount": 10},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9MOHAN2", "invoiceNumber": "INV-M2",
+             "customerPayable": 800, "exShowroom": 800, "insuranceAmount": 20},
+            {"sno": 3, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9MOHAN3", "invoiceNumber": "INV-M3",
+             "customerPayable": 900, "exShowroom": 900},
+        ],
+    })
+    for chassis, mobile, invoice in (
+        ("MD9MOHAN1", "7742654865", "INV-M1"),
+        ("MD9MOHAN2", "8058520061", "INV-M2"),
+        ("MD9MOHAN3", "8058614001", "INV-M3"),
+    ):
+        await server.db.oem_sold.insert_one({
+            "chassis": chassis, "mobile": mobile, "invoiceNumber": invoice,
+            "customerName": name, "model": "Turbo Max", "variant": "Maxx (PV)",
+            "soldDate": "2026-10-28", "coulsonStatus": "SOLD",
+        })
+    await server.db.payments.insert_one({
+        "receiptNumber": "RC-MOHAN-U2", "leadId": lid, "amount": 800,
+        "unitSnos": [2], "allocation": "separate", "date": "2026-10-28",
+        "customerName": name, "mobile": "7742654865",
+    })
+    await server.db.payments.insert_one({
+        "receiptNumber": "RC-MOHAN-CLUB", "leadId": lid, "amount": 500,
+        "unitSnos": [1, 2], "allocation": "club", "date": "2026-10-01",
+        "customerName": name, "mobile": "7742654865",
+    })
+    await server.db[server.lead_docs.COLLECTION].insert_one({
+        "documentId": "DC-MOHAN-PAN", "leadId": lid, "kind": "kyc_pan",
+        "filename": "pan.png", "unitSno": None, "data": b"pan",
+    })
+    await server.db[server.lead_docs.COLLECTION].insert_one({
+        "documentId": "DC-MOHAN-INS2", "leadId": lid, "kind": "delivery_insurance",
+        "filename": "ins2.png", "unitSno": 2, "data": b"ins",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-10")
+    assert r.status_code == 200, r.text
+    original = await server.db.leads.find_one({"leadId": lid})
+    kept = {oem_sync._norm_chassis(u.get("chassisNumber")) for u in original.get("units") or []}
+    assert kept == {"MD9MOHAN1"}
+    assert original.get("sameOrderMultiUnit") is not True
+    assert original.get("mobile") == "7742654865"
+    others = []
+    async for lead in server.db.leads.find({"customerName": name, "leadId": {"$ne": lid}}):
+        others.append(lead)
+    mobiles = {lead.get("mobile") for lead in others}
+    assert mobiles == {"8058520061", "8058614001"}
+    unit2 = next(lead for lead in others if lead.get("mobile") == "8058520061")
+    assert "MD9MOHAN2" in set(oem_sync.lead_chassis_list(unit2))
+    assert float(unit2.get("exShowroom") or 0) == 800
+    moved = await server.db.payments.find_one({"receiptNumber": "RC-MOHAN-U2"})
+    assert moved["leadId"] == unit2["leadId"]
+    assert moved["unitSnos"] == [1]
+    assert moved["mobile"] == "8058520061"
+    club = await server.db.payments.find_one({"receiptNumber": "RC-MOHAN-CLUB"})
+    assert club["leadId"] == lid
+    assert 2 not in (club.get("unitSnos") or [])
+    pan = await server.db[server.lead_docs.COLLECTION].find_one({"documentId": "DC-MOHAN-PAN"})
+    assert pan["leadId"] == lid
+    ins = await server.db[server.lead_docs.COLLECTION].find_one({"documentId": "DC-MOHAN-INS2"})
+    assert ins["leadId"] == unit2["leadId"]
+    kyc_on_new = await server.db[server.lead_docs.COLLECTION].count_documents({
+        "leadId": unit2["leadId"], "kind": "kyc_pan"})
+    assert kyc_on_new == 0
