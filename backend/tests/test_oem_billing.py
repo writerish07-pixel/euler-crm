@@ -1751,11 +1751,16 @@ async def test_sync_splits_same_name_different_mobile_units(client):
         "receiptNumber": "RC-MOHAN-U2", "leadId": lid, "amount": 800,
         "unitSnos": [2], "allocation": "separate", "date": "2026-10-28",
         "customerName": name, "mobile": "7742654865",
+        "unitSplits": [{"unitSno": 2, "amount": 800}],
     })
     await server.db.payments.insert_one({
         "receiptNumber": "RC-MOHAN-CLUB", "leadId": lid, "amount": 500,
         "unitSnos": [1, 2], "allocation": "club", "date": "2026-10-01",
         "customerName": name, "mobile": "7742654865",
+        "unitSplits": [
+            {"unitSno": 1, "amount": 300},
+            {"unitSno": 2, "amount": 200},
+        ],
     })
     await server.db[server.lead_docs.COLLECTION].insert_one({
         "documentId": "DC-MOHAN-PAN", "leadId": lid, "kind": "kyc_pan",
@@ -1783,10 +1788,12 @@ async def test_sync_splits_same_name_different_mobile_units(client):
     moved = await server.db.payments.find_one({"receiptNumber": "RC-MOHAN-U2"})
     assert moved["leadId"] == unit2["leadId"]
     assert moved["unitSnos"] == [1]
+    assert moved["unitSplits"] == [{"unitSno": 1, "amount": 800}]
     assert moved["mobile"] == "8058520061"
     club = await server.db.payments.find_one({"receiptNumber": "RC-MOHAN-CLUB"})
     assert club["leadId"] == lid
     assert 2 not in (club.get("unitSnos") or [])
+    assert club["unitSplits"] == [{"unitSno": 1, "amount": 300}]
     pan = await server.db[server.lead_docs.COLLECTION].find_one({"documentId": "DC-MOHAN-PAN"})
     assert pan["leadId"] == lid
     ins = await server.db[server.lead_docs.COLLECTION].find_one({"documentId": "DC-MOHAN-INS2"})
@@ -1794,3 +1801,96 @@ async def test_sync_splits_same_name_different_mobile_units(client):
     kyc_on_new = await server.db[server.lead_docs.COLLECTION].count_documents({
         "leadId": unit2["leadId"], "kind": "kyc_pan"})
     assert kyc_on_new == 0
+
+
+@pytest.mark.asyncio
+async def test_split_keeps_remaining_unit_price_and_renumbers_its_scan(client):
+    lid = "LD-KEEP-TURBO"
+    name = "Mohan Lal Yadav"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.delete_many({"customerName": name})
+    await server.db.oem_sold.delete_many({"customerName": name})
+    await server.db.payments.delete_many({"leadId": lid})
+    await server.db[server.lead_docs.COLLECTION].delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": name, "mobile": "7742654865",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Storm", "variant": "Life B",
+        "exShowroom": 800000, "chassisNumber": "MD9STORM1",
+        "units": [
+            {"sno": 1, "model": "Storm", "variant": "Life B",
+             "chassisNumber": "MD9STORM1", "exShowroom": 800000, "customerPayable": 800000},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9TURBO2", "exShowroom": 900000, "customerPayable": 900000},
+        ],
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9STORM1", "mobile": "8058520061", "invoiceNumber": "INV-S",
+        "customerName": name, "soldDate": "2026-10-01", "coulsonStatus": "SOLD",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9TURBO2", "mobile": "7742654865", "invoiceNumber": "INV-T",
+        "customerName": name, "soldDate": "2026-10-02", "coulsonStatus": "SOLD",
+    })
+    await server.db[server.lead_docs.COLLECTION].insert_one({
+        "documentId": "DC-TURBO-RTO", "leadId": lid, "kind": "delivery_rto",
+        "filename": "rto.pdf", "unitSno": 2, "data": b"rto",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-10")
+    assert r.status_code == 200, r.text
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert [u.get("chassisNumber") for u in live.get("units") or []] == ["MD9TURBO2"]
+    assert live.get("interestedModel") == "Turbo Max"
+    assert float(live.get("exShowroom") or 0) == 900000
+    doc = await server.db[server.lead_docs.COLLECTION].find_one({"documentId": "DC-TURBO-RTO"})
+    assert doc["leadId"] == lid
+    assert doc["unitSno"] == 1
+
+
+@pytest.mark.asyncio
+async def test_split_does_not_send_scans_to_a_different_mobile(client):
+    lid = "LD-NO-LEAK"
+    other = "LD-OTHER-VIN"
+    name = "Mohan Lal Yadav"
+    await server.db.leads.delete_many({"leadId": {"$in": [lid, other]}})
+    await server.db.leads.delete_many({"customerName": name})
+    await server.db.oem_sold.delete_many({"customerName": name})
+    await server.db[server.lead_docs.COLLECTION].delete_many({"leadId": {"$in": [lid, other]}})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": name, "mobile": "7742654865",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "sameOrderMultiUnit": True, "chassisNumber": "MD9KEEP9",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)", "exShowroom": 1000,
+        "units": [
+            {"sno": 1, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9KEEP9", "exShowroom": 1000},
+            {"sno": 2, "model": "Turbo Max", "variant": "Maxx (PV)",
+             "chassisNumber": "MD9TAKEN9", "exShowroom": 1000},
+        ],
+    })
+    await server.db.leads.insert_one({
+        "leadId": other, "customerName": "Someone Else", "mobile": "9000000001",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "chassisNumber": "MD9TAKEN9",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9KEEP9", "mobile": "7742654865", "customerName": name,
+        "soldDate": "2026-10-01", "coulsonStatus": "SOLD",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": "MD9TAKEN9", "mobile": "8058520061", "customerName": name,
+        "soldDate": "2026-10-02", "coulsonStatus": "SOLD",
+    })
+    await server.db[server.lead_docs.COLLECTION].insert_one({
+        "documentId": "DC-TAKEN-INS", "leadId": lid, "kind": "delivery_insurance",
+        "filename": "ins.png", "unitSno": 2, "data": b"ins",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-10")
+    assert r.status_code == 200, r.text
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert [u.get("chassisNumber") for u in live.get("units") or []] == ["MD9KEEP9"]
+    doc = await server.db[server.lead_docs.COLLECTION].find_one({"documentId": "DC-TAKEN-INS"})
+    assert doc["leadId"] == lid
+    leaked = await server.db[server.lead_docs.COLLECTION].count_documents({"leadId": other})
+    assert leaked == 0

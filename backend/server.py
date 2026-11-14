@@ -11991,6 +11991,34 @@ def _payment_unit_snos(payment):
     return out
 
 
+def _remap_unit_splits(splits, old_to_new, moved_snos=()):
+    """Renumber split lines. A unit that left this file drops out of the split.
+
+    The receipt amount stays on the lead. Clubbed money is not moved, and a
+    departed unit's slice must not land on whoever inherits that unit number.
+    """
+    moved = set(moved_snos or ())
+    out = []
+    for row in splits or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            sno = int(row.get("unitSno") or 0)
+        except (TypeError, ValueError):
+            continue
+        if sno in moved or sno not in old_to_new:
+            continue
+        out.append({**row, "unitSno": int(old_to_new[sno])})
+    return out
+
+
+def _unit_premium(unit, lead):
+    """Unit premium wins, including an explicit zero. Lead premium is the fallback."""
+    if isinstance(unit, dict) and "insuranceAmount" in unit:
+        return ce.num(unit.get("insuranceAmount"))
+    return ce.num((lead or {}).get("insuranceAmount"))
+
+
 async def _insert_split_customer_lead(source, unit, item):
     """A different OEM mobile becomes its own booked file. No KYC is copied."""
     chassis = item["chassis"]
@@ -12110,6 +12138,10 @@ async def _place_split_unit(source, unit, item):
         "$or": [{"chassisNumber": chassis}, {"units.chassisNumber": chassis}],
     })
     if holder:
+        # Another file already has this VIN. Scans and receipts move only when
+        # that file is the same mobile. A different mobile keeps its own papers.
+        if oem_sync.mobiles_conflict(holder, {"mobile": mobile}):
+            return None, None
         sno = 1
         for i, u in enumerate(holder.get("units") or []):
             if oem_sync._norm_chassis((u or {}).get("chassisNumber")) == chassis:
@@ -12138,12 +12170,17 @@ async def _move_unit_scoped_rows(source_id, dest_id, old_sno, dest_sno, item):
         snos = _payment_unit_snos(payment)
         if snos != [int(old_sno)]:
             continue
-        await db.payments.update_one({"_id": payment["_id"]}, {"$set": {
+        splits = _remap_unit_splits(
+            payment.get("unitSplits"), {int(old_sno): int(dest_sno)})
+        patch = {
             "leadId": dest_id,
             "unitSnos": [int(dest_sno)],
             "customerName": name,
             "mobile": mobile,
-        }})
+        }
+        if payment.get("unitSplits"):
+            patch["unitSplits"] = splits
+        await db.payments.update_one({"_id": payment["_id"]}, {"$set": patch})
     chassis = item.get("chassis") or ""
     if chassis:
         await db.insurance.update_many(
@@ -12155,6 +12192,15 @@ async def _move_unit_scoped_rows(source_id, dest_id, old_sno, dest_sno, item):
         {"leadId": source_id, "unitSno": int(old_sno)},
         {"$set": {"leadId": dest_id, "unitSno": int(dest_sno)}},
     )
+    async for doc in db[lead_docs.COLLECTION].find({"leadId": source_id}):
+        snos = lead_docs.doc_unit_snos(doc)
+        if snos != [int(old_sno)]:
+            continue
+        await db[lead_docs.COLLECTION].update_one({"_id": doc["_id"]}, {"$set": {
+            "leadId": dest_id,
+            "unitSno": int(dest_sno),
+            "unitSnos": [int(dest_sno)],
+        }})
 
 
 async def _remap_staying_payment_units(lead_id, old_to_new, moved_snos):
@@ -12166,10 +12212,42 @@ async def _remap_staying_payment_units(lead_id, old_to_new, moved_snos):
         if len(kept) == len(snos) and all(s in old_to_new and old_to_new[s] == s for s in snos):
             continue
         mapped = [old_to_new[s] for s in kept if s in old_to_new]
+        splits = _remap_unit_splits(payment.get("unitSplits"), old_to_new, moved_snos)
+        same_splits = splits == list(payment.get("unitSplits") or [])
+        if mapped == snos and same_splits:
+            continue
+        patch = {"unitSnos": mapped}
+        if payment.get("unitSplits"):
+            patch["unitSplits"] = splits
+        await db.payments.update_one({"_id": payment["_id"]}, {"$set": patch})
+
+
+async def _remap_staying_doc_units(lead_id, old_to_new, moved_snos):
+    """Renumber scans that stayed on this file. Moved units are already gone."""
+    async for doc in db[lead_docs.COLLECTION].find({"leadId": lead_id}):
+        snos = lead_docs.doc_unit_snos(doc)
+        if not snos:
+            continue
+        kept = [s for s in snos if s not in moved_snos and s in old_to_new]
+        mapped = [old_to_new[s] for s in kept]
         if mapped == snos:
             continue
-        await db.payments.update_one(
-            {"_id": payment["_id"]}, {"$set": {"unitSnos": mapped}})
+        patch = {}
+        if doc.get("unitSnos"):
+            patch["unitSnos"] = mapped
+        try:
+            one = int(doc.get("unitSno") or 0)
+        except (TypeError, ValueError):
+            one = 0
+        if one and one in old_to_new and one not in moved_snos:
+            patch["unitSno"] = old_to_new[one]
+        elif one in moved_snos:
+            # This scan belonged to a unit that left and was not transferred.
+            # Leave the old number so it does not attach to a surviving vehicle.
+            continue
+        if not patch:
+            continue
+        await db[lead_docs.COLLECTION].update_one({"_id": doc["_id"]}, {"$set": patch})
 
 
 async def _detach_foreign_mobile_units(lead, sold_rows):
@@ -12187,13 +12265,13 @@ async def _detach_foreign_mobile_units(lead, sold_rows):
         if not unit:
             continue
         dest_id, dest_sno = await _place_split_unit(lead, unit, item)
+        move_chassis.add(item["chassis"])
+        move_snos.add(int(item["sno"]))
         if not dest_id or dest_id == lead.get("leadId"):
             continue
         await _move_unit_scoped_rows(
             lead["leadId"], dest_id, int(item["sno"]), dest_sno, item)
         placed.append(dest_id)
-        move_chassis.add(item["chassis"])
-        move_snos.add(int(item["sno"]))
     if not move_chassis:
         return []
     remaining = [
@@ -12216,11 +12294,23 @@ async def _detach_foreign_mobile_units(lead, sold_rows):
         "lastUpdated": now_iso(),
     }
     if remaining:
-        patch["chassisNumber"] = remaining[0].get("chassisNumber") or ""
-        patch["invoiceNumber"] = remaining[0].get("invoiceNumber") or ""
-        patch["numberPlate"] = remaining[0].get("numberPlate") or ""
+        head = remaining[0]
+        patch["chassisNumber"] = head.get("chassisNumber") or ""
+        patch["invoiceNumber"] = head.get("invoiceNumber") or ""
+        patch["numberPlate"] = head.get("numberPlate") or ""
+        if head.get("model"):
+            patch["interestedModel"] = head.get("model")
+        if head.get("variant"):
+            patch["variant"] = head.get("variant")
+        # One vehicle left: the lead price is that vehicle. A pack rollup stays
+        # on the lead while more than one unit remains.
+        if len(remaining) == 1:
+            for key in UNIT_COMMERCIAL_KEYS:
+                if key in head:
+                    patch[key] = head[key]
     await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
     await _remap_staying_payment_units(lead["leadId"], old_to_new, move_snos)
+    await _remap_staying_doc_units(lead["leadId"], old_to_new, move_snos)
     await recompute_lead(lead["leadId"])
     for dest_id in placed:
         await recompute_lead(dest_id)
@@ -13027,7 +13117,7 @@ async def _upsert_insurance_on_delivery(lead_id, delivery_date, *, unit=None):
                                           "payoutRatePct": 0})
         return None
     unit = unit if isinstance(unit, dict) else None
-    premium = ce.num((unit or {}).get("insuranceAmount")) or ce.num(lead.get("insuranceAmount"))
+    premium = _unit_premium(unit, lead)
     if premium <= 0:
         return None          # no premium charged -> no payout is due; leave it absent
     chassis = oem_sync._norm_chassis(
@@ -15102,7 +15192,7 @@ async def _ensure_pack_insurance_for_chassis(chassis_list):
              if isinstance(u, dict) and oem_sync._norm_chassis(u.get("chassisNumber")) == ch),
             None,
         )
-        premium = ce.num((unit or {}).get("insuranceAmount")) or ce.num(lead.get("insuranceAmount"))
+        premium = _unit_premium(unit, lead)
         if premium <= 0:
             continue
         already = await db.insurance.find_one({"leadId": lead["leadId"], "chassisNumber": ch})

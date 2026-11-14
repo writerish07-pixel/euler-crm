@@ -735,3 +735,26 @@ async def test_pack_chassis_opens_its_own_payout_and_save_survives_recompute(cli
     assert any(err.get("error") == "recompute_failed" for err in saved.json()["errors"])
     doc = await server.db.insurance.find_one({"entryId": hit["entryId"]})
     assert float(doc["misAmount"]) == 8158
+
+
+@pytest.mark.asyncio
+async def test_pack_unit_with_zero_premium_does_not_inherit_the_lead_payout(client):
+    lid = "LD-MIS-ZERO"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.insurance.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Messenger SCS", "mobile": "8980143558",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "sameOrderMultiUnit": True, "insuranceAmount": 19000,
+        "insuranceArrangedBy": "dealer",
+        "chassisNumber": "MD9ZERO01",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9ZERO01", "insuranceAmount": 19000},
+            {"sno": 2, "chassisNumber": "MD9ZERO02", "insuranceAmount": 0},
+        ],
+    })
+    csv = "Chassis,Payout Amount\nMD9ZERO02,1000\n"
+    preview = await client.post("/api/insurance/mis/preview", files=_csv(csv))
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["totals"]["matched"] == 0
+    assert await server.db.insurance.count_documents({"leadId": lid, "chassisNumber": "MD9ZERO02"}) == 0
