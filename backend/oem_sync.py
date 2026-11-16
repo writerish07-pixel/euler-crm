@@ -1959,9 +1959,37 @@ def _stamp_raw_oem_sku(target, row):
     return target
 
 
+def sku_answer_stands(target):
+    """Owner already named this chassis. Do not ask again on any later sync."""
+    return bool(
+        (target or {}).get("oemSkuConfirmed")
+        and str((target or {}).get("variant") or "").strip()
+    )
+
+
+def chassis_answer_stands(lead, chassis):
+    """True when this chassis was confirmed on its unit or on the file header."""
+    ch = _norm_chassis(chassis)
+    if not lead or not ch:
+        return False
+    for unit in (lead.get("units") or []):
+        if isinstance(unit, dict) and _norm_chassis(unit.get("chassisNumber")) == ch:
+            if sku_answer_stands(unit):
+                return True
+            break
+    if _norm_chassis(lead.get("chassisNumber")) == ch and sku_answer_stands(lead):
+        return True
+    return False
+
+
 def _queue_variant_review(patch, lead, row, reason):
-    """Flag a chassis once. A later sync must not rewrite the same question."""
+    """Flag a chassis once. A confirmed answer is never asked again."""
     lead = lead or {}
+    if sku_answer_stands(lead):
+        if lead.get("oemSkuNeedsReview"):
+            patch["oemSkuNeedsReview"] = False
+            patch["oemSkuReviewReason"] = ""
+        return patch
     if lead.get("oemSkuNeedsReview") and lead.get("oemSkuReviewReason") == reason:
         return patch
     patch["oemSkuNeedsReview"] = True
@@ -1995,15 +2023,20 @@ def fill_lead_skus(lead, sold_rows=None):
         row = next(iter(by_ch.values()))
     billed = chassis_billed_sku(row) if row else None
     have_model = str((lead or {}).get("interestedModel") or "").strip()
+    header_answered = sku_answer_stands(lead)
+    if header_answered and (lead or {}).get("oemSkuNeedsReview"):
+        patch["oemSkuNeedsReview"] = False
+        patch["oemSkuReviewReason"] = ""
     if billed and str(billed.get("model") or "").strip() and lead_body_differs(lead, billed):
         if have_model and not same_sold_family(lead, billed):
             # A different model is not a body conversion. Do not write it.
-            # The owner confirms which body belongs on this chassis.
-            _queue_variant_review(
-                patch, lead, row,
-                "OEM billed a different model on this chassis. "
-                "Confirm the variant before it is written.",
-            )
+            # Once the owner has confirmed, the question stays closed.
+            if not header_answered:
+                _queue_variant_review(
+                    patch, lead, row,
+                    "OEM billed a different model on this chassis. "
+                    "Confirm the variant before it is written.",
+                )
             billed = None
         else:
             if not (lead or {}).get("originalVariant"):
@@ -2019,9 +2052,7 @@ def fill_lead_skus(lead, sold_rows=None):
             if (lead or {}).get("oemSkuNeedsReview"):
                 patch["oemSkuNeedsReview"] = False
                 patch["oemSkuReviewReason"] = ""
-    elif row and not billed and ch and not (
-            (lead or {}).get("oemSkuConfirmed") and str((lead or {}).get("variant") or "").strip()
-    ):
+    elif row and not billed and ch and not header_answered:
         _queue_variant_review(
             patch, lead, row,
             "OEM did not name one catalog variant for this chassis. "
@@ -2091,15 +2122,16 @@ def fill_pack_unit_skus(lead, sold_rows=None):
             if rec.get("oemSkuNeedsReview"):
                 rec["oemSkuNeedsReview"] = False
                 rec["oemSkuReviewReason"] = ""
-        elif row and ch and not (
-                rec.get("oemSkuConfirmed") and str(rec.get("variant") or "").strip()
-        ):
+        elif row and ch and not sku_answer_stands(rec):
             rec["oemSkuNeedsReview"] = True
             rec["oemSkuReviewReason"] = (
                 "OEM did not name one catalog variant for this chassis. "
                 "Confirm it before a price is written."
             )
             _stamp_raw_oem_sku(rec, row)
+        elif sku_answer_stands(rec) and rec.get("oemSkuNeedsReview"):
+            rec["oemSkuNeedsReview"] = False
+            rec["oemSkuReviewReason"] = ""
         avail = available_body_fields(row) if row else None
         if row and billed and available_differs_from_billed(avail, billed):
             stamp_available_billed_bodies(rec, row, billed=billed, available=avail)
@@ -3405,10 +3437,15 @@ def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None,
     lead_model, lead_variant = _lead_model_variant(lead, chassis)
     billed = chassis_billed_sku(sold)
     # The list shows what OEM billed. The file's variant is separate, so a
-    # DV already on the pack cannot relabel an FB invoice.
+    # DV already on the pack cannot relabel an FB invoice. A chassis the
+    # owner already confirmed is not shown as a question again.
     if billed:
         model = str(billed.get("model") or "").strip()
         variant = str(billed.get("variant") or "").strip()
+        sku_needs_review = False
+    elif chassis_answer_stands(lead, chassis):
+        model = lead_model
+        variant = lead_variant
         sku_needs_review = False
     else:
         model = ""

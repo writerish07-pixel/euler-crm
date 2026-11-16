@@ -1170,9 +1170,22 @@ function VariantConfirmRow({ leadId, item, onSaved }) {
   );
 }
 
+function variantQuestionOpen(row) {
+  if (!row || !row.oemSkuNeedsReview) return false;
+  if (row.oemSkuConfirmed && String(row.variant || "").trim()) return false;
+  return true;
+}
+
 function VariantConfirmCard({ lead, canConfirm, onSaved }) {
   const pending = [];
-  if (lead?.oemSkuNeedsReview) {
+  const confirmedChassis = new Set(
+    (lead?.units || [])
+      .filter((u) => u && u.oemSkuConfirmed && String(u.variant || "").trim())
+      .map((u) => String(u.chassisNumber || "").trim().toUpperCase())
+      .filter(Boolean),
+  );
+  const headerChassis = String(lead?.chassisNumber || "").trim().toUpperCase();
+  if (variantQuestionOpen(lead) && !(headerChassis && confirmedChassis.has(headerChassis))) {
     pending.push({
       unitSno: null,
       label: "This file",
@@ -1181,7 +1194,9 @@ function VariantConfirmCard({ lead, canConfirm, onSaved }) {
     });
   }
   (lead?.units || []).forEach((u, i) => {
-    if (!u || !u.oemSkuNeedsReview) return;
+    if (!variantQuestionOpen(u)) return;
+    const chassis = String(u.chassisNumber || "").trim().toUpperCase();
+    if (chassis && confirmedChassis.has(chassis)) return;
     const sno = u.sno || i + 1;
     pending.push({
       unitSno: sno,
