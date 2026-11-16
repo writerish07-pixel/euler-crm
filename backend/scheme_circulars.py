@@ -14,6 +14,14 @@ CIRCULARS = {
         "imageUrl": "/scheme-circulars/2026-10.png",
         "pdfUrl": "/scheme-circulars/2026-10.pdf",
     },
+    "2026-11": {
+        "month": "2026-11",
+        "ref": "EM/11-2026/001",
+        "title": "November 2026 Retail Consumer Scheme",
+        "dated": "2026-11-04",
+        "imageUrl": "/scheme-circulars/2026-11.png",
+        "pdfUrl": "/scheme-circulars/2026-11.pdf",
+    },
 }
 
 
