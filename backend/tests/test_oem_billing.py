@@ -147,6 +147,47 @@ def test_sold_doc_falls_back_to_sap_product_name():
     assert row["model"] == "TURBO RANGEMAXX PV"
 
 
+def test_confirmed_variant_is_not_shown_as_a_question_again():
+    """Once the owner names the body, billing, the queue, and the next sync stay quiet."""
+    sold = [{
+        "chassis": "MD9CONF01", "mobile": "9811100888", "invoiceNumber": "INV-C",
+        "customerName": "Cleared", "soldDate": "2026-11-06",
+    }]
+    lead = {
+        "leadId": "LD-CONF", "customerName": "Cleared", "mobile": "9811100888",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "oemSkuConfirmed": True, "oemSkuNeedsReview": True,
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "chassisNumber": "MD9CONF01",
+        "units": [{
+            "sno": 1, "chassisNumber": "MD9CONF01",
+            "model": "Turbo Max", "variant": "Maxx (PV)",
+            "oemSkuConfirmed": True, "oemSkuNeedsReview": True,
+            "oemSkuReviewReason": "OEM did not name one catalog variant for this chassis.",
+        }, {
+            "sno": 2, "chassisNumber": "MD9STILL01",
+            "model": "Turbo Max", "variant": "Maxx (DV220)",
+            "oemSkuNeedsReview": True,
+        }],
+    }
+    rows = oem_sync.classify_oem_billing(sold, [lead])
+    assert rows[0]["skuNeedsReview"] is False
+    assert rows[0]["model"] == "Turbo Max"
+    assert rows[0]["variant"] == "Maxx (PV)"
+    queued = server._variant_confirm_queue([lead])
+    assert [row["chassis"] for row in queued] == ["MD9STILL01"]
+    patch = oem_sync.fill_lead_skus(lead, sold)
+    assert patch.get("oemSkuNeedsReview") is False
+    units = oem_sync.fill_pack_unit_skus(lead, sold)
+    assert units[0].get("oemSkuNeedsReview") is False
+    assert units[0].get("oemSkuConfirmed") is True
+    assert units[0]["variant"] == "Maxx (PV)"
+    assert units[1].get("oemSkuNeedsReview") is True
+    kept = server._normalize_lead_units(units)
+    assert kept[0]["oemSkuConfirmed"] is True
+    assert kept[0].get("oemSkuNeedsReview") is not True
+
+
 def test_billing_row_does_not_invent_a_variant_when_sold_has_none():
     sold = [{
         "chassis": "MD9NOM01", "mobile": "9811100555", "invoiceNumber": "INV-N",

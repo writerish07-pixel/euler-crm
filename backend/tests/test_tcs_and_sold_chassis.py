@@ -982,8 +982,23 @@ async def test_each_chassis_keeps_its_oem_body_and_a_blank_invoice_waits(client)
     by = {oem_sync._norm_chassis(u["chassisNumber"]): u for u in lead["units"]}
     assert by["MD9GANESHUNK"]["variant"] == "Maxx (PV)"
     assert by["MD9GANESHUNK"].get("oemSkuNeedsReview") in (False, None, "")
+    assert by["MD9GANESHUNK"].get("oemSkuConfirmed") is True
     assert by["MD9GANESHFB"]["variant"] == "Maxx (FB)"
     assert by["MD9GANESHDV"]["variant"] == "Maxx (DV220)"
+    assert not any(row["chassis"] == "MD9GANESHUNK" for row in server._variant_confirm_queue([lead]))
+    await oem_sync.apply_sold_vehicle_ids_to_leads(
+        server.db, on_variants_corrected=server._reprice_exact_variant_units)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    by = {oem_sync._norm_chassis(u["chassisNumber"]): u for u in lead["units"]}
+    assert by["MD9GANESHUNK"]["variant"] == "Maxx (PV)"
+    assert by["MD9GANESHUNK"].get("oemSkuConfirmed") is True
+    assert by["MD9GANESHUNK"].get("oemSkuNeedsReview") in (False, None, "")
+    billed = oem_sync.classify_oem_billing([
+        {"chassis": "MD9GANESHUNK", "mobile": mobile, "customerName": "ganesh ram choudhary",
+         "soldDate": "2026-11-02", "coulsonStatus": "SOLD"},
+    ], [lead])
+    assert billed[0]["skuNeedsReview"] is False
+    assert billed[0]["variant"] == "Maxx (PV)"
 
 
 def test_stale_sibling_billed_label_follows_that_chassis():

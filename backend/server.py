@@ -2391,8 +2391,10 @@ BOARD_LEAD_PROJ = {
     "units.chassisNumber": 1, "units.numberPlate": 1,
     "units.oemSkuNeedsReview": 1, "units.oemSkuReviewReason": 1,
     "units.oemSkuRawModel": 1, "units.oemSkuRawVariant": 1,
+    "units.oemSkuConfirmed": 1,
     "oemSkuNeedsReview": 1, "oemSkuReviewReason": 1,
     "oemSkuRawModel": 1, "oemSkuRawVariant": 1,
+    "oemSkuConfirmed": 1,
     "dealCancelled": 1, "cancelHistory": 1, "leadSource": 1, "excessReceived": 1,
     "lastCancelDate": 1, "lastCancelReason": 1, "refundedAmount": 1,
     "schemeUse": 1, "schemeApplied": 1, "totalSchemeBenefit": 1, "schemeBenefit": 1,
@@ -3357,35 +3359,56 @@ async def dashboard():
 
 
 def _variant_confirm_queue(leads):
-    """Files where OEM did not name one body, so nothing was guessed."""
+    """Files where OEM did not name one body, so nothing was guessed.
+
+    A chassis the owner already confirmed is left off every list. The header
+    and its unit are one row when they are the same chassis.
+    """
     rows = []
+    seen = set()
+
+    def _add(lead, unit_sno, chassis, reason, raw_model, raw_variant):
+        lead_id = lead.get("leadId") or ""
+        ch = oem_sync._norm_chassis(chassis)
+        key = (lead_id, ch or f"unit:{unit_sno}")
+        if key in seen or len(rows) >= 30:
+            return
+        seen.add(key)
+        rows.append({
+            "leadId": lead_id,
+            "customerName": lead.get("customerName") or "",
+            "unitSno": unit_sno,
+            "chassis": chassis or "",
+            "reason": reason or "Confirm the OEM variant",
+            "rawModel": raw_model or "",
+            "rawVariant": raw_variant or "",
+        })
+
     for lead in leads or []:
         if not isinstance(lead, dict):
             continue
-        if lead.get("oemSkuNeedsReview"):
-            rows.append({
-                "leadId": lead.get("leadId") or "",
-                "customerName": lead.get("customerName") or "",
-                "unitSno": 1,
-                "chassis": lead.get("chassisNumber") or "",
-                "reason": lead.get("oemSkuReviewReason") or "Confirm the OEM variant",
-                "rawModel": lead.get("oemSkuRawModel") or "",
-                "rawVariant": lead.get("oemSkuRawVariant") or "",
-            })
         for i, unit in enumerate(lead.get("units") or []):
             if not isinstance(unit, dict) or not unit.get("oemSkuNeedsReview"):
                 continue
-            rows.append({
-                "leadId": lead.get("leadId") or "",
-                "customerName": lead.get("customerName") or "",
-                "unitSno": unit.get("sno") or i + 1,
-                "chassis": unit.get("chassisNumber") or "",
-                "reason": unit.get("oemSkuReviewReason") or "Confirm the OEM variant",
-                "rawModel": unit.get("oemSkuRawModel") or "",
-                "rawVariant": unit.get("oemSkuRawVariant") or "",
-            })
-            if len(rows) >= 30:
-                return rows
+            if oem_sync.sku_answer_stands(unit):
+                continue
+            _add(
+                lead,
+                unit.get("sno") or i + 1,
+                unit.get("chassisNumber") or "",
+                unit.get("oemSkuReviewReason"),
+                unit.get("oemSkuRawModel"),
+                unit.get("oemSkuRawVariant"),
+            )
+        if lead.get("oemSkuNeedsReview") and not oem_sync.sku_answer_stands(lead):
+            _add(
+                lead,
+                1,
+                lead.get("chassisNumber") or "",
+                lead.get("oemSkuReviewReason"),
+                lead.get("oemSkuRawModel"),
+                lead.get("oemSkuRawVariant"),
+            )
     return rows
 
 
@@ -7707,6 +7730,21 @@ def _resolve_unit_index(lead, unit_sno):
     return sno - 1, units
 
 
+_OEM_SKU_KEEP = (
+    "oemSkuKey", "oemSkuConfirmed", "oemSkuNeedsReview", "oemSkuReviewReason",
+    "oemSkuRawModel", "oemSkuRawVariant", "oemSkuRawLoadBody", "oemSkuRawUpdatedLoadBody",
+)
+
+
+def _copy_oem_sku_answer(src, dest):
+    """Keep a confirmed variant and an open question across unit rebuilds."""
+    for key in _OEM_SKU_KEEP:
+        val = (src or {}).get(key)
+        if val not in (None, "", False):
+            dest[key] = val
+    return dest
+
+
 def _copy_saved_price_fields(src, dest):
     """Keep the list of charges someone typed, including an explicit zero."""
     saved = [str(x) for x in ((src or {}).get("savedPriceFields") or []) if str(x or "").strip()]
@@ -7763,6 +7801,7 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
                   "originalVariant", "originalModel", "bodyType"):
             if u.get(k):
                 rec[k] = u.get(k)
+        _copy_oem_sku_answer(u, rec)
         _copy_unit_commercials(u, rec)
         saved = u.get("savedPriceFields")
         if isinstance(saved, list) and saved:
@@ -7800,6 +7839,7 @@ def _unit1_from_lead(lead):
               "originalVariant", "originalModel", "bodyType"):
         if (lead or {}).get(k):
             rec[k] = (lead or {}).get(k)
+    _copy_oem_sku_answer(lead, rec)
     _copy_unit_commercials(lead, rec)
     return rec
 
@@ -11659,24 +11699,32 @@ async def confirm_oem_variant(lead_id: str, body: ConfirmOemVariantIn, act=Depen
     old_model = lead.get("interestedModel") or ""
     old_variant = lead.get("variant") or ""
     key = "header"
+    confirmed_chassis = ""
     if idx is not None and idx < len(units):
         old_model = units[idx].get("model") or old_model
         old_variant = units[idx].get("variant") or old_variant
-        units[idx]["model"] = model
-        units[idx]["variant"] = variant
-        units[idx]["bodyType"] = sku.body_type
-        units[idx]["oemSkuKey"] = sku.key
-        units[idx]["oemSkuNeedsReview"] = False
-        units[idx]["oemSkuReviewReason"] = ""
-        units[idx]["oemSkuConfirmed"] = True
-        key = oem_sync._norm_chassis(units[idx].get("chassisNumber")) or f"sno:{units[idx].get('sno') or idx + 1}"
+        confirmed_chassis = oem_sync._norm_chassis(units[idx].get("chassisNumber"))
+        for u in units:
+            same_chassis = bool(confirmed_chassis) and oem_sync._norm_chassis(u.get("chassisNumber")) == confirmed_chassis
+            if u is not units[idx] and not same_chassis:
+                continue
+            u["model"] = model
+            u["variant"] = variant
+            u["bodyType"] = sku.body_type
+            u["oemSkuKey"] = sku.key
+            u["oemSkuNeedsReview"] = False
+            u["oemSkuReviewReason"] = ""
+            u["oemSkuConfirmed"] = True
+        key = confirmed_chassis or f"sno:{units[idx].get('sno') or idx + 1}"
+    header_chassis = oem_sync._norm_chassis(lead.get("chassisNumber"))
+    same_header = bool(confirmed_chassis) and confirmed_chassis == header_chassis
     patch = {"lastUpdated": now_iso()}
-    if idx == 0 or idx is None or not oem_sync.is_same_order_pack(lead):
+    if idx == 0 or idx is None or not oem_sync.is_same_order_pack(lead) or same_header:
         if not lead.get("originalVariant") and (
                 _fold_compare(old_variant, variant) or _fold_compare(old_model, model)):
             patch["originalModel"] = lead.get("interestedModel") or ""
             patch["originalVariant"] = lead.get("variant") or ""
-        if not oem_sync.is_same_order_pack(lead) or idx in (0, None):
+        if not oem_sync.is_same_order_pack(lead) or idx in (0, None) or same_header:
             patch["interestedModel"] = model
             patch["variant"] = variant
             patch["bodyType"] = sku.body_type
@@ -12146,6 +12194,9 @@ async def _append_oem_unit(lead, row):
             target["variant"] = variant
             if picked.get("bodyType"):
                 target["bodyType"] = picked["bodyType"]
+            target["oemSkuNeedsReview"] = False
+            target["oemSkuReviewReason"] = ""
+        elif oem_sync.sku_answer_stands(target):
             target["oemSkuNeedsReview"] = False
             target["oemSkuReviewReason"] = ""
         else:
