@@ -6963,6 +6963,12 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
             payload["bookingAmount"] = max(0.0, float(payload["bookingAmount"] or 0))
         except (TypeError, ValueError):
             raise HTTPException(422, "bookingAmount must be a number ≥ 0")
+    if "customerType" in payload or "gstin" in payload:
+        kind = lead_docs.normalize_customer_type(
+            payload.get("customerType") if "customerType" in payload else lead.get("customerType"))
+        payload["customerType"] = kind
+        gstin = str(payload.get("gstin") if "gstin" in payload else lead.get("gstin") or "").strip().upper()
+        payload["gstin"] = gstin if kind == "B2B" else ""
     if "budget" in payload:
         try:
             payload["budget"] = ce.round2(max(0.0, float(payload["budget"] or 0)))
@@ -7142,6 +7148,8 @@ async def _set_pack_unit_cx_demand(lead_id, unit_sno, value, act):
 # Showroom Admin enters the real RTO and insurance. The difference reduces
 # Additional (Dealer). Customer payable stays on Cx Demand.
 SHOWROOM_ACTUAL_PRICE_FIELDS = {"rto", "insuranceAmount"}
+# Showroom Admin can switch a file from Individual to B2B and store the GSTIN.
+SHOWROOM_IDENTITY_FIELDS = {"customerType", "gstin"}
 
 
 class LeadVehicleIn(BaseModel):
@@ -7191,7 +7199,8 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
         raise HTTPException(422, f"Field '{field}' cannot be edited inline.")
     role = ((act or {}).get("role") or "").strip().lower()
     showroom_actual = authmod.is_showroom_admin(act) and field in SHOWROOM_ACTUAL_PRICE_FIELDS
-    if role != "owner" and not showroom_actual:
+    showroom_identity = authmod.is_showroom_admin(act) and field in SHOWROOM_IDENTITY_FIELDS
+    if role != "owner" and not showroom_actual and not showroom_identity:
         raise HTTPException(403, "Owner access required")
     lead = await get_lead_or_404(lead_id)
     if showroom_actual:
@@ -11687,6 +11696,92 @@ async def _refresh_pack_unit_skus(lead, sold_rows=None):
     return clean(await db.leads.find_one({"leadId": lead["leadId"]}))
 
 
+async def _list_price_fields(model, variant, as_of=None):
+    """Price Master charges for this model. Empty when the row has no ex-showroom."""
+    row = await _price_master_row(model, variant) if model else None
+    if not row or ce.num(row.get("exShowroom")) <= 0:
+        return {}
+    return _price_structure_from_master(row, as_of)
+
+
+def _price_sku(lead, sold_row=None, unit=None):
+    picked = oem_sync.sold_body_fields(sold_row) if sold_row else None
+    if not picked and sold_row:
+        picked = oem_sync.resolved_unit_sku(lead, sold_row) or {}
+    picked = picked or {}
+    unit = unit or {}
+    model = unit.get("model") or picked.get("model") or (sold_row or {}).get("model") or (lead or {}).get("interestedModel") or ""
+    variant = unit.get("variant") or picked.get("variant") or (sold_row or {}).get("variant") or (lead or {}).get("variant") or ""
+    return model, variant
+
+
+async def _fill_missing_model_price(lead, *, row=None, as_of=None):
+    """Write the Price Master model price onto a file that was added with none.
+
+    A saved ex-showroom is left alone. OEM Billing used to stamp the chassis
+    and leave Gross Vehicle Cost at zero, so the whole Cx Demand looked like
+    extra income.
+    """
+    lead = await _fresh_lead(lead)
+    if not lead or not lead.get("leadId"):
+        return lead
+    on = str(as_of or (row or {}).get("soldDate") or lead.get("soldDate")
+             or lead.get("bookingDate") or today())[:10]
+    units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
+    changed_units = False
+    for unit in units:
+        if ce.num(unit.get("exShowroom")) > 0:
+            continue
+        model, variant = _price_sku(lead, row, unit)
+        priced = await _list_price_fields(model, variant, on)
+        if not priced:
+            continue
+        unit.update(priced)
+        changed_units = True
+    patch = {}
+    if changed_units:
+        patch["units"] = units
+    pack = oem_sync.is_same_order_pack({**lead, **({"units": units} if units else {})})
+    if (not pack and ce.num(lead.get("exShowroom")) <= 0 and not _is_priced(lead)):
+        model, variant = _price_sku(lead, row, units[0] if units else None)
+        priced = await _list_price_fields(model, variant, on)
+        if priced:
+            patch.update(priced)
+            patch["priceStructureSaved"] = False
+            if units and ce.num(units[0].get("exShowroom")) <= 0:
+                units[0].update(priced)
+                patch["units"] = units
+    if not patch:
+        return lead
+    patch["lastUpdated"] = now_iso()
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    await recompute_lead(lead["leadId"])
+    return await db.leads.find_one({"leadId": lead["leadId"]})
+
+
+async def _fill_unpriced_billed_leads():
+    """OEM Billing sync: a billed chassis with no model price takes Price Master."""
+    sold_chassis = set()
+    async for row in db.oem_sold.find({}, {"chassis": 1, "model": 1, "variant": 1, "soldDate": 1}):
+        ch = oem_sync._norm_chassis((row or {}).get("chassis"))
+        if ch:
+            sold_chassis.add(ch)
+    if not sold_chassis:
+        return 0
+    filled = 0
+    async for lead in db.leads.find({"accountStatus": "Active"}):
+        if _is_delivered(lead):
+            continue
+        held = set(oem_sync.lead_chassis_list(lead))
+        if not held & sold_chassis:
+            continue
+        before = ce.num(lead.get("exShowroom"))
+        updated = await _fill_missing_model_price(lead)
+        if ce.num((updated or {}).get("exShowroom")) > before:
+            filled += 1
+    return filled
+
+
 async def _connect_oem_sold(lead, row):
     """Put this Sold chassis on the live CRM file. Never mint a second id.
 
@@ -11697,8 +11792,10 @@ async def _connect_oem_sold(lead, row):
     chassis = oem_sync._norm_chassis((row or {}).get("chassis"))
     if not chassis or not lead:
         return lead
+    sold_date = str((row or {}).get("soldDate") or "")[:10]
     if chassis in set(oem_sync.lead_chassis_list(lead)):
-        return await _refresh_pack_unit_skus(lead, [row])
+        refreshed = await _refresh_pack_unit_skus(lead, [row])
+        return await _fill_missing_model_price(refreshed, row=row, as_of=sold_date)
     if not _can_append_sold_unit(lead):
         return None
     have = set(oem_sync.lead_chassis_list(lead))
@@ -11715,7 +11812,6 @@ async def _connect_oem_sold(lead, row):
         patch["invoiceNumber"] = invoice
     if plate:
         patch["numberPlate"] = plate
-    sold_date = str((row or {}).get("soldDate") or "")[:10]
     stamped = oem_sync.stamp_unit_vehicle_ids(lead, chassis, invoice, plate, sold_date)
     if stamped and stamped != list((lead or {}).get("units") or []):
         patch["units"] = stamped
@@ -11727,8 +11823,16 @@ async def _connect_oem_sold(lead, row):
     if delivery_ids:
         await db.deliveries.update_one({"leadId": lead["leadId"]}, {"$set": delivery_ids})
     updated = await db.leads.find_one({"leadId": lead["leadId"]})
-    await sheet_sync("leads", clean(updated))
-    return updated
+    picked_model, picked_variant = _price_sku(updated, row)
+    if picked_model and not str(updated.get("interestedModel") or "").strip():
+        await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
+            "interestedModel": picked_model,
+            "variant": picked_variant,
+        }})
+        updated = await db.leads.find_one({"leadId": lead["leadId"]})
+    updated = await _fill_missing_model_price(updated, row=row, as_of=sold_date)
+    await sheet_sync("leads", clean(updated or lead))
+    return updated or lead
 
 
 async def _append_oem_unit(lead, row):
@@ -11799,7 +11903,10 @@ async def _append_oem_unit(lead, row):
         patch["numberPlate"] = units[0].get("numberPlate") or plate
     await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
     await recompute_lead(lead["leadId"])
-    return clean(await db.leads.find_one({"leadId": lead["leadId"]}))
+    live = await _fill_missing_model_price(
+        await db.leads.find_one({"leadId": lead["leadId"]}),
+        row=row, as_of=sold_date)
+    return clean(live)
 
 
 async def _insert_oem_billing_lead(row, sold_rows=None):
@@ -12363,6 +12470,10 @@ async def sync_oem_billing(month: Optional[str] = None, year: Optional[str] = No
         logging.exception("OEM billing could not backfill chassis/invoice")
         stamped = {}
     created = await _create_leads_from_unmatched_oem_sold()
+    try:
+        await _fill_unpriced_billed_leads()
+    except Exception:
+        logging.exception("OEM billing could not fill missing model prices")
     leads = await oem_sync.load_oem_billing_leads(db)
     relinked = []
     for pair in oem_sync.pair_oem_billing_stubs(leads):
@@ -13812,6 +13923,7 @@ async def coulson_sync(act=Depends(actor)):
     result["leadsRepriced"] = repriced
     try:
         created = await _create_leads_from_unmatched_oem_sold()
+        await _fill_unpriced_billed_leads()
         result["oemBillingCreated"] = len(created)
         result["oemBillingLeadIds"] = created
     except Exception:
