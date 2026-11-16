@@ -986,6 +986,104 @@ async def test_each_chassis_keeps_its_oem_body_and_a_blank_invoice_waits(client)
     assert by["MD9GANESHDV"]["variant"] == "Maxx (DV220)"
 
 
+def test_stale_sibling_billed_label_follows_that_chassis():
+    """A DV pack label must not stay on a chassis OEM billed as FB or PV.
+
+    Live files kept Maxx (DV220) in oemBilledVariant after the working variant
+    had already been corrected to the chassis's own body. The next sync
+    replaces the label. It does not copy that body onto the DV sibling.
+    """
+    lead = {
+        "leadId": "LD-STALE-LABEL",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "chassisNumber": "MD9STALEDV", "sameOrderMultiUnit": True,
+        "oemBilledModel": "Turbo Max", "oemBilledVariant": "Maxx (DV220)",
+        "oemBilledBodyType": "DV220",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9STALEDV", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "oemBilledVariant": "Maxx (DV220)",
+             "oemBilledBodyType": "DV220"},
+            {"sno": 2, "chassisNumber": "MD9STALEFB", "model": "Turbo Max",
+             "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+             "oemBilledVariant": "Maxx (DV220)", "oemBilledBodyType": "DV220"},
+            {"sno": 3, "chassisNumber": "MD9STALEPV", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "oemBilledVariant": "Maxx (DV220)",
+             "oemBilledBodyType": "DV220"},
+        ],
+    }
+    sold = [
+        {"chassis": "MD9STALEDV", "model": "Turbo Max", "variant": "Maxx (DV220)",
+         "oemSkuKey": "turbo.maxx.dv220"},
+        {"chassis": "MD9STALEFB", "model": "Turbo Max", "variant": "Maxx (FB)",
+         "oemSkuKey": "turbo.maxx.fb"},
+        {"chassis": "MD9STALEPV", "model": "Turbo Max", "variant": "Maxx (PV)",
+         "oemSkuKey": "turbo.maxx.pv"},
+    ]
+    units = oem_sync.fill_pack_unit_skus(lead, sold)
+    by = {u["chassisNumber"]: u for u in units}
+    assert by["MD9STALEDV"]["variant"] == "Maxx (DV220)"
+    assert by["MD9STALEDV"]["oemBilledVariant"] == "Maxx (DV220)"
+    assert by["MD9STALEDV"]["oemBilledBodyType"] == "DV220"
+    assert by["MD9STALEFB"]["variant"] == "Maxx (FB)"
+    assert by["MD9STALEFB"]["oemBilledVariant"] == "Maxx (FB)"
+    assert by["MD9STALEFB"]["oemBilledBodyType"] == "FB"
+    assert by["MD9STALEPV"]["variant"] == "Maxx (PV)"
+    assert by["MD9STALEPV"]["oemBilledVariant"] == "Maxx (PV)"
+    assert by["MD9STALEPV"]["oemBilledBodyType"] == "PV"
+    again = oem_sync.fill_pack_unit_skus({**lead, "units": units}, sold)
+    assert again == units
+    header = oem_sync.fill_lead_skus(lead, sold)
+    assert header.get("oemBilledVariant", "Maxx (DV220)") == "Maxx (DV220)"
+    assert header.get("variant", "Maxx (DV220)") == "Maxx (DV220)"
+
+
+@pytest.mark.asyncio
+async def test_sync_replaces_a_stale_header_label_and_leaves_a_blank_one(client):
+    """OEM sync loads a projected header. The billed-body label must be in that
+    projection, or a stored DV label on an already-correct FB file is invisible
+    and never replaced. A header with no label stays blank.
+    """
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-HDR-STALE", "LD-HDR-BLANK"]}})
+    await server.db.oem_sold.delete_many({"chassis": {"$in": ["MD9HDRSTALE", "MD9HDRBLANK"]}})
+    await server.db.leads.insert_many([
+        {
+            "leadId": "LD-HDR-STALE", "customerName": "Header Stale",
+            "mobile": "9811100881", "interestedModel": "Turbo Max",
+            "variant": "Maxx (FB)", "chassisNumber": "MD9HDRSTALE",
+            "accountStatus": "Active", "currentStatus": "Booked",
+            "oemBilledModel": "Turbo Max", "oemBilledVariant": "Maxx (DV220)",
+            "oemBilledBodyType": "DV220",
+        },
+        {
+            "leadId": "LD-HDR-BLANK", "customerName": "Header Blank",
+            "mobile": "9811100882", "interestedModel": "Turbo Max",
+            "variant": "Maxx (FB)", "chassisNumber": "MD9HDRBLANK",
+            "accountStatus": "Active", "currentStatus": "Booked",
+        },
+    ])
+    await server.db.oem_sold.insert_many([
+        {"chassis": "MD9HDRSTALE", "mobile": "9811100881", "model": "Turbo Max",
+         "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb", "coulsonStatus": "SOLD"},
+        {"chassis": "MD9HDRBLANK", "mobile": "9811100882", "model": "Turbo Max",
+         "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb", "coulsonStatus": "SOLD"},
+    ])
+    first = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    stale = await server.db.leads.find_one({"leadId": "LD-HDR-STALE"})
+    blank = await server.db.leads.find_one({"leadId": "LD-HDR-BLANK"})
+    assert stale["variant"] == "Maxx (FB)"
+    assert stale["oemBilledVariant"] == "Maxx (FB)"
+    assert stale["oemBilledBodyType"] == "FB"
+    assert blank["variant"] == "Maxx (FB)"
+    assert not str(blank.get("oemBilledVariant") or "").strip()
+    assert not str(blank.get("oemBilledBodyType") or "").strip()
+    assert any(row.get("leadId") == "LD-HDR-STALE" for row in first["filled"])
+    second = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert not any(row.get("leadId") == "LD-HDR-STALE" for row in second["filled"])
+    again = await server.db.leads.find_one({"leadId": "LD-HDR-STALE"})
+    assert again["oemBilledVariant"] == "Maxx (FB)"
+    assert again["oemBilledBodyType"] == "FB"
+
+
 @pytest.mark.asyncio
 async def test_delivery_adopts_billed_dv_body(client):
     mobile = "9811100223"
