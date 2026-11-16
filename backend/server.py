@@ -7019,8 +7019,11 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
             "Executives cannot edit lead details. Ask the Team Leader or Owner.",
         )
     _require_action(lead, "canEditLead", "lead edits", act)
-    await _require_related_docs(lead, act)
     payload = body.model_dump(exclude_unset=True)
+    # Customer type and GSTIN are identity. They are saved before the B2B
+    # certificate exists, so the KYC gate must not block that write.
+    if not (payload and set(payload) <= {"customerType", "gstin"}):
+        await _require_related_docs(lead, act)
     another = bool(payload.pop("anotherVehicle", False))
     payload = {k: v for k, v in payload.items() if k not in LEAD_SYSTEM_FIELDS}
     if "mobile" in payload:
@@ -7335,6 +7338,10 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
         }
         if field == "insuranceAmount":
             price_set["insurance"] = patch_val
+        saved_prices = [str(x) for x in (lead.get("savedPriceFields") or []) if str(x or "").strip()]
+        if field not in saved_prices:
+            saved_prices.append(field)
+        price_set["savedPriceFields"] = saved_prices
         if not oem_sync.is_same_order_pack(lead):
             cx_now = ce.num(lead.get("cxDemand"))
             pay_now = ce.num(lead.get("customerPayable"))
@@ -7347,6 +7354,10 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
             u0[field] = patch_val
             if field == "insuranceAmount":
                 u0["insurance"] = patch_val
+            unit_saved = [str(x) for x in (u0.get("savedPriceFields") or []) if str(x or "").strip()]
+            if field not in unit_saved:
+                unit_saved.append(field)
+            u0["savedPriceFields"] = unit_saved
             if ce.num(u0.get("cxDemand")) <= 0 and ce.num(u0.get("customerPayable")) > 0:
                 u0["cxDemand"] = ce.round2(ce.num(u0.get("customerPayable")))
                 u0["useDealPrice"] = True
@@ -7695,10 +7706,19 @@ def _resolve_unit_index(lead, unit_sno):
     return sno - 1, units
 
 
+def _copy_saved_price_fields(src, dest):
+    """Keep the list of charges someone typed, including an explicit zero."""
+    saved = [str(x) for x in ((src or {}).get("savedPriceFields") or []) if str(x or "").strip()]
+    if saved and not (dest or {}).get("savedPriceFields"):
+        dest["savedPriceFields"] = saved
+    return dest
+
+
 def _copy_unit_commercials(src, dest):
     for k in UNIT_COMMERCIAL_KEYS:
         if k in (src or {}) and src.get(k) is not None:
             dest[k] = src[k]
+    _copy_saved_price_fields(src, dest)
     return dest
 
 
@@ -7743,6 +7763,9 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
             if u.get(k):
                 rec[k] = u.get(k)
         _copy_unit_commercials(u, rec)
+        saved = u.get("savedPriceFields")
+        if isinstance(saved, list) and saved:
+            rec["savedPriceFields"] = [str(x) for x in saved if str(x or "").strip()]
         for k in UNIT_RUNTIME_KEYS:
             if k in u and u.get(k) not in (None, ""):
                 rec[k] = u[k]
@@ -8718,7 +8741,11 @@ async def set_lead_gstin(lead_id: str, body: GstinIn, act=Depends(actor),
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
     value = str(body.gstin or "").strip().upper()
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {"gstin": value, "lastUpdated": now_iso()}})
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "gstin": value,
+        "lastUpdated": now_iso(),
+        "lastUpdatedBy": (act or {}).get("email") or "",
+    }})
     updated = await db.leads.find_one({"leadId": lead_id})
     await sheet_sync("leads", clean(dict(updated)))
     await write_audit(act, "update", "gstin", leadId=lead_id,
@@ -11907,10 +11934,52 @@ def _price_sku(lead, sold_row=None, unit=None):
     return model, variant
 
 
+def _saved_price_keys(doc):
+    return {str(x) for x in ((doc or {}).get("savedPriceFields") or []) if str(x or "").strip()}
+
+
+def _merge_missing_list_price(target, priced):
+    """Fill empty list charges. A typed amount, including a saved zero, stays."""
+    target = target or {}
+    priced = priced or {}
+    saved = _saved_price_keys(target)
+    merged = {}
+    for key, new_val in priced.items():
+        if key in saved:
+            continue
+        current = target.get(key)
+        if key == "tcsApplicable":
+            if current in (None, ""):
+                merged[key] = new_val
+            continue
+        if current in (None, "") or ce.num(current) == 0:
+            merged[key] = new_val
+    if "insuranceAmount" in merged:
+        merged["insurance"] = merged["insuranceAmount"]
+    return merged
+
+
+def _lead_price_donor(lead):
+    """Commercials already stored on the file, for a chassis-only unit copy.
+
+    On a same-order pack the header payable, Cx Demand, budget and gross
+    vehicle cost are the whole order. Those stay off unit 1.
+    """
+    skip = set(PACK_UNIT_ROLLUP_KEYS) if oem_sync.is_same_order_pack(lead or {}) else set()
+    donor = {}
+    for key in UNIT_MONEY_KEYS:
+        if key in skip:
+            continue
+        if (lead or {}).get(key) not in (None, ""):
+            donor[key] = lead.get(key)
+    return donor
+
+
 async def _fill_missing_model_price(lead, *, row=None, as_of=None):
     """Write the Price Master model price onto a file that was added with none.
 
-    A saved ex-showroom is left alone. OEM Billing used to stamp the chassis
+    A saved ex-showroom is left alone. A charge already typed on the file,
+    including an explicit zero, stays. OEM Billing used to stamp the chassis
     and leave Gross Vehicle Cost at zero, so the whole Cx Demand looked like
     extra income.
     """
@@ -11921,14 +11990,24 @@ async def _fill_missing_model_price(lead, *, row=None, as_of=None):
              or lead.get("bookingDate") or today())[:10]
     units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
     changed_units = False
-    for unit in units:
+    lead_has_price = ce.num(lead.get("exShowroom")) > 0
+    for index, unit in enumerate(units):
         if ce.num(unit.get("exShowroom")) > 0:
+            continue
+        if index == 0 and lead_has_price:
+            copied = _merge_missing_list_price(unit, _lead_price_donor(lead))
+            if lead.get("savedPriceFields") and not unit.get("savedPriceFields"):
+                copied["savedPriceFields"] = list(lead.get("savedPriceFields") or [])
+            if copied:
+                unit.update(copied)
+                changed_units = True
             continue
         model, variant = _price_sku(lead, row, unit)
         priced = await _list_price_fields(model, variant, on)
-        if not priced:
+        copied = _merge_missing_list_price(unit, priced)
+        if not copied:
             continue
-        unit.update(priced)
+        unit.update(copied)
         changed_units = True
     patch = {}
     if changed_units:
@@ -11937,18 +12016,21 @@ async def _fill_missing_model_price(lead, *, row=None, as_of=None):
     if (not pack and ce.num(lead.get("exShowroom")) <= 0 and not _is_priced(lead)):
         model, variant = _price_sku(lead, row, units[0] if units else None)
         priced = await _list_price_fields(model, variant, on)
-        if priced:
-            patch.update(priced)
+        copied = _merge_missing_list_price(lead, priced)
+        if copied:
+            patch.update(copied)
             patch["priceStructureSaved"] = False
             if units and ce.num(units[0].get("exShowroom")) <= 0:
-                units[0].update(priced)
+                units[0].update(_merge_missing_list_price(units[0], priced))
                 patch["units"] = units
     if not patch:
         return lead
     patch["lastUpdated"] = now_iso()
     await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
     await recompute_lead(lead["leadId"])
-    return await db.leads.find_one({"leadId": lead["leadId"]})
+    fresh = await db.leads.find_one({"leadId": lead["leadId"]})
+    await sheet_sync("leads", clean(dict(fresh or lead)))
+    return fresh
 
 
 async def _fill_unpriced_billed_leads():

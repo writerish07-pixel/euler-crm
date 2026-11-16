@@ -734,7 +734,7 @@ function CustomerTypeControl({ lead, onSaved }) {
   const saveGstin = async () => {
     setBusy(true);
     try {
-      await put(`/leads/${lead.leadId}/owner-field`, { field: "gstin", value: gstin });
+      await put(`/leads/${lead.leadId}/gstin`, { gstin });
       toast.success("GSTIN saved");
       onSaved && onSaved();
     } catch (e) {
