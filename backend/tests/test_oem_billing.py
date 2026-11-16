@@ -1894,3 +1894,123 @@ async def test_split_does_not_send_scans_to_a_different_mobile(client):
     assert doc["leadId"] == lid
     leaked = await server.db[server.lead_docs.COLLECTION].count_documents({"leadId": other})
     assert leaked == 0
+
+
+async def _seed_maxx_pv_price():
+    await server.db.price_master.update_many(
+        {"model": {"$regex": "^Turbo Max$", "$options": "i"},
+         "variant": {"$regex": r"^Maxx \(PV\)$", "$options": "i"}},
+        {"$set": {
+            "exShowroom": 770000, "rto": 12000, "insurance": 18000,
+            "status": "active", "oemSyncedAt": "2026-10-01T00:00:00+00:00",
+            "tcsApplicable": "No",
+        }},
+    )
+    found = await server.db.price_master.count_documents({
+        "model": "Turbo Max", "variant": "Maxx (PV)", "exShowroom": 770000,
+    })
+    if not found:
+        await server.db.price_master.insert_one({
+            "priceId": "PM-LUCKY-MAXX", "model": "Turbo Max", "variant": "Maxx (PV)",
+            "exShowroom": 770000, "rto": 12000, "insurance": 18000,
+            "status": "active", "oemSyncedAt": "2026-10-01T00:00:00+00:00",
+            "tcsApplicable": "No",
+        })
+
+
+@pytest.mark.asyncio
+async def test_oem_billing_sync_writes_model_price_onto_an_unpriced_file(client):
+    lid = "LD-LUCKY-PRICE"
+    mobile = "9783519355"
+    chassis = "MD9LUCKY01"
+    await server.db.leads.delete_many({"$or": [{"leadId": lid}, {"mobile": mobile}]})
+    await server.db.oem_sold.delete_many({"$or": [{"chassis": chassis}, {"mobile": mobile}]})
+    await _seed_maxx_pv_price()
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "M/S Lucky Choudhary", "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-10-01",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "cxDemand": 805000, "budget": 805000, "useDealPrice": True,
+        "customerPayable": 805000, "exShowroom": 0, "grossVehicleCost": 0,
+        "rto": 0, "insuranceAmount": 0, "customerType": "Individual",
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "INV-LUCKY",
+        "customerName": "M/S Lucky Choudhary",
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+        "soldDate": "2026-10-16", "coulsonStatus": "SOLD",
+    })
+    r = await client.post("/api/oem-billing/sync?month=2026-10")
+    assert r.status_code == 200, r.text
+    live = await server.db.leads.find_one({"leadId": lid})
+    assert chassis in set(oem_sync.lead_chassis_list(live))
+    assert float(live.get("exShowroom") or 0) == 770000
+    assert float(live.get("rto") or 0) == 12000
+    assert float(live.get("insuranceAmount") or 0) == 18000
+    assert float(live.get("grossVehicleCost") or 0) > 0
+    assert float(live.get("cxDemand") or 0) == 805000
+    assert float(live.get("customerPayable") or 0) == 805000
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"exShowroom": 111}})
+    again = await client.post("/api/oem-billing/sync?month=2026-10")
+    assert again.status_code == 200, again.text
+    kept = await server.db.leads.find_one({"leadId": lid})
+    assert float(kept.get("exShowroom") or 0) == 111
+
+
+@pytest.mark.asyncio
+async def test_oem_create_writes_model_price(client):
+    chassis = "MD9LUCKYNEW"
+    mobile = "9783519366"
+    await server.db.leads.delete_many({"mobile": mobile})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await _seed_maxx_pv_price()
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "INV-NEW",
+        "customerName": "New Billed", "model": "Turbo Max", "variant": "Maxx (PV)",
+        "soldDate": "2026-10-16", "coulsonStatus": "SOLD",
+    })
+    r = await client.post("/api/oem-billing/create", json={"chassis": chassis})
+    assert r.status_code == 200, r.text
+    assert r.json().get("created") is True
+    live = await server.db.leads.find_one({"leadId": r.json()["leadId"]})
+    assert float(live.get("exShowroom") or 0) == 770000
+    assert float(live.get("rto") or 0) == 12000
+    assert float(live.get("insuranceAmount") or 0) == 18000
+    assert float(live.get("grossVehicleCost") or 0) > 0
+
+
+@pytest.mark.asyncio
+async def test_showroom_admin_can_switch_individual_to_b2b(client):
+    import auth as authmod
+    lid = "LD-B2B-SWITCH"
+    email = "admin.b2b@euler.com"
+    pw = "desk#441"
+    await server.db.users.delete_many({"email": email})
+    await server.db.users.insert_one({
+        "userId": email, "email": email, "name": "Showroom Admin", "role": "tl",
+        "passwordHash": authmod.hash_password(pw),
+    })
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "M/S Lucky Choudhary", "mobile": "9783519377",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-10-01",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "customerType": "Individual",
+    })
+    login = await client.post("/api/auth/login", json={"email": email, "password": pw})
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    switched = await client.put(
+        f"/api/leads/{lid}/owner-field",
+        json={"field": "customerType", "value": "B2B"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["customerType"] == "B2B"
+    gst = await client.put(
+        f"/api/leads/{lid}/owner-field",
+        json={"field": "gstin", "value": "08aaaaa0000a1z5"})
+    assert gst.status_code == 200, gst.text
+    assert gst.json()["gstin"] == "08AAAAA0000A1Z5"
+    back = await client.put(f"/api/leads/{lid}", json={"customerType": "Individual"})
+    assert back.status_code == 200, back.text
+    assert back.json()["customerType"] == "Individual"
+    assert not (back.json().get("gstin") or "")

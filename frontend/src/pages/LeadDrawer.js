@@ -287,7 +287,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
 }
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isTeamLead, isSalesGm } = useAuth();
+  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isTeamLead, isSalesGm, isShowroomAdmin } = useAuth();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
@@ -390,6 +390,9 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
       <div className="flex flex-wrap items-center gap-2 mb-4 min-w-0">
         <Badge>{lead.currentStatus}</Badge>
         <Badge>{lead.accountStatus}</Badge>
+        {(isOwner || isShowroomAdmin) && !leadLocked && (
+          <CustomerTypeControl lead={lead} onSaved={refresh} />
+        )}
         {isExecutive && lead.assignmentPending && (
           <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20" data-testid="assignment-pending-badge">Awaiting approval</Badge>
         )}
@@ -708,6 +711,64 @@ function companyKeptRetained(oemShare, customerBenefit) {
 }
 
 /* -------------------------------------------------- Overview */
+function CustomerTypeControl({ lead, onSaved }) {
+  const [value, setValue] = useState(lead.customerType || "Individual");
+  const [gstin, setGstin] = useState(lead.gstin || "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setValue(lead.customerType || "Individual");
+    setGstin(lead.gstin || "");
+  }, [lead.customerType, lead.gstin]);
+  const saveType = async (next) => {
+    setValue(next);
+    setBusy(true);
+    try {
+      await put(`/leads/${lead.leadId}/owner-field`, { field: "customerType", value: next });
+      toast.success(next === "B2B" ? "Customer type set to B2B" : "Customer type set to Individual");
+      onSaved && onSaved();
+    } catch (e) {
+      setValue(lead.customerType || "Individual");
+      toast.error(apiErrorMessage(e, "Could not change customer type"));
+    } finally { setBusy(false); }
+  };
+  const saveGstin = async () => {
+    setBusy(true);
+    try {
+      await put(`/leads/${lead.leadId}/owner-field`, { field: "gstin", value: gstin });
+      toast.success("GSTIN saved");
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not save GSTIN"));
+    } finally { setBusy(false); }
+  };
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5" data-testid="customer-type-control">
+      <select
+        className="rounded-md ring-1 ring-inset ring-line text-xs py-1 px-1.5 bg-white"
+        data-testid="customer-type-select"
+        value={value}
+        disabled={busy}
+        onChange={(e) => saveType(e.target.value)}
+      >
+        <option value="Individual">Individual</option>
+        <option value="B2B">B2B</option>
+      </select>
+      {value === "B2B" && (
+        <>
+          <input
+            className="rounded-md ring-1 ring-inset ring-line text-xs py-1 px-1.5 w-36 font-mono uppercase"
+            data-testid="customer-type-gstin"
+            value={gstin}
+            placeholder="GSTIN"
+            onChange={(e) => setGstin(e.target.value.toUpperCase())}
+          />
+          <Button className="!py-0.5 !px-1.5 text-[11px]" data-testid="customer-type-gstin-save" onClick={saveGstin} disabled={busy}>Save GSTIN</Button>
+        </>
+      )}
+    </span>
+  );
+}
+
 function KV({ label, value, tone }) {
   return (
     <div className="flex items-start justify-between gap-3 py-1.5 border-b border-zinc-100 last:border-0 min-w-0">
@@ -1241,8 +1302,8 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
           <OwnerKV label="Exchange" field="exchangeRequired" value={lead.exchangeRequired || "No"}
             options={["No", "Yes"]} leadId={lid} onSaved={onSaved} />
           <OwnerKV label="Customer type" field="customerType" value={lead.customerType || "Individual"}
-            options={["Individual", "B2B"]} leadId={lid} onSaved={onSaved} />
-          <OwnerKV label="GSTIN" field="gstin" value={lead.gstin || ""} leadId={lid} onSaved={onSaved} />
+            options={["Individual", "B2B"]} allowShowroom leadId={lid} onSaved={onSaved} />
+          <OwnerKV label="GSTIN" field="gstin" value={lead.gstin || ""} allowShowroom leadId={lid} onSaved={onSaved} />
           <OwnerKV label="City" field="city" value={lead.city || ""} leadId={lid} onSaved={onSaved} />
           <VehicleKV lead={lead} models={masters.models || []} leadId={lid} onSaved={onSaved} />
           <OverviewUnits
@@ -3037,6 +3098,8 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
     remarks: lead.remarks || "", financeRequired: lead.financeRequired || "No",
     exchangeRequired: lead.exchangeRequired || "No", nextFollowupDate: lead.nextFollowupDate || "",
     bookingAmount: lead.bookingAmount ?? 0,
+    customerType: lead.customerType || "Individual",
+    gstin: lead.gstin || "",
   });
   const [variants, setVariants] = useState([]);
   const [clash, setClash] = useState(null);
@@ -3098,6 +3161,17 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
             </p>
           ) : (
             <Field label="Cx Demand (₹)"><Input type="number" value={form.budget} onChange={set("budget")} data-testid="edit-cx-demand" /></Field>
+          )}
+          <Field label="Customer type">
+            <Select data-testid="edit-customer-type" value={form.customerType} onChange={set("customerType")}>
+              <option value="Individual">Individual</option>
+              <option value="B2B">B2B</option>
+            </Select>
+          </Field>
+          {form.customerType === "B2B" && (
+            <Field label="GSTIN">
+              <Input data-testid="edit-gstin" value={form.gstin} onChange={set("gstin")} placeholder="22AAAAA0000A1Z5" />
+            </Field>
           )}
           <Field label="Finance Required"><Select value={form.financeRequired} onChange={set("financeRequired")}><option>No</option><option>Yes</option></Select></Field>
           <Field label="Exchange Required"><Select value={form.exchangeRequired} onChange={set("exchangeRequired")}><option>No</option><option>Yes</option></Select></Field>
