@@ -41,6 +41,7 @@ import tab_export
 import insurance_mis as ins_mis
 import sept_2026_schemes
 import oct_2026_schemes
+import nov_2026_schemes
 import scheme_circulars
 import deal_sheet_pdf
 import team_scope
@@ -19968,6 +19969,10 @@ async def _run_boot_maintenance():
             await oct_2026_schemes.ensure_oct_2026_schemes(db)
         except Exception:
             logging.exception("OCT_2026_SCHEME_BOOT_ERROR")
+        try:
+            await nov_2026_schemes.ensure_nov_2026_schemes(db)
+        except Exception:
+            logging.exception("NOV_2026_SCHEME_BOOT_ERROR")
         folded = await _boot_step(
             "oem_extra_fold", _fold_oem_extra_passed_into_additional_leads(), timeout=45)
         if folded:
