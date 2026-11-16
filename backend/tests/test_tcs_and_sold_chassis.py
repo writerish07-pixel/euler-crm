@@ -1038,6 +1038,53 @@ def test_stale_sibling_billed_label_follows_that_chassis():
 
 
 @pytest.mark.asyncio
+async def test_sync_replaces_a_stale_header_label_and_leaves_a_blank_one(client):
+    """OEM sync loads a projected header. The billed-body label must be in that
+    projection, or a stored DV label on an already-correct FB file is invisible
+    and never replaced. A header with no label stays blank.
+    """
+    await server.db.leads.delete_many({"leadId": {"$in": ["LD-HDR-STALE", "LD-HDR-BLANK"]}})
+    await server.db.oem_sold.delete_many({"chassis": {"$in": ["MD9HDRSTALE", "MD9HDRBLANK"]}})
+    await server.db.leads.insert_many([
+        {
+            "leadId": "LD-HDR-STALE", "customerName": "Header Stale",
+            "mobile": "9811100881", "interestedModel": "Turbo Max",
+            "variant": "Maxx (FB)", "chassisNumber": "MD9HDRSTALE",
+            "accountStatus": "Active", "currentStatus": "Booked",
+            "oemBilledModel": "Turbo Max", "oemBilledVariant": "Maxx (DV220)",
+            "oemBilledBodyType": "DV220",
+        },
+        {
+            "leadId": "LD-HDR-BLANK", "customerName": "Header Blank",
+            "mobile": "9811100882", "interestedModel": "Turbo Max",
+            "variant": "Maxx (FB)", "chassisNumber": "MD9HDRBLANK",
+            "accountStatus": "Active", "currentStatus": "Booked",
+        },
+    ])
+    await server.db.oem_sold.insert_many([
+        {"chassis": "MD9HDRSTALE", "mobile": "9811100881", "model": "Turbo Max",
+         "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb", "coulsonStatus": "SOLD"},
+        {"chassis": "MD9HDRBLANK", "mobile": "9811100882", "model": "Turbo Max",
+         "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb", "coulsonStatus": "SOLD"},
+    ])
+    first = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    stale = await server.db.leads.find_one({"leadId": "LD-HDR-STALE"})
+    blank = await server.db.leads.find_one({"leadId": "LD-HDR-BLANK"})
+    assert stale["variant"] == "Maxx (FB)"
+    assert stale["oemBilledVariant"] == "Maxx (FB)"
+    assert stale["oemBilledBodyType"] == "FB"
+    assert blank["variant"] == "Maxx (FB)"
+    assert not str(blank.get("oemBilledVariant") or "").strip()
+    assert not str(blank.get("oemBilledBodyType") or "").strip()
+    assert any(row.get("leadId") == "LD-HDR-STALE" for row in first["filled"])
+    second = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+    assert not any(row.get("leadId") == "LD-HDR-STALE" for row in second["filled"])
+    again = await server.db.leads.find_one({"leadId": "LD-HDR-STALE"})
+    assert again["oemBilledVariant"] == "Maxx (FB)"
+    assert again["oemBilledBodyType"] == "FB"
+
+
+@pytest.mark.asyncio
 async def test_delivery_adopts_billed_dv_body(client):
     mobile = "9811100223"
     chassis = "MD9BODYDELIV0001"
