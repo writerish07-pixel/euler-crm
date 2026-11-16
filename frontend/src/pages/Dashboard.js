@@ -63,6 +63,27 @@ export default function Dashboard() {
         </Link>
       </div>
 
+      {isOwner && (d?.variantConfirms || []).length > 0 && (
+        <Card className="p-4 mt-4 border-amber-300 bg-amber-50" data-testid="variant-confirm-queue">
+          <h3 className="font-heading font-bold text-ink text-sm">Confirm OEM variant before it is written</h3>
+          <p className="text-[12px] text-ink-soft mt-1">
+            These chassis need a variant confirmed. Nothing was guessed from another vehicle.
+          </p>
+          <ul className="mt-2 space-y-1 text-sm">
+            {(d.variantConfirms || []).map((row) => (
+              <li key={`${row.leadId}-${row.unitSno}-${row.chassis}`} data-testid={`variant-confirm-${row.leadId}-${row.unitSno}`}>
+                <span className="font-mono">{row.leadId}</span>
+                {" · "}{row.customerName || "—"}
+                {row.unitSno ? ` · unit ${row.unitSno}` : ""}
+                {row.chassis ? ` · ${row.chassis}` : ""}
+                {row.rawVariant || row.rawModel ? ` · OEM text ${[row.rawModel, row.rawVariant].filter(Boolean).join(" ")}` : ""}
+              </li>
+            ))}
+          </ul>
+          <Link to="/oem-billing" className="inline-block mt-2 text-xs font-semibold text-cobalt">Open OEM Billing</Link>
+        </Card>
+      )}
+
       {isOwner && <OwnerPriceEditor />}
 
       <div className="mt-6">

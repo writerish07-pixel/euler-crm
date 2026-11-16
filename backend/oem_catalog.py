@@ -334,8 +334,15 @@ def match_oem_row(sku: CatalogSku, oem: dict) -> bool:
 
 
 def sku_for_oem_row(oem: dict):
+    """One catalog SKU, or None.
+
+    Several matches means the OEM row does not name a single body. Callers
+    must ask the owner instead of keeping the first hit.
+    """
+    if not oem:
+        return None
     hits = [s for s in CATALOG if match_oem_row(s, oem)]
-    return hits[0] if len(hits) == 1 else (hits[0] if hits else None)
+    return hits[0] if len(hits) == 1 else None
 
 
 def jaipur_price(oem: dict):

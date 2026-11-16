@@ -147,7 +147,7 @@ def test_sold_doc_falls_back_to_sap_product_name():
     assert row["model"] == "TURBO RANGEMAXX PV"
 
 
-def test_billing_row_uses_lead_model_when_sold_has_none():
+def test_billing_row_does_not_invent_a_variant_when_sold_has_none():
     sold = [{
         "chassis": "MD9NOM01", "mobile": "9811100555", "invoiceNumber": "INV-N",
         "customerName": "Radhe Plastics", "soldDate": "2026-10-16",
@@ -160,8 +160,11 @@ def test_billing_row_uses_lead_model_when_sold_has_none():
         "deliveryDate": "2026-10-16",
     }]
     rows = oem_sync.classify_oem_billing(sold, leads)
-    assert rows[0]["model"] == "Turbo Max"
-    assert rows[0]["variant"] == "Maxx (PV)"
+    assert rows[0]["model"] == ""
+    assert rows[0]["variant"] == ""
+    assert rows[0]["skuNeedsReview"] is True
+    assert rows[0]["crmModel"] == "Turbo Max"
+    assert rows[0]["crmVariant"] == "Maxx (PV)"
 
 
 def test_billing_row_prefers_converted_dv_on_single_file():
@@ -186,8 +189,8 @@ def test_billing_row_prefers_converted_dv_on_single_file():
     assert rows[0]["availableBodyType"] == "FB"
 
 
-def test_billing_row_prefers_pack_dv_over_sold_fb():
-    """Chassis sat as FB, converted and billed DV — OEM Billing follows the pack DV."""
+def test_billing_row_keeps_sold_fb_when_the_pack_header_is_dv():
+    """One chassis billed FB stays FB even when the file's other unit is DV."""
     sold = [{
         "chassis": "MD9J217750", "mobile": "8980143558",
         "invoiceNumber": "AF-122-I26270230",
@@ -208,7 +211,8 @@ def test_billing_row_prefers_pack_dv_over_sold_fb():
     }]
     rows = oem_sync.classify_oem_billing(sold, leads)
     assert rows[0]["model"] == "Turbo Max"
-    assert rows[0]["variant"] == "Maxx (DV220)"
+    assert rows[0]["variant"] == "Maxx (FB)"
+    assert rows[0]["skuNeedsReview"] is False
 
 
 def test_billing_row_uses_pack_unit_model_for_that_chassis():
@@ -228,8 +232,11 @@ def test_billing_row_uses_pack_unit_model_for_that_chassis():
         ],
     }]
     rows = oem_sync.classify_oem_billing(sold, leads)
-    assert rows[0]["model"] == "Storm"
-    assert rows[0]["variant"] == "Storm LR (PV)"
+    assert rows[0]["model"] == ""
+    assert rows[0]["variant"] == ""
+    assert rows[0]["skuNeedsReview"] is True
+    assert rows[0]["crmModel"] == "Storm"
+    assert rows[0]["crmVariant"] == "Storm LR (PV)"
 
 
 def test_classify_pending_delivery_when_lead_is_booked():

@@ -815,6 +815,78 @@ async def _reprice_after_sold_body(lead_id):
         logging.exception("Sold body reprice failed for %s", lead_id)
 
 
+def _charge_was_list_price(current, previous):
+    if previous is None:
+        return current in (None, "", 0, 0.0)
+    if isinstance(previous, str) or isinstance(current, str):
+        return str(current or "").strip() == str(previous or "").strip()
+    return abs(ce.num(current) - ce.num(previous)) < 0.01
+
+
+async def _reprice_exact_variant_units(lead_id, changes):
+    """When a chassis moves to the body OEM billed, move the list price with it.
+
+    A charge that is not the old variant's list price was typed on the file
+    and stays. Cx Demand is not touched.
+    """
+    lead = await db.leads.find_one({"leadId": lead_id})
+    if not lead or not changes:
+        return
+    by_key = {c.get("key"): c for c in changes if c.get("key")}
+    units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
+    changed_units = False
+    for u in units:
+        key = oem_sync._norm_chassis(u.get("chassisNumber")) or f"sno:{u.get('sno')}"
+        change = by_key.get(key)
+        if not change or u.get("priceStructureSaved"):
+            continue
+        old = await _price_master_row(change.get("oldModel"), change.get("oldVariant"))
+        new = await _price_master_row(change.get("newModel"), change.get("newVariant"))
+        if not new:
+            continue
+        as_of = _lead_price_as_of(lead, unit=u)
+        old_ps = _price_structure_from_master(old, as_of) if old else {}
+        new_ps = _price_structure_from_master(new, as_of)
+        for k, new_val in new_ps.items():
+            cur = u.get(k)
+            previous = [old_ps.get(k)]
+            if old and k == "exShowroom":
+                previous.append(old.get("exShowroom"))
+            if cur in (None, "", 0, 0.0) or k not in u or any(
+                    _charge_was_list_price(cur, p) for p in previous):
+                u[k] = new_val
+        if "insuranceAmount" in u:
+            u["insurance"] = u.get("insuranceAmount")
+        changed_units = True
+    patch = {}
+    if changed_units:
+        patch["units"] = units
+    header = by_key.get("header")
+    if (header and not lead.get("priceStructureSaved")
+            and not oem_sync.is_same_order_pack(lead)):
+        old = await _price_master_row(header.get("oldModel"), header.get("oldVariant"))
+        new = await _price_master_row(header.get("newModel"), header.get("newVariant"))
+        if new:
+            as_of = _lead_price_as_of(lead)
+            old_ps = _price_structure_from_master(old, as_of) if old else {}
+            new_ps = _price_structure_from_master(new, as_of)
+            for k, new_val in new_ps.items():
+                cur = lead.get(k)
+                previous = [old_ps.get(k)]
+                if old and k == "exShowroom":
+                    previous.append(old.get("exShowroom"))
+                if cur in (None, "", 0, 0.0) or any(
+                        _charge_was_list_price(cur, p) for p in previous):
+                    patch[k] = new_val
+            if "insuranceAmount" in patch:
+                patch["insurance"] = patch["insuranceAmount"]
+    if not patch:
+        return
+    patch["lastUpdated"] = now_iso()
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    await recompute_lead(lead_id)
+
+
 async def _apply_sold_vehicle_ids():
     delinked = {}
     try:
@@ -823,7 +895,8 @@ async def _apply_sold_vehicle_ids():
         logging.exception("OEM Sold cancel-invoice delink failed")
         delinked = {}
     stamped = await oem_sync.apply_sold_vehicle_ids_to_leads(
-        db, on_body_adopted=_reprice_after_sold_body)
+        db, on_body_adopted=_reprice_after_sold_body,
+        on_variants_corrected=_reprice_exact_variant_units)
     reopened = await _reopen_incomplete_oem_auto_delivered()
     auto = await _auto_deliver_oem_sold_leads()
     stamped["delinkedCount"] = (delinked or {}).get("cleared") or 0
@@ -1147,14 +1220,9 @@ async def _sold_body_updates_for_lead(lead):
             family.append(extra)
     patch = oem_sync.fill_lead_skus(lead, family)
     fields = oem_sync.sold_body_fields(row) if row else None
-    current = {
-        "model": (lead or {}).get("interestedModel") or "",
-        "variant": (lead or {}).get("variant") or "",
-    }
     adopt = bool(
         row and fields and oem_sync.can_adopt_sold_body(lead, row)
         and oem_sync.lead_allows_body_adopt(lead)
-        and oem_sync._sku_body_rank(fields) >= oem_sync._sku_body_rank(current)
     )
     if adopt:
         extra = oem_sync.sold_body_adopt_patch(lead, row, adopt=True)
@@ -2320,6 +2388,10 @@ BOARD_LEAD_PROJ = {
     "units.sno": 1, "units.deliveryDate": 1, "units.soldDate": 1,
     "units.model": 1, "units.variant": 1,
     "units.chassisNumber": 1, "units.numberPlate": 1,
+    "units.oemSkuNeedsReview": 1, "units.oemSkuReviewReason": 1,
+    "units.oemSkuRawModel": 1, "units.oemSkuRawVariant": 1,
+    "oemSkuNeedsReview": 1, "oemSkuReviewReason": 1,
+    "oemSkuRawModel": 1, "oemSkuRawVariant": 1,
     "dealCancelled": 1, "cancelHistory": 1, "leadSource": 1, "excessReceived": 1,
     "lastCancelDate": 1, "lastCancelReason": 1, "refundedAmount": 1,
     "schemeUse": 1, "schemeApplied": 1, "totalSchemeBenefit": 1, "schemeBenefit": 1,
@@ -3278,8 +3350,42 @@ async def dashboard():
             "total": ce.round2(cust_os + company_os),
         },
         "modelPerformance": model_perf,
+        "variantConfirms": _variant_confirm_queue(leads),
         "lastUpdated": now_iso(),
     }
+
+
+def _variant_confirm_queue(leads):
+    """Files where OEM did not name one body, so nothing was guessed."""
+    rows = []
+    for lead in leads or []:
+        if not isinstance(lead, dict):
+            continue
+        if lead.get("oemSkuNeedsReview"):
+            rows.append({
+                "leadId": lead.get("leadId") or "",
+                "customerName": lead.get("customerName") or "",
+                "unitSno": 1,
+                "chassis": lead.get("chassisNumber") or "",
+                "reason": lead.get("oemSkuReviewReason") or "Confirm the OEM variant",
+                "rawModel": lead.get("oemSkuRawModel") or "",
+                "rawVariant": lead.get("oemSkuRawVariant") or "",
+            })
+        for i, unit in enumerate(lead.get("units") or []):
+            if not isinstance(unit, dict) or not unit.get("oemSkuNeedsReview"):
+                continue
+            rows.append({
+                "leadId": lead.get("leadId") or "",
+                "customerName": lead.get("customerName") or "",
+                "unitSno": unit.get("sno") or i + 1,
+                "chassis": unit.get("chassisNumber") or "",
+                "reason": unit.get("oemSkuReviewReason") or "Confirm the OEM variant",
+                "rawModel": unit.get("oemSkuRawModel") or "",
+                "rawVariant": unit.get("oemSkuRawVariant") or "",
+            })
+            if len(rows) >= 30:
+                return rows
+    return rows
 
 
 @api.get("/accounts/dashboard")
@@ -11483,6 +11589,92 @@ async def adopt_oem_body(lead_id: str, act=Depends(actor), user=Depends(owner_on
     return {"ok": True, "variant": patch.get("variant"), "model": patch.get("interestedModel")}
 
 
+class ConfirmOemVariantIn(BaseModel):
+    model: str = ""
+    variant: str = ""
+    unitSno: Optional[int] = None
+
+
+@api.put("/leads/{lead_id}/confirm-variant")
+async def confirm_oem_variant(lead_id: str, body: ConfirmOemVariantIn, act=Depends(actor)):
+    """Owner confirms the catalog variant when OEM did not name exactly one.
+
+    Nothing is written until this call. The choice has to be a Price Master body.
+    """
+    role = str((act or {}).get("role") or "").strip().lower()
+    if role != "owner" and not authmod.is_showroom_admin(act):
+        raise HTTPException(403, "Only the Owner or Showroom Admin can confirm a variant.")
+    model = str(body.model or "").strip()
+    variant = str(body.variant or "").strip()
+    sku = oem_cat.resolve_sku(model, variant)
+    if not sku:
+        raise HTTPException(422, "Pick a model and variant from Price Master.")
+    lead = await get_lead_or_404(lead_id)
+    _require_mutable_lead(lead, "variant confirmation", act)
+    model, variant = sku.crm_model, sku.crm_variant
+    units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
+    idx = None
+    if body.unitSno:
+        idx, units = _resolve_unit_index(lead, body.unitSno)
+        units = [dict(u) for u in units]
+    elif units:
+        idx = 0
+    old_model = lead.get("interestedModel") or ""
+    old_variant = lead.get("variant") or ""
+    key = "header"
+    if idx is not None and idx < len(units):
+        old_model = units[idx].get("model") or old_model
+        old_variant = units[idx].get("variant") or old_variant
+        units[idx]["model"] = model
+        units[idx]["variant"] = variant
+        units[idx]["bodyType"] = sku.body_type
+        units[idx]["oemSkuKey"] = sku.key
+        units[idx]["oemSkuNeedsReview"] = False
+        units[idx]["oemSkuReviewReason"] = ""
+        units[idx]["oemSkuConfirmed"] = True
+        key = oem_sync._norm_chassis(units[idx].get("chassisNumber")) or f"sno:{units[idx].get('sno') or idx + 1}"
+    patch = {"lastUpdated": now_iso()}
+    if idx == 0 or idx is None or not oem_sync.is_same_order_pack(lead):
+        if not lead.get("originalVariant") and (
+                _fold_compare(old_variant, variant) or _fold_compare(old_model, model)):
+            patch["originalModel"] = lead.get("interestedModel") or ""
+            patch["originalVariant"] = lead.get("variant") or ""
+        if not oem_sync.is_same_order_pack(lead) or idx in (0, None):
+            patch["interestedModel"] = model
+            patch["variant"] = variant
+            patch["bodyType"] = sku.body_type
+            patch["oemSkuKey"] = sku.key
+            patch["oemSkuConfirmed"] = True
+            patch["oemSkuNeedsReview"] = False
+            patch["oemSkuReviewReason"] = ""
+    if units:
+        patch["units"] = units
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    changes = [{
+        "key": key,
+        "oldModel": old_model, "oldVariant": old_variant,
+        "newModel": model, "newVariant": variant,
+    }]
+    if patch.get("variant"):
+        changes.append({
+            "key": "header",
+            "oldModel": lead.get("interestedModel") or "",
+            "oldVariant": lead.get("variant") or "",
+            "newModel": model, "newVariant": variant,
+        })
+    await _reprice_exact_variant_units(lead_id, changes)
+    await write_audit(act, "confirm", "oem-variant", leadId=lead_id,
+                      old={"model": old_model, "variant": old_variant},
+                      new={"model": model, "variant": variant, "unitSno": body.unitSno})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    await sheet_sync("leads", clean(dict(updated)))
+    return _lead_for_viewer(clean(updated), act)
+
+
+def _fold_compare(a, b):
+    return str(a or "").strip().lower() != str(b or "").strip().lower()
+
+
 async def _sibling_lead_for_docs(mobile="", name="", exclude_id=""):
     """Best live sibling to copy KYC from — same mobile first, then same name."""
     rows = await _leads_sharing_mobile(mobile, exclude_id)
@@ -11743,9 +11935,9 @@ async def _append_oem_unit(lead, row):
         return None
     invoice = str((row or {}).get("invoiceNumber") or "").strip()
     plate = str((row or {}).get("numberPlate") or "").strip()
-    picked = oem_sync.resolved_unit_sku(lead, row) or {}
-    model = picked.get("model") or (row or {}).get("model") or ""
-    variant = picked.get("variant") or (row or {}).get("variant") or ""
+    picked = oem_sync.sold_body_fields(row) or {}
+    model = picked.get("model") or ""
+    variant = picked.get("variant") or ""
     sold_date = str((row or {}).get("soldDate") or "")[:10] or today()
     units = _ensure_lead_units(lead)
     empty_i = next(
@@ -11762,9 +11954,20 @@ async def _append_oem_unit(lead, row):
             target["soldDate"] = sold_date
             if oem_sync._lead_is_delivered(lead) and not target.get("deliveryDate"):
                 target["deliveryDate"] = sold_date
-        if not target.get("model"):
+        if variant:
             target["model"] = model
             target["variant"] = variant
+            if picked.get("bodyType"):
+                target["bodyType"] = picked["bodyType"]
+            target["oemSkuNeedsReview"] = False
+            target["oemSkuReviewReason"] = ""
+        else:
+            target["oemSkuNeedsReview"] = True
+            target["oemSkuReviewReason"] = (
+                "OEM did not name one catalog variant for this chassis. "
+                "Confirm it before a price is written."
+            )
+            oem_sync._stamp_raw_oem_sku(target, row)
         oem_sync.stamp_available_billed_bodies(target, row)
     else:
         priced = await _price_unit_from_master(model, variant, sold_date)
@@ -11828,8 +12031,10 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     invoice = str(src.get("invoiceNumber") or row.get("invoiceNumber") or "").strip()
     plate = str(src.get("numberPlate") or "").strip()
     billed = oem_sync.sold_body_fields(src) or oem_sync.sold_body_fields(row) or {}
-    model = billed.get("model") or src.get("model") or row.get("model") or ""
-    variant = billed.get("variant") or src.get("variant") or row.get("variant") or ""
+    # Only a catalog SKU from this invoice. A raw OEM string that does not map
+    # stays off the file until the owner confirms it.
+    model = billed.get("model") or ""
+    variant = billed.get("variant") or ""
     sold_date = str(src.get("soldDate") or row.get("soldDate") or "").strip()[:10] or today()
     lead_id = await next_id("lead", "LD26")
     doc = {
@@ -11870,6 +12075,14 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
         "oemInvoiced": True,
         "oemSoldSyncedAt": now_iso(),
     }
+    if not variant:
+        doc["interestedModel"] = ""
+        doc["oemSkuNeedsReview"] = True
+        doc["oemSkuReviewReason"] = (
+            "OEM did not name one catalog variant for this chassis. "
+            "Confirm it before a price is written."
+        )
+        oem_sync._stamp_raw_oem_sku(doc, src)
     await db.leads.insert_one(doc)
     act_doc = {
         "activityId": await next_id("activity", "AC26"), "leadId": lead_id, "date": sold_date,
@@ -11882,7 +12095,10 @@ async def _insert_oem_billing_lead(row, sold_rows=None):
     await _copy_create_docs_from_sibling(
         lead_id, mobile=mobile, name=name,
         kinds=list(lead_docs.KYC_INDIVIDUAL + lead_docs.KYC_B2B + lead_docs.KYC_B2B_OPTIONAL))
-    updated = await _apply_list_price_and_scheme(lead_id, model, variant, sold_date)
+    if variant:
+        updated = await _apply_list_price_and_scheme(lead_id, model, variant, sold_date)
+    else:
+        updated = await db.leads.find_one({"leadId": lead_id})
     live = await db.leads.find_one({"leadId": lead_id}) or updated
     await _stamp_oem_invoiced(live, sold_rows)
     updated = clean(await db.leads.find_one({"leadId": lead_id}) or updated)
@@ -13795,7 +14011,9 @@ async def coulson_diagnose(body: CoulsonCredIn, act=Depends(actor)):
 async def coulson_sync(act=Depends(actor)):
     """Pull live OEM prices + yard stock. RTO/insurance stay as manual Price Master fields."""
     try:
-        result = await oem_sync.sync_from_coulson(db, on_body_adopted=_reprice_after_sold_body)
+        result = await oem_sync.sync_from_coulson(
+            db, on_body_adopted=_reprice_after_sold_body,
+            on_variants_corrected=_reprice_exact_variant_units)
     except coulson_client.CoulsonError as e:
         await oem_sync._record_sync(db, False, str(e))
         await db["system"].update_one({"_id": "coulson"}, {"$set": {"loginOk": False}}, upsert=True)
@@ -19385,7 +19603,9 @@ async def _coulson_sync_loop():
     await asyncio.sleep(20)
     while True:
         try:
-            result = await oem_sync.sync_from_coulson(db, on_body_adopted=_reprice_after_sold_body)
+            result = await oem_sync.sync_from_coulson(
+            db, on_body_adopted=_reprice_after_sold_body,
+            on_variants_corrected=_reprice_exact_variant_units)
             if result.get("ok"):
                 try:
                     await _reprice_after_oem(result.get("changedPriceIds"))
