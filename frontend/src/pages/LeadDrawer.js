@@ -1122,6 +1122,91 @@ export function OverviewUnits({
   );
 }
 
+function VariantConfirmRow({ leadId, item, onSaved }) {
+  const [model, setModel] = useState("");
+  const [variant, setVariant] = useState("");
+  const [models, setModels] = useState([]);
+  const [variants, setVariants] = useState([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    get("/price-master").then((rows) => {
+      const names = [...new Set((rows || []).map((r) => r.model).filter(Boolean))];
+      setModels(names);
+    }).catch(() => setModels([]));
+  }, []);
+  useEffect(() => {
+    if (!model) { setVariants([]); return; }
+    get("/price-master/variants", { model }).then((rows) => setVariants(rows || [])).catch(() => setVariants([]));
+  }, [model]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      await put(`/leads/${leadId}/confirm-variant`, {
+        model, variant, unitSno: item.unitSno || undefined,
+      });
+      toast.success("Variant saved from your confirmation");
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not confirm the variant"));
+    } finally { setBusy(false); }
+  };
+  return (
+    <div className="mt-2 flex flex-wrap items-end gap-2" data-testid={`variant-confirm-${item.unitSno || "file"}`}>
+      <div className="text-sm text-amber-950 min-w-[12rem]">
+        <div className="font-semibold">{item.label}</div>
+        <div className="text-[11px]">{item.reason}</div>
+        {item.raw ? <div className="text-[11px] font-mono">OEM text: {item.raw}</div> : null}
+      </div>
+      <Select data-testid={`variant-confirm-model-${item.unitSno || "file"}`} value={model} onChange={(e) => { setModel(e.target.value); setVariant(""); }}>
+        <option value="">Model</option>
+        {models.map((m) => <option key={m} value={m}>{m}</option>)}
+      </Select>
+      <Select data-testid={`variant-confirm-variant-${item.unitSno || "file"}`} value={variant} onChange={(e) => setVariant(e.target.value)}>
+        <option value="">Variant</option>
+        {variants.map((r) => <option key={r.variant} value={r.variant}>{r.variant}</option>)}
+      </Select>
+      <Button className="!py-1 !px-2 text-xs" disabled={busy || !model || !variant} onClick={save}>Confirm variant</Button>
+    </div>
+  );
+}
+
+function VariantConfirmCard({ lead, canConfirm, onSaved }) {
+  const pending = [];
+  if (lead?.oemSkuNeedsReview) {
+    pending.push({
+      unitSno: null,
+      label: "This file",
+      reason: lead.oemSkuReviewReason || "OEM did not name one variant.",
+      raw: [lead.oemSkuRawModel, lead.oemSkuRawVariant, lead.oemSkuRawUpdatedLoadBody].filter(Boolean).join(" · "),
+    });
+  }
+  (lead?.units || []).forEach((u, i) => {
+    if (!u || !u.oemSkuNeedsReview) return;
+    const sno = u.sno || i + 1;
+    pending.push({
+      unitSno: sno,
+      label: `Unit ${sno}${u.chassisNumber ? ` · ${u.chassisNumber}` : ""}`,
+      reason: u.oemSkuReviewReason || "OEM did not name one variant.",
+      raw: [u.oemSkuRawModel, u.oemSkuRawVariant, u.oemSkuRawUpdatedLoadBody].filter(Boolean).join(" · "),
+    });
+  });
+  if (!pending.length) return null;
+  return (
+    <Card className="p-3 sm:col-span-2 border-amber-300 bg-amber-50" data-testid="variant-confirm-card">
+      <p className="text-sm text-amber-950 font-semibold">Confirm the variant before it is priced</p>
+      <p className="text-[12px] text-amber-900 mt-1">
+        Confirm {pending.length === 1 ? "this chassis" : "these chassis"} before a variant is written.
+        Another vehicle on the order was not used as a guess.
+      </p>
+      {canConfirm ? pending.map((item) => (
+        <VariantConfirmRow key={item.unitSno || "file"} leadId={lead.leadId} item={item} onSaved={onSaved} />
+      )) : (
+        <p className="text-[12px] text-amber-900 mt-2">Ask the Owner to confirm the variant on the dashboard.</p>
+      )}
+    </Card>
+  );
+}
+
 export function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
   onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate }) {
   const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, isShowroomAdmin, canSeeOwnerCommercials, canManageShowroom } = useAuth();
@@ -1243,6 +1328,7 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
           </p>
         </Card>
       )}
+      <VariantConfirmCard lead={lead} canConfirm={isOwner || isShowroomAdmin} onSaved={onSaved} />
       {(lead.oemBodyMismatch || (lead.oemBodyChanges || []).length > 0) && (
         <Card className="p-3 sm:col-span-2 border-amber-200 bg-amber-50/70" data-testid="oem-body-banner">
           {lead.oemBodyMismatch

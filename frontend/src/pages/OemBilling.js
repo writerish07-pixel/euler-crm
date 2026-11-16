@@ -280,8 +280,18 @@ export default function OemBilling() {
           ) },
           { key: "model", label: "Vehicle", render: (r) => (
             <div className="text-sm">
-              {r.model || "—"}
-              <div className="text-xs text-ink-faint">{r.variant}</div>
+              {r.skuNeedsReview ? (
+                <div className="text-amber-800" data-testid={`oem-bill-sku-review-${r.chassis}`}>
+                  Confirm variant
+                  <div className="text-[11px]">OEM did not name one body. Nothing was written from another vehicle.</div>
+                  {r.crmVariant ? <div className="text-[11px] text-ink-faint">File currently {r.crmModel} {r.crmVariant}</div> : null}
+                </div>
+              ) : (
+                <>
+                  {r.model || "—"}
+                  <div className="text-xs text-ink-faint">{r.variant}</div>
+                </>
+              )}
               {r.availableBodyType && r.billedBodyType && r.availableBodyType !== r.billedBodyType ? (
                 <div className="text-[11px] text-ink-faint" data-testid={`oem-bill-body-${r.chassis}`}>
                   billed {r.billedBodyType} · available {r.availableBodyType}

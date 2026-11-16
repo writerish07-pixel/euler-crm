@@ -339,7 +339,8 @@ async def _access_token(db, username=None, password=None):
     return "", ""
 
 
-async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted=None):
+async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted=None,
+                           on_variants_corrected=None):
     """Pull OEM prices + PRESENT inventory. Fail-soft: raises CoulsonError on auth/API failure."""
     catalog_result = await apply_catalog(db)
     token, src = await _access_token(db, username, password)
@@ -501,7 +502,8 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
     except Exception:
         log.exception("OEM cancelled-invoice delink failed")
         delinked = {}
-    leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(db, on_body_adopted=on_body_adopted)
+    leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(
+        db, on_body_adopted=on_body_adopted, on_variants_corrected=on_variants_corrected)
     leads_vehicle_ids["delinkedCount"] = (delinked or {}).get("cleared") or 0
     leads_vehicle_ids["delinkedIds"] = (delinked or {}).get("clearedIds") or []
 
@@ -1901,22 +1903,54 @@ def _raw_sold_sku_fields(row):
     }
 
 
+def chassis_billed_sku(row):
+    """Catalog SKU Coulson billed on this chassis.
+
+    Uses this row only: the updated load body when Coulson converted the body,
+    otherwise the model and variant on the invoice. Another vehicle on the
+    same order is never a source.
+    """
+    if not row:
+        return None
+    return sold_body_fields(row)
+
+
 def resolved_unit_sku(lead, row=None):
-    """SKU for one pack unit: billed/converted body, else sibling, else raw Sold."""
-    return pick_converted_sku(
-        sold_body_fields(row) if row else None,
-        pack_sibling_sku_fields(lead),
-        _raw_sold_sku_fields(row),
-    )
+    """SKU for this chassis. The pack sibling is not a guess for a missing body."""
+    del lead
+    return chassis_billed_sku(row)
+
+
+def _stamp_raw_oem_sku(target, row):
+    """Keep the OEM text for the owner. Do not treat it as a catalog variant."""
+    row = row or {}
+    target["oemSkuRawModel"] = str(row.get("model") or "").strip()
+    target["oemSkuRawVariant"] = str(row.get("variant") or "").strip()
+    target["oemSkuRawLoadBody"] = str(row.get("loadBody") or row.get("load_body") or "").strip()
+    target["oemSkuRawUpdatedLoadBody"] = str(
+        row.get("updatedLoadBody") or row.get("updated_load_body") or ""
+    ).strip()
+    return target
+
+
+def _queue_variant_review(patch, lead, row, reason):
+    """Flag a chassis once. A later sync must not rewrite the same question."""
+    lead = lead or {}
+    if lead.get("oemSkuNeedsReview") and lead.get("oemSkuReviewReason") == reason:
+        return patch
+    patch["oemSkuNeedsReview"] = True
+    patch["oemSkuReviewReason"] = reason
+    _stamp_raw_oem_sku(patch, row)
+    return patch
 
 
 def fill_lead_skus(lead, sold_rows=None):
-    """Billed / converted SKU onto every unit and the lead header.
+    """Write each chassis's own billed SKU. Never copy another unit's body.
 
-    Applies to every CRM file — single unit or pack, booked or already
-    Delivered. Blank invoice lines pick up the billed body or the file's SKU.
-    FB that Coulson converted and billed as DV becomes DV; DV is not overwritten
-    with a stale yard FB.
+    A converted chassis follows that chassis's updated load body (FB billed
+    as DV stays DV). A second chassis billed as FB stays FB, even when the
+    first unit on the file is DV. An invoice that does not name one catalog
+    variant is left for the owner and is not given a guessed body.
     """
     units = fill_pack_unit_skus(lead, sold_rows)
     patch = {}
@@ -1929,41 +1963,47 @@ def fill_lead_skus(lead, sold_rows=None):
             by_ch[ch] = row
     ch = _norm_chassis((lead or {}).get("chassisNumber"))
     row = by_ch.get(ch) if ch else None
-    if row is None and len(by_ch) == 1:
+    # A header with no chassis of its own may take the only invoice on a
+    # single-vehicle file. A pack header never borrows another unit's body.
+    if row is None and not ch and len(by_ch) == 1 and not is_same_order_pack(lead):
         row = next(iter(by_ch.values()))
-    have = None
-    if str((lead or {}).get("interestedModel") or "").strip():
-        have = {
-            "model": (lead or {}).get("interestedModel") or "",
-            "variant": (lead or {}).get("variant") or "",
-            "bodyType": (lead or {}).get("bodyType") or "",
-            "oemSkuKey": (lead or {}).get("oemSkuKey") or "",
-        }
-    billed = sold_body_fields(row) if row else None
-    picked = pick_converted_sku(
-        billed,
-        have,
-        pack_sibling_sku_fields({**(lead or {}), "units": units or (lead or {}).get("units")}),
-        _raw_sold_sku_fields(row),
-    )
+    billed = chassis_billed_sku(row) if row else None
     have_model = str((lead or {}).get("interestedModel") or "").strip()
-    if picked and str(picked.get("model") or "").strip() and lead_body_differs(lead, picked):
-        if have_model and not same_sold_family(lead, picked):
-            picked = None
+    if billed and str(billed.get("model") or "").strip() and lead_body_differs(lead, billed):
+        if have_model and not same_sold_family(lead, billed):
+            # A different model is not a body conversion. Do not write it.
+            # The owner confirms which body belongs on this chassis.
+            _queue_variant_review(
+                patch, lead, row,
+                "OEM billed a different model on this chassis. "
+                "Confirm the variant before it is written.",
+            )
+            billed = None
         else:
             if not (lead or {}).get("originalVariant"):
                 patch["originalModel"] = (lead or {}).get("interestedModel") or ""
                 patch["originalVariant"] = (lead or {}).get("variant") or ""
-            patch["interestedModel"] = picked["model"]
-            patch["variant"] = picked.get("variant") or ""
-            if picked.get("bodyType"):
-                patch["bodyType"] = picked["bodyType"]
-            if picked.get("oemSkuKey"):
-                patch["oemSkuKey"] = picked["oemSkuKey"]
+            patch["interestedModel"] = billed["model"]
+            patch["variant"] = billed.get("variant") or ""
+            if billed.get("bodyType"):
+                patch["bodyType"] = billed["bodyType"]
+            if billed.get("oemSkuKey"):
+                patch["oemSkuKey"] = billed["oemSkuKey"]
             patch["oemBodyMismatch"] = False
+            if (lead or {}).get("oemSkuNeedsReview"):
+                patch["oemSkuNeedsReview"] = False
+                patch["oemSkuReviewReason"] = ""
+    elif row and not billed and ch and not (
+            (lead or {}).get("oemSkuConfirmed") and str((lead or {}).get("variant") or "").strip()
+    ):
+        _queue_variant_review(
+            patch, lead, row,
+            "OEM did not name one catalog variant for this chassis. "
+            "Confirm it before a price is written.",
+        )
     avail = available_body_fields(row) if row else None
-    use_billed = (picked or billed) if (picked or billed) else None
-    if row and available_differs_from_billed(avail, use_billed):
+    use_billed = billed
+    if row and use_billed and available_differs_from_billed(avail, use_billed):
         body_rec = {
             "originalVariant": patch.get("originalVariant") or (lead or {}).get("originalVariant") or "",
             "originalModel": patch.get("originalModel") or (lead or {}).get("originalModel") or "",
@@ -1976,11 +2016,12 @@ def fill_lead_skus(lead, sold_rows=None):
 
 
 def fill_pack_unit_skus(lead, sold_rows=None):
-    """Fill blank unit model/variant and adopt billed DV onto that chassis.
+    """Write each unit from its own Coulson invoice.
 
-    Invoice-only appends land empty. Yard Sold can still say FB after Coulson
-    converted and billed DV. Every unit on every file keeps the converted body
-    — including files already marked Delivered.
+    A chassis Coulson converted (updated load body DV, yard body FB) takes
+    the billed body. A chassis billed as FB is not rewritten to a sibling DV.
+    When the invoice does not name one catalog variant, the unit is flagged
+    and its current variant is left untouched until the owner confirms.
     """
     units = [dict(u) for u in ((lead or {}).get("units") or []) if isinstance(u, dict)]
     if not units:
@@ -1990,46 +2031,42 @@ def fill_pack_unit_skus(lead, sold_rows=None):
         ch = _norm_chassis((row or {}).get("chassis"))
         if ch:
             by_ch[ch] = row
-    sibling = pack_sibling_sku_fields(lead)
     out = []
     for u in units:
         rec = dict(u)
         ch = _norm_chassis(rec.get("chassisNumber"))
-        row = by_ch.get(ch)
-        have = None
-        if str(rec.get("model") or "").strip():
-            have = {
-                "model": rec.get("model") or "",
-                "variant": rec.get("variant") or "",
-                "bodyType": rec.get("bodyType") or "",
-                "oemSkuKey": rec.get("oemSkuKey") or "",
-            }
-        billed = sold_body_fields(row) if row else None
-        picked = pick_converted_sku(
-            billed,
-            have,
-            sibling,
-            _raw_sold_sku_fields(row),
-        )
-        if picked and str(picked.get("model") or "").strip():
+        row = by_ch.get(ch) if ch else None
+        billed = chassis_billed_sku(row) if row else None
+        if billed and str(billed.get("model") or "").strip():
             same = (
-                _fold_sku(rec.get("model")) == _fold_sku(picked.get("model"))
-                and _fold_sku(rec.get("variant")) == _fold_sku(picked.get("variant"))
+                _fold_sku(rec.get("model")) == _fold_sku(billed.get("model"))
+                and _fold_sku(rec.get("variant")) == _fold_sku(billed.get("variant"))
             )
             if not same:
                 if str(rec.get("model") or "").strip() and not rec.get("originalVariant"):
                     rec["originalModel"] = rec.get("model") or ""
                     rec["originalVariant"] = rec.get("variant") or ""
-                rec["model"] = picked["model"]
-                rec["variant"] = picked.get("variant") or ""
-                if picked.get("bodyType"):
-                    rec["bodyType"] = picked["bodyType"]
-                if picked.get("oemSkuKey"):
-                    rec["oemSkuKey"] = picked["oemSkuKey"]
+                rec["model"] = billed["model"]
+                rec["variant"] = billed.get("variant") or ""
+                if billed.get("bodyType"):
+                    rec["bodyType"] = billed["bodyType"]
+                if billed.get("oemSkuKey"):
+                    rec["oemSkuKey"] = billed["oemSkuKey"]
+            if rec.get("oemSkuNeedsReview"):
+                rec["oemSkuNeedsReview"] = False
+                rec["oemSkuReviewReason"] = ""
+        elif row and ch and not (
+                rec.get("oemSkuConfirmed") and str(rec.get("variant") or "").strip()
+        ):
+            rec["oemSkuNeedsReview"] = True
+            rec["oemSkuReviewReason"] = (
+                "OEM did not name one catalog variant for this chassis. "
+                "Confirm it before a price is written."
+            )
+            _stamp_raw_oem_sku(rec, row)
         avail = available_body_fields(row) if row else None
-        use_billed = (picked or billed) if (picked or billed) else None
-        if row and available_differs_from_billed(avail, use_billed):
-            stamp_available_billed_bodies(rec, row, billed=use_billed, available=avail)
+        if row and billed and available_differs_from_billed(avail, billed):
+            stamp_available_billed_bodies(rec, row, billed=billed, available=avail)
         out.append(rec)
     return out
 
@@ -2369,6 +2406,8 @@ def _match_sold_by_name(lead, sold_rows, occupied_chassis=None):
             continue
         if len(_digits10(row.get("mobile"))) != 10:
             continue
+        # A different 10-digit mobile is a different customer, even with the
+        # same name. A blank CRM mobile can still take the one OEM row.
         if mobiles_conflict(lead, row):
             continue
         if sold_model_conflicts(row, lead):
@@ -2383,9 +2422,9 @@ def match_sold_row(lead, sold_rows, occupied_chassis=None):
     """Pick the unique remaining sold row for this lead, or None if missing/ambiguous.
 
     A chassis already on the lead wins. Otherwise mobile wins when it uniquely
-    matches among unoccupied Sold rows. If the CRM mobile is blank or does
-    not appear on Sold, a unique customer name is enough — that is how
-    Roshan Sharma / Prakash Chand Ranwa style mismatches get a chassis.
+    matches among unoccupied Sold rows. A blank CRM mobile can take the one
+    Sold row that shares a usable customer name. A different 10-digit mobile
+    is another customer and is not copied onto this file.
     Five identical Turbo Max on one mobile stay unmatched until chassis is set.
     """
     return (
@@ -2566,7 +2605,36 @@ def _drop_taken_identifier(patch, lead, field):
         patch.pop("units", None)
 
 
-async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
+def variant_snapshot(lead):
+    out = {"header": (
+        str((lead or {}).get("interestedModel") or ""),
+        str((lead or {}).get("variant") or ""),
+    )}
+    for u in (lead or {}).get("units") or []:
+        if not isinstance(u, dict):
+            continue
+        key = _norm_chassis(u.get("chassisNumber")) or f"sno:{u.get('sno')}"
+        out[key] = (str(u.get("model") or ""), str(u.get("variant") or ""))
+    return out
+
+
+def variant_changes(before, lead):
+    """Chassis whose model/variant changed to a named OEM body."""
+    after = variant_snapshot(lead)
+    changed = []
+    for key, new in after.items():
+        old = (before or {}).get(key)
+        if not old or old == new or not str(new[1] or "").strip():
+            continue
+        changed.append({
+            "key": key,
+            "oldModel": old[0], "oldVariant": old[1],
+            "newModel": new[0], "newVariant": new[1],
+        })
+    return changed
+
+
+async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None, on_variants_corrected=None):
     """Write Coulson Sold chassis / invoice / plate onto every uniquely matched lead.
 
     OEM is the source of truth when the customer mobile maps to exactly one sold
@@ -2646,6 +2714,7 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         lid = (lead or {}).get("leadId")
         if not lid:
             continue
+        before_variants = variant_snapshot(lead)
         chassis = _norm_chassis(row.get("chassis"))
         invoice = str(row.get("invoiceNumber") or "").strip()
         plate = str(row.get("numberPlate") or "").strip()
@@ -2759,6 +2828,9 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         lead.update(patch)
         filled_ids.add(lid)
         stats["updated"] += 1
+        changes = variant_changes(before_variants, lead)
+        if changes and on_variants_corrected:
+            await on_variants_corrected(lid, changes)
         _note_stamp(stats, "filled", {
             "leadId": lid,
             "chassis": chassis,
@@ -2781,6 +2853,7 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         lid = (lead or {}).get("leadId")
         if not lid or lid in filled_ids:
             continue
+        before_variants = variant_snapshot(lead)
         family = sold_rows_for_lead(
             lead, sold, occupied - set(lead_chassis_list(lead)))
         sku_patch = fill_lead_skus(lead, family) or {}
@@ -2799,6 +2872,9 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None):
         occupied.update(lead_chassis_list(lead))
         filled_ids.add(lid)
         stats["updated"] += 1
+        changes = variant_changes(before_variants, lead)
+        if changes and on_variants_corrected:
+            await on_variants_corrected(lid, changes)
         _note_stamp(stats, "filled", {
             "leadId": lid,
             "chassis": _norm_chassis(lead.get("chassisNumber")),
@@ -3286,26 +3362,17 @@ def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None,
     keeper = resolve_chassis_holders(holder_leads or [])
     chassis = _norm_chassis((sold or {}).get("chassis"))
     lead_model, lead_variant = _lead_model_variant(lead, chassis)
-    unit_fields = {"model": lead_model, "variant": lead_variant} if lead_model else None
-    picked = pick_converted_sku(
-        sold_body_fields(sold),
-        unit_fields,
-        pack_sibling_sku_fields(lead) if lead else None,
-        _raw_sold_sku_fields(sold),
-    )
-    model = str(
-        (picked or {}).get("model")
-        or (sold or {}).get("model")
-        or lead_model
-        or ""
-    ).strip()
-    variant = str(
-        (picked or {}).get("variant")
-        or (sold or {}).get("variant")
-        or lead_variant
-        or ""
-    ).strip()
-    billed = sold_body_fields(sold)
+    billed = chassis_billed_sku(sold)
+    # The list shows what OEM billed. The file's variant is separate, so a
+    # DV already on the pack cannot relabel an FB invoice.
+    if billed:
+        model = str(billed.get("model") or "").strip()
+        variant = str(billed.get("variant") or "").strip()
+        sku_needs_review = False
+    else:
+        model = ""
+        variant = ""
+        sku_needs_review = True
     available = available_body_fields(sold)
     billed_body = str((billed or {}).get("bodyType") or (sold or {}).get("billedBodyType")
                       or (sold or {}).get("oemBilledBodyType") or "").strip()
@@ -3320,7 +3387,10 @@ def _billing_row(sold, bucket, lead=None, review_reason="", holder_leads=None,
         "customerName": str((sold or {}).get("customerName") or "").strip(),
         "model": model,
         "variant": variant,
-        "billedBodyType": billed_body or str((picked or {}).get("bodyType") or "").strip(),
+        "skuNeedsReview": sku_needs_review,
+        "crmModel": lead_model,
+        "crmVariant": lead_variant,
+        "billedBodyType": billed_body or str((billed or {}).get("bodyType") or "").strip(),
         "availableBodyType": available_body,
         "availableVariant": str((available or {}).get("variant") or "").strip(),
         "soldDate": sold_date,

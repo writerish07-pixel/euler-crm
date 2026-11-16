@@ -1415,7 +1415,7 @@ async def test_append_oem_unit_keeps_own_billed_date(client):
 
 
 @pytest.mark.asyncio
-async def test_append_oem_unit_fills_model_from_pack_sibling(client):
+async def test_append_oem_unit_keeps_its_own_billed_body(client):
     lid = "LD-BLANK-SKU"
     mobile = "8980143999"
     await server.db.leads.delete_many({"leadId": lid})
@@ -1446,7 +1446,7 @@ async def test_append_oem_unit_fills_model_from_pack_sibling(client):
     assert len(units) == 2
     assert units[1]["chassisNumber"] == "MD9SIBB06"
     assert units[1]["model"] == "Turbo Max"
-    assert units[1]["variant"] == "Maxx (DV220)"
+    assert units[1]["variant"] == "Maxx (FB)"
 
 
 @pytest.mark.asyncio

@@ -375,12 +375,14 @@ async def test_sold_id_backfill_does_not_steal_live_chassis(client):
         "model": "Turbo Max", "variant": "Maxx (PV)",
     })
     stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
-    assert stats["updated"] == 0
     want = await server.db.leads.find_one({"leadId": "LD-SOLD-WANT"})
     has = await server.db.leads.find_one({"leadId": "LD-SOLD-HAS"})
     assert not want.get("chassisNumber")
     assert has["chassisNumber"] == chassis
     assert has["invoiceNumber"] == "CINV-HAS-KEEP"
+    assert has["variant"] == "Storm LR (PV) Reg C7 6.6kWh"
+    assert has.get("oemSkuNeedsReview") is True
+    assert "LD-SOLD-WANT" not in {row["leadId"] for row in stats["filled"]}
     await server.db.leads.delete_many({"leadId": {"$in": ["LD-SOLD-WANT", "LD-SOLD-HAS"]}})
 
 
@@ -400,7 +402,7 @@ def test_vehicle_customer_name_reads_nested():
 
 @pytest.mark.asyncio
 async def test_blank_or_wrong_mobile_fills_from_unique_sold_name(client):
-    """The four sheet names: unique OEM name → copy mobile then chassis/invoice."""
+    """A blank CRM mobile takes the one OEM name. A different 10-digit mobile does not."""
     rows = [
         ("LD-NM-1", "Roshan Sharma", "", "9777099101", "MD9NMROSHAN0001", "INV-NM-1"),
         ("LD-NM-2", "Prakash chand Ranwa", "9000000002", "9777099102", "MD9NMPRAKASH01", "INV-NM-2"),
@@ -424,15 +426,16 @@ async def test_blank_or_wrong_mobile_fills_from_unique_sold_name(client):
             "customerName": name, "model": "Turbo Max", "variant": "Maxx (PV)",
         })
     stats = await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
-    assert stats["updated"] == 4
-    assert stats["mobilesUpdated"] == 4
+    assert stats["mobilesUpdated"] == 3
     for lid, name, crm_mobile, oem_mobile, chassis, invoice in rows:
         lead = await server.db.leads.find_one({"leadId": lid})
+        if crm_mobile == "9000000002":
+            assert lead["mobile"] == "9000000002", lid
+            assert not lead.get("chassisNumber"), lid
+            continue
         assert lead["mobile"] == oem_mobile, lid
         assert lead["chassisNumber"] == chassis
         assert lead["invoiceNumber"] == invoice
-        if crm_mobile == "9000000002":
-            assert lead.get("altMobile") == "9000000002"
     await server.db.leads.delete_many({"leadId": {"$in": [r[0] for r in rows]}})
 
 
@@ -766,9 +769,8 @@ def test_fill_pack_unit_skus_blank_and_fb_to_dv():
     ]
     units = oem_sync.fill_pack_unit_skus(lead, sold)
     assert units[1]["model"] == "Turbo Max"
-    assert units[1]["variant"] == "Maxx (DV220)"
-    assert units[1].get("availableBodyType") == "FB"
-    assert units[1].get("oemBilledBodyType") == "DV220"
+    assert units[1]["variant"] == "Maxx (FB)"
+    assert units[1].get("oemSkuNeedsReview") is not True
     assert units[2]["variant"] == "Maxx (DV220)"
     assert units[2]["originalVariant"] == "Maxx (FB)"
     assert units[2].get("availableBodyType") == "FB"
@@ -921,9 +923,67 @@ async def test_sold_sync_fills_delivered_pack_blank_units_as_dv(client):
     assert stats["bodyUnitsFilled"] >= 1
     lead = await server.db.leads.find_one({"leadId": lid})
     by_ch = {oem_sync._norm_chassis(u.get("chassisNumber")): u for u in lead["units"]}
-    assert by_ch["MD9PACKFB06"]["variant"] == "Maxx (DV220)"
+    assert by_ch["MD9PACKFB06"]["variant"] == "Maxx (FB)"
     assert by_ch["MD9PACKFB07"]["variant"] == "Maxx (DV220)"
     assert lead["variant"] == "Maxx (DV220)"
+
+
+@pytest.mark.asyncio
+async def test_each_chassis_keeps_its_oem_body_and_a_blank_invoice_waits(client):
+    """Two billed months: DV and FB stay themselves. A nameless invoice is not guessed."""
+    lid = "LD-MIX-BODY"
+    mobile = "8386096960"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.oem_sold.delete_many({"mobile": mobile})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "ganesh ram choudhary", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "bookingDate": "2026-09-01", "sameOrderMultiUnit": True,
+        "chassisNumber": "MD9GANESHDV", "exShowroom": 809999,
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9GANESHDV", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "exShowroom": 809999},
+            {"sno": 2, "chassisNumber": "MD9GANESHFB", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "exShowroom": 809999},
+            {"sno": 3, "chassisNumber": "MD9GANESHUNK", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "exShowroom": 809999},
+        ],
+    })
+    await server.db.oem_sold.insert_many([
+        {"chassis": "MD9GANESHDV", "mobile": mobile, "model": "Turbo Max",
+         "variant": "Maxx (DV220)", "oemSkuKey": "turbo.maxx.dv220",
+         "soldDate": "2026-09-16", "coulsonStatus": "SOLD"},
+        {"chassis": "MD9GANESHFB", "mobile": mobile, "model": "Turbo Max",
+         "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+         "soldDate": "2026-10-16", "coulsonStatus": "SOLD"},
+        {"chassis": "MD9GANESHUNK", "mobile": mobile, "soldDate": "2026-11-02",
+         "coulsonStatus": "SOLD"},
+    ])
+    await oem_sync.apply_sold_vehicle_ids_to_leads(
+        server.db, on_variants_corrected=server._reprice_exact_variant_units)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    by = {oem_sync._norm_chassis(u["chassisNumber"]): u for u in lead["units"]}
+    assert by["MD9GANESHDV"]["variant"] == "Maxx (DV220)"
+    assert float(by["MD9GANESHDV"].get("exShowroom") or 0) == 809999
+    assert by["MD9GANESHFB"]["variant"] == "Maxx (FB)"
+    # 1 Sep 2026 Turbo list price is the catalog ex-showroom plus the uplift.
+    assert float(by["MD9GANESHFB"].get("exShowroom") or 0) == 760000 + server.TURBO_EXSHOWROOM_UPLIFT
+    assert by["MD9GANESHUNK"]["variant"] == "Maxx (DV220)"
+    assert float(by["MD9GANESHUNK"].get("exShowroom") or 0) == 809999
+    assert by["MD9GANESHUNK"]["oemSkuNeedsReview"] is True
+    queued = server._variant_confirm_queue([lead])
+    assert any(row["chassis"] == "MD9GANESHUNK" for row in queued)
+    confirmed = await client.put(f"/api/leads/{lid}/confirm-variant", json={
+        "model": "Turbo Max", "variant": "Maxx (PV)", "unitSno": 3,
+    })
+    assert confirmed.status_code == 200, confirmed.text
+    lead = await server.db.leads.find_one({"leadId": lid})
+    by = {oem_sync._norm_chassis(u["chassisNumber"]): u for u in lead["units"]}
+    assert by["MD9GANESHUNK"]["variant"] == "Maxx (PV)"
+    assert by["MD9GANESHUNK"].get("oemSkuNeedsReview") in (False, None, "")
+    assert by["MD9GANESHFB"]["variant"] == "Maxx (FB)"
+    assert by["MD9GANESHDV"]["variant"] == "Maxx (DV220)"
 
 
 @pytest.mark.asyncio
