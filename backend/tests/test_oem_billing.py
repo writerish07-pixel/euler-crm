@@ -2036,6 +2036,91 @@ async def test_price_fill_copies_saved_lead_price_onto_the_unit(client, monkeypa
     assert float(first.get("exShowroom") or 0) == 750000
 
 
+@pytest.mark.asyncio
+async def test_billed_date_keeps_a_saved_zero_through_price_fill(client):
+    """A typed zero stays a zero after the unit billed date is saved.
+
+    Saving the date rebuilds the unit. That rebuild used to drop
+    savedPriceFields, so the next OEM price fill treated the zero as empty
+    and wrote the Price Master charge onto the unit.
+    """
+    lid = "LD-ZERO-DATE"
+    mobile = "9783519411"
+    chassis = "MD9ZERODATE"
+    await server.db.leads.delete_many({"$or": [{"leadId": lid}, {"mobile": mobile}]})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await _seed_maxx_pv_price()
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Saved Zero", "mobile": mobile,
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-10-01",
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "cxDemand": 805000, "budget": 805000, "useDealPrice": True,
+        "customerPayable": 805000, "exShowroom": 0, "grossVehicleCost": 0,
+        "rto": 0, "insuranceAmount": 0,
+        "savedPriceFields": ["rto"],
+        "customerType": "Individual", "chassisNumber": chassis,
+        "units": [{
+            "sno": 1, "chassisNumber": chassis, "model": "Turbo Max",
+            "variant": "Maxx (PV)", "rto": 0, "savedPriceFields": ["rto"],
+        }],
+    })
+    dated = await client.put(f"/api/leads/{lid}/units/1/billed-date", json={"soldDate": "2026-10-16"})
+    assert dated.status_code == 200, dated.text
+    after_date = await server.db.leads.find_one({"leadId": lid})
+    unit = (after_date.get("units") or [{}])[0]
+    assert "rto" in (unit.get("savedPriceFields") or [])
+    assert float(unit.get("rto") or 0) == 0
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "INV-ZERO",
+        "customerName": "Saved Zero", "model": "Turbo Max", "variant": "Maxx (PV)",
+        "soldDate": "2026-10-16", "coulsonStatus": "SOLD",
+    })
+    synced = await client.post("/api/oem-billing/sync?month=2026-10")
+    assert synced.status_code == 200, synced.text
+    live = await server.db.leads.find_one({"leadId": lid})
+    unit = (live.get("units") or [{}])[0]
+    assert float(live.get("exShowroom") or 0) == 770000
+    assert float(live.get("rto") or 0) == 0
+    assert float(unit.get("rto") or 0) == 0
+    assert "rto" in (unit.get("savedPriceFields") or [])
+    added = await client.post(f"/api/leads/{lid}/units", json={
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+    })
+    assert added.status_code == 200, added.text
+    packed = await server.db.leads.find_one({"leadId": lid})
+    first = (packed.get("units") or [{}])[0]
+    assert float(first.get("rto") or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_pack_price_fill_skips_order_totals_on_unit_1(client):
+    lid = "LD-PACK-DONOR"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Pack Donor", "mobile": "9783519422",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-10-01",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "sameOrderMultiUnit": True,
+        "exShowroom": 824999, "rto": 5500, "insuranceAmount": 19000,
+        "cxDemand": 1698998, "budget": 1698998, "customerPayable": 1698998,
+        "grossVehicleCost": 1698998,
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9PACKDV", "model": "Turbo Max",
+             "variant": "Maxx (DV220)"},
+            {"sno": 2, "chassisNumber": "MD9PACKPV", "model": "Turbo Max",
+             "variant": "Maxx (PV)"},
+        ],
+    })
+    await server._fill_missing_model_price({"leadId": lid})
+    live = await server.db.leads.find_one({"leadId": lid})
+    first = (live.get("units") or [{}])[0]
+    assert float(first.get("exShowroom") or 0) == 824999
+    assert float(first.get("rto") or 0) == 5500
+    pack_total = 1698998
+    for key in ("cxDemand", "customerPayable", "grossVehicleCost", "budget"):
+        assert float(first.get(key) or 0) != pack_total
+
+
 async def _async_ok():
     return {"ok": True, "operation": "queued"}
 
@@ -2073,9 +2158,12 @@ async def test_b2b_gstin_saves_without_business_kyc(client, monkeypatch):
         json={"field": "customerType", "value": "B2B"})
     assert switched.status_code == 200, switched.text
     assert switched.json()["customerType"] == "B2B"
+    await server.db.leads.update_one(
+        {"leadId": lid}, {"$set": {"lastUpdatedBy": "alice@euler.com"}})
     gst = await client.put(f"/api/leads/{lid}/gstin", json={"gstin": "08aaaaa0000a1z5"})
     assert gst.status_code == 200, gst.text
     assert gst.json()["gstin"] == "08AAAAA0000A1Z5"
+    assert gst.json()["lastUpdatedBy"] == email
     back = await client.put(f"/api/leads/{lid}", json={"customerType": "Individual"})
     assert back.status_code == 200, back.text
     assert back.json()["customerType"] == "Individual"

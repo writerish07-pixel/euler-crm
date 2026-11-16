@@ -7706,10 +7706,19 @@ def _resolve_unit_index(lead, unit_sno):
     return sno - 1, units
 
 
+def _copy_saved_price_fields(src, dest):
+    """Keep the list of charges someone typed, including an explicit zero."""
+    saved = [str(x) for x in ((src or {}).get("savedPriceFields") or []) if str(x or "").strip()]
+    if saved and not (dest or {}).get("savedPriceFields"):
+        dest["savedPriceFields"] = saved
+    return dest
+
+
 def _copy_unit_commercials(src, dest):
     for k in UNIT_COMMERCIAL_KEYS:
         if k in (src or {}) and src.get(k) is not None:
             dest[k] = src[k]
+    _copy_saved_price_fields(src, dest)
     return dest
 
 
@@ -7754,6 +7763,9 @@ def _normalize_lead_units(raw_units, *, model="", variant="", chassis="",
             if u.get(k):
                 rec[k] = u.get(k)
         _copy_unit_commercials(u, rec)
+        saved = u.get("savedPriceFields")
+        if isinstance(saved, list) and saved:
+            rec["savedPriceFields"] = [str(x) for x in saved if str(x or "").strip()]
         for k in UNIT_RUNTIME_KEYS:
             if k in u and u.get(k) not in (None, ""):
                 rec[k] = u[k]
@@ -8729,7 +8741,11 @@ async def set_lead_gstin(lead_id: str, body: GstinIn, act=Depends(actor),
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
     value = str(body.gstin or "").strip().upper()
-    await db.leads.update_one({"leadId": lead_id}, {"$set": {"gstin": value, "lastUpdated": now_iso()}})
+    await db.leads.update_one({"leadId": lead_id}, {"$set": {
+        "gstin": value,
+        "lastUpdated": now_iso(),
+        "lastUpdatedBy": (act or {}).get("email") or "",
+    }})
     updated = await db.leads.find_one({"leadId": lead_id})
     await sheet_sync("leads", clean(dict(updated)))
     await write_audit(act, "update", "gstin", leadId=lead_id,
@@ -11944,9 +11960,16 @@ def _merge_missing_list_price(target, priced):
 
 
 def _lead_price_donor(lead):
-    """Commercials already stored on the file, for a chassis-only unit copy."""
+    """Commercials already stored on the file, for a chassis-only unit copy.
+
+    On a same-order pack the header payable, Cx Demand, budget and gross
+    vehicle cost are the whole order. Those stay off unit 1.
+    """
+    skip = set(PACK_UNIT_ROLLUP_KEYS) if oem_sync.is_same_order_pack(lead or {}) else set()
     donor = {}
     for key in UNIT_MONEY_KEYS:
+        if key in skip:
+            continue
         if (lead or {}).get(key) not in (None, ""):
             donor[key] = lead.get(key)
     return donor
