@@ -986,6 +986,57 @@ async def test_each_chassis_keeps_its_oem_body_and_a_blank_invoice_waits(client)
     assert by["MD9GANESHDV"]["variant"] == "Maxx (DV220)"
 
 
+def test_stale_sibling_billed_label_follows_that_chassis():
+    """A DV pack label must not stay on a chassis OEM billed as FB or PV.
+
+    Live files kept Maxx (DV220) in oemBilledVariant after the working variant
+    had already been corrected to the chassis's own body. The next sync
+    replaces the label. It does not copy that body onto the DV sibling.
+    """
+    lead = {
+        "leadId": "LD-STALE-LABEL",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "chassisNumber": "MD9STALEDV", "sameOrderMultiUnit": True,
+        "oemBilledModel": "Turbo Max", "oemBilledVariant": "Maxx (DV220)",
+        "oemBilledBodyType": "DV220",
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9STALEDV", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "oemBilledVariant": "Maxx (DV220)",
+             "oemBilledBodyType": "DV220"},
+            {"sno": 2, "chassisNumber": "MD9STALEFB", "model": "Turbo Max",
+             "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+             "oemBilledVariant": "Maxx (DV220)", "oemBilledBodyType": "DV220"},
+            {"sno": 3, "chassisNumber": "MD9STALEPV", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "oemBilledVariant": "Maxx (DV220)",
+             "oemBilledBodyType": "DV220"},
+        ],
+    }
+    sold = [
+        {"chassis": "MD9STALEDV", "model": "Turbo Max", "variant": "Maxx (DV220)",
+         "oemSkuKey": "turbo.maxx.dv220"},
+        {"chassis": "MD9STALEFB", "model": "Turbo Max", "variant": "Maxx (FB)",
+         "oemSkuKey": "turbo.maxx.fb"},
+        {"chassis": "MD9STALEPV", "model": "Turbo Max", "variant": "Maxx (PV)",
+         "oemSkuKey": "turbo.maxx.pv"},
+    ]
+    units = oem_sync.fill_pack_unit_skus(lead, sold)
+    by = {u["chassisNumber"]: u for u in units}
+    assert by["MD9STALEDV"]["variant"] == "Maxx (DV220)"
+    assert by["MD9STALEDV"]["oemBilledVariant"] == "Maxx (DV220)"
+    assert by["MD9STALEDV"]["oemBilledBodyType"] == "DV220"
+    assert by["MD9STALEFB"]["variant"] == "Maxx (FB)"
+    assert by["MD9STALEFB"]["oemBilledVariant"] == "Maxx (FB)"
+    assert by["MD9STALEFB"]["oemBilledBodyType"] == "FB"
+    assert by["MD9STALEPV"]["variant"] == "Maxx (PV)"
+    assert by["MD9STALEPV"]["oemBilledVariant"] == "Maxx (PV)"
+    assert by["MD9STALEPV"]["oemBilledBodyType"] == "PV"
+    again = oem_sync.fill_pack_unit_skus({**lead, "units": units}, sold)
+    assert again == units
+    header = oem_sync.fill_lead_skus(lead, sold)
+    assert header.get("oemBilledVariant", "Maxx (DV220)") == "Maxx (DV220)"
+    assert header.get("variant", "Maxx (DV220)") == "Maxx (DV220)"
+
+
 @pytest.mark.asyncio
 async def test_delivery_adopts_billed_dv_body(client):
     mobile = "9811100223"

@@ -1741,6 +1741,32 @@ def available_body_fields(row):
     return raw
 
 
+def _refresh_billed_labels(rec, billed):
+    """Point oemBilled* at this chassis's own SKU.
+
+    The working variant can already be the billed body while the label still
+    names a sibling (a DV pack label left on an FB or PV chassis). A later
+    sync replaces that label. A blank label is left blank, and an invoice
+    that names no catalog variant is not given one.
+    """
+    if not isinstance(rec, dict) or not billed:
+        return False
+    changed = False
+    for src, dest in (
+            ("model", "oemBilledModel"),
+            ("variant", "oemBilledVariant"),
+            ("bodyType", "oemBilledBodyType"),
+    ):
+        val = str(billed.get(src) or "").strip()
+        current = str(rec.get(dest) or "").strip()
+        # Only a label that is already set, and disagrees, is rewritten.
+        # Filling a blank label here would mark every matched file as updated.
+        if val and current and current != val:
+            rec[dest] = val
+            changed = True
+    return changed
+
+
 def stamp_available_billed_bodies(target, row, *, billed=None, available=None):
     """Write available + billed body onto a lead or unit dict. Working SKU is billed."""
     rec = target if isinstance(target, dict) else {}
@@ -2012,6 +2038,16 @@ def fill_lead_skus(lead, sold_rows=None):
         for k, v in body_rec.items():
             if v and str((lead or {}).get(k) or "") != str(v):
                 patch[k] = v
+    if use_billed and str(use_billed.get("model") or "").strip():
+        labels = {
+            "oemBilledModel": patch.get("oemBilledModel") or (lead or {}).get("oemBilledModel") or "",
+            "oemBilledVariant": patch.get("oemBilledVariant") or (lead or {}).get("oemBilledVariant") or "",
+            "oemBilledBodyType": patch.get("oemBilledBodyType") or (lead or {}).get("oemBilledBodyType") or "",
+        }
+        if _refresh_billed_labels(labels, use_billed):
+            for key, val in labels.items():
+                if str((lead or {}).get(key) or "") != str(val):
+                    patch[key] = val
     return patch
 
 
@@ -2067,6 +2103,8 @@ def fill_pack_unit_skus(lead, sold_rows=None):
         avail = available_body_fields(row) if row else None
         if row and billed and available_differs_from_billed(avail, billed):
             stamp_available_billed_bodies(rec, row, billed=billed, available=avail)
+        if billed and str(billed.get("model") or "").strip():
+            _refresh_billed_labels(rec, billed)
         out.append(rec)
     return out
 
