@@ -98,6 +98,20 @@ def test_sold_date_ignores_dealer_billing_date():
     }) == ""
 
 
+def test_cancelled_invoice_still_in_sold_is_not_a_rebill():
+    dead = "MD9CANCELSTALE"
+    sold = [
+        {"chassis": dead, "invoiceNumber": "AF-OLD"},
+        {"chassis": "MD9REBILLOK", "invoiceNumber": "AF-NEW"},
+    ]
+    cancelled = [
+        {"chassis": dead, "invoiceNumber": "AF-OLD"},
+        {"chassis": "MD9REBILLOK", "invoiceNumber": "AF-OLD"},
+    ]
+    gone = oem_sync.cancelled_chassis_without_live_rebill(sold, cancelled)
+    assert gone == {dead}
+
+
 def test_billing_day_counts_match_oem_invoice_list():
     rows = [
         {"soldDate": "2026-10-14", "invoiceNumber": "AF-1"},
