@@ -11666,11 +11666,18 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
     write_filt["receipts"] = {"$not": {"$elemMatch": {
         "amount": amount, "date": receipt_date, "recordedAt": {"$gte": cutoff},
     }}}
+    new_received = {"$add": [{"$ifNull": ["$receivedAgainstFile", 0]}, amount]}
+    outstanding_expr = {"$max": [0, {"$subtract": [committed, new_received]}]}
     updated = await db.finance.find_one_and_update(
         write_filt,
-        {"$inc": {"receivedAgainstFile": amount},
-         "$push": {"receipts": receipt},
-         "$set": {"lastPaymentDate": receipt_date, "lastUpdated": today()}},
+        [{"$set": {
+            "receivedAgainstFile": new_received,
+            "fileOutstanding": outstanding_expr,
+            "status": {"$cond": [{"$lte": [outstanding_expr, 0]}, "Received", "Partial"]},
+            "lastPaymentDate": receipt_date,
+            "lastUpdated": today(),
+            "receipts": {"$concatArrays": [{"$ifNull": ["$receipts", []]}, [receipt]]},
+        }}],
         return_document=ReturnDocument.AFTER,
     )
     if not updated:
@@ -11685,11 +11692,7 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
                                  f"Committed ₹{ce.round2(committed)}, already received "
                                  f"₹{ce.round2(already)} — only ₹{room} can be booked.")
     received = ce.round2(ce.num(updated.get("receivedAgainstFile")))
-    outstanding = ce.round2(max(0.0, committed - received))
-    await db.finance.update_one({"fileNumber": file_number}, {
-        "$set": {"fileOutstanding": outstanding,
-                 "status": "Received" if outstanding <= 0 else "Partial"},
-    })
+    outstanding = ce.round2(ce.num(updated.get("fileOutstanding")))
     await write_audit(act, "receipt", "finance", leadId=f.get("leadId", ""), financeFileNumber=file_number,
                       old={"receivedAgainstFile": ce.num(f.get("receivedAgainstFile")), "fileOutstanding": ce.num(f.get("fileOutstanding"))},
                       new={"receivedAgainstFile": received, "fileOutstanding": outstanding, "amount": amount})
@@ -17768,6 +17771,7 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
               "lastUpdated": now_iso()}
     if existing.get("manual"):
         setdoc["manual"] = True
+    setdoc.pop("claimStatus", None)
     filt = {"leadId": body.leadId, "componentKey": body.componentKey}
     if body.unitSno:
         filt["unitSno"] = body.unitSno
@@ -17784,9 +17788,19 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
         "amount": amount, "date": receipt_date, "reference": str(body.reference or ""),
         "recordedAt": {"$gte": cutoff},
     }}}
+    new_received = {"$add": [{"$ifNull": ["$receivedAmount", 0]}, amount]}
+    status_expr = (
+        {"$cond": [{"$gte": [new_received, eligible - 0.01]}, "Received", "Partial"]}
+        if eligible > 0 else "Partial"
+    )
     updated = await db.claims.find_one_and_update(
         write_filt,
-        {"$set": setdoc, "$inc": {"receivedAmount": amount}, "$push": {"receipts": receipt}},
+        [{"$set": {
+            **setdoc,
+            "receivedAmount": new_received,
+            "receipts": {"$concatArrays": [{"$ifNull": ["$receipts", []]}, [receipt]]},
+            "claimStatus": status_expr,
+        }}],
         upsert=False,
         return_document=ReturnDocument.AFTER,
     )
@@ -17809,8 +17823,8 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
                 f"Eligible ₹{eligible}, already received ₹{ce.round2(already)} — only ₹{room} can be booked.")
     else:
         received = ce.round2(ce.num(updated.get("receivedAmount")))
-    status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
-    await db.claims.update_one(filt, {"$set": {"claimStatus": status}})
+    status = (updated or {}).get("claimStatus") or (
+        "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial")
     await sheet_sync("claims", {"claimId": claim_id, "leadId": body.leadId,
                                     "customer": customer, "model": model,
                                     "claimStatus": status, "receivedAmount": received, "claimAmount": body.amount})
