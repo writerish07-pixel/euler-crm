@@ -2969,13 +2969,19 @@ def _row_invoice(row):
     return _norm_invoice((row or {}).get("invoiceNumber") or (row or {}).get("invoice_number"))
 
 
-def cancelled_chassis_without_live_rebill(sold_rows, cancelled_rows):
+def _is_cancelled_invoice_status(row):
+    status = str((row or {}).get("invoiceStatus") or (row or {}).get("status") or "").strip().upper()
+    return status in ("CANCELLED", "CANCELED", "VOID")
+
+
+def cancelled_chassis_without_live_rebill(sold_rows, cancelled_rows, live_invoice_rows=None):
     """Chassis to clear because the Invoice List cancel is still the live bill.
 
-    A Sold row that carries the cancelled invoice is a stale copy of that bill.
-    A Sold row with a different invoice is the new Created bill, and that
-    chassis stays. A cancel row with no invoice number follows the older rule:
-    clear the chassis only when Sold no longer lists it at all.
+    A Sold row, or a Created Invoice List row, with a different invoice is the
+    new bill, and that chassis stays. A Sold row that still carries the
+    cancelled invoice is a stale copy, not a rebill. A cancel row with no
+    invoice number follows the older rule: clear the chassis only when neither
+    Sold nor the Created list still has a live bill for it.
     """
     cancelled_invoices = {}
     bare = set()
@@ -2989,16 +2995,40 @@ def cancelled_chassis_without_live_rebill(sold_rows, cancelled_rows):
         else:
             bare.add(ch)
     rebilled = set()
-    for row in sold_rows or []:
+
+    def note_live(row):
+        if _is_cancelled_invoice_status(row):
+            return
         ch = _norm_chassis((row or {}).get("chassis"))
-        if ch not in cancelled_invoices:
-            continue
         inv = _row_invoice(row)
-        if inv and inv not in cancelled_invoices[ch]:
+        if not ch or not inv:
+            return
+        cancelled_invs = cancelled_invoices.get(ch)
+        if cancelled_invs is None:
+            if ch in bare:
+                rebilled.add(ch)
+            return
+        if inv not in cancelled_invs:
             rebilled.add(ch)
-    live = sold_chassis_set(sold_rows)
-    bare_only = bare - live - set(cancelled_invoices)
+
+    created_rows = [
+        row for row in (live_invoice_rows or [])
+        if not _is_cancelled_invoice_status(row)
+    ]
+    for row in sold_rows or []:
+        note_live(row)
+    for row in created_rows:
+        note_live(row)
+    live = sold_chassis_set(sold_rows) | sold_chassis_set(created_rows)
+    bare_only = bare - live - set(cancelled_invoices) - rebilled
     return (set(cancelled_invoices) - rebilled) | bare_only
+
+
+def _pick_created_invoice(rows):
+    """Latest Created bill for a chassis. Date, then invoice number."""
+    def key(row):
+        return (str((row or {}).get("soldDate") or (row or {}).get("syncedAt") or ""), _row_invoice(row))
+    return max(rows, key=key)
 
 
 def _staff_delivery_locked(lead):
@@ -3189,8 +3219,10 @@ def drop_cancelled_empty_units(lead):
 async def delink_cancelled_sold_invoices(db):
     """Drop chassis whose Invoice List rows are all Cancelled.
 
-    A rebilled chassis is on Sold again under the new Created invoice. That
-    cancelled bill is history and must not clear the lead. Staff-completed
+    A rebilled chassis is on Sold again, or still on the Created invoice list,
+    under the new invoice. That cancelled bill is history and must not clear
+    the lead. A Sold row that still shows the cancelled invoice is moved to
+    the Created bill before the lead is checked. Staff-completed
     Delivered / Close Won files keep their delivery status. A cancelled-only
     chassis is always cleared (and an empty cancelled pack unit is dropped).
     Chassis that merely vanished from Sold — with no Invoice List cancel —
@@ -3199,21 +3231,63 @@ async def delink_cancelled_sold_invoices(db):
     """
     sold = [r async for r in db.oem_sold.find({})]
     cancelled_rows = [r async for r in db.oem_cancelled_invoices.find({})]
-    # Rebill: Sold carries a different invoice than the cancelled bill.
+    invoice_rows = [r async for r in db.oem_invoices.find({})]
+    # Rebill: Sold or the Created invoice list carries a different invoice.
     # The same invoice still sitting in Sold is the cancelled bill, not a rebill.
-    cancelled_only = cancelled_chassis_without_live_rebill(sold, cancelled_rows)
-    stale = []
+    cancelled_only = cancelled_chassis_without_live_rebill(sold, cancelled_rows, invoice_rows)
     cancelled_invoices = {}
     for row in cancelled_rows:
         ch = _norm_chassis((row or {}).get("chassis"))
         inv = _row_invoice(row)
         if ch and inv:
             cancelled_invoices.setdefault(ch, set()).add(inv)
+    created_by_chassis = {}
+    for row in invoice_rows:
+        if _is_cancelled_invoice_status(row):
+            continue
+        ch = _norm_chassis((row or {}).get("chassis"))
+        inv = _row_invoice(row)
+        if not ch or not inv or inv in cancelled_invoices.get(ch, set()):
+            continue
+        created_by_chassis.setdefault(ch, []).append(row)
+    stale = []
     for row in sold:
         ch = _norm_chassis((row or {}).get("chassis"))
         inv = _row_invoice(row)
-        if ch and inv and inv in cancelled_invoices.get(ch, set()):
+        if not (ch and inv and inv in cancelled_invoices.get(ch, set())):
+            continue
+        created = created_by_chassis.get(ch)
+        if not created:
             stale.append({"chassis": ch, "invoiceNumber": inv})
+            continue
+        chosen = _pick_created_invoice(created)
+        new_inv = _row_invoice(chosen)
+        already = any(
+            _norm_chassis((other or {}).get("chassis")) == ch and _row_invoice(other) == new_inv
+            for other in sold
+        )
+        if already:
+            stale.append({"chassis": ch, "invoiceNumber": inv})
+            continue
+        patch = {"invoiceNumber": new_inv}
+        sold_date = str(chosen.get("soldDate") or "").strip()
+        if sold_date:
+            patch["soldDate"] = sold_date
+        # The new bill can be a different customer. Keep their mobile and name
+        # so the old lead is not matched to this invoice.
+        bob_mobile = _digits10(chosen.get("mobile"))
+        if len(bob_mobile) == 10:
+            patch["mobile"] = bob_mobile
+        for key in ("customerName", "numberPlate"):
+            value = str(chosen.get(key) or "").strip()
+            if value:
+                patch[key] = value
+        if row.get("_id") is not None:
+            await db.oem_sold.update_one({"_id": row["_id"]}, {"$set": patch})
+        else:
+            await db.oem_sold.update_one(
+                {"chassis": ch, "invoiceNumber": inv}, {"$set": patch})
+        row.update(patch)
     if stale:
         await db.oem_sold.delete_many({"$or": stale})
         stale_keys = {(s["chassis"], s["invoiceNumber"]) for s in stale}
@@ -3226,6 +3300,11 @@ async def delink_cancelled_sold_invoices(db):
         sold = [r for r in sold if _norm_chassis((r or {}).get("chassis")) not in cancelled_only]
     cancelled_ch = cancelled_only
     sold_ch = sold_chassis_set(sold)
+    sold_by_chassis = {}
+    for row in sold:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if ch:
+            sold_by_chassis[ch] = row
     leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads)
     stats = {"cleared": 0, "flagged": 0, "reverted": 0, "droppedUnits": 0, "clearedIds": []}
@@ -3234,17 +3313,25 @@ async def delink_cancelled_sold_invoices(db):
             continue
         held = lead_chassis_list(lead)
         cancelled_held = [c for c in held if c in cancelled_ch]
-        missing = [c for c in held if c not in sold_ch and c not in cancelled_ch]
+        # A Created bill for a different mobile is not this lead's rebill.
+        other_customer = [
+            c for c in held
+            if c not in cancelled_ch and mobiles_conflict(lead, sold_by_chassis.get(c))
+        ]
+        missing = [
+            c for c in held
+            if c not in sold_ch and c not in cancelled_ch and c not in set(other_customer)
+        ]
         lid = lead.get("leadId")
         if not lid:
             continue
         replacements = sold_rows_replacing_gone(
             lead, sold, occupied - set(held))
-        drop = set(cancelled_held)
+        drop = set(cancelled_held) | set(other_customer)
         if missing:
             if replacements or not _staff_delivery_locked(lead):
                 drop.update(missing)
-            elif not cancelled_held:
+            elif not drop:
                 if not lead.get("oemInvoiceMissing"):
                     await db.leads.update_one(
                         {"leadId": lid},

@@ -18,7 +18,7 @@ No production database was written. No deploy was triggered. No pull request was
 | Files | `backend/oem_sync.py`, `backend/tests/test_oem_billing.py` |
 | Dependencies | Rebill path, staff-delivered missing-sold flag, pack unit drop. |
 | Tests executed | The new helper test; the previously failing pack-cancel test; `test_staff_delivered_rebill_replaces_cancelled_pack_chassis`; `test_oem_sold_cancel_delinks_auto_delivered_then_restamps`; `test_staff_delivered_missing_sold_is_flagged_not_cleared`; `test_delink_and_stamp_keep_rebilled_chassis_on_the_lead`; `test_replace_cancelled_keeps_rebilled_chassis_on_sold`. |
-| Result | 7 passed. |
+| Result | 7 passed. Follow-up: a Created invoice list row is also a rebill when Sold still shows the cancelled bill. That chassis stays, and the Sold row is moved to the Created invoice. If that Created bill has a different mobile, the old lead is cleared and does not receive the new invoice. |
 | Status | Repaired on this branch. Not deployed. |
 
 ## AUD-002 — Catalog test still expected blank RTO
