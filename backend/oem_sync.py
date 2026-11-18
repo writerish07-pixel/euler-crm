@@ -3273,14 +3273,21 @@ async def delink_cancelled_sold_invoices(db):
         sold_date = str(chosen.get("soldDate") or "").strip()
         if sold_date:
             patch["soldDate"] = sold_date
+        # The new bill can be a different customer. Keep their mobile and name
+        # so the old lead is not matched to this invoice.
+        bob_mobile = _digits10(chosen.get("mobile"))
+        if len(bob_mobile) == 10:
+            patch["mobile"] = bob_mobile
+        for key in ("customerName", "numberPlate"):
+            value = str(chosen.get(key) or "").strip()
+            if value:
+                patch[key] = value
         if row.get("_id") is not None:
             await db.oem_sold.update_one({"_id": row["_id"]}, {"$set": patch})
         else:
             await db.oem_sold.update_one(
                 {"chassis": ch, "invoiceNumber": inv}, {"$set": patch})
-        row["invoiceNumber"] = new_inv
-        if sold_date:
-            row["soldDate"] = sold_date
+        row.update(patch)
     if stale:
         await db.oem_sold.delete_many({"$or": stale})
         stale_keys = {(s["chassis"], s["invoiceNumber"]) for s in stale}
@@ -3293,6 +3300,11 @@ async def delink_cancelled_sold_invoices(db):
         sold = [r for r in sold if _norm_chassis((r or {}).get("chassis")) not in cancelled_only]
     cancelled_ch = cancelled_only
     sold_ch = sold_chassis_set(sold)
+    sold_by_chassis = {}
+    for row in sold:
+        ch = _norm_chassis((row or {}).get("chassis"))
+        if ch:
+            sold_by_chassis[ch] = row
     leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads)
     stats = {"cleared": 0, "flagged": 0, "reverted": 0, "droppedUnits": 0, "clearedIds": []}
@@ -3301,17 +3313,25 @@ async def delink_cancelled_sold_invoices(db):
             continue
         held = lead_chassis_list(lead)
         cancelled_held = [c for c in held if c in cancelled_ch]
-        missing = [c for c in held if c not in sold_ch and c not in cancelled_ch]
+        # A Created bill for a different mobile is not this lead's rebill.
+        other_customer = [
+            c for c in held
+            if c not in cancelled_ch and mobiles_conflict(lead, sold_by_chassis.get(c))
+        ]
+        missing = [
+            c for c in held
+            if c not in sold_ch and c not in cancelled_ch and c not in set(other_customer)
+        ]
         lid = lead.get("leadId")
         if not lid:
             continue
         replacements = sold_rows_replacing_gone(
             lead, sold, occupied - set(held))
-        drop = set(cancelled_held)
+        drop = set(cancelled_held) | set(other_customer)
         if missing:
             if replacements or not _staff_delivery_locked(lead):
                 drop.update(missing)
-            elif not cancelled_held:
+            elif not drop:
                 if not lead.get("oemInvoiceMissing"):
                     await db.leads.update_one(
                         {"leadId": lid},

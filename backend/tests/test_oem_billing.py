@@ -1470,6 +1470,61 @@ async def test_delink_keeps_rebill_when_only_the_created_list_has_the_new_invoic
 
 
 @pytest.mark.asyncio
+async def test_created_rebill_for_a_different_mobile_stays_off_the_old_lead(client):
+    """Alice's cancelled bill must not receive Bob's new invoice for the same chassis."""
+    chassis = "MD9OTHERCUST01"
+    alice = "9811111111"
+    bob = "9822222222"
+    lid = "LD-ALICE-CANCEL"
+    old_inv = "AF-ALICE-OLD"
+    new_inv = "AF-BOB-NEW"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_cancelled_invoices.delete_many({"chassis": chassis})
+    await server.db.oem_invoices.delete_many({"chassis": chassis})
+    await server.db.leads.delete_many({
+        "$or": [{"leadId": lid}, {"mobile": {"$in": [alice, bob]}}, {"chassisNumber": chassis}],
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Alice Cancel", "mobile": alice,
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "chassisNumber": chassis, "invoiceNumber": old_inv,
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": alice, "invoiceNumber": old_inv,
+        "customerName": "Alice Cancel", "coulsonStatus": "SOLD",
+    })
+    await server.db.oem_cancelled_invoices.insert_one({
+        "chassis": chassis, "invoiceNumber": old_inv, "invoiceStatus": "CANCELLED",
+    })
+    await server.db.oem_invoices.insert_one({
+        "chassis": chassis, "invoiceNumber": new_inv, "invoiceStatus": "CREATED",
+        "mobile": bob, "customerName": "Bob Rebill", "soldDate": "2026-10-14",
+    })
+    try:
+        gone = await oem_sync.delink_cancelled_sold_invoices(server.db)
+        assert lid in (gone.get("clearedIds") or [])
+        lead = await server.db.leads.find_one({"leadId": lid})
+        assert chassis not in oem_sync.lead_chassis_list(lead)
+        assert lead.get("invoiceNumber") != new_inv
+        assert lead.get("cancelledInvoiceNumber") == old_inv
+        sold = await server.db.oem_sold.find_one({"chassis": chassis})
+        assert sold and sold["invoiceNumber"] == new_inv
+        assert oem_sync._digits10(sold.get("mobile")) == bob
+        assert sold.get("customerName") == "Bob Rebill"
+        await oem_sync.apply_sold_vehicle_ids_to_leads(server.db)
+        lead = await server.db.leads.find_one({"leadId": lid})
+        assert chassis not in oem_sync.lead_chassis_list(lead)
+        assert lead.get("invoiceNumber") != new_inv
+    finally:
+        await server.db.oem_sold.delete_many({"chassis": chassis})
+        await server.db.oem_cancelled_invoices.delete_many({"chassis": chassis})
+        await server.db.oem_invoices.delete_many({"chassis": chassis})
+        await server.db.leads.delete_many({
+            "$or": [{"leadId": lid}, {"mobile": {"$in": [alice, bob]}}, {"chassisNumber": chassis}],
+        })
+
+
+@pytest.mark.asyncio
 async def test_lost_lead_is_revived_when_oem_bills_that_mobile(client):
     chassis = "MD9LOSTREV01"
     mobile = "9812211004"
