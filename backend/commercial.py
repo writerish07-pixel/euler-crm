@@ -789,7 +789,12 @@ def get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows):
 
 
 def scheme_share_split_for(model, variant, booking_date, offers, scheme_rows):
-    """PURE share splitter — company share applied FIRST (partial/under-package rule)."""
+    """Diagnostics only; money must use compute_scheme_allocation.
+
+    PURE share splitter — company share applied FIRST (partial/under-package rule).
+    This helper still claims entitlement components. Dealer earnings and the
+    claim register must not call it.
+    """
     master = get_scheme_shares_for_lead(model, variant, booking_date, scheme_rows)
     by_component = {}
     dealer_total = 0.0
@@ -986,8 +991,9 @@ def compute_scheme_allocation(s, scheme_rows):
     mode = normalize_benefit_mode(s.get("benefitMode") or s.get("customerBenefitMode"))
     breakup = _parse_benefit_breakup(s)
     # Flat schemeAllocation decision map (PUT /scheme-allocation) merges under
-    # benefitPassedBreakup so both persistence shapes feed one engine. Breakup wins
-    # on key conflict. Summary objects from recompute_lead are ignored.
+    # benefitPassedBreakup so both persistence shapes feed one engine. The flat
+    # schemeAllocation decisions win on a key conflict. Summary objects from
+    # recompute_lead are ignored.
     flat_decisions = _explicit_allocation(s)
     if flat_decisions or isinstance(breakup, dict):
         merged = {}

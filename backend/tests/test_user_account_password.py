@@ -45,12 +45,14 @@ async def test_create_user_without_email_shows_password(client):
     body = r.json()
     assert body["email"] == ""
     assert body["loginId"] == "harish.b"
-    assert body["password"] == "desk#441"
+    assert body.get("passwordSet") is True
+    assert "password" not in body
 
     listed = (await client.get("/api/auth/users")).json()
     row = _row(listed, "harish.b")
     assert row["email"] == ""
-    assert row["password"] == "desk#441"
+    assert "password" not in row
+    assert row.get("passwordSet") is True
 
     login = await client.post("/api/auth/login", json={"email": "harish.b", "password": "desk#441"})
     assert login.status_code == 200, login.text
@@ -96,7 +98,8 @@ async def test_staff_change_password_updates_owner_list(client):
 
     listed = (await client.get("/api/auth/users")).json()
     row = _row(listed, "s.mathur")
-    assert row["password"] == "newPass9"
+    assert "password" not in row
+    assert row.get("passwordSet") is True
     assert row.get("passwordChangedAt")
 
     ok = await client.post("/api/auth/login", json={"email": "s.mathur", "password": "newPass9"})
@@ -107,7 +110,7 @@ async def test_staff_change_password_updates_owner_list(client):
 
 @pytest.mark.asyncio
 async def test_seed_fills_password_plain_when_hash_still_default(client):
-    """Existing demo rows that never stored plaintext get it backfilled if the hash is still euler@123."""
+    """A default hash is flagged. Seed must not write the password back in plaintext."""
     import auth as authmod
 
     await server.db.users.update_one(
@@ -121,7 +124,10 @@ async def test_seed_fills_password_plain_when_hash_still_default(client):
     await authmod.seed_users(server.db)
     listed = (await client.get("/api/auth/users")).json()
     row = next(u for u in listed if u["email"] == "executive@euler.com")
-    assert row["password"] == "euler@123"
+    assert "password" not in row
+    assert row.get("usingDefaultPassword") is True
+    stored = await server.db.users.find_one({"email": "executive@euler.com"})
+    assert not (stored.get("passwordPlain") or "")
 
 
 @pytest.mark.asyncio
@@ -141,7 +147,7 @@ async def test_seed_does_not_overwrite_staff_password_after_change(client):
     await authmod.seed_users(server.db)
     listed = (await client.get("/api/auth/users")).json()
     row = _row(listed, "kept.pw")
-    assert row["password"] == "keptPass9"
+    assert "password" not in row
     ok = await client.post("/api/auth/login", json={"email": "kept.pw", "password": "keptPass9"})
     assert ok.status_code == 200
 
@@ -211,7 +217,11 @@ async def test_login_succeeds_from_plaintext_when_hash_is_missing(client):
         "role": "executive",
     })
     uid = r.json()["userId"]
-    await server.db.users.update_one({"userId": uid}, {"$unset": {"passwordHash": ""}})
+    # Legacy rows kept the password only in passwordPlain. Create no longer writes that field.
+    await server.db.users.update_one(
+        {"userId": uid},
+        {"$unset": {"passwordHash": ""}, "$set": {"passwordPlain": "desk#441"}},
+    )
     ok = await client.post("/api/auth/login", json={"email": "no.hash", "password": "desk#441"})
     assert ok.status_code == 200, ok.text
     repaired = await server.db.users.find_one({"userId": uid})
@@ -270,7 +280,8 @@ async def test_owner_can_reset_staff_password_then_they_sign_in(client):
     assert put.status_code == 200, put.text
     listed = (await client.get("/api/auth/users")).json()
     row = _row(listed, "reset.me")
-    assert row["password"] == "newPass9"
+    assert "password" not in row
+    assert put.json().get("password") == "newPass9"
     ok = await client.post("/api/auth/login", json={"email": "reset.me", "password": "newPass9"})
     assert ok.status_code == 200, ok.text
     stale = await client.post("/api/auth/login", json={"email": "reset.me", "password": "oldPass1"})

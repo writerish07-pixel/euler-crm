@@ -190,10 +190,12 @@ export function isSlowLead360Path(url) {
 // either doubles it or fails as "duplicate" on a receipt that did save. Staff
 // see the error and check the ledger instead.
 const CREATE_ONCE_LEAD_ACTIONS = /^\/leads\/[^/]+\/(payments|refund|convert-booking)$/;
+const CREATE_ONCE_MONEY = /^\/finance\/[^/]+\/receipt$/;
 
 export function isCreateOncePath(url) {
   const p = String(url || "").split("?")[0];
-  return p === "/leads" || CREATE_ONCE_LEAD_ACTIONS.test(p);
+  return p === "/leads" || p === "/claims/receipt"
+    || CREATE_ONCE_LEAD_ACTIONS.test(p) || CREATE_ONCE_MONEY.test(p);
 }
 
 /** KYC / OEM Extra Support / deal-sheet scans. Never retry: the first POST

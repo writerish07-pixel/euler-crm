@@ -342,9 +342,9 @@ export default function Settings() {
             Pick the person from <b>Staff & Reports</b> so the login name matches the
             Executive on existing leads — that is what fills their dashboard.
             Staff sign in with the <b>User ID</b> (or their name if it is unique). Email is optional.
-            After they log in they can change their password; the Password column
-            here updates to whatever they saved. If someone cannot sign in, type a
-            new password in that column and Save — that overwrites the login.
+            After they log in they can change their password. If someone cannot
+            sign in, use Reset password — the new password is shown once and is
+            not stored where this screen can read it back.
             {" "}For an <b>OEM Finance</b> login type the name — they are not on Staff & Reports.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end mb-4">
@@ -1085,40 +1085,36 @@ function LoginIdCell({ row, onSaved }) {
 }
 
 function PasswordCell({ row, onSaved }) {
-  const [value, setValue] = useState(row.password || "");
   const [busy, setBusy] = useState(false);
-  const dirty = value !== (row.password || "");
-  useEffect(() => { setValue(row.password || ""); }, [row.password, row.userId]);
+  const [shownOnce, setShownOnce] = useState("");
 
-  const save = async () => {
-    const pw = value.trim();
-    if (pw.length < 6) return toast.error("Password must be at least 6 characters");
+  const reset = async () => {
+    const pw = window.prompt("New password (at least 6 characters). It is shown once.");
+    if (pw == null) return;
+    if (pw.trim().length < 6) return toast.error("Password must be at least 6 characters");
     setBusy(true);
     try {
-      await put(`/auth/users/${row.userId}/password`, { password: pw });
-      toast.success("Password updated — they can sign in with this now");
+      const res = await put(`/auth/users/${row.userId}/password`, { password: pw.trim() });
+      const once = res?.password || pw.trim();
+      setShownOnce(once);
+      toast.success("Password reset. Copy it now — it will not be shown again.");
       onSaved();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not set the password"));
-      setValue(row.password || "");
     } finally { setBusy(false); }
   };
 
   return (
     <div className="flex flex-col items-start gap-1">
-      <div className="flex items-center gap-1.5">
-        <Input data-testid={`user-password-${row.userId}`} value={value}
-          className="!py-1 text-xs w-32 font-mono"
-          placeholder="set password"
-          onFocus={(e) => e.target.select()}
-          onChange={(e) => setValue(e.target.value)} />
-        {dirty && (
-          <Button variant="secondary" className="!py-1 !px-2 text-xs" disabled={busy} onClick={save}
-            data-testid={`save-password-${row.userId}`}>
-            Save
-          </Button>
-        )}
-      </div>
+      <Button variant="secondary" className="!py-1 !px-2 text-xs" disabled={busy} onClick={reset}
+        data-testid={`reset-password-${row.userId}`}>
+        Reset password
+      </Button>
+      {shownOnce ? (
+        <span className="text-[10px] font-mono text-ink" data-testid={`password-once-${row.userId}`}>
+          {shownOnce}
+        </span>
+      ) : null}
       {row.passwordChangedAt ? (
         <span className="text-[10px] text-ink-faint">
           updated {fmtWhen(row.passwordChangedAt)}

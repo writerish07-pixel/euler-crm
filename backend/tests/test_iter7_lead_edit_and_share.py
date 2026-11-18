@@ -13,10 +13,12 @@ def _load_base():
                     break
         except Exception:
             pass
-    assert v, "REACT_APP_BACKEND_URL missing"
-    return v.rstrip("/")
+    return (v or "").rstrip("/")
 
+pytestmark = pytest.mark.live_http
 BASE = _load_base()
+if not BASE:
+    pytest.skip("live_http: REACT_APP_BACKEND_URL is unset", allow_module_level=True)
 
 
 def _login(email, password):

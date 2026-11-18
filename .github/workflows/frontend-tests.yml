@@ -1,0 +1,26 @@
+name: Frontend tests
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+
+jobs:
+  frontend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: yarn
+          cache-dependency-path: frontend/yarn.lock
+      - name: Install
+        run: yarn install --frozen-lockfile
+      - name: Test
+        run: yarn test --watchAll=false
+        env:
+          CI: "true"

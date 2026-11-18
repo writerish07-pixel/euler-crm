@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import hmac
 import json
 import logging
 import io
@@ -57,6 +58,7 @@ client = AsyncIOMotorClient(os.environ["MONGO_URL"])
 db = client[os.environ["DB_NAME"]]
 
 app = FastAPI(title="Euler CRM API")
+_identity_index_status = {}
 _finance_index_status = {
     "status": "UNKNOWN",
     "ready": False,
@@ -393,7 +395,7 @@ async def get_lead_or_404(lead_id):
 
 
 async def get_scheme_rows():
-    return [clean(s) for s in await db.scheme_master.find().to_list(1000)]
+    return [clean(s) for s in await db.scheme_master.find().to_list(None)]
 
 
 # ---------------------------------------------------------------- audit trail (H4) — append-only transaction log
@@ -3095,6 +3097,22 @@ def _staff_safe_lead(lead: dict) -> dict:
     out = dict(lead)
     for k in OWNER_PNL_LEAD_KEYS:
         out.pop(k, None)
+    if isinstance(out.get("schemeAllocationSummary"), dict):
+        out["schemeAllocationSummary"] = _staff_safe_nested_shares(out["schemeAllocationSummary"])
+    units = out.get("units")
+    if isinstance(units, list):
+        safe_units = []
+        for unit in units:
+            if not isinstance(unit, dict):
+                safe_units.append(unit)
+                continue
+            row = dict(unit)
+            for k in OWNER_PNL_LEAD_KEYS:
+                row.pop(k, None)
+            if isinstance(row.get("schemeAllocationSummary"), dict):
+                row["schemeAllocationSummary"] = _staff_safe_nested_shares(row["schemeAllocationSummary"])
+            safe_units.append(row)
+        out["units"] = safe_units
     return out
 
 
@@ -4787,10 +4805,6 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      followup: Optional[bool] = False,
                      scope: Optional[str] = None,
                      user=Depends(current_user)):
-    # Boot already scans for retry-dups. Waiting on that lock (or repeating the
-    # 15k-row pass) after every deploy made GET /leads time out — empty register.
-    if _boot_state.get("maintenance") != "running":
-        await _ensure_retry_dups_repaired()
     await _ensure_pending_deals_parked()
     query = {"dealApprovalPending": {"$ne": True}}
     if status and status != "all":
@@ -9015,22 +9029,82 @@ async def _lead_has_money(lead_id):
     return bool(pay or book)
 
 
-async def _purge_retry_duplicate_lead(lead_id):
+_RETRY_HISTORY_COLLS = (
+    "payments", "bookings", "finance", "insurance", "claims",
+    "activities", "whatsapp_messages",
+)
+
+
+def _retry_moment(lead):
+    """Creation instant when the row has a time, not a date-only string."""
+    for key in ("createdAt", "lastUpdated", "createdDate"):
+        raw = str((lead or {}).get(key) or "").strip()
+        if "T" not in raw and " " not in raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    return None
+
+
+def _within_retry_window(keeper, extra):
+    a = _retry_moment(keeper)
+    b = _retry_moment(extra)
+    if not a or not b:
+        return False
+    return abs((a - b).total_seconds()) <= 10 * 60
+
+
+async def _retry_lead_has_history(lead_id):
+    for coll in _RETRY_HISTORY_COLLS:
+        if await db[coll].find_one({"leadId": lead_id}, {"_id": 1}):
+            return True
+    if await db[lead_docs.COLLECTION].find_one({"leadId": lead_id}, {"_id": 1}):
+        return True
+    return False
+
+
+def _doc_without_id(doc):
+    return {k: v for k, v in (doc or {}).items() if k != "_id"}
+
+
+async def _purge_retry_duplicate_lead(lead_id, *, kept_lead_id="", act=None, dry_run=False):
     """Remove a New file minted by a retried Create Lead. Mongo only.
 
     Google Sheet waits are what timed the desk out at 25s. Lead rows are
     claims-only on the sheet, so skipping traces here is safe.
+    dry_run reports that the lead would be removed and writes nothing.
     """
     lead = await db.leads.find_one({"leadId": lead_id})
     if not lead or not _is_retry_dup_candidate(lead):
         return False
-    if await _lead_has_money(lead_id):
+    if await _lead_has_money(lead_id) or await _retry_lead_has_history(lead_id):
         return False
+    if dry_run:
+        return True
+    related = {}
     for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
                  "activities", "dealer_earnings", "incentive_register", "billing_summaries",
-                 "whatsapp_messages", "whatsapp_outbox"]:
+                 "whatsapp_messages", "whatsapp_outbox", lead_docs.COLLECTION]:
+        rows = await db[coll].find({"leadId": lead_id}).to_list(500)
+        related[coll] = [_doc_without_id(row) for row in rows]
+    await db.leads_purged_archive.insert_one({
+        "leadId": lead_id,
+        "lead": _doc_without_id(lead),
+        "related": related,
+        "purgedAt": now_iso(),
+        "purgedBy": (act or {}).get("email") or "owner",
+        "keptLeadId": kept_lead_id,
+    })
+    await write_audit(
+        act, "purge-duplicate", "lead", leadId=lead_id,
+        old={"leadId": lead_id}, new={"keptLeadId": kept_lead_id})
+    for coll in related:
         await db[coll].delete_many({"leadId": lead_id})
-    await db[lead_docs.COLLECTION].delete_many({"leadId": lead_id})
     await db.leads.delete_one({"leadId": lead_id})
     return True
 
@@ -9056,20 +9130,19 @@ async def _merge_retry_siblings_into_pack(keeper, extras):
     return updated, removed
 
 
-async def _repair_retry_duplicate_leads():
-    """Collapse New files minted by the Create Lead retry / OEM leftover bug.
+async def _repair_retry_duplicate_leads(dry_run=False, act=None):
+    """List or remove Create Lead retry copies. Never groups by name alone.
 
-    Same person + same model + 2+ open unbooked singles with no money → keep the
-    first id. Variant is ignored so City / blank / Maxx (PV) copies still collapse.
-    createdDate is not required (many retried rows have it blank).
-    Different models on the same day still join one pack.
+    A copy is removed only when it shares a 10-digit mobile, model and variant
+    with the keeper, was created within 10 minutes, and has no history.
+    Same-day different-model packs are reported on a dry run and are not merged.
     """
     rows = await db.leads.find(
         {"dealCancelled": {"$ne": True}},
         {
             "leadId": 1, "customerName": 1, "mobile": 1, "interestedModel": 1,
-            "variant": 1, "createdDate": 1, "lastUpdated": 1, "currentStatus": 1,
-            "accountStatus": 1, "units": 1, "sameOrderMultiUnit": 1,
+            "variant": 1, "createdDate": 1, "createdAt": 1, "lastUpdated": 1,
+            "currentStatus": 1, "accountStatus": 1, "units": 1, "sameOrderMultiUnit": 1,
             "bookingDate": 1, "bookingId": 1, "deliveryStatus": 1, "deliveryDate": 1,
             "chassisNumber": 1, "invoiceNumber": 1, "numberPlate": 1,
             "exShowroom": 1, "dealCancelled": 1, "anotherVehicle": 1,
@@ -9080,61 +9153,69 @@ async def _repair_retry_duplicate_leads():
         if not _is_retry_dup_candidate(lead):
             continue
         key = _person_group_key(lead)
-        if not key:
+        if not key.startswith("m:"):
             continue
         by_person.setdefault(key, []).append(lead)
     repaired = []
     for _key, cluster in by_person.items():
         if len(cluster) < 2:
             continue
-        by_model = {}
+        by_sku = {}
         for lead in cluster:
-            by_model.setdefault(_model_key(lead) or _sku_key(lead), []).append(lead)
+            by_sku.setdefault(_sku_key(lead), []).append(lead)
         leftover = []
-        for _model, same in by_model.items():
+        for _sku, same in by_sku.items():
             if len(same) < 2:
                 leftover.extend(same)
                 continue
             same = sorted(same, key=lambda l: str(l.get("leadId") or ""))
-            ids = [r["leadId"] for r in same]
-            if await db.payments.find_one({"leadId": {"$in": ids}}) or \
-                    await db.bookings.find_one({"leadId": {"$in": ids}}):
-                leftover.extend(same)
-                continue
             keeper, extras = same[0], same[1:]
             removed = []
             for extra in extras:
-                if await _purge_retry_duplicate_lead(extra["leadId"]):
+                if not _within_retry_window(keeper, extra):
+                    leftover.append(extra)
+                    continue
+                if await _purge_retry_duplicate_lead(
+                        extra["leadId"], kept_lead_id=keeper["leadId"],
+                        act=act, dry_run=dry_run):
                     removed.append(extra["leadId"])
+                else:
+                    leftover.append(extra)
             if removed:
                 repaired.append({
                     "kept": keeper["leadId"], "removed": removed, "action": "delete-retry",
                     "customerName": keeper.get("customerName") or "",
+                    "dryRun": bool(dry_run),
                 })
             leftover.append(keeper)
-        days = {}
-        for lead in leftover:
-            day = _lead_created_day(lead) or str(lead.get("lastUpdated") or "")[:10]
-            if not day:
-                continue
-            days.setdefault(day, []).append(lead)
-        for _day, same_day in days.items():
-            models = {_model_key(l) for l in same_day}
-            if len(same_day) < 2 or len(models) < 2:
-                continue
-            same_day = sorted(same_day, key=lambda l: str(l.get("leadId") or ""))
-            ids = [r["leadId"] for r in same_day]
-            if await db.payments.find_one({"leadId": {"$in": ids}}) or \
-                    await db.bookings.find_one({"leadId": {"$in": ids}}):
-                continue
-            updated, removed = await _merge_retry_siblings_into_pack(same_day[0], same_day[1:])
-            if removed:
+        if dry_run:
+            days = {}
+            for lead in leftover:
+                day = _lead_created_day(lead) or str(lead.get("lastUpdated") or "")[:10]
+                if not day:
+                    continue
+                days.setdefault(day, []).append(lead)
+            for _day, same_day in days.items():
+                models = {_model_key(l) for l in same_day}
+                if len(same_day) < 2 or len(models) < 2:
+                    continue
+                same_day = sorted(same_day, key=lambda l: str(l.get("leadId") or ""))
                 repaired.append({
-                    "kept": same_day[0]["leadId"], "removed": removed, "action": "merge-pack",
+                    "kept": same_day[0]["leadId"],
+                    "removed": [l["leadId"] for l in same_day[1:]],
+                    "action": "merge-pack",
                     "customerName": same_day[0].get("customerName") or "",
-                    "vehicleCount": (updated or {}).get("vehicleCount"),
+                    "dryRun": True,
                 })
     return repaired
+
+
+@api.post("/leads/repair-retry-duplicates")
+async def repair_retry_duplicates(dryRun: bool = True, act=Depends(actor),
+                                  _owner=Depends(owner_only)):
+    """Owner-only. dryRun defaults to true and writes nothing."""
+    clusters = await _repair_retry_duplicate_leads(dry_run=dryRun, act=act)
+    return {"dryRun": bool(dryRun), "clusters": clusters}
 
 
 @api.delete("/leads/{lead_id}", dependencies=[Depends(owner_only)])
@@ -11016,7 +11097,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
 async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = None,
                         year: Optional[str] = None, q: Optional[str] = None):
     filt = {"leadId": lead_id} if lead_id else {}
-    rows = [clean(p) for p in await db.payments.find(filt).sort("date", -1).to_list(2000)]
+    rows = [clean(p) for p in await db.payments.find(filt).sort("date", -1).to_list(None)]
     needle = str(q or "").strip().lower()
     if needle:
         def _hit(p):
@@ -11030,9 +11111,14 @@ async def list_payments(lead_id: Optional[str] = None, month: Optional[str] = No
 
 @api.post("/leads/{lead_id}/payments")
 async def add_payment(lead_id: str, body: PaymentIn, act=Depends(actor), user=Depends(current_user)):
+    role = ((act or {}).get("role") or (user or {}).get("role") or "").strip().lower()
+    if role == "sales_gm":
+        raise HTTPException(
+            403,
+            "Sales GM approves deals; receipts are posted by sales staff or the money desk.",
+        )
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
-    role = ((act or {}).get("role") or (user or {}).get("role") or "").strip().lower()
     if body.paymentMode == "Finance":
         if role not in (*authmod.SALES_ROLES, *authmod.MONEY_ROLES):
             raise HTTPException(
@@ -11570,11 +11656,19 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
     outstanding = ce.round2(max(0.0, committed - received))
     receipt = {"amount": amount, "date": receipt_date,
                "reference": body.reference, "recordedAt": now_iso()}
+    from pymongo import ReturnDocument
+    updated = await db.finance.find_one_and_update(
+        {"fileNumber": file_number},
+        {"$inc": {"receivedAgainstFile": amount},
+         "$push": {"receipts": receipt},
+         "$set": {"lastPaymentDate": receipt_date, "lastUpdated": today()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    received = ce.round2(ce.num((updated or {}).get("receivedAgainstFile")))
+    outstanding = ce.round2(max(0.0, committed - received))
     await db.finance.update_one({"fileNumber": file_number}, {
         "$set": {"receivedAgainstFile": received, "fileOutstanding": outstanding,
-                 "status": "Received" if outstanding <= 0 else "Partial",
-                 "lastPaymentDate": receipt_date, "lastUpdated": today()},
-        "$push": {"receipts": receipt},
+                 "status": "Received" if outstanding <= 0 else "Partial"},
     })
     await write_audit(act, "receipt", "finance", leadId=f.get("leadId", ""), financeFileNumber=file_number,
                       old={"receivedAgainstFile": ce.num(f.get("receivedAgainstFile")), "fileOutstanding": ce.num(f.get("fileOutstanding"))},
@@ -11589,7 +11683,7 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
 async def list_deliveries(month: Optional[str] = None, year: Optional[str] = None,
                           user=Depends(current_user)):
     # Open bookings still in fulfilment, plus Delivered / Close Won retails.
-    leads = await db.leads.find({}, BOARD_LEAD_PROJ).to_list(5000)
+    leads = await db.leads.find({}, BOARD_LEAD_PROJ).to_list(None)
     leads = [l for l in leads if _is_open_booking_lead(l) or _is_delivered_lead(l)]
     if user.get("role") == "executive":
         leads = _leads_for_executive(leads, user)
@@ -17582,6 +17676,7 @@ class ClaimReceiptIn(BaseModel):
     date: str = ""
     reference: str = ""
     unitSno: Optional[int] = None
+    allowExcess: bool = False
 
 
 @api.post("/claims/receipt")
@@ -17612,15 +17707,37 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
             else:
                 eligible = ce.round2(ce.num(existing.get("eligibleClaim") or existing.get("claimAmount") or eligible))
         customer, model = lead.get("customerName", ""), lead.get("interestedModel", "")
-    received = ce.round2(ce.num(existing.get("receivedAmount")) + body.amount)
+    amount = ce.round2(body.amount)
+    receipt_date = body.date or today()
+    for prior in reversed(existing.get("receipts") or []):
+        if ce.round2(ce.num(prior.get("amount"))) != amount or str(prior.get("date") or "") != receipt_date:
+            continue
+        if str(prior.get("reference") or "") != str(body.reference or ""):
+            continue
+        try:
+            prev_at = datetime.fromisoformat(prior["recordedAt"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if prev_at.tzinfo is None:
+            prev_at = prev_at.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - prev_at).total_seconds() < FINANCE_RECEIPT_DEDUPE_SECONDS:
+            raise HTTPException(409, "Duplicate submission detected — this claim receipt was just recorded.")
+    already = ce.num(existing.get("receivedAmount"))
+    if eligible > 0 and already + amount > eligible + 0.01 and not body.allowExcess:
+        room = ce.round2(max(0.0, eligible - already))
+        raise HTTPException(
+            422,
+            f"Receipt ₹{amount} is more than this claim still expects. "
+            f"Eligible ₹{eligible}, already received ₹{ce.round2(already)} — only ₹{room} can be booked.")
+    received = ce.round2(already + amount)
     status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
     submitted = existing.get("submittedDate") or (body.date or today())
     approved = existing.get("approvedDate") or (body.date or today())
     claim_id = existing.get("claimId") or f"CLM-{body.leadId}-{body.componentKey}"
-    receipt = {"amount": ce.round2(body.amount), "date": body.date or today(),
+    receipt = {"amount": amount, "date": receipt_date,
                "reference": body.reference, "recordedAt": now_iso()}
     setdoc = {"claimId": claim_id, "leadId": body.leadId,
-              "componentKey": body.componentKey, "receivedAmount": received, "claimStatus": status,
+              "componentKey": body.componentKey, "claimStatus": status,
               **({"unitSno": body.unitSno} if body.unitSno else {}),
               "claimReference": body.reference or existing.get("claimReference", ""),
               "eligibleClaim": eligible, "submittedDate": submitted, "approvedDate": approved,
@@ -17634,11 +17751,16 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
     filt = {"leadId": body.leadId, "componentKey": body.componentKey}
     if body.unitSno:
         filt["unitSno"] = body.unitSno
-    await db.claims.update_one(
+    from pymongo import ReturnDocument
+    updated = await db.claims.find_one_and_update(
         filt,
-        {"$set": setdoc, "$push": {"receipts": receipt}},
+        {"$set": setdoc, "$inc": {"receivedAmount": amount}, "$push": {"receipts": receipt}},
         upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
+    received = ce.round2(ce.num((updated or {}).get("receivedAmount")))
+    status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
+    await db.claims.update_one(filt, {"$set": {"receivedAmount": received, "claimStatus": status}})
     await sheet_sync("claims", {"claimId": claim_id, "leadId": body.leadId,
                                     "customer": customer, "model": model,
                                     "claimStatus": status, "receivedAmount": received, "claimAmount": body.amount})
@@ -18275,15 +18397,15 @@ async def list_dealer_earnings(month: Optional[str] = None, year: Optional[str] 
     """
     leads = await _commercial_leads()
     # Fallback extras from dealer_earnings docs when lead mirror is thin.
-    de_by = {r.get("leadId"): r for r in await db.dealer_earnings.find().to_list(5000)}
+    de_by = {r.get("leadId"): r for r in await db.dealer_earnings.find().to_list(None)}
     ins_by_lead = {}
-    for e in await db.insurance.find().to_list(8000):
+    for e in await db.insurance.find().to_list(None):
         lid = e.get("leadId")
         if lid:
             ins_by_lead[lid] = ce.round2(
                 ins_by_lead.get(lid, 0) + ce.insurance_dealer_income(e))
     claims_by = {}
-    for c in await db.claims.find({"manual": {"$ne": True}}).to_list(8000):
+    for c in await db.claims.find({"manual": {"$ne": True}}).to_list(None):
         claims_by.setdefault(c.get("leadId"), []).append(c)
     rows = []
     for l in leads:
@@ -19142,11 +19264,14 @@ async def botspace_webhook(request: Request):
     except Exception:
         body = {}
     cfg = await wa.get_config()
-    secret = cfg.get("webhookSecret") or ""
+    secret = str(cfg.get("webhookSecret") or "")
     if secret:
         got = request.headers.get("x-botspace-secret") or request.query_params.get("secret") or ""
-        if got != secret:
+        if not hmac.compare_digest(str(got), secret):
             raise HTTPException(401, "Invalid webhook secret")
+    else:
+        logger.warning("BOTSPACE_WEBHOOK_SECRET_MISSING")
+        return {"ok": True, "ignored": "webhook secret not configured"}
     try:
         return await wa.handle_webhook(body if isinstance(body, dict) else {})
     except Exception:
@@ -19160,7 +19285,7 @@ async def botspace_cron(request: Request):
     cfg = await wa.get_config()
     token = cfg.get("cronToken") or ""
     got = request.headers.get("x-cron-token") or request.query_params.get("token") or ""
-    if not token or got != token:
+    if not token or not got or not hmac.compare_digest(str(got), str(token)):
         raise HTTPException(401, "Invalid cron token")
     # ?slot=morning|eod sends the daily reports; no slot keeps the legacy
     # follow-up / finance / outbox job. Both are idempotent per day, so a cron
@@ -19205,13 +19330,17 @@ async def _exotel_form(request: Request) -> dict:
     return data
 
 
-async def _exotel_token_ok(request: Request):
+async def _exotel_token_ok(request: Request, *, writes: bool = False):
     cfg = await exo.get_config()
-    secret = cfg.get("webhookSecret") or ""
-    if not secret:
-        return
+    secret = str(cfg.get("webhookSecret") or "")
     got = request.query_params.get("token") or request.headers.get("x-exotel-token") or ""
-    if got != secret:
+    if not secret:
+        if writes:
+            logger.warning("EXOTEL_WEBHOOK_SECRET_MISSING")
+            raise HTTPException(401, "Exotel webhook secret is not configured")
+        logger.warning("EXOTEL_WEBHOOK_SECRET_MISSING")
+        return
+    if not hmac.compare_digest(str(got), secret):
         raise HTTPException(401, "Invalid Exotel token")
 
 
@@ -19305,7 +19434,11 @@ async def exotel_gather_config(request: Request):
 @public.get("/integrations/exotel/gather")
 @public.post("/integrations/exotel/gather")
 async def exotel_gather(request: Request):
-    await _exotel_token_ok(request)
+    cfg = await exo.get_config()
+    if not str(cfg.get("webhookSecret") or ""):
+        logger.warning("EXOTEL_WEBHOOK_SECRET_MISSING")
+        return _exoml(exo.exoml_record_then_thanks(cfg))
+    await _exotel_token_ok(request, writes=True)
     form = await _exotel_form(request)
     res = await exo.handle_gather(form)
     cfg = await exo.get_config()
@@ -19318,7 +19451,11 @@ async def exotel_gather(request: Request):
 @public.get("/integrations/exotel/recorded")
 @public.post("/integrations/exotel/recorded")
 async def exotel_recorded(request: Request):
-    await _exotel_token_ok(request)
+    cfg = await exo.get_config()
+    if not str(cfg.get("webhookSecret") or ""):
+        logger.warning("EXOTEL_WEBHOOK_SECRET_MISSING")
+        return _exoml(exo.exoml_after_digits(cfg))
+    await _exotel_token_ok(request, writes=True)
     form = await _exotel_form(request)
     await exo.handle_recorded(form)
     cfg = await exo.get_config()
@@ -19328,7 +19465,11 @@ async def exotel_recorded(request: Request):
 @public.get("/integrations/exotel/status")
 @public.post("/integrations/exotel/status")
 async def exotel_status(request: Request):
-    await _exotel_token_ok(request)
+    cfg = await exo.get_config()
+    if not str(cfg.get("webhookSecret") or ""):
+        logger.warning("EXOTEL_WEBHOOK_SECRET_MISSING")
+        return {"ok": True, "ignored": "webhook secret not configured"}
+    await _exotel_token_ok(request, writes=True)
     form = await _exotel_form(request)
     purpose = (request.query_params.get("purpose") or "").strip().lower()
     if purpose:
@@ -19341,7 +19482,7 @@ async def exotel_cron(request: Request):
     cfg = await exo.get_config()
     token = cfg.get("cronToken") or ""
     got = request.headers.get("x-cron-token") or request.query_params.get("token") or ""
-    if not token or got != token:
+    if not token or not got or not hmac.compare_digest(str(got), str(token)):
         raise HTTPException(401, "Invalid cron token")
     return await exo.run_auto_calls(limit=40)
 
@@ -19393,9 +19534,16 @@ async def api_ping():
     return {"ok": True, "status": "up"}
 
 
+_SHARE_LEAD_FIELDS = {
+    "_id": 0, "bookingDate": 1, "deliveryDate": 1, "closedDate": 1, "createdDate": 1,
+    "currentStatus": 1, "deliveryStatus": 1, "accountStatus": 1, "dealCancelled": 1,
+    "interestedModel": 1, "variant": 1, "bookingId": 1,
+}
+
+
 @public.get("/share/dashboard")
 async def share_dashboard():
-    leads = await db.leads.find().to_list(5000)
+    leads = await db.leads.find({}, _SHARE_LEAD_FIELDS).to_list(None)
     ym = this_month()
     td = today()
     booked = [l for l in leads if _is_booked_lead(l)]
@@ -19411,13 +19559,14 @@ async def share_dashboard():
         by_model[m] = by_model.get(m, 0) + 1
 
     def row(l, date_field):
-        return {"date": l.get(date_field), "name": l.get("customerName") or "—",
-                "model": l.get("interestedModel") or "", "variant": l.get("variant") or ""}
+        return {"date": l.get(date_field),
+                "model": l.get("interestedModel") or "", "variant": l.get("variant") or "",
+                "status": l.get("currentStatus") or ""}
 
     recent_bookings = sorted(active_booked, key=lambda l: str(l.get("bookingDate") or ""), reverse=True)[:20]
     recent_retail = sorted(retail_this_month, key=lambda l: str(l.get("deliveryDate") or ""), reverse=True)[:20]
     all_leads = sorted(leads, key=lambda l: str(l.get("createdDate") or ""), reverse=True)
-    all_leads_rows = [{"date": l.get("createdDate"), "name": l.get("customerName") or "—",
+    all_leads_rows = [{"date": l.get("createdDate"),
                        "model": l.get("interestedModel") or "", "variant": l.get("variant") or "",
                        "status": l.get("currentStatus") or "New"} for l in all_leads]
 
@@ -19506,8 +19655,16 @@ async def create_quotation(body: QuotationIn, _sales=Depends(sales_staff_only)):
 
 
 # ---------------------------------------------------------------- startup
+def _cors_origins():
+    raw = os.environ.get("CORS_ORIGINS", "").strip()
+    if not raw:
+        logging.warning("CORS_ORIGINS is unset; allowing every origin")
+        return ["*"]
+    return [part.strip() for part in raw.split(",") if part.strip()] or ["*"]
+
+
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+    CORSMiddleware, allow_origins=_cors_origins(), allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
 )
 
@@ -19674,7 +19831,9 @@ async def reset_transactions(act=Depends(actor)):
     counts = {}
     for coll in ["leads", "bookings", "payments", "deliveries", "finance", "insurance",
                  "claims", "activities", "dealer_earnings", "quotations", "incentive_register",
-                 "billing_summaries", "sheet_sync_log"]:
+                 "billing_summaries", "sheet_sync_log",
+                 lead_docs.COLLECTION, "whatsapp_threads", "whatsapp_messages",
+                 "whatsapp_outbox", "lead_requests"]:
         r = await db[coll].delete_many({})
         counts[coll] = r.deleted_count
     await db["system"].update_one({"_id": "seed_state"},
@@ -19707,6 +19866,7 @@ def _config_diagnostics():
         "gsheetIdPresent": cred["gsheet_id_present"],
         "sheetSyncEnabled": bool(cred["credential_found"] and cred["gsheet_id_present"]),
         "financeIndexes": dict(_finance_index_status),
+        "identityIndexes": dict(_identity_index_status),
     }
 
 
@@ -19754,6 +19914,71 @@ async def _audit_finance_integrity_for_unique_indexes():
     ).to_list(1000)
     logging.info("FINANCE_INTEGRITY_AUDIT: %s", {k: len(v) for k, v in findings.items()})
     return findings
+
+
+async def _duplicate_key_count(coll, field):
+    rows = await db[coll].aggregate([
+        {"$match": {field: {"$type": "string", "$gt": ""}}},
+        {"$group": {"_id": f"${field}", "n": {"$sum": 1}}},
+        {"$match": {"n": {"$gt": 1}}},
+        {"$count": "n"},
+    ]).to_list(1)
+    if not rows:
+        return 0
+    return int(rows[0].get("n") or 0)
+
+
+async def _ensure_identity_unique_indexes():
+    """Unique leadId and receiptNumber when the collection has no duplicates.
+
+    Existing duplicates are left untouched and the index is skipped.
+    """
+    global _identity_index_status
+    status = {}
+    for coll, field in (("leads", "leadId"), ("payments", "receiptNumber")):
+        try:
+            count = await _duplicate_key_count(coll, field)
+        except Exception:
+            logging.exception("UNIQUE_INDEX_SKIPPED %s %s", coll, "check-failed")
+            status[coll] = {"ready": False, "duplicates": None, "skipped": True}
+            continue
+        if count:
+            logging.error("UNIQUE_INDEX_SKIPPED %s %s", coll, count)
+            status[coll] = {"ready": False, "duplicates": count, "skipped": True}
+            continue
+        try:
+            info = await db[coll].index_information()
+        except Exception:
+            info = {}
+        already = False
+        for spec in (info or {}).values():
+            keys = spec.get("key") or []
+            names = [k[0] if isinstance(k, (list, tuple)) else k for k in keys]
+            if field not in names:
+                continue
+            already = True
+            if spec.get("unique"):
+                status[coll] = {"ready": True, "duplicates": 0, "skipped": False}
+            else:
+                logging.error("UNIQUE_INDEX_SKIPPED %s %s", coll, "non-unique-index")
+                status[coll] = {"ready": False, "duplicates": 0, "skipped": True}
+            break
+        if already:
+            continue
+        else:
+            try:
+                await db[coll].create_index(
+                    field, unique=True,
+                    partialFilterExpression={field: {"$type": "string", "$gt": ""}},
+                )
+                status[coll] = {"ready": True, "duplicates": 0, "skipped": False}
+            except Exception:
+                logging.error("UNIQUE_INDEX_SKIPPED %s %s", coll, "create-failed")
+                status[coll] = {"ready": False, "duplicates": 0, "skipped": True}
+        if already and coll not in status:
+            status[coll] = {"ready": True, "duplicates": 0, "skipped": False}
+    _identity_index_status = status
+    return status
 
 
 async def _ensure_finance_unique_indexes():
@@ -19927,6 +20152,7 @@ async def _run_boot_maintenance():
             await _boot_step("recompute_seeded", _recompute_seeded_leads(), timeout=120)
         try:
             await _ensure_finance_unique_indexes()
+            await _ensure_identity_unique_indexes()
         except Exception as e:
             _finance_index_status = {
                 "status": "ERROR",
@@ -19970,12 +20196,8 @@ async def _run_boot_maintenance():
         except Exception:
             logging.exception("FINANCE_RECEIPT_DEDUPE_ERROR")
         try:
-            if not _is_test_env():
-                repaired = await _repair_retry_duplicate_leads()
-                if repaired:
-                    logging.info("RETRY_DUP_LEADS_REPAIRED: %s", len(repaired))
-            # Do not force GET /leads to scan 15k rows again. That second pass
-            # sat behind the same lock as boot and timed the register out.
+            # Retry-duplicate purge is owner-only and never runs on boot.
+            # GET /leads must not delete leads.
             _retry_dup_repair_done = True
             _retry_dup_last_clean_at = time.monotonic()
         except Exception:
@@ -20236,6 +20458,8 @@ async def _apply_turbo_sept_uplift_to_open_leads():
     """
     if today() < TURBO_EXSHOWROOM_UPLIFT_FROM:
         return 0
+    if await db.system.find_one({"_id": "turbo_sept_uplift"}):
+        return 0
     lifted = 0
     for lead in await db.leads.find({"deliveryStatus": {"$ne": "Delivered"}}).to_list(5000):
         if _is_delivered(lead) or _acct(lead) != "Active":
@@ -20258,8 +20482,15 @@ async def _apply_turbo_sept_uplift_to_open_leads():
         lid = lead.get("leadId")
         await db.leads.update_one({"leadId": lid},
                                   {"$set": {"exShowroom": selling, "lastUpdated": now_iso()}})
+        await write_audit(None, "turbo-sept-uplift", "lead", leadId=lid,
+                          old={"exShowroom": current}, new={"exShowroom": selling})
         await recompute_lead(lid)
         lifted += 1
+    await db.system.update_one(
+        {"_id": "turbo_sept_uplift"},
+        {"$set": {"doneAt": now_iso(), "lifted": lifted}},
+        upsert=True,
+    )
     if lifted:
         logging.info("TURBO_SEPT_UPLIFT: applied ₹%s to %s open Turbo lead(s)",
                      TURBO_EXSHOWROOM_UPLIFT, lifted)

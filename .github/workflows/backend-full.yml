@@ -1,0 +1,45 @@
+name: Backend full
+
+# Full in-process suite. Live HTTP files are marked live_http and skipped
+# when REACT_APP_BACKEND_URL is unset. They are not excluded by a -k pattern.
+# test_auth_and_iter2, test_euler_crm, test_iter3_insurance_import,
+# test_iter4_mapping_and_lead_insurance, test_iter7_lead_edit_and_share,
+# test_iter8_step_gating_and_scheme, test_iter9_scheme_avail_delivery_close_dupmobile,
+# test_iter11_receipts_flows, test_iter13_14_parity, test_iter15_lead_partial_update,
+# test_iter16_phase2_production_fixes
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+
+jobs:
+  backend-full:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest==9.2.0 pytest-asyncio==1.5.0 mongomock==4.3.0 mongomock-motor==0.0.36
+          python -m pip install -r requirements.txt
+      - name: Full suite
+        env:
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: euler_full_ci
+          JWT_SECRET: ci-secret-not-used-for-production-32
+          ENVIRONMENT: test
+          OWNER_PASSWORD: euler@123
+          SEED_DEMO_USERS: "1"
+        run: python -m pytest tests/ -q --tb=line -m "not live_http" --junitxml=backend-junit.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-junit
+          path: backend/backend-junit.xml

@@ -1,6 +1,6 @@
-# Euler Motors CRM — Web Portal
+# Euler Motors CRM
 
-One web app for desktop **and phone**. Staff open a single URL — no HTML files to install.
+The live product is the React app in `frontend/` and the FastAPI service in `backend/`. Staff open the deployed web app. The HTML files and Apps Script portal in this repository are historical.
 
 ## Staff link (after GitHub Pages)
 

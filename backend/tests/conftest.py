@@ -14,6 +14,10 @@ import pytest
 def _block_live_google_sheet_writes(monkeypatch, request):
     # Force test environment flags even when the host exported production GSHEET_ID.
     monkeypatch.setenv("ENVIRONMENT", "test")
+    # Demo logins exist only when this flag is on. Tests that need them set it
+    # here; production startup does not.
+    if os.environ.get("SEED_DEMO_USERS") is None:
+        monkeypatch.setenv("SEED_DEMO_USERS", "1")
     # Keep whatever GSHEET_ID the host has — env_safety + mocks below stop writes.
     monkeypatch.delenv("GSHEET_ALLOW_TEST_WRITES", raising=False)
 
@@ -53,3 +57,5 @@ def _block_live_google_sheet_writes(monkeypatch, request):
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "real_sheet_sync: use live server.sheet_sync (Google still mocked)")
+    config.addinivalue_line(
+        "markers", "live_http: needs REACT_APP_BACKEND_URL; skipped when it is unset")

@@ -277,8 +277,8 @@ async def test_repair_same_mobile_without_created_date(client):
     listed = await client.get("/api/leads", params={"q": "No Date Triple", "scope": "all"})
     assert listed.status_code == 200, listed.text
     left = [l async for l in server.db.leads.find({"mobile": mobile})]
-    assert len(left) == 1
-    assert left[0]["leadId"] == "LD26NODATE1"
+    # GET /leads no longer purges, and a row with no timestamp is not a retry.
+    assert len(left) == 3
 
 
 @pytest.mark.asyncio
@@ -310,13 +310,14 @@ async def test_repair_merges_same_day_different_skus(client):
         "createdDate": "2026-09-22", "lastUpdated": "2026-09-22T08:01:00+00:00",
         "exShowroom": 500000,
     })
-    repaired = await server._repair_retry_duplicate_leads()
-    assert len(repaired) == 1
+    # Different models on the same day are reported, not merged into a pack.
+    repaired = await server._repair_retry_duplicate_leads(dry_run=True)
+    assert any(r.get("action") == "merge-pack" for r in repaired)
     left = [l async for l in server.db.leads.find({"mobile": mobile})]
-    assert len(left) == 1
-    assert left[0]["leadId"] == "LD26MERGE01"
-    assert left[0].get("sameOrderMultiUnit") is True
-    assert left[0].get("vehicleCount") == 2
+    assert len(left) == 2
+    await server._repair_retry_duplicate_leads(dry_run=False)
+    left = [l async for l in server.db.leads.find({"mobile": mobile})]
+    assert len(left) == 2
 
 
 @pytest.mark.asyncio
@@ -488,11 +489,11 @@ async def test_repair_same_model_ignores_variant_split(client):
         "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
         "accountStatus": "Active", "currentStatus": "New",
     })
+    # Different variants are different vehicles and are not purged.
     repaired = await server._repair_retry_duplicate_leads()
-    assert repaired
+    assert repaired == []
     left = [l async for l in server.db.leads.find({"mobile": mobile})]
-    assert len(left) == 1
-    assert left[0]["leadId"] == "LD26VAR001"
+    assert len(left) == 3
 
 
 @pytest.mark.asyncio

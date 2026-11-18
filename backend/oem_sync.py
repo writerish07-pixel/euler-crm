@@ -2995,13 +2995,18 @@ def cancelled_chassis_without_live_rebill(sold_rows, cancelled_rows, live_invoic
         else:
             bare.add(ch)
     rebilled = set()
+    ambiguous = set()
 
     def note_live(row):
         if _is_cancelled_invoice_status(row):
             return
         ch = _norm_chassis((row or {}).get("chassis"))
         inv = _row_invoice(row)
-        if not ch or not inv:
+        if not ch:
+            return
+        if not inv:
+            if ch in cancelled_invoices:
+                ambiguous.add(ch)
             return
         cancelled_invs = cancelled_invoices.get(ch)
         if cancelled_invs is None:
@@ -3021,7 +3026,8 @@ def cancelled_chassis_without_live_rebill(sold_rows, cancelled_rows, live_invoic
         note_live(row)
     live = sold_chassis_set(sold_rows) | sold_chassis_set(created_rows)
     bare_only = bare - live - set(cancelled_invoices) - rebilled
-    return (set(cancelled_invoices) - rebilled) | bare_only
+    cancelled_chassis_without_live_rebill.last_ambiguous = ambiguous
+    return (set(cancelled_invoices) - rebilled - ambiguous) | bare_only
 
 
 def _pick_created_invoice(rows):
@@ -3216,6 +3222,16 @@ def drop_cancelled_empty_units(lead):
     return patch
 
 
+async def _archive_removed_sold(db, queries, reason):
+    """Keep a copy of every Sold row about to be deleted. Never rewrites the original."""
+    for query in queries or []:
+        async for row in db.oem_sold.find(query):
+            doc = {k: v for k, v in row.items() if k != "_id"}
+            doc["removedAt"] = now_iso()
+            doc["reason"] = reason
+            await db.oem_sold_removed.insert_one(doc)
+
+
 async def delink_cancelled_sold_invoices(db):
     """Drop chassis whose Invoice List rows are all Cancelled.
 
@@ -3288,7 +3304,11 @@ async def delink_cancelled_sold_invoices(db):
             await db.oem_sold.update_one(
                 {"chassis": ch, "invoiceNumber": inv}, {"$set": patch})
         row.update(patch)
+    ambiguous = set(getattr(cancelled_chassis_without_live_rebill, "last_ambiguous", set()) or set())
+    if ambiguous:
+        logging.warning("OEM_SOLD_AMBIGUOUS_BLANK_INVOICE: %s", sorted(ambiguous))
     if stale:
+        await _archive_removed_sold(db, stale, "stale-cancelled-invoice")
         await db.oem_sold.delete_many({"$or": stale})
         stale_keys = {(s["chassis"], s["invoiceNumber"]) for s in stale}
         sold = [
@@ -3296,6 +3316,7 @@ async def delink_cancelled_sold_invoices(db):
             if (_norm_chassis((r or {}).get("chassis")), _row_invoice(r)) not in stale_keys
         ]
     if cancelled_only:
+        await _archive_removed_sold(db, [{"chassis": ch} for ch in cancelled_only], "cancelled-without-rebill")
         await db.oem_sold.delete_many({"chassis": {"$in": list(cancelled_only)}})
         sold = [r for r in sold if _norm_chassis((r or {}).get("chassis")) not in cancelled_only]
     cancelled_ch = cancelled_only
@@ -3307,7 +3328,8 @@ async def delink_cancelled_sold_invoices(db):
             sold_by_chassis[ch] = row
     leads = await load_oem_billing_leads(db)
     occupied = occupied_chassis_numbers(leads)
-    stats = {"cleared": 0, "flagged": 0, "reverted": 0, "droppedUnits": 0, "clearedIds": []}
+    stats = {"cleared": 0, "flagged": 0, "reverted": 0, "droppedUnits": 0, "clearedIds": [],
+             "ambiguousBlankInvoice": sorted(getattr(cancelled_chassis_without_live_rebill, "last_ambiguous", set()) or set())}
     for lead in leads:
         if _lead_is_cancelled(lead):
             continue

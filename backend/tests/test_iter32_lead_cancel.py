@@ -870,7 +870,10 @@ async def test_close_won_still_shows_on_oem_and_commercial_tabs(client):
         "claimId": f"CLM-{lid}-loyaltyBonus", "leadId": lid,
         "componentKey": "loyaltyBonus", "component": "Loyalty Bonus",
         "claimAmount": 12000, "eligibleClaim": 12000, "claimStatus": "Pending",
-        "customer": "ITER32 Close Won commercial", "manual": False,
+        "customer": "ITER32 Close Won commercial",
+        # Derived rows are rebuilt from the scheme. This file has no scheme
+        # allocation, so the lasting register row is a manual claim.
+        "manual": True,
     })
     r = await client.post(f"/api/leads/{lid}/close", json={"closeReason": "Delivered and settled"})
     assert r.status_code == 200, r.text

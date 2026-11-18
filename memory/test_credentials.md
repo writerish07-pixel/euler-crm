@@ -2,7 +2,11 @@
 
 **Authentication:** JWT email+password with roles (Owner / Executive). Bearer token in `Authorization` header, stored in localStorage on the frontend.
 
-## Accounts (seeded on backend startup)
+## Accounts (test only)
+
+Demo users are created only when `SEED_DEMO_USERS=1` (pytest sets this). Production startup does not create them. The password below is the test seed, not a production password.
+
+## Accounts (seeded when SEED_DEMO_USERS=1)
 | Role | Email | Password |
 |------|-------|----------|
 | Owner | `owner@euler.com` | `euler@123` |

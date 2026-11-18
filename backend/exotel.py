@@ -216,6 +216,7 @@ def public_config(cfg: dict) -> dict:
     out["speakAudioUrl"] = urls["audio"] + "/speak.mp3"
     out["thanksAudioUrl"] = urls["audio"] + "/thanks.mp3"
     out["connectUrl"] = connect_flow_url(cfg)
+    out["webhookSecretConfigured"] = bool(str(cfg.get("webhookSecret") or "").strip())
     return out
 
 

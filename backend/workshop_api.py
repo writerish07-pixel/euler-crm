@@ -200,7 +200,6 @@ async def _create_staff_login(db, staff, password):
         "loginId": login_id,
         "loginIdNorm": norm,
         "passwordHash": authmod.hash_password(password),
-        "passwordPlain": password,
         "name": staff.get("name") or "",
         "role": role,
         "createdAt": _now(),

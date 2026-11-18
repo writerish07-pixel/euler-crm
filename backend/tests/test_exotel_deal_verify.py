@@ -227,6 +227,8 @@ async def client(monkeypatch):
             "apiKey": "test-key", "apiToken": "test-token",
             "accountSid": "shubhammotors1", "exoPhone": "01414937655",
             "enabled": True, "quietStart": 10, "quietEnd": 19,
+            # Write webhooks refuse an empty secret. This fixture token is not a real key.
+            "webhookSecret": "exo-test-secret",
         }},
         upsert=True,
     )
@@ -241,6 +243,7 @@ async def client(monkeypatch):
         r = await c.post("/api/auth/login", json={"email": OWNER_EMAIL, "password": OWNER_PASSWORD})
         assert r.status_code == 200, r.text
         c.headers["Authorization"] = f"Bearer {r.json()['token']}"
+        c.headers["x-exotel-token"] = "exo-test-secret"
         yield c
 
 
