@@ -249,6 +249,7 @@ def _mask(key: str) -> str:
 def public_config(cfg: dict) -> dict:
     out = {k: v for k, v in cfg.items() if k != "apiKey"}
     out["webhookPath"] = "/api/integrations/botspace/webhook"
+    out["webhookSecretConfigured"] = bool(str(cfg.get("webhookSecret") or "").strip())
     out["templatesGuide"] = "docs/whatsapp-meta-templates.md"
     return out
 

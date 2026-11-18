@@ -22,7 +22,11 @@ import pytest
 import requests
 from pymongo import MongoClient
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+pytestmark = pytest.mark.live_http
+_raw_base = os.environ.get("REACT_APP_BACKEND_URL")
+if not _raw_base:
+    pytest.skip("live_http: REACT_APP_BACKEND_URL is unset", allow_module_level=True)
+BASE_URL = _raw_base.rstrip("/")
 API = f"{BASE_URL}/api"
 
 OWNER = {"email": "owner@euler.com", "password": "euler@123"}

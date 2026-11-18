@@ -127,9 +127,7 @@ def password_matches(pw, user) -> bool:
     for candidate in candidates:
         if hashed and verify_password(candidate, hashed):
             return True
-        if plain and candidate == plain:
-            return True
-        if plain and candidate.strip() == plain.strip():
+        if not hashed and plain and (candidate == plain or candidate.strip() == plain.strip()):
             return True
     return False
 
@@ -263,7 +261,10 @@ def _owner_user_row(u) -> dict:
         "loginId": u.get("loginId") or "",
         "name": u.get("name") or "",
         "role": u["role"],
-        "password": u.get("passwordPlain") or "",
+        "passwordSet": bool(u.get("passwordHash") or u.get("passwordPlain")),
+        "usingDefaultPassword": bool(
+            (u.get("passwordHash") and verify_password("euler@123", u.get("passwordHash")))
+            or str(u.get("passwordPlain") or "") == "euler@123"),
         "passwordChangedAt": u.get("passwordChangedAt") or "",
     }
 
@@ -429,17 +430,24 @@ def build_router(db):
             patch = {}
             typed_pw = str(body.password or "").strip() or str(body.password or "")
             hashed = user.get("passwordHash") or ""
-            if not hashed or not verify_password(typed_pw, hashed):
+            unset = {}
+            if (not hashed or not verify_password(typed_pw, hashed)) and (user.get("passwordPlain") or typed_pw):
                 if typed_pw:
                     patch["passwordHash"] = hash_password(typed_pw)
-                    if not (user.get("passwordPlain") or "").strip():
-                        patch["passwordPlain"] = typed_pw
+            if user.get("passwordPlain"):
+                unset["passwordPlain"] = ""
             lid = (user.get("loginId") or "").strip()
             if lid and not (user.get("loginIdNorm") or "").strip():
                 patch["loginIdNorm"] = norm_login_id(lid)
+            update = {}
             if patch:
-                await db.users.update_one({"userId": user["userId"]}, {"$set": patch})
+                update["$set"] = patch
                 user.update(patch)
+            if unset:
+                update["$unset"] = unset
+                user.pop("passwordPlain", None)
+            if update:
+                await db.users.update_one({"userId": user["userId"]}, update)
             token = create_token(user)
             return {"token": token, "user": await _with_service_access(db, _public_session_user(user))}
         except HTTPException:
@@ -475,9 +483,9 @@ def build_router(db):
             {"userId": user["userId"]},
             {"$set": {
                 "passwordHash": hash_password(new_pw),
-                "passwordPlain": new_pw,
                 "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
-            }},
+            },
+             "$unset": {"passwordPlain": ""}},
         )
         return {"ok": True, "message": "Password updated"}
 
@@ -517,7 +525,6 @@ def build_router(db):
         doc = {"userId": user_id, "email": email,
                "loginId": login_id, "loginIdNorm": norm,
                "passwordHash": hash_password(pw),
-               "passwordPlain": pw,
                "name": name, "role": role, "createdAt": datetime.now(timezone.utc).isoformat()}
         await _clear_deleted_user(db, email=email, login_id=login_id)
         await db.users.insert_one(doc)
@@ -559,11 +566,11 @@ def build_router(db):
             {"userId": user_id},
             {"$set": {
                 "passwordHash": hash_password(pw),
-                "passwordPlain": pw,
                 "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
-            }},
+            },
+             "$unset": {"passwordPlain": ""}},
         )
-        return {"ok": True, "userId": user_id}
+        return {"ok": True, "userId": user_id, "password": pw}
 
     @router.delete("/users/{user_id}")
     async def delete_user(user_id: str, user=Depends(owner_only)):
@@ -707,22 +714,34 @@ async def _ensure_password_plain_if_still_default(db, email, default_pw):
         )
 
 
+def _demo_seed_enabled() -> bool:
+    return os.environ.get("SEED_DEMO_USERS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _dev_or_test_env() -> bool:
+    return os.environ.get("ENVIRONMENT", "").strip().lower() in ("test", "dev", "development")
+
+
 async def seed_users(db):
     await db.users.create_index("email", unique=True)
     owner_email = os.environ.get("OWNER_EMAIL", "owner@euler.com").strip().lower()
-    owner_pw = os.environ.get("OWNER_PASSWORD", "euler@123")
+    owner_pw_env = (os.environ.get("OWNER_PASSWORD") or "").strip()
     existing = await db.users.find_one({"email": owner_email})
     if not existing:
         owner_deleted = await _is_deleted_account(db, email=owner_email, login_id="owner")
         other_owners = await db.users.count_documents({"role": "owner"})
         if not owner_deleted or other_owners == 0:
-            await db.users.insert_one({
-                "userId": str(uuid.uuid4()), "email": owner_email,
-                "loginId": "owner", "loginIdNorm": "owner",
-                "passwordHash": hash_password(owner_pw),
-                "passwordPlain": owner_pw,
-                "name": "Owner", "role": "owner", "createdAt": datetime.now(timezone.utc).isoformat(),
-            })
+            if not owner_pw_env and not _dev_or_test_env() and not _demo_seed_enabled():
+                log.critical(
+                    "OWNER_PASSWORD is unset; refusing to create an owner with the published default password")
+            else:
+                owner_pw = owner_pw_env or "euler@123"
+                await db.users.insert_one({
+                    "userId": str(uuid.uuid4()), "email": owner_email,
+                    "loginId": "owner", "loginIdNorm": "owner",
+                    "passwordHash": hash_password(owner_pw),
+                    "name": "Owner", "role": "owner", "createdAt": datetime.now(timezone.utc).isoformat(),
+                })
     else:
         # Never reset an existing owner's password on startup — that would undo
         # Settings → Change password after every deploy/restart.
@@ -737,34 +756,37 @@ async def seed_users(db):
                     {"userId": existing["userId"]},
                     {"$set": {
                         "passwordHash": hash_password(reset_pw),
-                        "passwordPlain": reset_pw,
                         "passwordResetEnvMarker": marker,
                         "passwordChangedAt": datetime.now(timezone.utc).isoformat(),
-                    }},
+                    },
+                     "$unset": {"passwordPlain": ""}},
                 )
         await _ensure_login_id(db, owner_email, "owner")
-        await _ensure_password_plain_if_still_default(db, owner_email, owner_pw)
-    demos = [
-        ("executive@euler.com", "Executive", "executive", "executive"),
-        ("accounts@euler.com", "Accounts", "accounts", "accounts"),
-        ("asm@euler.com", "ASM", "asm", "asm"),
-        ("rm@euler.com", "RM", "rm", "rm"),
-        ("salesgm@euler.com", "Sales GM", "sales_gm", "salesgm"),
-        ("oemfinance@euler.com", "OEM Finance", "oem_finance", "oemfinance"),
-    ]
-    for email, name, role, login_id in demos:
-        if await _is_deleted_account(db, email=email, login_id=login_id):
-            continue
-        if not await db.users.find_one({"email": email}):
+    if _demo_seed_enabled():
+        demos = [
+            ("executive@euler.com", "Executive", "executive", "executive"),
+            ("accounts@euler.com", "Accounts", "accounts", "accounts"),
+            ("asm@euler.com", "ASM", "asm", "asm"),
+            ("rm@euler.com", "RM", "rm", "rm"),
+            ("salesgm@euler.com", "Sales GM", "sales_gm", "salesgm"),
+            ("oemfinance@euler.com", "OEM Finance", "oem_finance", "oemfinance"),
+        ]
+        for email, name, role, login_id in demos:
+            if await _is_deleted_account(db, email=email, login_id=login_id):
+                continue
+            if await db.users.find_one({"email": email}):
+                continue
             await db.users.insert_one({
                 "userId": str(uuid.uuid4()), "email": email,
                 "loginId": login_id, "loginIdNorm": login_id,
                 "passwordHash": hash_password("euler@123"),
-                "passwordPlain": "euler@123",
                 "name": name, "role": role,
                 "createdAt": datetime.now(timezone.utc).isoformat(),
             })
-        else:
-            await _ensure_login_id(db, email, login_id)
-            await _ensure_password_plain_if_still_default(db, email, "euler@123")
+    if not _dev_or_test_env():
+        default_count = 0
+        async for row in db.users.find({}, {"passwordHash": 1, "passwordPlain": 1}):
+            if verify_password("euler@123", row.get("passwordHash") or "") or str(row.get("passwordPlain") or "") == "euler@123":
+                default_count += 1
+        log.warning("DEFAULT_PASSWORD_ACCOUNTS: %s", default_count)
     await _backfill_login_id_norm(db)

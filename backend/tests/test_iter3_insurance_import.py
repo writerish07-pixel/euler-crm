@@ -14,7 +14,9 @@ if not BASE_URL:
             if line.startswith("REACT_APP_BACKEND_URL="):
                 BASE_URL = line.split("=", 1)[1].strip()
                 break
-assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
+pytestmark = pytest.mark.live_http
+if not BASE_URL:
+    pytest.skip("live_http: REACT_APP_BACKEND_URL is unset", allow_module_level=True)
 BASE_URL = BASE_URL.rstrip("/")
 API = f"{BASE_URL}/api"
 

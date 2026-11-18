@@ -97,7 +97,20 @@ def compress_pdf(data: bytes, *, lossless_only: bool = False) -> bytes:
                     except Exception:
                         continue
             page.compress_content_streams()
-        writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+        for kwargs in (
+            {"remove_duplicates": True, "remove_unreferenced": True},
+            {"remove_duplicates": True, "remove_orphans": True},
+            {"remove_identicals": True, "remove_orphans": True},
+        ):
+            try:
+                writer.compress_identical_objects(**kwargs)
+                break
+            except TypeError:
+                continue
+            except Exception as exc:
+                if type(exc).__name__ != "DeprecationError":
+                    raise
+                continue
         out = io.BytesIO()
         writer.write(out)
         packed = out.getvalue()

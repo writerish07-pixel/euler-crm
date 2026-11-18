@@ -1,5 +1,9 @@
 # Euler CRM — production readiness (this audit)
 
+Later remediation of the Claude findings is in `CLAUDE_REMEDIATION_FINAL_REPORT.md`.
+
+
+
 Date: 18 Nov 2026 (Asia/Calcutta).
 
 **Status: AMBER.**

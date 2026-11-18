@@ -1,0 +1,2172 @@
+........................................................................ [  4%]
+........................................................................ [  8%]
+........F.........................................................F..... [ 13%]
+.....FF..........................................F...................... [ 17%]
+........................................................................ [ 21%]
+.......................FFFFFFFFFFFFF...........FFFFFFFFF.F...F.F........ [ 26%]
+...F.F..................F...........F.............................F..... [ 30%]
+..................................FF.....F.FF..FFFF..................... [ 35%]
+....................................................EEEEEEEEEEEEEEEEE... [ 39%]
+.......F.F.............................................................. [ 43%]
+.......................................................................F [ 48%]
+......................................FF................................ [ 52%]
+........................................................................ [ 57%]
+........................................................................ [ 61%]
+........................................................................ [ 65%]
+........................................................................ [ 70%]
+........................................................................ [ 74%]
+............................F.........................................F. [ 79%]
+........................................................................ [ 83%]
+........F.......................................F....................... [ 87%]
+....................FFFFF..F.................F.......................... [ 92%]
+..................................F...............F.F................... [ 96%]
+........................................................                 [100%]
+==================================== ERRORS ====================================
+________________ ERROR collecting tests/test_auth_and_iter2.py _________________
+tests/test_auth_and_iter2.py:18: in <module>
+    assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
+E   AssertionError: REACT_APP_BACKEND_URL must be set
+E   assert None
+___________________ ERROR collecting tests/test_euler_crm.py ___________________
+tests/test_euler_crm.py:18: in <module>
+    assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
+E   AssertionError: REACT_APP_BACKEND_URL must be set
+E   assert None
+_____________ ERROR collecting tests/test_iter11_receipts_flows.py _____________
+tests/test_iter11_receipts_flows.py:25: in <module>
+    BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'NoneType' object has no attribute 'rstrip'
+_______________ ERROR collecting tests/test_iter13_14_parity.py ________________
+tests/test_iter13_14_parity.py:18: in <module>
+    BASE_URL = os.environ["REACT_APP_BACKEND_URL"].rstrip("/")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+<frozen os>:685: in __getitem__
+    ???
+E   KeyError: 'REACT_APP_BACKEND_URL'
+__________ ERROR collecting tests/test_iter15_lead_partial_update.py ___________
+tests/test_iter15_lead_partial_update.py:33: in <module>
+    BASE = _load_base()
+           ^^^^^^^^^^^^
+tests/test_iter15_lead_partial_update.py:29: in _load_base
+    assert v, "REACT_APP_BACKEND_URL missing"
+E   AssertionError: REACT_APP_BACKEND_URL missing
+E   assert None
+________ ERROR collecting tests/test_iter16_phase2_production_fixes.py _________
+tests/test_iter16_phase2_production_fixes.py:38: in <module>
+    BASE = _load_base()
+           ^^^^^^^^^^^^
+tests/test_iter16_phase2_production_fixes.py:34: in _load_base
+    assert v, "REACT_APP_BACKEND_URL missing"
+E   AssertionError: REACT_APP_BACKEND_URL missing
+E   assert None
+____________ ERROR collecting tests/test_iter3_insurance_import.py _____________
+tests/test_iter3_insurance_import.py:17: in <module>
+    assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
+E   AssertionError: REACT_APP_BACKEND_URL must be set
+E   assert None
+_______ ERROR collecting tests/test_iter4_mapping_and_lead_insurance.py ________
+tests/test_iter4_mapping_and_lead_insurance.py:22: in <module>
+    assert BASE_URL, "REACT_APP_BACKEND_URL must be set"
+E   AssertionError: REACT_APP_BACKEND_URL must be set
+E   assert None
+___________ ERROR collecting tests/test_iter7_lead_edit_and_share.py ___________
+tests/test_iter7_lead_edit_and_share.py:19: in <module>
+    BASE = _load_base()
+           ^^^^^^^^^^^^
+tests/test_iter7_lead_edit_and_share.py:16: in _load_base
+    assert v, "REACT_APP_BACKEND_URL missing"
+E   AssertionError: REACT_APP_BACKEND_URL missing
+E   assert None
+_________ ERROR collecting tests/test_iter8_step_gating_and_scheme.py __________
+tests/test_iter8_step_gating_and_scheme.py:10: in <module>
+    BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'NoneType' object has no attribute 'rstrip'
+__ ERROR collecting tests/test_iter9_scheme_avail_delivery_close_dupmobile.py __
+tests/test_iter9_scheme_avail_delivery_close_dupmobile.py:13: in <module>
+    BASE_URL = os.environ.get("REACT_APP_BACKEND_URL").rstrip("/")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'NoneType' object has no attribute 'rstrip'
+______ ERROR at setup of test_booked_undelivered_lead_gets_the_new_price _______
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+________ ERROR at setup of test_report_shows_before_and_after_per_lead _________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+______________ ERROR at setup of test_price_drop_also_propagates _______________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_________ ERROR at setup of test_settled_lead_keeps_the_price_it_paid __________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+___________ ERROR at setup of test_delivered_lead_is_never_repriced ____________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+______________ ERROR at setup of test_closed_lead_is_not_repriced ______________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_____________ ERROR at setup of test_unpriced_lead_is_not_repriced _____________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+___________ ERROR at setup of test_a_different_vehicle_is_untouched ____________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_________ ERROR at setup of test_priced_but_unbooked_lead_is_repriced __________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+________ ERROR at setup of test_saving_the_same_price_reprices_nothing _________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+________________ ERROR at setup of test_repricing_is_idempotent ________________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+___________ ERROR at setup of test_status_only_edit_does_not_reprice ___________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+______ ERROR at setup of test_scheme_entitlements_do_not_move_with_price _______
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_________________ ERROR at setup of test_reprice_is_owner_only _________________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+____________ ERROR at setup of test_every_repriced_lead_is_audited _____________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+________ ERROR at setup of test_preview_reports_impact_without_writing _________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_________ ERROR at setup of test_preview_lists_the_leads_it_would_skip _________
+
+    @pytest_asyncio.fixture
+    async def client():
+        global PRICE_ID
+        await server.startup()
+        row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
+>       assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
+E       AssertionError: seed is missing the Hi-Load/TR-NC (HiLoad) Price Master row
+E       assert None
+
+tests/test_iter27_price_master_reprice.py:52: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+=================================== FAILURES ===================================
+_________________ test_approve_sets_outstanding_to_deal_price __________________
+
+client = <httpx.AsyncClient object at 0x7fe48775f080>
+
+    @pytest.mark.asyncio
+    async def test_approve_sets_outstanding_to_deal_price(client):
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ex:
+            login = await ex.post("/api/auth/login", json={"email": "executive@euler.com", "password": PW})
+            ex.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+            sub = await ex.post("/api/leads", json={
+                "customerName": "Deal Approve", "mobile": next_mobile(),
+                "interestedModel": "Storm", "variant": "Storm LR Deal Test",
+                "executive": "Executive", "budget": 1400000,
+            })
+            assert sub.status_code == 200, sub.text
+>           lid = sub.json()["leadId"]
+                  ^^^^^^^^^^^^^^^^^^^^
+E           KeyError: 'leadId'
+
+tests/test_deal_format.py:170: KeyError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+ERROR    root:server.py:19791 FINANCE_UNIQUE_INDEX_ERROR: finance unique index creation failed
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 19782, in _ensure_finance_unique_indexes
+    await db.finance.create_index("fileNumber", unique=True, partialFilterExpression={"fileNumber": {"$type": "string", "$gt": ""}})
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock_motor/__init__.py", line 49, in wrapper
+    return getattr(proxy_source, method_name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock/collection.py", line 1609, in create_index
+    documents_gen.throw(
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock/store.py", line 134, in documents
+    yield from self._documents.values()
+pymongo.errors.DuplicateKeyError: E11000 Duplicate Key Error
+______ test_price_structure_insurance_change_recomputes_payable_and_tally ______
+
+client = <httpx.AsyncClient object at 0x7fe48777b260>
+
+    @pytest.mark.asyncio
+    async def test_price_structure_insurance_change_recomputes_payable_and_tally(client):
+        """Edited insurance on Price Structure must move GVC, payable and Tally off-invoice."""
+        lid = await _booked_priced_lead(client, "9111100095")
+        before = await server.db.leads.find_one({"leadId": lid})
+        old_ins = ce.round2(ce.num(before.get("insuranceAmount") or before.get("insurance")))
+        assert old_ins > 0
+        new_ins = 15000.0
+        assert new_ins != old_ins
+        r = await client.put(f"/api/leads/{lid}/price-structure", json={
+            "exShowroom": ce.num(before.get("exShowroom")),
+            "rto": ce.num(before.get("rto")),
+            "insuranceAmount": new_ins,
+            "insuranceArrangedBy": before.get("insuranceArrangedBy") or "dealer",
+            "accessoriesAmount": ce.num(before.get("accessoriesAmount")),
+            "handlingCharges": ce.num(before.get("handlingCharges")),
+            "trc": ce.num(before.get("trc")),
+            "fastag": ce.num(before.get("fastag")),
+            "extendedWarranty": ce.num(before.get("extendedWarranty")),
+            "otherCharges": ce.num(before.get("otherCharges")),
+            "rsaAmc": ce.num(before.get("rsaAmc")),
+            "tcsApplicable": before.get("tcsApplicable") or "No",
+        })
+        assert r.status_code == 200, r.text
+        after = await server.db.leads.find_one({"leadId": lid})
+        assert ce.num(after.get("insuranceAmount")) == new_ins
+        delta = ce.round2(new_ins - old_ins)
+        assert ce.num(after.get("grossVehicleCost")) == ce.round2(
+            ce.num(before.get("grossVehicleCost")) + delta)
+        if after.get("useDealPrice") and ce.num(after.get("cxDemand")) > 0:
+            assert ce.num(after.get("customerPayable")) == ce.num(before.get("customerPayable"))
+>           assert ce.num(after.get("additionalDiscount")) == ce.round2(
+                ce.num(before.get("additionalDiscount")) + delta)
+E           AssertionError: assert 0.0 == -4000.0
+E            +  where 0.0 = <function num at 0x7fe48b89eca0>(0.0)
+E            +    where <function num at 0x7fe48b89eca0> = ce.num
+E            +    and   0.0 = <built-in method get of dict object at 0x7fe487677d40>('additionalDiscount')
+E            +      where <built-in method get of dict object at 0x7fe487677d40> = {'leadId': 'LD26000037', 'customerName': 'Bill Summary', 'mobile': '9111100095', 'altMobile': '', ...}.get
+E            +  and   -4000.0 = <function round2 at 0x7fe48b89f2e0>((0.0 + -4000.0))
+E            +    where <function round2 at 0x7fe48b89f2e0> = ce.round2
+E            +    and   0.0 = <function num at 0x7fe48b89eca0>(0)
+E            +      where <function num at 0x7fe48b89eca0> = ce.num
+E            +      and   0 = <built-in method get of dict object at 0x7fe487756d80>('additionalDiscount')
+E            +        where <built-in method get of dict object at 0x7fe487756d80> = {'leadId': 'LD26000037', 'customerName': 'Bill Summary', 'mobile': '9111100095', 'altMobile': '', ...}.get
+
+tests/test_delivery_billing_summary.py:372: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+ERROR    root:server.py:19791 FINANCE_UNIQUE_INDEX_ERROR: finance unique index creation failed
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 19782, in _ensure_finance_unique_indexes
+    await db.finance.create_index("fileNumber", unique=True, partialFilterExpression={"fileNumber": {"$type": "string", "$gt": ""}})
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock_motor/__init__.py", line 49, in wrapper
+    return getattr(proxy_source, method_name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock/collection.py", line 1609, in create_index
+    documents_gen.throw(
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock/store.py", line 134, in documents
+    yield from self._documents.values()
+pymongo.errors.DuplicateKeyError: E11000 Duplicate Key Error
+________________ test_scanned_pdf_shrinks_and_stays_a_valid_pdf ________________
+
+    def test_scanned_pdf_shrinks_and_stays_a_valid_pdf():
+        raw = _scanned_pdf()
+        packed = doc_compress.compress_pdf(raw)
+>       assert len(packed) < len(raw) * 0.6
+E       AssertionError: assert 3795509 < (3795509 * 0.6)
+E        +  where 3795509 = len(b'%PDF-1.4\n% created by Pillow PDF driver\n3 0 obj<<\n/Type /Catalog\n/Pages 4 0 R\n>>endobj\n4 0 obj<<\n/Type /Pages...000000144 00000 n \n0003795209 00000 n \ntrailer\n<<\n/Root 3 0 R\n/Size 7\n/Info 6 0 R\n>>\nstartxref\n3795291\n%%EOF')
+E        +  and   3795509 = len(b'%PDF-1.4\n% created by Pillow PDF driver\n3 0 obj<<\n/Type /Catalog\n/Pages 4 0 R\n>>endobj\n4 0 obj<<\n/Type /Pages...000000144 00000 n \n0003795209 00000 n \ntrailer\n<<\n/Root 3 0 R\n/Size 7\n/Info 6 0 R\n>>\nstartxref\n3795291\n%%EOF')
+
+tests/test_doc_compress.py:89: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    euler.doc_compress:doc_compress.py:105 pdf compression failed; keeping original
+Traceback (most recent call last):
+  File "/workspace/backend/doc_compress.py", line 100, in compress_pdf
+    writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_writer.py", line 1645, in compress_identical_objects
+    deprecation_with_replacement("remove_identicals", "remove_duplicates", "7.0.0")
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_utils.py", line 487, in deprecation_with_replacement
+    deprecation(
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_utils.py", line 474, in deprecation
+    raise DeprecationError(msg)
+pypdf.errors.DeprecationError: remove_identicals is deprecated and was removed in pypdf 7.0.0. Use remove_duplicates instead.
+_____________ test_tally_pdfs_keep_their_text_and_images_untouched _____________
+
+    def test_tally_pdfs_keep_their_text_and_images_untouched():
+        writer = PdfWriter()
+        writer.add_blank_page(595, 842)
+        out = io.BytesIO()
+        writer.write(out)
+        raw = out.getvalue()
+        # Under the PDF floor: returned byte-for-byte.
+        assert doc_compress.compress_pdf(raw, lossless_only=True) == raw
+        scan = _scanned_pdf()
+        lossless = doc_compress.compress_pdf(scan, lossless_only=True)
+        # No resampling for Tally kinds, so the embedded scan is not shrunk.
+>       assert len(lossless) > len(doc_compress.compress_pdf(scan))
+E       AssertionError: assert 3795509 > 3795509
+E        +  where 3795509 = len(b'%PDF-1.4\n% created by Pillow PDF driver\n3 0 obj<<\n/Type /Catalog\n/Pages 4 0 R\n>>endobj\n4 0 obj<<\n/Type /Pages...000000144 00000 n \n0003795209 00000 n \ntrailer\n<<\n/Root 3 0 R\n/Size 7\n/Info 6 0 R\n>>\nstartxref\n3795291\n%%EOF')
+E        +  and   3795509 = len(b'%PDF-1.4\n% created by Pillow PDF driver\n3 0 obj<<\n/Type /Catalog\n/Pages 4 0 R\n>>endobj\n4 0 obj<<\n/Type /Pages...000000144 00000 n \n0003795209 00000 n \ntrailer\n<<\n/Root 3 0 R\n/Size 7\n/Info 6 0 R\n>>\nstartxref\n3795291\n%%EOF')
+E        +    where b'%PDF-1.4\n% created by Pillow PDF driver\n3 0 obj<<\n/Type /Catalog\n/Pages 4 0 R\n>>endobj\n4 0 obj<<\n/Type /Pages...000000144 00000 n \n0003795209 00000 n \ntrailer\n<<\n/Root 3 0 R\n/Size 7\n/Info 6 0 R\n>>\nstartxref\n3795291\n%%EOF' = <function compress_pdf at 0x7fe48b955a80>(b'%PDF-1.4\n% created by Pillow PDF driver\n3 0 obj<<\n/Type /Catalog\n/Pages 4 0 R\n>>endobj\n4 0 obj<<\n/Type /Pages...000000144 00000 n \n0003795209 00000 n \ntrailer\n<<\n/Root 3 0 R\n/Size 7\n/Info 6 0 R\n>>\nstartxref\n3795291\n%%EOF')
+E        +      where <function compress_pdf at 0x7fe48b955a80> = doc_compress.compress_pdf
+
+tests/test_doc_compress.py:105: AssertionError
+------------------------------ Captured log call -------------------------------
+ERROR    euler.doc_compress:doc_compress.py:105 pdf compression failed; keeping original
+Traceback (most recent call last):
+  File "/workspace/backend/doc_compress.py", line 100, in compress_pdf
+    writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_writer.py", line 1645, in compress_identical_objects
+    deprecation_with_replacement("remove_identicals", "remove_duplicates", "7.0.0")
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_utils.py", line 487, in deprecation_with_replacement
+    deprecation(
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_utils.py", line 474, in deprecation
+    raise DeprecationError(msg)
+pypdf.errors.DeprecationError: remove_identicals is deprecated and was removed in pypdf 7.0.0. Use remove_duplicates instead.
+ERROR    euler.doc_compress:doc_compress.py:105 pdf compression failed; keeping original
+Traceback (most recent call last):
+  File "/workspace/backend/doc_compress.py", line 100, in compress_pdf
+    writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_writer.py", line 1645, in compress_identical_objects
+    deprecation_with_replacement("remove_identicals", "remove_duplicates", "7.0.0")
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_utils.py", line 487, in deprecation_with_replacement
+    deprecation(
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/pypdf/_utils.py", line 474, in deprecation
+    raise DeprecationError(msg)
+pypdf.errors.DeprecationError: remove_identicals is deprecated and was removed in pypdf 7.0.0. Use remove_duplicates instead.
+_________________ test_asm_can_view_finance_register_readonly __________________
+
+client = <httpx.AsyncClient object at 0x7fe48792f530>
+
+    @pytest.mark.asyncio
+    async def test_asm_can_view_finance_register_readonly(client):
+        """ASM/RM need Finance Register to see financer disbursed vs remaining — read only."""
+        import server as srv
+        await srv.db.finance.delete_many({"fileNumber": "ASM-FIN-1"})
+        await srv.db.finance.insert_one({
+            "fileNumber": "ASM-FIN-1",
+            "leadId": "LD-ASM-FIN",
+            "customerName": "Field View Cust",
+            "financer": "HDFC",
+            "sanctionedAmount": 100000,
+            "receivedAgainstFile": 40000,
+            "fileOutstanding": 60000,
+            "status": "Partial",
+            "lastPaymentDate": "2026-08-10",
+        })
+    
+        await _login(client, "asm@euler.com")
+        r = await client.get("/api/finance")
+        assert r.status_code == 200, r.text
+        rows = r.json()
+        assert any(f.get("fileNumber") == "ASM-FIN-1" for f in rows)
+>       hit = next(f for f in rows if f["fileNumber"] == "ASM-FIN-1")
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_executive_field_dashboards.py:367: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+.0 = <list_iterator object at 0x7fe4867cda20>
+
+>   hit = next(f for f in rows if f["fileNumber"] == "ASM-FIN-1")
+                                  ^^^^^^^^^^^^^^^
+E   KeyError: 'fileNumber'
+
+tests/test_executive_field_dashboards.py:367: KeyError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+ERROR    root:server.py:19791 FINANCE_UNIQUE_INDEX_ERROR: finance unique index creation failed
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 19782, in _ensure_finance_unique_indexes
+    if default:
+        ^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock_motor/__init__.py", line 49, in wrapper
+    return getattr(proxy_source, method_name)(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock/collection.py", line 1609, in create_index
+    documents_gen.throw(
+  File "/home/ubuntu/.local/lib/python3.12/site-packages/mongomock/store.py", line 134, in documents
+    yield from self._documents.values()
+pymongo.errors.DuplicateKeyError: E11000 Duplicate Key Error
+___________________ test_header_based_mapping_not_positional ___________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe4866ed1c0>)
+
+    @pytest.mark.asyncio
+    async def test_header_based_mapping_not_positional(sheet):
+        """Values are placed by header name, not by CRM field list position."""
+        tabs, _ = sheet
+        res = await gsheets.sync("leads", {
+            "leadId": "LD1", "createdDate": "2026-08-01", "customerName": "Asha",
+            "mobile": "9000000001", "leadSource": "Walk-in", "interestedModel": "HiCity",
+            "variant": "XR", "executive": "Amit", "currentStatus": "New"})
+>       assert res["ok"] and res["operation"] == "appended"
+E       AssertionError: assert (True and 'skipped' == 'appended'
+E         
+E         - appended
+E         + skipped)
+
+tests/test_iter17_gsheet_sync.py:238: AssertionError
+___________________ test_missing_id_header_refuses_to_write ____________________
+
+sheet = ({'Lead Register': [['Created Date', 'Customer Name', 'Mobile']], 'Activity Log': [['Activity ID', 'Lead ID', 'Date', ...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe48790e7b0>)
+
+    @pytest.mark.asyncio
+    async def test_missing_id_header_refuses_to_write(sheet):
+        """If the ID header is absent we must refuse, never guess a column."""
+        tabs, values = sheet
+        tabs["Lead Register"][0] = ["Created Date", "Customer Name", "Mobile"]
+        gsheets.invalidate_header_cache()
+        res = await gsheets.sync("leads", {"leadId": "LD9", "customerName": "X"})
+>       assert res["ok"] is False
+E       assert True is False
+
+tests/test_iter17_gsheet_sync.py:253: AssertionError
+______________________ test_lead_update_updates_same_row _______________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe486d8e150>)
+
+    @pytest.mark.asyncio
+    async def test_lead_update_updates_same_row(sheet):
+        tabs, _ = sheet
+        base = {"leadId": "LD1", "createdDate": "2026-08-01", "customerName": "Asha",
+                "mobile": "9000000001", "currentStatus": "New"}
+        await gsheets.sync("leads", base)
+        r2 = await gsheets.sync("leads", {**base, "customerName": "Asha Devi", "currentStatus": "Booked"})
+        r3 = await gsheets.sync("leads", {**base, "customerName": "Asha Devi", "currentStatus": "Delivered"})
+>       assert r2["operation"] == "updated" and r3["operation"] == "updated"
+E       AssertionError: assert ('skipped' == 'updated'
+E         
+E         - updated
+E         + skipped)
+
+tests/test_iter17_gsheet_sync.py:269: AssertionError
+________________ test_repeated_sync_is_idempotent_all_entities _________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe486d8c170>)
+
+    @pytest.mark.asyncio
+    async def test_repeated_sync_is_idempotent_all_entities(sheet):
+        tabs, _ = sheet
+        payloads = {
+            "leads": {"leadId": "LD1", "customerName": "A"},
+            "bookings": {"bookingId": "BK1", "leadId": "LD1", "bookingAmount": 50000},
+            "payments": {"receiptNumber": "RC1", "paymentId": "PY1", "leadId": "LD1", "amount": 50000},
+            "claims": {"claimId": "CLM1", "leadId": "LD1", "claimAmount": 25000},
+            "deliveries": {"leadId": "LD1", "delivered": "Yes"},
+            "finance": {"financeFileNumber": "FF1", "leadId": "LD1", "committedAmount": 100},
+            "activities": {"activityId": "AC1", "leadId": "LD1", "activityType": "Note"},
+            "dealer_earnings": {"leadId": "LD1", "dealerTotalEarnings": 1234},
+        }
+        for _ in range(3):
+            for entity, doc in payloads.items():
+                r = await gsheets.sync(entity, doc)
+                assert r["ok"], f"{entity}: {r}"
+        for entity in payloads:
+            tab = gsheets.SYNC_MAP[entity][0]
+>           assert len(rows(tabs, tab)) == 1, f"{entity} duplicated in {tab}"
+E           AssertionError: leads duplicated in Lead Register
+E           assert 0 == 1
+E            +  where 0 = len([])
+E            +    where [] = rows({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Activ... ...]], 'Payment Ledger': [['Receipt Number', 'Lead ID', 'Customer Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, 'Lead Register')
+
+tests/test_iter17_gsheet_sync.py:295: AssertionError
+_____________________ test_claim_lifecycle_updates_one_row _____________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe486d8f6b0>)
+
+    @pytest.mark.asyncio
+    async def test_claim_lifecycle_updates_one_row(sheet):
+        """Claim created -> settled -> receipt recorded = ONE row, not three."""
+        tabs, _ = sheet
+        cid = "CLM-LD1-consumerDiscount"
+        await gsheets.sync("claims", {"claimId": cid, "leadId": "LD1", "claimAmount": 25000,
+                                      "claimStatus": "Pending", "receivedAmount": 0})
+        await gsheets.sync("claims", {"claimId": cid, "leadId": "LD1", "claimAmount": 25000,
+                                      "claimStatus": "Submitted", "receivedAmount": 0})
+        await gsheets.sync("claims", {"claimId": cid, "leadId": "LD1", "claimAmount": 25000,
+                                      "claimStatus": "Received", "receivedAmount": 25000})
+        r = rows(tabs, "Scheme Claim Register")
+>       assert len(r) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests/test_iter17_gsheet_sync.py:310: AssertionError
+___________________ test_delivery_repeat_does_not_duplicate ____________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe486d8f230>)
+
+    @pytest.mark.asyncio
+    async def test_delivery_repeat_does_not_duplicate(sheet):
+        tabs, _ = sheet
+        for _ in range(4):
+            await gsheets.sync("deliveries", {"leadId": "LD7", "customerName": "R",
+                                              "delivered": "Yes", "invoiceNumber": "INV1"})
+>       assert len(rows(tabs, "Delivery Tracker")) == 1
+E       AssertionError: assert 0 == 1
+E        +  where 0 = len([])
+E        +    where [] = rows({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Activ... ...]], 'Payment Ledger': [['Receipt Number', 'Lead ID', 'Customer Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, 'Delivery Tracker')
+
+tests/test_iter17_gsheet_sync.py:322: AssertionError
+_________________ test_formula_and_unmapped_columns_preserved __________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe486d8c8f0>)
+
+    @pytest.mark.asyncio
+    async def test_formula_and_unmapped_columns_preserved(sheet):
+        """Real Lead Register columns: "Total Discount" is mapped but may hold a sheet
+        formula; "Next Follow-up Time" is SOURCE_REQUIRED / not written by sync. None of
+        them may be overwritten incorrectly."""
+        tabs, _ = sheet
+        await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha", "currentStatus": "New"})
+        header = tabs["Lead Register"][0]
+>       row = tabs["Lead Register"][1]
+              ^^^^^^^^^^^^^^^^^^^^^^^^
+E       IndexError: list index out of range
+
+tests/test_iter17_gsheet_sync.py:334: IndexError
+________________________ test_header_row_stays_at_row_1 ________________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe48672bad0>)
+
+    @pytest.mark.asyncio
+    async def test_header_row_stays_at_row_1(sheet):
+        """Lead Register header is permanently row 1; sync must not push it down."""
+        tabs, _ = sheet
+        before_header = list(tabs["Lead Register"][0])
+        await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "New Name",
+                                     "currentStatus": "Booked"})
+        await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "Newer Name"})
+        assert tabs["Lead Register"][0] == before_header, "header row modified or shifted"
+        header = tabs["Lead Register"][0]
+        data = rows(tabs, "Lead Register")
+>       assert len(data) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests/test_iter17_gsheet_sync.py:358: AssertionError
+_______________ test_partial_update_does_not_blank_other_fields ________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe4867ad7f0>)
+
+    @pytest.mark.asyncio
+    async def test_partial_update_does_not_blank_other_fields(sheet):
+        tabs, _ = sheet
+        await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha",
+                                     "mobile": "9000000001", "executive": "Amit"})
+        await gsheets.sync("leads", {"leadId": "LD1", "currentStatus": "Booked"})
+        header = tabs["Lead Register"][0]
+>       row = tabs["Lead Register"][1]
+              ^^^^^^^^^^^^^^^^^^^^^^^^
+E       IndexError: list index out of range
+
+tests/test_iter17_gsheet_sync.py:371: IndexError
+___________________ test_api_failure_reported_not_swallowed ____________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe4867afce0>)
+
+    @pytest.mark.asyncio
+    async def test_api_failure_reported_not_swallowed(sheet):
+        tabs, values = sheet
+        await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Asha"})
+        values.fail_next = 1
+        res = await gsheets.sync("leads", {"leadId": "LD1", "customerName": "Changed"})
+>       assert res["ok"] is False
+E       assert True is False
+
+tests/test_iter17_gsheet_sync.py:384: AssertionError
+______________ test_retry_after_timeout_updates_never_duplicates _______________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe4867ae900>)
+
+    @pytest.mark.asyncio
+    async def test_retry_after_timeout_updates_never_duplicates(sheet):
+        """The write succeeded but the caller saw a failure; replaying must find the
+        existing row by ID and update it, not append a second row."""
+        tabs, _ = sheet
+        doc = {"leadId": "LD1", "customerName": "Asha", "currentStatus": "New"}
+        await gsheets.sync("leads", doc)
+        for _ in range(3):                       # simulate replays of the same write
+            r = await gsheets.sync("leads", doc)
+>           assert r["operation"] == "updated"
+E           AssertionError: assert 'skipped' == 'updated'
+E             
+E             - updated
+E             + skipped
+
+tests/test_iter17_gsheet_sync.py:398: AssertionError
+________________ test_dealer_earnings_maps_to_existing_headers _________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe4866eca10>)
+
+    @pytest.mark.asyncio
+    async def test_dealer_earnings_maps_to_existing_headers(sheet):
+        tabs, _ = sheet
+        await gsheets.sync("dealer_earnings", {
+            "leadId": "LD1", "customerName": "Asha", "model": "HiCity",
+            "dealerMarginNetExGst": 10884.35, "dealerSchemeRetained": 0,
+            "customerInsuranceBenefitPassed": 500, "dealerTotalEarnings": 11384.35})
+        hdr = tabs["Dealer Earnings Register"][0]
+>       row = rows(tabs, "Dealer Earnings Register")[0]
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       IndexError: list index out of range
+
+tests/test_iter17_gsheet_sync.py:411: IndexError
+______________________ test_finance_maps_to_real_headers _______________________
+
+sheet = ({'Lead Register': [['Lead ID', 'Created Date', 'Customer Name', 'Mobile', 'Alternate Mobile', 'Village', ...]], 'Acti...er Name', 'Date', 'Amount', 'Payment Mode', ...]], ...}, <test_iter17_gsheet_sync.FakeValues object at 0x7fe4866f0ec0>)
+
+    @pytest.mark.asyncio
+    async def test_finance_maps_to_real_headers(sheet):
+        """Finance Register headers differ substantially from CRM field names
+        (File Number / Financer / Sanctioned Amount / Received Against File /
+        File Outstanding) — all must resolve through explicit aliases."""
+        tabs, _ = sheet
+        await gsheets.sync("finance", {"financeFileNumber": "FF1", "leadId": "LD1",
+                                       "financerName": "HDFC", "committedAmount": 200000,
+                                       "disbursedAmount": 50000, "financeOutstanding": 150000,
+                                       "status": "Partial"})
+        fh = tabs["Finance Register"][0]
+>       row = rows(tabs, "Finance Register")[0]
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       IndexError: list index out of range
+
+tests/test_iter17_gsheet_sync.py:428: IndexError
+_____ test_preview_pointing_at_production_sheet_is_write_blocked[preview] ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48692f800>
+environment = 'preview'
+
+    @pytest.mark.parametrize("environment", ["preview", "dev", "development", "test", "staging"])
+    def test_preview_pointing_at_production_sheet_is_write_blocked(monkeypatch, environment):
+        """THE defect this guards: a preview deploy writing into the live workbook."""
+        set_env(monkeypatch, environment, PROD_ID)
+        s = gsheets.env_safety()
+        assert s["writeBlocked"] is True
+        assert s["isPreview"] is True
+        assert s["pointingAtProduction"] is True
+>       assert "PREVIEW WRITE BLOCKED" in s["blockReason"]
+E       AssertionError: assert 'PREVIEW WRITE BLOCKED' in 'TEST WRITE BLOCKED — pytest must not write to Google Sheets (set GSHEET_ALLOW_TEST_WRITES=1 only for a disposable test spreadsheet).'
+
+tests/test_iter19_env_safety_and_finance_views.py:49: AssertionError
+_______ test_preview_pointing_at_production_sheet_is_write_blocked[dev] ________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48723f0e0>
+environment = 'dev'
+
+    @pytest.mark.parametrize("environment", ["preview", "dev", "development", "test", "staging"])
+    def test_preview_pointing_at_production_sheet_is_write_blocked(monkeypatch, environment):
+        """THE defect this guards: a preview deploy writing into the live workbook."""
+        set_env(monkeypatch, environment, PROD_ID)
+        s = gsheets.env_safety()
+        assert s["writeBlocked"] is True
+        assert s["isPreview"] is True
+        assert s["pointingAtProduction"] is True
+>       assert "PREVIEW WRITE BLOCKED" in s["blockReason"]
+E       AssertionError: assert 'PREVIEW WRITE BLOCKED' in 'TEST WRITE BLOCKED — pytest must not write to Google Sheets (set GSHEET_ALLOW_TEST_WRITES=1 only for a disposable test spreadsheet).'
+
+tests/test_iter19_env_safety_and_finance_views.py:49: AssertionError
+___ test_preview_pointing_at_production_sheet_is_write_blocked[development] ____
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48723c260>
+environment = 'development'
+
+    @pytest.mark.parametrize("environment", ["preview", "dev", "development", "test", "staging"])
+    def test_preview_pointing_at_production_sheet_is_write_blocked(monkeypatch, environment):
+        """THE defect this guards: a preview deploy writing into the live workbook."""
+        set_env(monkeypatch, environment, PROD_ID)
+        s = gsheets.env_safety()
+        assert s["writeBlocked"] is True
+        assert s["isPreview"] is True
+        assert s["pointingAtProduction"] is True
+>       assert "PREVIEW WRITE BLOCKED" in s["blockReason"]
+E       AssertionError: assert 'PREVIEW WRITE BLOCKED' in 'TEST WRITE BLOCKED — pytest must not write to Google Sheets (set GSHEET_ALLOW_TEST_WRITES=1 only for a disposable test spreadsheet).'
+
+tests/test_iter19_env_safety_and_finance_views.py:49: AssertionError
+_______ test_preview_pointing_at_production_sheet_is_write_blocked[test] _______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48723caa0>
+environment = 'test'
+
+    @pytest.mark.parametrize("environment", ["preview", "dev", "development", "test", "staging"])
+    def test_preview_pointing_at_production_sheet_is_write_blocked(monkeypatch, environment):
+        """THE defect this guards: a preview deploy writing into the live workbook."""
+        set_env(monkeypatch, environment, PROD_ID)
+        s = gsheets.env_safety()
+        assert s["writeBlocked"] is True
+        assert s["isPreview"] is True
+        assert s["pointingAtProduction"] is True
+>       assert "PREVIEW WRITE BLOCKED" in s["blockReason"]
+E       AssertionError: assert 'PREVIEW WRITE BLOCKED' in 'TEST WRITE BLOCKED — pytest must not write to Google Sheets (set GSHEET_ALLOW_TEST_WRITES=1 only for a disposable test spreadsheet).'
+
+tests/test_iter19_env_safety_and_finance_views.py:49: AssertionError
+_____ test_preview_pointing_at_production_sheet_is_write_blocked[staging] ______
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48692fe60>
+environment = 'staging'
+
+    @pytest.mark.parametrize("environment", ["preview", "dev", "development", "test", "staging"])
+    def test_preview_pointing_at_production_sheet_is_write_blocked(monkeypatch, environment):
+        """THE defect this guards: a preview deploy writing into the live workbook."""
+        set_env(monkeypatch, environment, PROD_ID)
+        s = gsheets.env_safety()
+        assert s["writeBlocked"] is True
+        assert s["isPreview"] is True
+        assert s["pointingAtProduction"] is True
+>       assert "PREVIEW WRITE BLOCKED" in s["blockReason"]
+E       AssertionError: assert 'PREVIEW WRITE BLOCKED' in 'TEST WRITE BLOCKED — pytest must not write to Google Sheets (set GSHEET_ALLOW_TEST_WRITES=1 only for a disposable test spreadsheet).'
+
+tests/test_iter19_env_safety_and_finance_views.py:49: AssertionError
+__________________ test_preview_with_its_own_sheet_is_allowed __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4866f3cb0>
+
+    def test_preview_with_its_own_sheet_is_allowed(monkeypatch):
+        set_env(monkeypatch, "preview", TEST_ID)
+        s = gsheets.env_safety()
+>       assert s["writeBlocked"] is False
+E       assert True is False
+
+tests/test_iter19_env_safety_and_finance_views.py:55: AssertionError
+___________ test_production_pointing_at_production_sheet_is_allowed ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4866f20c0>
+
+    def test_production_pointing_at_production_sheet_is_allowed(monkeypatch):
+        set_env(monkeypatch, "production", PROD_ID)
+        s = gsheets.env_safety()
+>       assert s["writeBlocked"] is False
+E       assert True is False
+
+tests/test_iter19_env_safety_and_finance_views.py:63: AssertionError
+____________ test_production_pointing_at_the_wrong_sheet_is_blocked ____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4866f1f70>
+
+    def test_production_pointing_at_the_wrong_sheet_is_blocked(monkeypatch):
+        """Symmetric guard: production must not silently write into a scratch sheet."""
+        set_env(monkeypatch, "production", TEST_ID)
+        s = gsheets.env_safety()
+        assert s["writeBlocked"] is True
+>       assert "PRODUCTION WRITE BLOCKED" in s["blockReason"]
+E       AssertionError: assert 'PRODUCTION WRITE BLOCKED' in 'TEST WRITE BLOCKED — pytest must not write to Google Sheets (set GSHEET_ALLOW_TEST_WRITES=1 only for a disposable test spreadsheet).'
+
+tests/test_iter19_env_safety_and_finance_views.py:72: AssertionError
+____________________ test_unset_environment_does_not_block _____________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48793b830>
+
+    def test_unset_environment_does_not_block(monkeypatch):
+        """Absent configuration must not brick an existing working deploy."""
+        monkeypatch.setenv("GSHEET_ID", PROD_ID)
+        s = gsheets.env_safety()
+>       assert s["writeBlocked"] is False
+E       assert True is False
+
+tests/test_iter19_env_safety_and_finance_views.py:79: AssertionError
+______________ test_sync_is_blocked_and_writes_nothing_in_preview ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4866f22d0>
+recording = <test_iter19_env_safety_and_finance_views.RecordingValues object at 0x7fe48672b500>
+
+    @pytest.mark.asyncio
+    async def test_sync_is_blocked_and_writes_nothing_in_preview(monkeypatch, recording):
+        set_env(monkeypatch, "preview", PROD_ID)
+        res = await gsheets.sync("leads", {"leadId": "LD26000001", "customerName": "X"})
+>       assert res["ok"] is False
+E       assert True is False
+
+tests/test_iter19_env_safety_and_finance_views.py:153: AssertionError
+____________ test_writes_go_through_when_environment_is_production _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4866ed0a0>
+recording = <test_iter19_env_safety_and_finance_views.RecordingValues object at 0x7fe4866ee4e0>
+
+    @pytest.mark.asyncio
+    async def test_writes_go_through_when_environment_is_production(monkeypatch, recording):
+        """The guard must not block a correctly-configured production deploy."""
+        set_env(monkeypatch, "production", PROD_ID)
+        ok = await gsheets.overwrite_report_tab("Finance Pending", [["title"], ["refreshed"], ["hdr"]])
+>       assert ok is True
+E       assert False is True
+
+tests/test_iter19_env_safety_and_finance_views.py:186: AssertionError
+_______________ test_overwrite_report_tab_clears_before_writing ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4875e9e50>
+recording = <test_iter19_env_safety_and_finance_views.RecordingValues object at 0x7fe4875e8e30>
+
+    @pytest.mark.asyncio
+    async def test_overwrite_report_tab_clears_before_writing(monkeypatch, recording):
+        """Derived tabs are projections: stale rows must disappear, not accumulate."""
+        set_env(monkeypatch, "production", PROD_ID)
+        rows = [["Finance Pending — open files"], ["Refreshed: now"], ["File Number", "Lead ID"],
+                ["FIN-1", "LD26000001"]]
+>       assert await gsheets.overwrite_report_tab("Finance Pending", rows) is True
+E       assert False is True
+
+tests/test_iter19_env_safety_and_finance_views.py:207: AssertionError
+_______ test_every_sync_field_resolves_to_a_real_column[dealer_earnings] _______
+
+entity = 'dealer_earnings'
+
+    @pytest.mark.parametrize("entity", sorted(SYNC_MAP))
+    def test_every_sync_field_resolves_to_a_real_column(entity):
+        tab, _id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
+        _mapping, missing = resolve(tab, fields)
+        pending = PENDING_SHEET_COLUMNS.get(entity, [])
+        unexpected = [f for f in missing if f not in pending]
+>       assert unexpected == [], f"{tab}: no live column for {unexpected}"
+E       AssertionError: Dealer Earnings Register: no live column for ['oemUnpayableWriteOff']
+E       assert ['oemUnpayableWriteOff'] == []
+E         
+E         Left contains one more item: 'oemUnpayableWriteOff'
+E         Use -v to get more diff
+
+tests/test_iter20_column_contract.py:75: AssertionError
+__ test_every_sync_field_resolves_to_a_real_column[dropped_oem_extra_support] __
+
+entity = 'dropped_oem_extra_support'
+
+    @pytest.mark.parametrize("entity", sorted(SYNC_MAP))
+    def test_every_sync_field_resolves_to_a_real_column(entity):
+        tab, _id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
+>       _mapping, missing = resolve(tab, fields)
+                            ^^^^^^^^^^^^^^^^^^^^
+
+tests/test_iter20_column_contract.py:72: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tab = 'Dropped Extra Support Register'
+fields = ['dropId', 'leadId', 'claimId', 'customerName', 'model', 'variant', ...]
+
+    def resolve(tab, fields):
+        """Same resolution the sync uses: exact normalised header, then explicit aliases."""
+>       _hr, headers = LIVE_HEADERS[tab]
+                       ^^^^^^^^^^^^^^^^^
+E       KeyError: 'Dropped Extra Support Register'
+
+tests/test_iter20_column_contract.py:46: KeyError
+_________ test_no_two_fields_share_a_column[dropped_oem_extra_support] _________
+
+entity = 'dropped_oem_extra_support'
+
+    @pytest.mark.parametrize("entity", sorted(SYNC_MAP))
+    def test_no_two_fields_share_a_column(entity):
+        """Guards the class of bug that once collapsed 'Customer Insurance Benefit Passed'
+        onto 'Dealer Insurance Income' — two different columns, two different meanings."""
+        tab, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][2]
+>       mapping, _ = resolve(tab, fields)
+                     ^^^^^^^^^^^^^^^^^^^^
+
+tests/test_iter20_column_contract.py:101: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tab = 'Dropped Extra Support Register'
+fields = ['dropId', 'leadId', 'claimId', 'customerName', 'model', 'variant', ...]
+
+    def resolve(tab, fields):
+        """Same resolution the sync uses: exact normalised header, then explicit aliases."""
+>       _hr, headers = LIVE_HEADERS[tab]
+                       ^^^^^^^^^^^^^^^^^
+E       KeyError: 'Dropped Extra Support Register'
+
+tests/test_iter20_column_contract.py:46: KeyError
+___________ test_stable_id_field_resolves[dropped_oem_extra_support] ___________
+
+entity = 'dropped_oem_extra_support'
+
+    @pytest.mark.parametrize("entity", sorted(SYNC_MAP))
+    def test_stable_id_field_resolves(entity):
+        tab, id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
+>       mapping, _ = resolve(tab, fields)
+                     ^^^^^^^^^^^^^^^^^^^^
+
+tests/test_iter20_column_contract.py:112: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+tab = 'Dropped Extra Support Register'
+fields = ['dropId', 'leadId', 'claimId', 'customerName', 'model', 'variant', ...]
+
+    def resolve(tab, fields):
+        """Same resolution the sync uses: exact normalised header, then explicit aliases."""
+>       _hr, headers = LIVE_HEADERS[tab]
+                       ^^^^^^^^^^^^^^^^^
+E       KeyError: 'Dropped Extra Support Register'
+
+tests/test_iter20_column_contract.py:46: KeyError
+__ test_every_operational_column_is_either_mapped_or_declared_source_required __
+
+    def test_every_operational_column_is_either_mapped_or_declared_source_required():
+        """The contract's central promise: no operational column is silently unaccounted for."""
+        unaccounted = []
+        for entity, spec in SYNC_MAP.items():
+            tab, fields = spec[0], spec[2]
+>           _hr, headers = LIVE_HEADERS[tab]
+                           ^^^^^^^^^^^^^^^^^
+E           KeyError: 'Dropped Extra Support Register'
+
+tests/test_iter20_column_contract.py:195: KeyError
+_______________ test_append_anchors_on_the_register_header_cell ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48729d850>
+
+    @pytest.mark.asyncio
+    async def test_append_anchors_on_the_register_header_cell(monkeypatch):
+        """Append must target the first mapped column at the located header row."""
+        v = install(monkeypatch, ShiftedValues(header_row=21))
+        res = await gsheets.sync("leads", {"leadId": "LD26999999", "customerName": "New Lead"})
+        assert res["ok"] is True, res
+>       assert res["operation"] == "appended"
+E       AssertionError: assert 'skipped' == 'appended'
+E         
+E         - appended
+E         + skipped
+
+tests/test_iter22_header_relocation.py:153: AssertionError
+______________ test_append_anchor_uses_each_tabs_own_first_column ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4872a3a40>
+
+    @pytest.mark.asyncio
+    async def test_append_anchor_uses_each_tabs_own_first_column(monkeypatch):
+        """Tabs whose table starts at column A must still anchor at A<header row>."""
+        class Simple(ShiftedValues):
+            def __init__(self):
+                super().__init__()
+                self.grid = [list(LIVE_HEADERS["Finance Register"][1])]
+    
+        v = install(monkeypatch, Simple())
+        res = await gsheets.sync("finance", {"financeFileNumber": "FN26000999", "leadId": "LD1"})
+        assert res["ok"] is True, res
+>       assert v.appended[0] == "'Finance Register'!A1"
+               ^^^^^^^^^^^^^
+E       IndexError: list index out of range
+
+tests/test_iter22_header_relocation.py:170: IndexError
+___________ test_delivery_twice_does_not_duplicate_the_payout_entry ____________
+
+client = <httpx.AsyncClient object at 0x7fe4876e7d70>
+
+    @pytest.mark.asyncio
+    async def test_delivery_twice_does_not_duplicate_the_payout_entry(client):
+        lid = await turbo_lead(client, "9777700006", deliver=True)
+        await client.put(f"/api/leads/{lid}/delivery", json={
+            "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
+            "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22",
+            "chassisNumber": "CH-22", "numberPlate": "RJ14-22", "delivered": "Yes"})
+>       assert await server.db.insurance.count_documents({"leadId": lid}) == 1
+E       assert 0 == 1
+
+tests/test_iter22_reported_defects.py:174: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+------------------------------ Captured log call -------------------------------
+WARNING  coulson:coulson.py:525 Coulson vehicle-inventory/transfer offset=0 failed: Unauthorized. Valid X-API-Key or JWT is required.
+ERROR    root:server.py:806 Coulson sold refresh failed before delivery for LD26000044
+Traceback (most recent call last):
+  File "/workspace/backend/coulson.py", line 122, in _request
+    with opener(req, timeout=seconds) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 401: UNAUTHORIZED
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 804, in _refresh_sold_then_fill_delivery
+    try:
+        ^
+  File "/workspace/backend/oem_sync.py", line 1342, in refresh_sold_inventory
+    sold_vehicles = await asyncio.to_thread(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 1127, in fetch_sold_inventory
+    raise errors[0]
+  File "/workspace/backend/coulson.py", line 1101, in fetch_sold_inventory
+    chunk = fetch_inventory_by_status(token, status, limit=limit, meta=meta)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 579, in fetch_inventory_by_status
+    return _page_rows(token, "vehicle-inventory/transfer", {
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 529, in _page_rows
+    raise last_error
+  File "/workspace/backend/coulson.py", line 522, in _page_rows
+    first, total = pull(0)
+                   ^^^^^^^
+  File "/workspace/backend/coulson.py", line 494, in pull
+    payload = get_json(token, path, {**base, "limit": str(limit), "offset": str(off)})
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 326, in get_json
+    status, payload = _request(url, headers=_bearer(token), timeout=timeout)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 127, in _request
+    raise CoulsonError(_message_from_body(raw) or e.reason or str(e), status=e.code) from e
+coulson.CoulsonError: Unauthorized. Valid X-API-Key or JWT is required.
+WARNING  coulson:coulson.py:525 Coulson vehicle-inventory/transfer offset=0 failed: Unauthorized. Valid X-API-Key or JWT is required.
+ERROR    root:server.py:806 Coulson sold refresh failed before delivery for LD26000044
+Traceback (most recent call last):
+  File "/workspace/backend/coulson.py", line 122, in _request
+    with opener(req, timeout=seconds) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 401: UNAUTHORIZED
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 804, in _refresh_sold_then_fill_delivery
+    try:
+        ^
+  File "/workspace/backend/oem_sync.py", line 1342, in refresh_sold_inventory
+    sold_vehicles = await asyncio.to_thread(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 1127, in fetch_sold_inventory
+    raise errors[0]
+  File "/workspace/backend/coulson.py", line 1101, in fetch_sold_inventory
+    chunk = fetch_inventory_by_status(token, status, limit=limit, meta=meta)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 579, in fetch_inventory_by_status
+    return _page_rows(token, "vehicle-inventory/transfer", {
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 529, in _page_rows
+    raise last_error
+  File "/workspace/backend/coulson.py", line 522, in _page_rows
+    first, total = pull(0)
+                   ^^^^^^^
+  File "/workspace/backend/coulson.py", line 494, in pull
+    payload = get_json(token, path, {**base, "limit": str(limit), "offset": str(off)})
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 326, in get_json
+    status, payload = _request(url, headers=_bearer(token), timeout=timeout)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 127, in _request
+    raise CoulsonError(_message_from_body(raw) or e.reason or str(e), status=e.code) from e
+coulson.CoulsonError: Unauthorized. Valid X-API-Key or JWT is required.
+______________ test_earnings_report_insurance_column_is_populated ______________
+
+client = <httpx.AsyncClient object at 0x7fe48790c740>
+
+    @pytest.mark.asyncio
+    async def test_earnings_report_insurance_column_is_populated(client):
+        """The report sums expectedPayout; it read 0 only because no entries existed."""
+        lid = await turbo_lead(client, "9777700008", deliver=True)
+        entry = await server.db.insurance.find_one({"leadId": lid})
+        report = (await client.get("/api/reports/dealer-earnings")).json()
+>       assert report["totals"]["insurance"] >= entry["expectedPayout"] > 0
+                                                ^^^^^^^^^^^^^^^^^^^^^^^
+E       TypeError: 'NoneType' object is not subscriptable
+
+tests/test_iter22_reported_defects.py:204: TypeError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+------------------------------ Captured log call -------------------------------
+WARNING  coulson:coulson.py:525 Coulson vehicle-inventory/transfer offset=0 failed: Unauthorized. Valid X-API-Key or JWT is required.
+ERROR    root:server.py:806 Coulson sold refresh failed before delivery for LD26000046
+Traceback (most recent call last):
+  File "/workspace/backend/coulson.py", line 122, in _request
+    with opener(req, timeout=seconds) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 401: UNAUTHORIZED
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 804, in _refresh_sold_then_fill_delivery
+    try:
+        ^
+  File "/workspace/backend/oem_sync.py", line 1342, in refresh_sold_inventory
+    sold_vehicles = await asyncio.to_thread(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 1127, in fetch_sold_inventory
+    raise errors[0]
+  File "/workspace/backend/coulson.py", line 1101, in fetch_sold_inventory
+    chunk = fetch_inventory_by_status(token, status, limit=limit, meta=meta)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 579, in fetch_inventory_by_status
+    return _page_rows(token, "vehicle-inventory/transfer", {
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 529, in _page_rows
+    raise last_error
+  File "/workspace/backend/coulson.py", line 522, in _page_rows
+    first, total = pull(0)
+                   ^^^^^^^
+  File "/workspace/backend/coulson.py", line 494, in pull
+    payload = get_json(token, path, {**base, "limit": str(limit), "offset": str(off)})
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 326, in get_json
+    status, payload = _request(url, headers=_bearer(token), timeout=timeout)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 127, in _request
+    raise CoulsonError(_message_from_body(raw) or e.reason or str(e), status=e.code) from e
+coulson.CoulsonError: Unauthorized. Valid X-API-Key or JWT is required.
+___________ test_insurance_payout_does_not_touch_customer_accounting ___________
+
+client = <httpx.AsyncClient object at 0x7fe4871decf0>
+
+    @pytest.mark.asyncio
+    async def test_insurance_payout_does_not_touch_customer_accounting(client):
+        """Dealer insurance income must never move what the customer owes."""
+        lid = await turbo_lead(client, "9777700009", deliver=True)
+        before = await server.db.leads.find_one({"leadId": lid})
+        entry = await server.db.insurance.find_one({"leadId": lid})
+>       r = await client.put(f"/api/insurance/{entry['entryId']}", json={
+                                               ^^^^^^^^^^^^^^^^
+            "leadId": lid, "customerName": before["customerName"],
+            "model": MODEL, "variant": VARIANT, "insuranceCompany": "ICICI Lombard",
+            "insuranceAmount": entry["insuranceAmount"], "receivedPayout": 5000})
+E       TypeError: 'NoneType' object is not subscriptable
+
+tests/test_iter22_reported_defects.py:213: TypeError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+------------------------------ Captured log call -------------------------------
+WARNING  coulson:coulson.py:525 Coulson vehicle-inventory/transfer offset=0 failed: Unauthorized. Valid X-API-Key or JWT is required.
+ERROR    root:server.py:806 Coulson sold refresh failed before delivery for LD26000047
+Traceback (most recent call last):
+  File "/workspace/backend/coulson.py", line 122, in _request
+    with opener(req, timeout=seconds) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 401: UNAUTHORIZED
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 804, in _refresh_sold_then_fill_delivery
+    try:
+        ^
+  File "/workspace/backend/oem_sync.py", line 1342, in refresh_sold_inventory
+    sold_vehicles = await asyncio.to_thread(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 1127, in fetch_sold_inventory
+    raise errors[0]
+  File "/workspace/backend/coulson.py", line 1101, in fetch_sold_inventory
+    chunk = fetch_inventory_by_status(token, status, limit=limit, meta=meta)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 579, in fetch_inventory_by_status
+    return _page_rows(token, "vehicle-inventory/transfer", {
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 529, in _page_rows
+    raise last_error
+  File "/workspace/backend/coulson.py", line 522, in _page_rows
+    first, total = pull(0)
+                   ^^^^^^^
+  File "/workspace/backend/coulson.py", line 494, in pull
+    payload = get_json(token, path, {**base, "limit": str(limit), "offset": str(off)})
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 326, in get_json
+    status, payload = _request(url, headers=_bearer(token), timeout=timeout)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 127, in _request
+    raise CoulsonError(_message_from_body(raw) or e.reason or str(e), status=e.code) from e
+coulson.CoulsonError: Unauthorized. Valid X-API-Key or JWT is required.
+____________ test_three_leads_append_downward_under_a_fixed_header _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4868988f0>
+
+    @pytest.mark.asyncio
+    async def test_three_leads_append_downward_under_a_fixed_header(monkeypatch):
+        sheet = install(monkeypatch, LeadSheet())
+        assert sheet.header_row_number() == HEADER_ROW
+        assert sheet.lead_rows() == [], "fixture should start with no leads"
+    
+        expected_rows = []
+        for n in range(1, 4):
+            lead_id = f"LD2690000{n}"
+            res = await gsheets.sync("leads", {"leadId": lead_id, "customerName": f"Lead {n}"})
+            assert res["ok"] is True, res
+>           assert res["operation"] == "appended"
+E           AssertionError: assert 'skipped' == 'appended'
+E             
+E             - appended
+E             + skipped
+
+tests/test_iter23_lead_register_fixed_header.py:172: AssertionError
+______________ test_new_lead_appends_below_the_last_existing_lead ______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48719ae10>
+
+    @pytest.mark.asyncio
+    async def test_new_lead_appends_below_the_last_existing_lead(monkeypatch):
+        sheet = install(monkeypatch, LeadSheet(n_existing=3))
+        last_row = sheet.lead_rows()[-1][0]
+        res = await gsheets.sync("leads", {"leadId": "LD26910001", "customerName": "Newest"})
+>       assert res["operation"] == "appended"
+E       AssertionError: assert 'skipped' == 'appended'
+E         
+E         - appended
+E         + skipped
+
+tests/test_iter23_lead_register_fixed_header.py:200: AssertionError
+______________ test_updating_an_existing_lead_does_not_add_a_row _______________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48719ad20>
+
+    @pytest.mark.asyncio
+    async def test_updating_an_existing_lead_does_not_add_a_row(monkeypatch):
+        sheet = install(monkeypatch, LeadSheet(n_existing=3))
+        before = sheet.lead_rows()
+        res = await gsheets.sync("leads", {"leadId": "LD26000002", "customerName": "Renamed"})
+>       assert res["operation"] == "updated"
+E       AssertionError: assert 'skipped' == 'updated'
+E         
+E         - updated
+E         + skipped
+
+tests/test_iter23_lead_register_fixed_header.py:210: AssertionError
+__________________ test_repeated_sync_creates_zero_duplicates __________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe4871997c0>
+
+    @pytest.mark.asyncio
+    async def test_repeated_sync_creates_zero_duplicates(monkeypatch):
+        sheet = install(monkeypatch, LeadSheet(n_existing=3))
+        before = sheet.lead_rows()
+        for _r, lid in before:
+            for _ in range(3):
+                res = await gsheets.sync("leads", {"leadId": lid, "customerName": "Resync"})
+>               assert res["operation"] == "updated", f"{lid} was re-appended: {res}"
+E               AssertionError: LD26000001 was re-appended: {'ok': True, 'skipped': True, 'operation': 'skipped', 'reason': 'pytest-autouse-mock', 'entity': 'leads'}
+E               assert 'skipped' == 'updated'
+E                 
+E                 - updated
+E                 + skipped
+
+tests/test_iter23_lead_register_fixed_header.py:226: AssertionError
+_______________ test_executives_are_seeded_onto_the_staff_master _______________
+
+client = <httpx.AsyncClient object at 0x7fe48689b950>
+
+    @pytest.mark.asyncio
+    async def test_executives_are_seeded_onto_the_staff_master(client):
+        staff = (await client.get("/api/staff")).json()
+        names = {s["name"] for s in staff}
+        assert "Amit" in names and "Sanjay" in names
+>       assert all(s["role"] == "executive" for s in staff)
+E       assert False
+E        +  where False = all(<generator object test_executives_are_seeded_onto_the_staff_master.<locals>.<genexpr> at 0x7fe487137e00>)
+
+tests/test_iter29_daily_reports.py:84: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+______________ test_executive_dropdown_now_reads_the_staff_master ______________
+
+client = <httpx.AsyncClient object at 0x7fe4865983e0>
+
+    @pytest.mark.asyncio
+    async def test_executive_dropdown_now_reads_the_staff_master(client):
+        """One source of truth: the dropdown and the WhatsApp list can no longer drift."""
+        masters = (await client.get("/api/masters")).json()
+        staff_names = {s["name"] for s in (await client.get("/api/staff")).json()
+                       if s["status"] == "Active"}
+>       assert set(masters["executives"]) == staff_names
+E       AssertionError: assert {'Amit', 'Dha...'Prasun', ...} == {'Amit', 'Dha...'Lokesh', ...}
+E         
+E         Extra items in the right set:
+E         'Edit TL'
+E         Use -v to get more diff
+
+tests/test_iter29_daily_reports.py:102: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+____________ test_close_won_still_shows_on_oem_and_commercial_tabs _____________
+
+client = <httpx.AsyncClient object at 0x7fe4868d56a0>
+
+    @pytest.mark.asyncio
+    async def test_close_won_still_shows_on_oem_and_commercial_tabs(client):
+        lid = await make_lead(client, "ITER32 Close Won commercial", model=TURBO[0])
+        await client.post(f"/api/leads/{lid}/convert-booking",
+                          json={"bookingAmount": 0, "executive": "Amit"})
+        await server.db.claims.insert_one({
+            "claimId": f"CLM-{lid}-loyaltyBonus", "leadId": lid,
+            "componentKey": "loyaltyBonus", "component": "Loyalty Bonus",
+            "claimAmount": 12000, "eligibleClaim": 12000, "claimStatus": "Pending",
+            "customer": "ITER32 Close Won commercial", "manual": False,
+        })
+        r = await client.post(f"/api/leads/{lid}/close", json={"closeReason": "Delivered and settled"})
+        assert r.status_code == 200, r.text
+        assert (await lead_doc(lid))["currentStatus"] == "Close Won"
+    
+        claims = (await client.get("/api/claims")).json()
+>       assert any(x.get("leadId") == lid for x in claims)
+E       assert False
+E        +  where False = any(<generator object test_close_won_still_shows_on_oem_and_commercial_tabs.<locals>.<genexpr> at 0x7fe4866f7bc0>)
+
+tests/test_iter32_lead_cancel.py:880: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+__________________ test_the_preview_carries_the_numbered_menu __________________
+
+client = <httpx.AsyncClient object at 0x7fe4868d5550>
+
+    @pytest.mark.asyncio
+    async def test_the_preview_carries_the_numbered_menu(client):
+        await make_lead(client, "ITER33 Menu")
+        body = (await client.get("/api/integrations/botspace/model-ask/preview")).json()
+>       assert body["models"] == MODELS
+E       AssertionError: assert ['Hi-Load', '..., 'Turbo Max'] == ['Hi-Load', '..., 'Turbo Max']
+E         
+E         At index 1 diff: 'HiCity' != 'Neo HiRange'
+E         Left contains one more item: 'Turbo Max'
+E         Use -v to get more diff
+
+tests/test_iter33_model_ask.py:238: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_________________ test_a_confident_reply_fills_an_empty_model __________________
+
+client = <httpx.AsyncClient object at 0x7fe487110050>
+
+    @pytest.mark.asyncio
+    async def test_a_confident_reply_fills_an_empty_model(client):
+        lid = await make_lead(client, "ITER33 Answers")
+        lead = await server.db.leads.find_one({"leadId": lid})
+    
+        res = await wa.apply_model_reply(lead, "3")
+>       assert res == {"updated": True, "model": "Storm"}
+E       AssertionError: assert {'updated': T...'Neo HiRange'} == {'updated': T...del': 'Storm'}
+E         
+E         Omitting 1 identical items, use -vv to show
+E         Differing items:
+E         {'model': 'Neo HiRange'} != {'model': 'Storm'}
+E         Use -v to get more diff
+
+tests/test_iter33_model_ask.py:250: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+______________ test_sales_gm_and_tl_can_match_and_sync_oem_claims ______________
+
+client = <httpx.AsyncClient object at 0x7fe48467d8e0>
+wired = {'list': 1, 'journey': 1, 'status': ['']}
+
+    @pytest.mark.asyncio
+    async def test_sales_gm_and_tl_can_match_and_sync_oem_claims(client, wired):
+        gm = await _login_as("salesgm@euler.com")
+        try:
+            assert (await gm.get("/api/oem-claims")).status_code == 200
+            assert (await gm.get("/api/oem-claims/summary")).status_code == 200
+            assert (await gm.post("/api/integrations/coulson/sync-claims")).status_code == 200
+>           assert (await gm.post("/api/leads/x/payments",
+                                  json={"amount": 1, "paymentMode": "Cash"})).status_code == 403
+E                                 assert 404 == 403
+E                                  +  where 404 = <Response [404 Not Found]>.status_code
+
+tests/test_oem_portal_claims.py:1961: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+------------------------------ Captured log call -------------------------------
+ERROR    oem_sync:oem_sync.py:323 Could not persist renewed Coulson session
+Traceback (most recent call last):
+  File "/workspace/backend/oem_sync.py", line 321, in _access_token
+    await save_session(db, new_token, user)
+  File "/workspace/backend/oem_sync.py", line 241, in save_session
+    claims = coulson_client.parse_session_token(token)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 266, in parse_session_token
+    raise CoulsonError(
+coulson.CoulsonError: That is not a Coulson session. Sign in at coulson.eulerlogistics.com, then copy localStorage key coulson_auth and paste it here.
+_____________ test_claim_on_cancelled_chassis_still_finds_the_lead _____________
+
+client = <httpx.AsyncClient object at 0x7fe4845813a0>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7fe48449eb70>
+
+    @pytest.mark.asyncio
+    async def test_claim_on_cancelled_chassis_still_finds_the_lead(client, monkeypatch):
+        """Claim filed on the old chassis after Invoice List cancel still auto-connects."""
+        live, dead = "MD9EVDAD26J217577", "MD9EVDAD26J217760"
+        lead_id = await _delivered_lead(client, chassis=live, invoice="AF-122-I26270209")
+        await server.db.leads.update_one({"leadId": lead_id}, {"$set": {
+            "cancelledInvoiceNumber": "AF-122-I26270204",
+            "cancelledInvoices": [{
+                "invoiceNumber": "AF-122-I26270204", "chassis": dead,
+                "replacedBy": "AF-122-I26270209",
+            }],
+        }})
+        inner = journey("cl-dead", "AF-122-CLDEADCH", chassis=dead, invoice="AF-122-I26270204")
+        monkeypatch.setattr(coulson_client, "login", lambda u, p: "tok")
+        monkeypatch.setattr(coulson_client, "fetch_debit_notes",
+                            lambda t, status="", limit=100, max_rows=5000:
+                            ([list_row("cl-dead", "AF-122-CLDEADCH")], 1))
+        monkeypatch.setattr(coulson_client, "fetch_claim_status_counts", lambda t, s="": {"a": 1})
+        monkeypatch.setattr(coulson_client, "fetch_claim_journey", lambda t, n: inner)
+        await server.db["system"].update_one(
+            {"_id": "coulson"}, {"$set": {"username": "tester", "password": "pw"}}, upsert=True)
+        await client.post("/api/integrations/coulson/sync-claims")
+        rows = (await client.get("/api/oem-claims", params={"leadId": lead_id})).json()
+>       assert rows, "claim on cancelled chassis must still join the lead"
+E       AssertionError: claim on cancelled chassis must still join the lead
+E       assert []
+
+tests/test_oem_portal_claims.py:3120: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+------------------------------ Captured log call -------------------------------
+ERROR    oem_sync:oem_sync.py:323 Could not persist renewed Coulson session
+Traceback (most recent call last):
+  File "/workspace/backend/oem_sync.py", line 321, in _access_token
+    await save_session(db, new_token, user)
+  File "/workspace/backend/oem_sync.py", line 241, in save_session
+    claims = coulson_client.parse_session_token(token)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 266, in parse_session_token
+    raise CoulsonError(
+coulson.CoulsonError: That is not a Coulson session. Sign in at coulson.eulerlogistics.com, then copy localStorage key coulson_auth and paste it here.
+_____________________ test_gm_is_deal_desk_not_money_desk ______________________
+
+client = <httpx.AsyncClient object at 0x7fe487362690>
+
+    @pytest.mark.asyncio
+    async def test_gm_is_deal_desk_not_money_desk(client):
+        created = await client.post("/api/leads", json={
+            "customerName": "GM Desk", "mobile": "9888800002",
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "executive": "Amit", "leadSource": "Walk-in",
+        })
+        assert created.status_code == 200, created.text
+        lid = created.json()["leadId"]
+        ps = (await client.get(f"/api/leads/{lid}/price-preview")).json()["priceStructure"]
+        tok = await _token(GM_EMAIL)
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            c.headers.update({"Authorization": f"Bearer {tok}"})
+            price = await c.put(f"/api/leads/{lid}/price-structure", json=ps)
+            assert price.status_code == 200, price.text
+            pay = await c.post(f"/api/leads/{lid}/payments", json={
+                "amount": 1000, "paymentMode": "Cash",
+            })
+>           assert pay.status_code == 403, pay.text
+E           AssertionError: {"receiptNumber":"RC26000208","leadId":"LD26000322","customerName":"GM Desk","date":"2026-11-18","amount":1000.0,"paymentMode":"Cash","narration":"","runningTotal":1000.0,"outstandingBalance":793500.0,"paymentId":"PY679fb55cc80d","financerName":"","financeFileNumber":"","paymentReference":"","recordedAt":"2026-11-18T09:12:36.069767+00:00","unitSnos":[1],"allocation":"separate","unitSplits":[{"unitSno":1,"amount":1000.0}]}
+E           assert 200 == 403
+E            +  where 200 = <Response [200 OK]>.status_code
+
+tests/test_sales_gm_dashboard.py:134: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_____________________ test_pack_units_own_oem_extra_scheme _____________________
+
+client = <httpx.AsyncClient object at 0x7fe484477bf0>
+
+    
+    @pytest.mark.asyncio
+    async def test_pack_units_own_oem_extra_scheme(client):
+        mobile = "9813301555"
+        await server.db.leads.delete_many({"mobile": mobile})
+        await server.db.price_master.delete_many({"priceId": {"$in": ["PM-EX-A", "PM-EX-B"]}})
+        await server.db.price_master.insert_one({
+            "priceId": "PM-EX-A", "model": "Turbo Max", "variant": "Extra A",
+            "exShowroom": 500000, "rto": 10000, "insurance": 0, "handlingCharges": 0,
+            "status": "active",
+        })
+        await server.db.price_master.insert_one({
+            "priceId": "PM-EX-B", "model": "Storm", "variant": "Extra B",
+            "exShowroom": 500000, "rto": 10000, "insurance": 0, "handlingCharges": 0,
+            "status": "active",
+        })
+        created = await client.post("/api/leads", json={
+            "customerName": "Per Unit Extra",
+            "mobile": mobile,
+            "interestedModel": "Turbo Max",
+            "variant": "Extra A",
+            "executive": "Amit",
+            "leadSource": "Walk-in",
+        })
+        assert created.status_code == 200, created.text
+        lid = created.json()["leadId"]
+        added = await client.post(f"/api/leads/{lid}/units", json={
+            "model": "Storm", "variant": "Extra B",
+        })
+        assert added.status_code == 200, added.text
+        for sno, ex, rto in ((1, 500000, 10000), (2, 500000, 10000)):
+            p = await client.put(f"/api/leads/{lid}/price-structure", json={
+                "exShowroom": ex, "rto": rto, "unitSno": sno,
+            })
+            assert p.status_code == 200, p.text
+            empty = await client.put(f"/api/leads/{lid}/scheme", json={
+                "benefitMode": "Partial Benefit",
+                "additionalDiscount": 0,
+                "oemExtraSupportReceived": 0,
+                "oemExtraSupportPassed": 0,
+                "benefitPassedBreakup": "{}",
+                "schemeComponentsUsed": "{}",
+                "unitSno": sno,
+            })
+            assert empty.status_code == 200, empty.text
+        baseline = await server.db.leads.find_one({"leadId": lid})
+        base_units = baseline.get("units") or []
+        base1 = ce.num(base_units[0].get("customerPayable"))
+        base2 = ce.num(base_units[1].get("customerPayable"))
+        assert base1 > 0 and base2 > 0
+    
+        await server.db.lead_documents.insert_one({
+            "leadId": lid, "kind": "oem_extra_support", "filename": "asm-mail.pdf",
+        })
+        s1 = await client.put(f"/api/leads/{lid}/scheme", json={
+            "benefitMode": "Partial Benefit",
+            "additionalDiscount": 0,
+            "oemExtraSupportReceived": 8000,
+            "oemExtraSupportPassed": 0,
+            "benefitPassedBreakup": "{}",
+            "schemeComponentsUsed": "{}",
+            "unitSno": 1,
+        })
+        assert s1.status_code == 200, s1.text
+        after1 = await server.db.leads.find_one({"leadId": lid})
+        u1 = (after1.get("units") or [])[0]
+        u2 = (after1.get("units") or [])[1]
+        assert ce.num(u1.get("oemExtraSupportReceived")) == 8000
+        assert ce.num(u1.get("oemExtraSupportPassed")) == 0
+        assert ce.num(u1.get("customerPayable")) == base1
+        assert ce.num(u2.get("oemExtraSupportReceived")) == 0
+        pack1 = ce.num(after1.get("customerPayable"))
+    
+        s2 = await client.put(f"/api/leads/{lid}/scheme", json={
+            "benefitMode": "Partial Benefit",
+            "additionalDiscount": 0,
+            "oemExtraSupportReceived": 5000,
+            "oemExtraSupportPassed": 2000,
+            "benefitPassedBreakup": "{}",
+            "schemeComponentsUsed": "{}",
+            "unitSno": 2,
+        })
+        assert s2.status_code == 200, s2.text
+        done = await server.db.leads.find_one({"leadId": lid})
+        units = done.get("units") or []
+        assert ce.num(units[0].get("oemExtraSupportReceived")) == 8000
+        assert ce.num(units[1].get("oemExtraSupportReceived")) == 5000
+        assert ce.num(units[1].get("oemExtraSupportPassed")) == 0
+        assert ce.num(units[1].get("additionalDiscount")) == 2000
+>       assert ce.num(units[0].get("customerPayable")) == base1
+E       AssertionError: assert 508000.0 == 473000.0
+E        +  where 508000.0 = <function num at 0x7fe48b89eca0>(508000.0)
+E        +    where <function num at 0x7fe48b89eca0> = ce.num
+E        +    and   508000.0 = <built-in method get of dict object at 0x7fe484668200>('customerPayable')
+E        +      where <built-in method get of dict object at 0x7fe484668200> = {'sno': 2, 'model': 'Storm', 'variant': 'Extra B', 'chassisNumber': '', ...}.get
+E        +  and   473000.0 = <function round2 at 0x7fe48b89f2e0>((475000.0 - 2000))
+E        +    where <function round2 at 0x7fe48b89f2e0> = ce.round2
+
+tests/test_same_order_multi_unit.py:982: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+________________________ test_D_api_both_full_explicit _________________________
+
+client = <httpx.AsyncClient object at 0x7fe47fdb4e00>
+
+    @pytest.mark.asyncio
+    async def test_D_api_both_full_explicit(client):
+        lid = await turbo_booked(client, "9888810001",
+                                 breakup={"loyaltyBonus": 10000, "insuranceBenefit": 20000},
+                                 used={"loyaltyBonus": True, "insuranceBenefit": True})
+        lead = await server.db.leads.find_one({"leadId": lid})
+        assert lead.get("schemeAllocationExplicit") is True
+        assert lead["schemeCustomerBenefit"] == 30000
+        assert lead["dealerSchemeRetained"] == 0
+>       assert lead["companyOutstanding"] == 20000
+E       assert 30000.0 == 20000
+
+tests/test_scheme_allocation_engine.py:362: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+__________________ test_save_reload_persists_exact_allocation __________________
+
+client = <httpx.AsyncClient object at 0x7fe47fd70c80>
+
+    @pytest.mark.asyncio
+    async def test_save_reload_persists_exact_allocation(client):
+        lid = await turbo_booked(client, "9888810009",
+                                 breakup={"loyaltyBonus": 0, "insuranceBenefit": 5000},
+                                 used={"loyaltyBonus": False, "insuranceBenefit": True})
+        lead = await server.db.leads.find_one({"leadId": lid})
+        assert json.loads(lead["benefitPassedBreakup"]) == {"loyaltyBonus": 0, "insuranceBenefit": 5000}
+        assert json.loads(lead["schemeComponentsUsed"])["insuranceBenefit"] is True
+        await server.recompute_lead(lid)
+        again = await server.db.leads.find_one({"leadId": lid})
+        assert again["schemeCustomerBenefit"] == 5000
+>       assert again["dealerSchemeRetained"] == 5000
+E       assert 15000.0 == 5000
+
+tests/test_scheme_allocation_engine.py:379: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+______________________ test_E_insurance_5k_to_20k_deltas _______________________
+
+client = <httpx.AsyncClient object at 0x7fe47fd0c620>
+
+    @pytest.mark.asyncio
+    async def test_E_insurance_5k_to_20k_deltas(client):
+        lid = await turbo_booked(client, "9888810003",
+                                 breakup={"loyaltyBonus": 0, "insuranceBenefit": 5000},
+                                 used={"loyaltyBonus": False, "insuranceBenefit": True})
+        before = await server.db.leads.find_one({"leadId": lid})
+        assert before["schemeCustomerBenefit"] == 5000
+>       assert before["dealerSchemeRetained"] == 5000
+E       assert 15000.0 == 5000
+
+tests/test_scheme_allocation_engine.py:390: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_______________ test_F_partial_claim_receipt_isolates_components _______________
+
+client = <httpx.AsyncClient object at 0x7fe4844b0440>
+
+    @pytest.mark.asyncio
+    async def test_F_partial_claim_receipt_isolates_components(client):
+        # Use=Yes on both with CB=0 so OEM claim rows exist; then receipt one component.
+        lid = await turbo_booked(client, "9888810004",
+                                 breakup={"loyaltyBonus": 0, "insuranceBenefit": 0},
+                                 used={"loyaltyBonus": True, "insuranceBenefit": True})
+        r = await client.post("/api/claims/receipt", json={
+            "leadId": lid, "componentKey": "loyaltyBonus", "amount": 10000, "date": "2026-08-20"})
+        assert r.status_code == 200, r.text
+        claims = {c["componentKey"]: c for c in (await client.get("/api/claims")).json()
+                  if c["leadId"] == lid}
+        assert sorted(claims) == ["insuranceBenefit", "loyaltyBonus"]
+        assert claims["loyaltyBonus"]["receivedAmount"] == 10000
+        assert claims["loyaltyBonus"]["claimStatus"] == "Received"
+        assert claims["insuranceBenefit"]["receivedAmount"] == 0
+        assert claims["insuranceBenefit"]["claimStatus"] == "Pending"
+        total = ce.round2(sum(ce.num(c["eligibleClaim"]) for c in claims.values()))
+        received = ce.round2(sum(ce.num(c["receivedAmount"]) for c in claims.values()))
+>       assert (total, received, ce.round2(total - received)) == (20000, 10000, 10000)
+E       assert (30000.0, 10000.0, 20000.0) == (20000, 10000, 10000)
+E         
+E         At index 0 diff: 30000.0 != 20000
+E         Use -v to get more diff
+
+tests/test_scheme_allocation_engine.py:424: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_______________ test_earnings_no_double_count_scheme_and_payout ________________
+
+client = <httpx.AsyncClient object at 0x7fe48468cbc0>
+
+    @pytest.mark.asyncio
+    async def test_earnings_no_double_count_scheme_and_payout(client):
+        """Scheme benefit + insurer payout + memo customerInsuranceBenefitPassed must not double-count."""
+        await server.db.leads.delete_many({})
+        await server.db.insurance.delete_many({})
+        await server.db.dealer_earnings.delete_many({})
+        lid = await turbo_booked(client, "9888810005",
+                                 breakup={"loyaltyBonus": 0, "insuranceBenefit": 5000},
+                                 used={"loyaltyBonus": False, "insuranceBenefit": True},
+                                 deliver=False)
+        await client.put(f"/api/leads/{lid}/extra-income", json={
+            "customerInsuranceBenefitPassed": 3000, "documentationIncome": 1000})
+        lead = await server.db.leads.find_one({"leadId": lid})
+        await client.post(f"/api/leads/{lid}/payments",
+                          json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
+        await client.put(f"/api/leads/{lid}/delivery", json={
+            "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
+            "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-ALLOC-E",
+            "chassisNumber": "CH-ALLOC-E", "numberPlate": "RJ14-ALE", "delivered": "Yes"})
+        lead = await server.db.leads.find_one({"leadId": lid})
+        entry = await server.db.insurance.find_one({"leadId": lid})
+        payout = ce.num(entry["expectedPayout"])
+    
+        # Insurance CB ₹5,000 is fully within OEM share ₹10,000 → dealer-funded cost ₹0.
+        # customerInsuranceBenefitPassed is overwritten from allocation (SSOT), not the memo 3000.
+        expected_total = ce.round2(
+            lead["dealerMarginNetExGst"] + lead["dealerSchemeRetained"]
+            + lead["oemExtraSupportRetained"] + lead["extraDealerIncomeTotal"]
+            + lead["dealerInsuranceIncome"] - ce.num(lead.get("dealerFundedBenefit")))
+        assert lead["dealerTotalEarnings"] == expected_total
+        assert lead["dealerInsuranceIncome"] == payout
+        assert payout > 0
+        assert lead["extraDealerIncomeTotal"] == 1000
+>       assert lead["dealerSchemeRetained"] == 5000
+E       assert 15000.0 == 5000
+
+tests/test_scheme_allocation_engine.py:460: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+------------------------------ Captured log call -------------------------------
+ERROR    root:server.py:806 Coulson sold refresh failed before delivery for LD26000345
+Traceback (most recent call last):
+  File "/workspace/backend/server.py", line 804, in _refresh_sold_then_fill_delivery
+    """Pull the latest OEM Sold list, then stamp chassis/invoice from unique mobile."""
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/oem_sync.py", line 1337, in refresh_sold_inventory
+    token, _src = await _access_token(db)
+                  ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/oem_sync.py", line 319, in _access_token
+    new_token = await asyncio.to_thread(coulson_client.login, user, pw)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/backend/coulson.py", line 222, in login
+    raise CoulsonError(
+coulson.CoulsonError: Username/password is not valid, Please try again
+_________________ test_scheme_screen_still_surfaces_insurance __________________
+
+client = <httpx.AsyncClient object at 0x7fe4868d74d0>
+
+    @pytest.mark.asyncio
+    async def test_scheme_screen_still_surfaces_insurance(client):
+        lid = await turbo_booked(client, "9888810008")
+        rules = (await client.get(f"/api/leads/{lid}/scheme-rules")).json()
+        ents = {e["key"]: e for e in rules["entitlements"]}
+        assert "insuranceBenefit" in ents
+        assert ents["insuranceBenefit"]["totalBenefit"] == 20000
+>       assert ents["insuranceBenefit"]["companyShare"] == 10000
+E       assert 20000.0 == 10000
+
+tests/test_scheme_allocation_engine.py:535: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+_____________ test_booking_autofill_does_not_lock_price_for_staff ______________
+
+client = <httpx.AsyncClient object at 0x7fe4863894c0>
+
+    @pytest.mark.asyncio
+    async def test_booking_autofill_does_not_lock_price_for_staff(client):
+        await _login(client, "owner@euler.com")
+        lid = await _lead(client, "9777700003", executive="Executive")
+        await _login(client, "executive@euler.com")
+        await client.post(f"/api/leads/{lid}/convert-booking",
+                          json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+        lead = await server.db.leads.find_one({"leadId": lid})
+>       assert ce.num(lead.get("exShowroom")) > 0
+E       AssertionError: assert 0.0 > 0
+E        +  where 0.0 = <function num at 0x7fe48b89eca0>(0)
+E        +    where <function num at 0x7fe48b89eca0> = ce.num
+E        +    and   0 = <built-in method get of dict object at 0x7fe4847c2a00>('exShowroom')
+E        +      where <built-in method get of dict object at 0x7fe4847c2a00> = {'leadId': 'LD26000355', 'customerName': 'Step Lock', 'mobile': '9777700003', 'altMobile': '', ...}.get
+
+tests/test_scheme_retained_and_step_locks.py:211: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+________ test_each_chassis_keeps_its_oem_body_and_a_blank_invoice_waits ________
+
+client = <httpx.AsyncClient object at 0x7fe48426f6b0>
+
+    @pytest.mark.asyncio
+    async def test_each_chassis_keeps_its_oem_body_and_a_blank_invoice_waits(client):
+        """Two billed months: DV and FB stay themselves. A nameless invoice is not guessed."""
+        lid = "LD-MIX-BODY"
+        mobile = "8386096960"
+        await server.db.leads.delete_many({"leadId": lid})
+        await server.db.oem_sold.delete_many({"mobile": mobile})
+        await server.db.leads.insert_one({
+            "leadId": lid, "customerName": "ganesh ram choudhary", "mobile": mobile,
+            "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+            "accountStatus": "Active", "currentStatus": "Booked",
+            "bookingDate": "2026-09-01", "sameOrderMultiUnit": True,
+            "chassisNumber": "MD9GANESHDV", "exShowroom": 809999,
+            "units": [
+                {"sno": 1, "chassisNumber": "MD9GANESHDV", "model": "Turbo Max",
+                 "variant": "Maxx (DV220)", "exShowroom": 809999},
+                {"sno": 2, "chassisNumber": "MD9GANESHFB", "model": "Turbo Max",
+                 "variant": "Maxx (DV220)", "exShowroom": 809999},
+                {"sno": 3, "chassisNumber": "MD9GANESHUNK", "model": "Turbo Max",
+                 "variant": "Maxx (DV220)", "exShowroom": 809999},
+            ],
+        })
+        await server.db.oem_sold.insert_many([
+            {"chassis": "MD9GANESHDV", "mobile": mobile, "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "oemSkuKey": "turbo.maxx.dv220",
+             "soldDate": "2026-09-16", "coulsonStatus": "SOLD"},
+            {"chassis": "MD9GANESHFB", "mobile": mobile, "model": "Turbo Max",
+             "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+             "soldDate": "2026-10-16", "coulsonStatus": "SOLD"},
+            {"chassis": "MD9GANESHUNK", "mobile": mobile, "soldDate": "2026-11-02",
+             "coulsonStatus": "SOLD"},
+        ])
+        await oem_sync.apply_sold_vehicle_ids_to_leads(
+            server.db, on_variants_corrected=server._reprice_exact_variant_units)
+        lead = await server.db.leads.find_one({"leadId": lid})
+        by = {oem_sync._norm_chassis(u["chassisNumber"]): u for u in lead["units"]}
+        assert by["MD9GANESHDV"]["variant"] == "Maxx (DV220)"
+        assert float(by["MD9GANESHDV"].get("exShowroom") or 0) == 809999
+        assert by["MD9GANESHFB"]["variant"] == "Maxx (FB)"
+        # 1 Sep 2026 Turbo list price is the catalog ex-showroom plus the uplift.
+>       assert float(by["MD9GANESHFB"].get("exShowroom") or 0) == 760000 + server.TURBO_EXSHOWROOM_UPLIFT
+E       AssertionError: assert 809999.0 == (760000 + 15000)
+E        +  where 809999.0 = float((809999))
+E        +    where 809999 = <built-in method get of dict object at 0x7fe484711000>('exShowroom')
+E        +      where <built-in method get of dict object at 0x7fe484711000> = {'sno': 2, 'chassisNumber': 'MD9GANESHFB', 'model': 'Turbo Max', 'variant': 'Maxx (FB)', ...}.get
+E        +  and   15000 = server.TURBO_EXSHOWROOM_UPLIFT
+
+tests/test_tcs_and_sold_chassis.py:971: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+________________ test_price_list_quotes_turbo_with_sept_uplift _________________
+
+client = <httpx.AsyncClient object at 0x7fe47fe3adb0>
+
+    @pytest.mark.asyncio
+    async def test_price_list_quotes_turbo_with_sept_uplift(client):
+        body = (await client.get("/api/price-list", params={"model": "Turbo Max"})).json()
+        rows = [r for g in body["models"] for r in g["rows"]]
+        maxx = next(r for r in rows if r["variant"] == "Maxx (PV)")
+        pm = next(r for r in (await client.get("/api/price-master", params={"model": "Turbo Max"})).json()
+                  if r["variant"] == "Maxx (PV)")
+        assert pm["exShowroom"] == OEM_MAXX_PV
+>       assert pm["sellingExShowroom"] == OEM_MAXX_PV + UPLIFT
+E       assert 770000.0 == (770000 + 15000)
+
+tests/test_turbo_sept_exshowroom_uplift.py:74: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+______________________ test_september_booking_adds_uplift ______________________
+
+client = <httpx.AsyncClient object at 0x7fe47fe420f0>
+
+    @pytest.mark.asyncio
+    async def test_september_booking_adds_uplift(client):
+        lid = await _lead(client, "Sep Turbo", "9535010002")
+        r = await client.post(f"/api/leads/{lid}/convert-booking", json={
+            "bookingDate": "2026-09-01", "bookingAmount": 0})
+        assert r.status_code == 200, r.text
+        lead = await server.db.leads.find_one({"leadId": lid})
+>       assert lead["exShowroom"] == OEM_MAXX_PV + UPLIFT
+E       assert 770000.0 == (770000 + 15000)
+
+tests/test_turbo_sept_exshowroom_uplift.py:98: AssertionError
+------------------------------ Captured log setup ------------------------------
+WARNING  root:server.py:20060 CONFIG: Google Sheet sync is DISABLED (credentialFound=False, gsheetId=True). Add the Render Secret File gsheets_credentials.json and set GSHEET_ID.
+=========================== short test summary info ============================
+FAILED tests/test_deal_format.py::test_approve_sets_outstanding_to_deal_price
+FAILED tests/test_delivery_billing_summary.py::test_price_structure_insurance_change_recomputes_payable_and_tally
+FAILED tests/test_doc_compress.py::test_scanned_pdf_shrinks_and_stays_a_valid_pdf
+FAILED tests/test_doc_compress.py::test_tally_pdfs_keep_their_text_and_images_untouched
+FAILED tests/test_executive_field_dashboards.py::test_asm_can_view_finance_register_readonly
+FAILED tests/test_iter17_gsheet_sync.py::test_header_based_mapping_not_positional
+FAILED tests/test_iter17_gsheet_sync.py::test_missing_id_header_refuses_to_write
+FAILED tests/test_iter17_gsheet_sync.py::test_lead_update_updates_same_row - ...
+FAILED tests/test_iter17_gsheet_sync.py::test_repeated_sync_is_idempotent_all_entities
+FAILED tests/test_iter17_gsheet_sync.py::test_claim_lifecycle_updates_one_row
+FAILED tests/test_iter17_gsheet_sync.py::test_delivery_repeat_does_not_duplicate
+FAILED tests/test_iter17_gsheet_sync.py::test_formula_and_unmapped_columns_preserved
+FAILED tests/test_iter17_gsheet_sync.py::test_header_row_stays_at_row_1 - ass...
+FAILED tests/test_iter17_gsheet_sync.py::test_partial_update_does_not_blank_other_fields
+FAILED tests/test_iter17_gsheet_sync.py::test_api_failure_reported_not_swallowed
+FAILED tests/test_iter17_gsheet_sync.py::test_retry_after_timeout_updates_never_duplicates
+FAILED tests/test_iter17_gsheet_sync.py::test_dealer_earnings_maps_to_existing_headers
+FAILED tests/test_iter17_gsheet_sync.py::test_finance_maps_to_real_headers - ...
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_preview_pointing_at_production_sheet_is_write_blocked[preview]
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_preview_pointing_at_production_sheet_is_write_blocked[dev]
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_preview_pointing_at_production_sheet_is_write_blocked[development]
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_preview_pointing_at_production_sheet_is_write_blocked[test]
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_preview_pointing_at_production_sheet_is_write_blocked[staging]
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_preview_with_its_own_sheet_is_allowed
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_production_pointing_at_production_sheet_is_allowed
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_production_pointing_at_the_wrong_sheet_is_blocked
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_unset_environment_does_not_block
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_sync_is_blocked_and_writes_nothing_in_preview
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_writes_go_through_when_environment_is_production
+FAILED tests/test_iter19_env_safety_and_finance_views.py::test_overwrite_report_tab_clears_before_writing
+FAILED tests/test_iter20_column_contract.py::test_every_sync_field_resolves_to_a_real_column[dealer_earnings]
+FAILED tests/test_iter20_column_contract.py::test_every_sync_field_resolves_to_a_real_column[dropped_oem_extra_support]
+FAILED tests/test_iter20_column_contract.py::test_no_two_fields_share_a_column[dropped_oem_extra_support]
+FAILED tests/test_iter20_column_contract.py::test_stable_id_field_resolves[dropped_oem_extra_support]
+FAILED tests/test_iter20_column_contract.py::test_every_operational_column_is_either_mapped_or_declared_source_required
+FAILED tests/test_iter22_header_relocation.py::test_append_anchors_on_the_register_header_cell
+FAILED tests/test_iter22_header_relocation.py::test_append_anchor_uses_each_tabs_own_first_column
+FAILED tests/test_iter22_reported_defects.py::test_delivery_twice_does_not_duplicate_the_payout_entry
+FAILED tests/test_iter22_reported_defects.py::test_earnings_report_insurance_column_is_populated
+FAILED tests/test_iter22_reported_defects.py::test_insurance_payout_does_not_touch_customer_accounting
+FAILED tests/test_iter23_lead_register_fixed_header.py::test_three_leads_append_downward_under_a_fixed_header
+FAILED tests/test_iter23_lead_register_fixed_header.py::test_new_lead_appends_below_the_last_existing_lead
+FAILED tests/test_iter23_lead_register_fixed_header.py::test_updating_an_existing_lead_does_not_add_a_row
+FAILED tests/test_iter23_lead_register_fixed_header.py::test_repeated_sync_creates_zero_duplicates
+FAILED tests/test_iter29_daily_reports.py::test_executives_are_seeded_onto_the_staff_master
+FAILED tests/test_iter29_daily_reports.py::test_executive_dropdown_now_reads_the_staff_master
+FAILED tests/test_iter32_lead_cancel.py::test_close_won_still_shows_on_oem_and_commercial_tabs
+FAILED tests/test_iter33_model_ask.py::test_the_preview_carries_the_numbered_menu
+FAILED tests/test_iter33_model_ask.py::test_a_confident_reply_fills_an_empty_model
+FAILED tests/test_oem_portal_claims.py::test_sales_gm_and_tl_can_match_and_sync_oem_claims
+FAILED tests/test_oem_portal_claims.py::test_claim_on_cancelled_chassis_still_finds_the_lead
+FAILED tests/test_sales_gm_dashboard.py::test_gm_is_deal_desk_not_money_desk
+FAILED tests/test_same_order_multi_unit.py::test_pack_units_own_oem_extra_scheme
+FAILED tests/test_scheme_allocation_engine.py::test_D_api_both_full_explicit
+FAILED tests/test_scheme_allocation_engine.py::test_save_reload_persists_exact_allocation
+FAILED tests/test_scheme_allocation_engine.py::test_E_insurance_5k_to_20k_deltas
+FAILED tests/test_scheme_allocation_engine.py::test_F_partial_claim_receipt_isolates_components
+FAILED tests/test_scheme_allocation_engine.py::test_earnings_no_double_count_scheme_and_payout
+FAILED tests/test_scheme_allocation_engine.py::test_scheme_screen_still_surfaces_insurance
+FAILED tests/test_scheme_retained_and_step_locks.py::test_booking_autofill_does_not_lock_price_for_staff
+FAILED tests/test_tcs_and_sold_chassis.py::test_each_chassis_keeps_its_oem_body_and_a_blank_invoice_waits
+FAILED tests/test_turbo_sept_exshowroom_uplift.py::test_price_list_quotes_turbo_with_sept_uplift
+FAILED tests/test_turbo_sept_exshowroom_uplift.py::test_september_booking_adds_uplift
+ERROR tests/test_auth_and_iter2.py - AssertionError: REACT_APP_BACKEND_URL mu...
+ERROR tests/test_euler_crm.py - AssertionError: REACT_APP_BACKEND_URL must be...
+ERROR tests/test_iter11_receipts_flows.py - AttributeError: 'NoneType' object...
+ERROR tests/test_iter13_14_parity.py - KeyError: 'REACT_APP_BACKEND_URL'
+ERROR tests/test_iter15_lead_partial_update.py - AssertionError: REACT_APP_BA...
+ERROR tests/test_iter16_phase2_production_fixes.py - AssertionError: REACT_AP...
+ERROR tests/test_iter3_insurance_import.py - AssertionError: REACT_APP_BACKEN...
+ERROR tests/test_iter4_mapping_and_lead_insurance.py - AssertionError: REACT_...
+ERROR tests/test_iter7_lead_edit_and_share.py - AssertionError: REACT_APP_BAC...
+ERROR tests/test_iter8_step_gating_and_scheme.py - AttributeError: 'NoneType'...
+ERROR tests/test_iter9_scheme_avail_delivery_close_dupmobile.py - AttributeEr...
+ERROR tests/test_iter27_price_master_reprice.py::test_booked_undelivered_lead_gets_the_new_price
+ERROR tests/test_iter27_price_master_reprice.py::test_report_shows_before_and_after_per_lead
+ERROR tests/test_iter27_price_master_reprice.py::test_price_drop_also_propagates
+ERROR tests/test_iter27_price_master_reprice.py::test_settled_lead_keeps_the_price_it_paid
+ERROR tests/test_iter27_price_master_reprice.py::test_delivered_lead_is_never_repriced
+ERROR tests/test_iter27_price_master_reprice.py::test_closed_lead_is_not_repriced
+ERROR tests/test_iter27_price_master_reprice.py::test_unpriced_lead_is_not_repriced
+ERROR tests/test_iter27_price_master_reprice.py::test_a_different_vehicle_is_untouched
+ERROR tests/test_iter27_price_master_reprice.py::test_priced_but_unbooked_lead_is_repriced
+ERROR tests/test_iter27_price_master_reprice.py::test_saving_the_same_price_reprices_nothing
+ERROR tests/test_iter27_price_master_reprice.py::test_repricing_is_idempotent
+ERROR tests/test_iter27_price_master_reprice.py::test_status_only_edit_does_not_reprice
+ERROR tests/test_iter27_price_master_reprice.py::test_scheme_entitlements_do_not_move_with_price
+ERROR tests/test_iter27_price_master_reprice.py::test_reprice_is_owner_only
+ERROR tests/test_iter27_price_master_reprice.py::test_every_repriced_lead_is_audited
+ERROR tests/test_iter27_price_master_reprice.py::test_preview_reports_impact_without_writing
+ERROR tests/test_iter27_price_master_reprice.py::test_preview_lists_the_leads_it_would_skip
+63 failed, 1560 passed, 28 errors in 824.38s (0:13:44)
+EXIT:1
