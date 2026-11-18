@@ -1,4 +1,5 @@
 """CLD-06: a claim receipt cannot be posted twice or past the eligible amount."""
+import asyncio
 import os
 import sys
 
@@ -68,3 +69,24 @@ async def test_four_receipts_sum(client):
     claim = await server.db.claims.find_one({"leadId": "LD26CLD06B"})
     assert claim["receivedAmount"] == 1000
     assert sum(x["amount"] for x in claim["receipts"]) == 1000
+
+
+@pytest.mark.asyncio
+async def test_overlapping_identical_receipts_do_not_exceed_eligible(client):
+    await server.db.claims.delete_many({"leadId": "LD26CLD06C"})
+    await server.db.claims.insert_one({
+        "leadId": "LD26CLD06C", "componentKey": "consumer", "manual": True,
+        "eligibleClaim": 10000, "claimAmount": 10000, "receivedAmount": 0, "receipts": [],
+    })
+    body = {"leadId": "LD26CLD06C", "componentKey": "consumer", "amount": 10000,
+            "date": "2026-11-18", "reference": "UTR1"}
+    first, second = await asyncio.gather(
+        client.post("/api/claims/receipt", json=body),
+        client.post("/api/claims/receipt", json=body),
+    )
+    codes = sorted([first.status_code, second.status_code])
+    assert codes[0] == 200
+    assert codes[1] in (409, 422)
+    claim = await server.db.claims.find_one({"leadId": "LD26CLD06C", "componentKey": "consumer"})
+    assert claim["receivedAmount"] == 10000
+    assert len(claim["receipts"]) == 1

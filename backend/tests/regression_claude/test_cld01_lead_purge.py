@@ -83,7 +83,7 @@ async def test_true_retry_is_dry_run_then_archived(client):
         await _lead(lid, customerName="Retry", mobile=mobile,
                     interestedModel="Turbo Max", variant="Maxx (PV)",
                     createdDate="2026-11-18",
-                    lastUpdated=["2026-11-18T09:00:00+00:00", "2026-11-18T09:00:30+00:00", "2026-11-18T09:01:00+00:00"][i])
+                    createdAt=["2026-11-18T09:00:00+00:00", "2026-11-18T09:00:30+00:00", "2026-11-18T09:01:00+00:00"][i])
     dry = await client.post("/api/leads/repair-retry-duplicates")
     assert dry.status_code == 200, dry.text
     assert dry.json()["dryRun"] is True
@@ -93,6 +93,18 @@ async def test_true_retry_is_dry_run_then_archived(client):
     assert live.status_code == 200, live.text
     left = [l["leadId"] async for l in server.db.leads.find({"mobile": mobile})]
     assert left == ["LD26CLD01E"]
+    await _lead("LD26CLD01OLD", customerName="Old Enquiry", mobile="9811100099",
+                interestedModel="Turbo Max", variant="Maxx (PV)",
+                createdDate="2026-06-01", createdAt="2026-06-01T04:00:00+00:00",
+                lastUpdated="2026-11-18T09:00:00+00:00")
+    await _lead("LD26CLD01NEW", customerName="Old Enquiry", mobile="9811100099",
+                interestedModel="Turbo Max", variant="Maxx (PV)",
+                createdDate="2026-11-01", createdAt="2026-11-01T04:00:00+00:00",
+                lastUpdated="2026-11-18T09:00:30+00:00")
+    touched = await client.post("/api/leads/repair-retry-duplicates", params={"dryRun": "false"})
+    assert touched.status_code == 200, touched.text
+    kept = [l["leadId"] async for l in server.db.leads.find({"mobile": "9811100099"})]
+    assert sorted(kept) == ["LD26CLD01NEW", "LD26CLD01OLD"]
     archived = await server.db.leads_purged_archive.count_documents({"keptLeadId": "LD26CLD01E"})
     assert archived == 2
     audit = await server.db.audit_log.count_documents({"action": "purge-duplicate", "leadId": "LD26CLD01F"})
@@ -104,3 +116,23 @@ async def test_non_owner_cannot_purge(client):
     tok = (await client.post("/api/auth/login", json={"email": "executive@euler.com", "password": "euler@123"})).json()["token"]
     r = await client.post("/api/leads/repair-retry-duplicates", headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_startup_replaces_a_plain_lead_id_index(client):
+    await server.db.leads.delete_many({})
+    await server.db.payments.delete_many({})
+    try:
+        await server.db.leads.drop_index("leadId_1")
+    except Exception:
+        pass
+    await server.db.leads.create_index("leadId")
+    await server._ensure_identity_unique_indexes()
+    info = await server.db.leads.index_information()
+    singles = []
+    for spec in info.values():
+        names = [k[0] if isinstance(k, (list, tuple)) else k for k in (spec.get("key") or [])]
+        if names == ["leadId"]:
+            singles.append(spec)
+    assert len(singles) == 1
+    assert singles[0].get("unique") is True

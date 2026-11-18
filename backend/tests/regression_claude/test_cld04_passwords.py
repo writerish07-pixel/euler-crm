@@ -71,3 +71,33 @@ async def test_legacy_plaintext_logs_in_once_then_is_hashed(client):
     bad = await client.post("/api/auth/login", json={"email": "legacy", "password": "wrong-pass"})
     assert bad.status_code == 401
     assert authmod.verify_password("legacyPass1", stored["passwordHash"])
+
+
+@pytest.mark.asyncio
+async def test_plaintext_cleanup_hashes_before_it_removes_the_only_credential(client):
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "scripts", "drop_plaintext_passwords.py")
+    spec = importlib.util.spec_from_file_location("drop_plaintext_passwords", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    await server.db.users.insert_one({
+        "userId": "plain-only", "email": "plain.only@euler.com", "role": "executive",
+        "passwordPlain": "legacyPass1",
+    })
+    await server.db.users.insert_one({
+        "userId": "both", "email": "both.pw@euler.com", "role": "executive",
+        "passwordHash": authmod.hash_password("keptPass1"), "passwordPlain": "keptPass1",
+    })
+    dry = await mod.drop_plaintext(server.db, apply=False)
+    assert dry["passwordPlain_only"] >= 1
+    assert dry["unset"] == 0
+    applied = await mod.drop_plaintext(server.db, apply=True)
+    assert applied["hashed_then_unset"] >= 1
+    plain = await server.db.users.find_one({"userId": "plain-only"})
+    assert plain.get("passwordHash")
+    assert not plain.get("passwordPlain")
+    assert authmod.verify_password("legacyPass1", plain["passwordHash"])
+    both = await server.db.users.find_one({"userId": "both"})
+    assert not both.get("passwordPlain")
+    assert authmod.verify_password("keptPass1", both["passwordHash"])

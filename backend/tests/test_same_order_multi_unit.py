@@ -252,7 +252,8 @@ async def test_repair_deletes_same_sku_retry_triples(client):
             "leadId": lid, "customerName": "Retry Triple", "mobile": mobile,
             "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
             "accountStatus": "Active", "currentStatus": "New",
-            "createdDate": "2026-09-22", "lastUpdated": "2026-09-22T08:00:00+00:00",
+            "createdDate": "2026-09-22", "createdAt": "2026-09-22T08:00:00+00:00",
+            "lastUpdated": "2026-09-22T08:00:00+00:00",
             "executive": "Amit",
         })
     repaired = await server._repair_retry_duplicate_leads()

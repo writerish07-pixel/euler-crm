@@ -5240,7 +5240,7 @@ async def _insert_live_lead(body: LeadIn, *, source_note: str = "Lead created fr
         "consumerDiscount": 0, "exchangeBonus": 0, "loyaltyBonus": 0, "referralBonus": 0,
         "dsaDiscount": 0, "additionalDiscount": 0, "exShowroom": 0, "rto": 0, "insuranceAmount": 0,
         "accessoriesAmount": 0, "handlingCharges": 0, "trc": 0, "fastag": 0, "extendedWarranty": 0,
-        "otherCharges": 0, "bookingAmount": 0, "lastUpdated": now_iso(),
+        "otherCharges": 0, "bookingAmount": 0, "createdAt": now_iso(), "lastUpdated": now_iso(),
         "oemExtraSupportReceived": ce.round2(max(0.0, ce.num(payload.get("oemExtraSupportReceived")))),
         "oemExtraSupportPassed": 0,
         "sameOrderMultiUnit": bool(same_order and len(pack_units) > 1),
@@ -9036,19 +9036,17 @@ _RETRY_HISTORY_COLLS = (
 
 
 def _retry_moment(lead):
-    """Creation instant when the row has a time, not a date-only string."""
-    for key in ("createdAt", "lastUpdated", "createdDate"):
-        raw = str((lead or {}).get(key) or "").strip()
-        if "T" not in raw and " " not in raw:
-            continue
-        try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    return None
+    """Immutable creation instant. lastUpdated is not creation time."""
+    raw = str((lead or {}).get("createdAt") or "").strip()
+    if "T" not in raw and " " not in raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _within_retry_window(keeper, extra):
@@ -11657,17 +11655,39 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
     receipt = {"amount": amount, "date": receipt_date,
                "reference": body.reference, "recordedAt": now_iso()}
     from pymongo import ReturnDocument
+    write_filt = {"fileNumber": file_number}
+    if committed > 0:
+        room = ce.round2(committed + 0.01 - amount)
+        write_filt["$or"] = [
+            {"receivedAgainstFile": {"$lte": room}},
+            {"receivedAgainstFile": {"$exists": False}},
+        ]
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=FINANCE_RECEIPT_DEDUPE_SECONDS)).isoformat()
+    write_filt["receipts"] = {"$not": {"$elemMatch": {
+        "amount": amount, "date": receipt_date, "recordedAt": {"$gte": cutoff},
+    }}}
     updated = await db.finance.find_one_and_update(
-        {"fileNumber": file_number},
+        write_filt,
         {"$inc": {"receivedAgainstFile": amount},
          "$push": {"receipts": receipt},
          "$set": {"lastPaymentDate": receipt_date, "lastUpdated": today()}},
         return_document=ReturnDocument.AFTER,
     )
-    received = ce.round2(ce.num((updated or {}).get("receivedAgainstFile")))
+    if not updated:
+        fresh = await db.finance.find_one({"fileNumber": file_number}) or {}
+        for prior in reversed(fresh.get("receipts") or []):
+            if ce.round2(ce.num(prior.get("amount"))) == amount and str(prior.get("date") or "") == receipt_date:
+                raise HTTPException(409, "Duplicate submission detected — this financer receipt was just "
+                                         "recorded. Open the file to confirm before recording it again.")
+        already = ce.num(fresh.get("receivedAgainstFile"))
+        room = ce.round2(max(0.0, committed - already))
+        raise HTTPException(422, f"Receipt ₹{amount} is more than this file still expects. "
+                                 f"Committed ₹{ce.round2(committed)}, already received "
+                                 f"₹{ce.round2(already)} — only ₹{room} can be booked.")
+    received = ce.round2(ce.num(updated.get("receivedAgainstFile")))
     outstanding = ce.round2(max(0.0, committed - received))
     await db.finance.update_one({"fileNumber": file_number}, {
-        "$set": {"receivedAgainstFile": received, "fileOutstanding": outstanding,
+        "$set": {"fileOutstanding": outstanding,
                  "status": "Received" if outstanding <= 0 else "Partial"},
     })
     await write_audit(act, "receipt", "finance", leadId=f.get("leadId", ""), financeFileNumber=file_number,
@@ -17752,15 +17772,45 @@ async def record_claim_receipt(body: ClaimReceiptIn, act=Depends(actor), _money=
     if body.unitSno:
         filt["unitSno"] = body.unitSno
     from pymongo import ReturnDocument
+    write_filt = dict(filt)
+    if eligible > 0 and not body.allowExcess:
+        room = ce.round2(eligible + 0.01 - amount)
+        write_filt["$or"] = [
+            {"receivedAmount": {"$lte": room}},
+            {"receivedAmount": {"$exists": False}},
+        ]
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=FINANCE_RECEIPT_DEDUPE_SECONDS)).isoformat()
+    write_filt["receipts"] = {"$not": {"$elemMatch": {
+        "amount": amount, "date": receipt_date, "reference": str(body.reference or ""),
+        "recordedAt": {"$gte": cutoff},
+    }}}
     updated = await db.claims.find_one_and_update(
-        filt,
+        write_filt,
         {"$set": setdoc, "$inc": {"receivedAmount": amount}, "$push": {"receipts": receipt}},
-        upsert=True,
+        upsert=False,
         return_document=ReturnDocument.AFTER,
     )
-    received = ce.round2(ce.num((updated or {}).get("receivedAmount")))
+    if not updated:
+        if not existing:
+            await db.claims.insert_one({**setdoc, "receivedAmount": amount, "receipts": [receipt]})
+            received = amount
+        else:
+            fresh = await db.claims.find_one(filt) or {}
+            for prior in reversed(fresh.get("receipts") or []):
+                if (ce.round2(ce.num(prior.get("amount"))) == amount
+                        and str(prior.get("date") or "") == receipt_date
+                        and str(prior.get("reference") or "") == str(body.reference or "")):
+                    raise HTTPException(409, "Duplicate submission detected — this claim receipt was just recorded.")
+            already = ce.num(fresh.get("receivedAmount"))
+            room = ce.round2(max(0.0, eligible - already))
+            raise HTTPException(
+                422,
+                f"Receipt ₹{amount} is more than this claim still expects. "
+                f"Eligible ₹{eligible}, already received ₹{ce.round2(already)} — only ₹{room} can be booked.")
+    else:
+        received = ce.round2(ce.num(updated.get("receivedAmount")))
     status = "Received" if eligible > 0 and received >= eligible - 0.01 else "Partial"
-    await db.claims.update_one(filt, {"$set": {"receivedAmount": received, "claimStatus": status}})
+    await db.claims.update_one(filt, {"$set": {"claimStatus": status}})
     await sheet_sync("claims", {"claimId": claim_id, "leadId": body.leadId,
                                     "customer": customer, "model": model,
                                     "claimStatus": status, "receivedAmount": received, "claimAmount": body.amount})
@@ -19950,33 +20000,30 @@ async def _ensure_identity_unique_indexes():
             info = await db[coll].index_information()
         except Exception:
             info = {}
-        already = False
-        for spec in (info or {}).values():
+        single_name = None
+        single_unique = False
+        for name, spec in (info or {}).items():
             keys = spec.get("key") or []
             names = [k[0] if isinstance(k, (list, tuple)) else k for k in keys]
-            if field not in names:
+            if names != [field]:
                 continue
-            already = True
-            if spec.get("unique"):
-                status[coll] = {"ready": True, "duplicates": 0, "skipped": False}
-            else:
-                logging.error("UNIQUE_INDEX_SKIPPED %s %s", coll, "non-unique-index")
-                status[coll] = {"ready": False, "duplicates": 0, "skipped": True}
+            single_name = name
+            single_unique = bool(spec.get("unique"))
             break
-        if already:
-            continue
-        else:
-            try:
-                await db[coll].create_index(
-                    field, unique=True,
-                    partialFilterExpression={field: {"$type": "string", "$gt": ""}},
-                )
-                status[coll] = {"ready": True, "duplicates": 0, "skipped": False}
-            except Exception:
-                logging.error("UNIQUE_INDEX_SKIPPED %s %s", coll, "create-failed")
-                status[coll] = {"ready": False, "duplicates": 0, "skipped": True}
-        if already and coll not in status:
+        if single_unique:
             status[coll] = {"ready": True, "duplicates": 0, "skipped": False}
+            continue
+        try:
+            if single_name:
+                await db[coll].drop_index(single_name)
+            await db[coll].create_index(
+                field, unique=True,
+                partialFilterExpression={field: {"$type": "string", "$gt": ""}},
+            )
+            status[coll] = {"ready": True, "duplicates": 0, "skipped": False}
+        except Exception:
+            logging.error("UNIQUE_INDEX_SKIPPED %s %s", coll, "create-failed")
+            status[coll] = {"ready": False, "duplicates": 0, "skipped": True}
     _identity_index_status = status
     return status
 
