@@ -826,6 +826,33 @@ def _charge_was_list_price(current, previous):
     return abs(ce.num(current) - ce.num(previous)) < 0.01
 
 
+def _settled_money(doc) -> bool:
+    """Money received and nothing left to collect.
+
+    Same rule as a Price Master rise: a customer who already paid must not
+    pick up a new balance, or Mark Delivered is refused.
+    """
+    if not isinstance(doc, dict):
+        return False
+    return (ce.num(doc.get("totalReceived")) > 0
+            and ce.num(doc.get("customerOutstanding")) <= 0.01)
+
+
+def _unit_settled(lead, unit) -> bool:
+    """A pack unit with its own receipts is settled on its own figures.
+
+    A single-vehicle file keeps the balance on the lead, so the unit follows
+    that balance when it has no receipts of its own.
+    """
+    if isinstance(unit, dict) and (
+            unit.get("totalReceived") not in (None, "")
+            or unit.get("customerOutstanding") not in (None, "")):
+        return _settled_money(unit)
+    if oem_sync.is_same_order_pack(lead):
+        return False
+    return _settled_money(lead)
+
+
 async def _reprice_exact_variant_units(lead_id, changes):
     """When a chassis moves to the body OEM billed, move the list price with it.
 
@@ -835,6 +862,10 @@ async def _reprice_exact_variant_units(lead_id, changes):
     lead = await db.leads.find_one({"leadId": lead_id})
     if not lead or not changes:
         return
+    # A file the customer has already paid keeps that price. Confirming the
+    # catalog name must not open a balance and block Mark Delivered.
+    if not oem_sync.is_same_order_pack(lead) and _settled_money(lead):
+        return
     by_key = {c.get("key"): c for c in changes if c.get("key")}
     units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
     changed_units = False
@@ -842,6 +873,8 @@ async def _reprice_exact_variant_units(lead_id, changes):
         key = oem_sync._norm_chassis(u.get("chassisNumber")) or f"sno:{u.get('sno')}"
         change = by_key.get(key)
         if not change or u.get("priceStructureSaved"):
+            continue
+        if _unit_settled(lead, u):
             continue
         old = await _price_master_row(change.get("oldModel"), change.get("oldVariant"))
         new = await _price_master_row(change.get("newModel"), change.get("newVariant"))
@@ -866,7 +899,8 @@ async def _reprice_exact_variant_units(lead_id, changes):
         patch["units"] = units
     header = by_key.get("header")
     if (header and not lead.get("priceStructureSaved")
-            and not oem_sync.is_same_order_pack(lead)):
+            and not oem_sync.is_same_order_pack(lead)
+            and not _settled_money(lead)):
         old = await _price_master_row(header.get("oldModel"), header.get("oldVariant"))
         new = await _price_master_row(header.get("newModel"), header.get("newVariant"))
         if new:
@@ -6591,6 +6625,7 @@ async def lead_approval_request(lead_id: str, user=Depends(current_user)):
 async def customer_360(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
+    lead = await _honour_catalog_price_already_paid(lead)
     lead = await _reopen_one_oem_auto_if_needed(lead)
     lead = (await _attach_approval_request_ids([clean(dict(lead))]))[0]
     # ASM / RM — pipeline snapshot only (no commercials, payments, claims)
@@ -7098,6 +7133,9 @@ async def update_lead(lead_id: str, body: LeadUpdateIn, act=Depends(actor), _sal
         or ("variant" in payload and str(payload["variant"] or "").strip()
             != str(lead.get("variant") or "").strip())
     )
+    if vehicle_changed and not str(lead.get("originalVariant") or "").strip():
+        payload["originalModel"] = lead.get("interestedModel") or ""
+        payload["originalVariant"] = lead.get("variant") or ""
     # Once priced/schemed, only the owner or Showroom Admin may change model /
     # variant (it reprices from Price Master and realigns the scheme).
     if vehicle_changed and (_is_priced(lead) or _has_persisted_scheme(lead)):
@@ -8669,6 +8707,11 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
     lead = await db.leads.find_one({"leadId": lead_id})
     if not lead:
         return None
+    # Vehicle name can change. The price the customer already paid does not,
+    # and the scheme on that paid file stays with it.
+    if refresh_price and _settled_money(lead):
+        refresh_price = False
+        realign_scheme = False
     patch = {}
     if refresh_price:
         row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
@@ -13324,10 +13367,200 @@ async def create_oem_billing_lead(body: OemBillingCreateIn, act=Depends(actor)):
             "chassis": chassis}
 
 
+def _variant_text_differs(a, b) -> bool:
+    return str(a or "").strip().lower() != str(b or "").strip().lower()
+
+
+async def _previous_catalog_variant(lead):
+    """The model and variant this file had before the confirmed name.
+
+    originalVariant is also written when a billed body is adopted, and a stale
+    value can be left by an earlier chassis. Only a confirm, or a model edit
+    whose new name is the one on the file now, counts.
+    """
+    current = str((lead or {}).get("variant") or "").strip()
+    if (lead or {}).get("oemSkuConfirmed"):
+        original = str(lead.get("originalVariant") or "").strip()
+        if original and _variant_text_differs(original, current):
+            return (str(lead.get("originalModel") or lead.get("interestedModel") or "").strip(), original)
+    lead_id = (lead or {}).get("leadId") or ""
+    if not lead_id:
+        return "", ""
+    rows = await db.audit_log.find(
+        {"leadId": lead_id, "action": {"$in": ["confirm", "update"]}},
+    ).sort("timestamp", -1).to_list(40)
+    for row in rows:
+        if row.get("action") == "update" and row.get("module") not in ("lead", "lead-field", None, ""):
+            continue
+        old = row.get("oldValue") or {}
+        new = row.get("newValue") or {}
+        if not isinstance(old, dict):
+            continue
+        old_variant = str(old.get("variant") or "").strip()
+        new_variant = str((new or {}).get("variant") or "").strip() if isinstance(new, dict) else ""
+        if new_variant and _variant_text_differs(new_variant, current):
+            continue
+        if old_variant and _variant_text_differs(old_variant, current):
+            model = str(old.get("model") or old.get("interestedModel") or lead.get("interestedModel") or "").strip()
+            return model, old_variant
+    return "", ""
+
+
+async def _payable_on_catalog(lead, model, variant, scheme_rows):
+    """Customer payable if the file were still on this catalog row.
+
+    Charges that were typed (not the new list price) stay. Charges that moved
+    with the new variant go back to that older list, so the figure is the
+    price the customer was billed before the name was confirmed.
+    """
+    row = await _price_master_row(model, variant)
+    if not row:
+        return None
+    as_of = _lead_price_as_of(lead)
+    old_ps = _price_structure_from_master(row, as_of)
+    new_row = await _price_master_row(lead.get("interestedModel"), lead.get("variant"))
+    new_ps = _price_structure_from_master(new_row, as_of) if new_row else {}
+    restored = dict(lead)
+    for key, old_val in old_ps.items():
+        cur = lead.get(key)
+        new_val = new_ps.get(key)
+        if key == "exShowroom" or cur in (None, "", 0, 0.0) or (
+                new_val is not None and _charge_was_list_price(cur, new_val)):
+            restored[key] = old_val
+    totals = ce.compute_commercial_totals(lead_to_snapshot(restored), scheme_rows)
+    payable = ce.round2(ce.num(totals.get("customerPayable")))
+    return payable if payable > 0 else None
+
+
+async def _honour_pack_units_already_paid(lead, scheme_rows):
+    units = [dict(u) for u in (lead.get("units") or []) if isinstance(u, dict)]
+    if not units:
+        return lead
+    audits = await db.audit_log.find(
+        {"leadId": lead.get("leadId"), "module": "oem-variant", "action": "confirm"},
+    ).sort("timestamp", -1).to_list(40)
+    changed = False
+    for i, unit in enumerate(units):
+        if ce.num(unit.get("customerOutstanding")) <= 0.01:
+            continue
+        received = ce.num(unit.get("totalReceived"))
+        if received <= 0:
+            continue
+        if unit.get("useDealPrice") and ce.num(unit.get("cxDemand")) > 0:
+            continue
+        sno = int(unit.get("sno") or i + 1)
+        old_model, old_variant = "", ""
+        for row in audits:
+            new = row.get("newValue") or {}
+            old = row.get("oldValue") or {}
+            if not isinstance(old, dict):
+                continue
+            unit_sno = new.get("unitSno") if isinstance(new, dict) else None
+            if unit_sno in (None, "", 0):
+                if sno != 1:
+                    continue
+            else:
+                try:
+                    if int(unit_sno) != sno:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            variant = str(old.get("variant") or "").strip()
+            if variant and _variant_text_differs(variant, unit.get("variant")):
+                old_model = str(old.get("model") or unit.get("model") or "").strip()
+                old_variant = variant
+                break
+        if not old_variant and i == 0:
+            old_model, old_variant = await _previous_catalog_variant(lead)
+        if not old_variant:
+            continue
+        master = await _price_master_row(old_model, old_variant)
+        if not master:
+            continue
+        old_ex = ce.num(_price_structure_from_master(
+            master, _lead_price_as_of(lead, unit=unit)).get("exShowroom"))
+        if old_ex <= 0:
+            continue
+        overlay = _lead_overlay_unit(lead, {**unit, "exShowroom": old_ex}, i)
+        old_payable = ce.round2(ce.num(
+            ce.compute_commercial_totals(lead_to_snapshot(overlay), scheme_rows).get("customerPayable")))
+        if old_payable <= 0 or received + 0.01 < old_payable:
+            continue
+        current_payable = ce.num(unit.get("customerPayable"))
+        if ce.num(unit.get("customerOutstanding")) > (current_payable - old_payable) + 1:
+            continue
+        unit["useDealPrice"] = True
+        unit["cxDemand"] = old_payable
+        unit["budget"] = old_payable
+        units[i] = unit
+        changed = True
+    if not changed:
+        return lead
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
+        "units": units, "lastUpdated": now_iso(),
+    }})
+    await recompute_lead(lead["leadId"])
+    return await db.leads.find_one({"leadId": lead["leadId"]}) or lead
+
+
+async def _honour_catalog_price_already_paid(lead):
+    """Keep the price a customer already paid when the variant was confirmed.
+
+    Confirming the model moves list price. A file that was paid in full then
+    shows a balance, and every desk's Mark Delivered refuses it. Lock Cx
+    Demand to the previous catalog price when receipts already cover it.
+    A booking advance that does not cover that price is left owing.
+    """
+    if not lead or lead.get("dealCancelled") or _is_delivered(lead):
+        return lead
+    if ce.num(lead.get("customerOutstanding")) <= 0.01 and not oem_sync.is_same_order_pack(lead):
+        return lead
+    scheme_rows = None
+    if oem_sync.is_same_order_pack(lead):
+        scheme_rows = await get_scheme_rows()
+        return await _honour_pack_units_already_paid(lead, scheme_rows)
+    if lead.get("useDealPrice") and ce.num(lead.get("cxDemand")) > 0:
+        return lead
+    received = ce.num(lead.get("totalReceived"))
+    if received <= 0 or ce.num(lead.get("customerOutstanding")) <= 0.01:
+        return lead
+    old_model, old_variant = await _previous_catalog_variant(lead)
+    if not old_variant:
+        return lead
+    scheme_rows = await get_scheme_rows()
+    old_payable = await _payable_on_catalog(lead, old_model, old_variant, scheme_rows)
+    if not old_payable or received + 0.01 < old_payable:
+        return lead
+    current_payable = ce.num(lead.get("customerPayable"))
+    outstanding = ce.num(lead.get("customerOutstanding"))
+    if outstanding > (current_payable - old_payable) + 1:
+        return lead
+    locked = ce.round2(old_payable)
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
+        "useDealPrice": True,
+        "cxDemand": locked,
+        "budget": locked,
+        "lastUpdated": now_iso(),
+    }})
+    await recompute_lead(lead["leadId"])
+    fresh = await db.leads.find_one({"leadId": lead["leadId"]}) or lead
+    units = [dict(u) for u in (fresh.get("units") or []) if isinstance(u, dict)]
+    if len(units) == 1:
+        units[0]["customerOutstanding"] = fresh.get("customerOutstanding")
+        units[0]["customerPayable"] = fresh.get("customerPayable")
+        units[0]["totalReceived"] = fresh.get("totalReceived")
+        units[0]["useDealPrice"] = True
+        units[0]["cxDemand"] = locked
+        await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {"units": units}})
+        fresh = await db.leads.find_one({"leadId": lead["leadId"]}) or fresh
+    return fresh
+
+
 @api.put("/leads/{lead_id}/delivery")
 async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _desk=Depends(deal_desk_only)):
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, act)
+    lead = await _honour_catalog_price_already_paid(lead)
     await _require_related_docs(lead, act)
     delivered = (body.delivered or "").lower() in ("yes", "true", "delivered", "1")
     role = ((act or {}).get("role") or "").strip().lower()
@@ -13386,7 +13619,12 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         targets = [focus_idx] if focus_idx is not None else list(range(len(unit_docs) or 1))
         for idx in targets:
             u = unit_docs[idx] if unit_docs else {}
-            outstanding = u.get("customerOutstanding")
+            # A settled single-vehicle file is clear even when a unit copy
+            # still holds the balance from before the variant was confirmed.
+            if not pack_now and _settled_money(lead):
+                outstanding = lead.get("customerOutstanding")
+            else:
+                outstanding = u.get("customerOutstanding")
             if outstanding in (None, ""):
                 if pack_now:
                     # A missing unit balance is payable minus what that unit
