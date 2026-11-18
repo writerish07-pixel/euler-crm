@@ -1,0 +1,47 @@
+name: Critical regression
+
+# In-process mongomock tests for money, scheme, booking, and OEM billing.
+# Live HTTP tests that need REACT_APP_BACKEND_URL are not in this job.
+# This does not deploy and does not replace the Cloudflare wrangler dry-run.
+
+on:
+  push:
+    branches: [main, "cursor/**"]
+  pull_request:
+
+jobs:
+  critical-regression:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-asyncio mongomock mongomock-motor
+          python -m pip install -r requirements.txt
+      - name: Critical suite
+        env:
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: euler_critical_ci
+          JWT_SECRET: ci-secret-not-used-for-production
+          ENVIRONMENT: test
+          OWNER_PASSWORD: euler@123
+        run: |
+          python -m pytest \
+            tests/test_iter21_golive_lifecycle.py \
+            tests/test_scheme_allocation_engine.py \
+            tests/test_oct_2026_schemes.py \
+            tests/test_nov_2026_schemes.py \
+            tests/test_deal_pass_meet_cx.py \
+            tests/test_rto_insurance_deal_approval.py \
+            tests/test_owner_payment_delete.py \
+            tests/test_excess_refund_and_finance_dedupe.py \
+            tests/test_oem_billing.py \
+            tests/test_coulson_oem_inventory.py \
+            -q --tb=line

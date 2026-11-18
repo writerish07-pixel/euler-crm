@@ -138,12 +138,13 @@ async def test_apply_catalog_renames_and_drops(client):
     dropped = next(r for r in rows if r["variant"] == "Storm TR (FB) Reg C10 3.3kWh")
     assert str(dropped["status"]).lower() == "inactive"
 
-    # New OEM SKUs have blank RTO / insurance
+    # New catalog rows take the family RTO / insurance default
+    # (commercial.default_rto_insurance_for_model). A later manual edit is kept.
     sr = variants[("Hi-Load", "SR (FB120)")]
-    assert sr["rto"] == 0 and sr["insurance"] == 0
+    assert sr["rto"] == 5500 and sr["insurance"] == 10000
     assert sr["exShowroom"] == 421156
     tipper = variants[("Turbo Max", "City (Tipper)")]
-    assert tipper["rto"] == 0 and tipper["insurance"] == 0
+    assert tipper["rto"] == 5500 and tipper["insurance"] == 19000
 
     dac_variants = (await client.get("/api/price-master/variants", params={"model": "Turbo Max"})).json()
     assert all(r["variant"] != "City (DAC)" for r in dac_variants)
