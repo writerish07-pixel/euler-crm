@@ -189,7 +189,7 @@ export function isSlowLead360Path(url) {
 // back after the server already saved the receipt; a silent second POST then
 // either doubles it or fails as "duplicate" on a receipt that did save. Staff
 // see the error and check the ledger instead.
-const CREATE_ONCE_LEAD_ACTIONS = /^\/leads\/[^/]+\/(payments|refund|convert-booking)$/;
+const CREATE_ONCE_LEAD_ACTIONS = /^\/leads\/[^/]+\/(payments|refund|convert-booking|delivery)$/;
 const CREATE_ONCE_MONEY = /^\/finance\/[^/]+\/receipt$/;
 
 export function isCreateOncePath(url) {
@@ -235,6 +235,9 @@ function mutationOpts(url, opts = {}) {
   }
   if (timeout === undefined && isSlowOemMatchPath(url)) {
     timeout = BULK_TIMEOUT_MS;
+  }
+  if (timeout === undefined && isCreateOncePath(url) && /\/delivery$/.test(String(url || "").split("?")[0])) {
+    timeout = 60000;
   }
   if (timeout === undefined && docUpload) {
     timeout = DOC_UPLOAD_TIMEOUT_MS;

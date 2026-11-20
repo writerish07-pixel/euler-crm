@@ -1123,3 +1123,45 @@ async def test_delivery_adopts_billed_dv_body(client):
     assert lead["chassisNumber"] == chassis
     assert lead["variant"] == "Maxx (DV220)"
     assert lead["originalVariant"] == "Maxx (FB)"
+
+
+@pytest.mark.asyncio
+async def test_save_delivery_uses_stored_sold_and_does_not_walk_the_book(client, monkeypatch):
+    """The phone toast "Delivery update failed" was the 25s timeout.
+
+    Save used to pull every Coulson Sold row, then stamp chassis onto every
+    lead, before it answered. Owner, Sales GM, Showroom Admin and Team Leader
+    all use this one request. The chassis already on screen is enough.
+    """
+    called = {"refresh": 0, "stamp": 0}
+
+    async def _refresh(*_a, **_k):
+        called["refresh"] += 1
+        raise AssertionError("Save Delivery must not pull the Sold book")
+
+    async def _stamp():
+        called["stamp"] += 1
+        raise AssertionError("Save Delivery must not walk every lead")
+
+    monkeypatch.setattr(oem_sync, "refresh_sold_inventory", _refresh)
+    monkeypatch.setattr(server, "_apply_sold_vehicle_ids", _stamp)
+    mobile = "9811100551"
+    chassis = "MD9ESAAD26K217030"
+    await _booked_cleared_lead("LD-DEL-FAST", mobile, "Mohan Lal Yadav")
+    await server.db.leads.update_one({"leadId": "LD-DEL-FAST"}, {"$set": {
+        "interestedModel": "Storm", "variant": "Storm EV",
+    }})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "AF-122-I26270272",
+        "numberPlate": "RJ14GV5545", "model": "Storm", "variant": "Storm EV",
+        "coulsonStatus": "SOLD",
+    })
+    r = await client.put("/api/leads/LD-DEL-FAST/delivery", json=_delivery_yes(
+        insurerName="united", deliveryDate="2026-11-05"))
+    assert r.status_code == 200, r.text
+    lead = await server.db.leads.find_one({"leadId": "LD-DEL-FAST"})
+    assert server._is_delivered(lead) is True
+    assert lead["chassisNumber"] == chassis
+    assert lead["invoiceNumber"] == "AF-122-I26270272"
+    assert called == {"refresh": 0, "stamp": 0}

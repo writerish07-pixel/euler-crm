@@ -2781,7 +2781,7 @@ export function DeliveryTab({ lead, actions = {}, isOwner = false, canEditCommer
         : "Delivery status updated");
       onSaved();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Delivery update failed"));
+      toast.error(apiErrorMessage(e, "Could not mark delivered. Refresh the lead and try again."));
     }
   };
   const savePlates = async () => {

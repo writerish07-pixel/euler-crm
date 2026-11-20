@@ -801,12 +801,14 @@ def _validate_delivery_ready(lead, body, *, outstanding=None, arranged_by=None,
 
 
 async def _refresh_sold_then_fill_delivery(lead, body):
-    """Pull the latest OEM Sold list, then stamp chassis/invoice from unique mobile."""
-    try:
-        await oem_sync.refresh_sold_inventory(db)
-    except Exception:
-        logging.exception("Coulson sold refresh failed before delivery for %s",
-                          (lead or {}).get("leadId"))
+    """Stamp chassis and invoice from the Sold list already stored.
+
+    Save Delivery used to pull every billed chassis from Coulson first. That
+    pull is the same job as OEM Billing Sync and runs well past the phone's
+    25 second limit, so the toast was only "Delivery update failed" while the
+    chassis was already on screen. Opening the Delivery tab refreshes Sold.
+    The save uses that copy.
+    """
     return await _fill_delivery_from_sold(lead, body)
 
 
@@ -13747,7 +13749,10 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
                     await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
             else:
                 await _upsert_insurance_on_delivery(lead_id, body.deliveryDate or today())
-            await rebuild_finance_views()
+            try:
+                await asyncio.wait_for(rebuild_finance_views(), timeout=8)
+            except asyncio.TimeoutError:
+                logging.exception("finance view refresh timed out after delivery %s", lead_id)
             await recompute_lead(lead_id)
             await _upsert_delivery_billing_summary(lead_id)
         except Exception:
@@ -13765,10 +13770,9 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
                     await oem_sync.take_chassis_from_inventory(db, raw)
             except Exception:
                 logging.exception("Could not drop delivered chassis from yard inventory")
-            try:
-                await _apply_sold_vehicle_ids()
-            except Exception:
-                logging.exception("Could not backfill chassis/invoice from OEM Sold")
+            # Whole-book Sold stamping runs on OEM Billing Sync and at startup.
+            # Doing it again inside this save walked every lead and held the
+            # phone past its timeout after the file was already Delivered.
     elif unit_docs and (pack_now or len(unit_docs) > 1):
         await recompute_lead(lead_id)
     return _lead_for_viewer(clean(await db.leads.find_one({"leadId": lead_id})), act)
