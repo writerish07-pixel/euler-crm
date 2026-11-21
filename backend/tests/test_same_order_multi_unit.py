@@ -833,6 +833,75 @@ def test_refresh_drops_pack_total_locked_onto_unit1():
     assert total == 1580000
 
 
+def test_refresh_drops_copied_pack_total_under_one_and_a_half_ex():
+    """A Storm plus a cheaper sibling can copy an order total under 1.5× ex.
+
+    12,00,000 × 1.5 is 18,00,000. The copied ₹17,70,000 still includes the
+    other vehicle, so unit 1 must not lock to it and then add the sibling again.
+    """
+    pack = 1770000
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Storm", "variant": "LR200",
+        "exShowroom": 1200000,
+        "cxDemand": pack, "customerPayable": pack, "budget": pack,
+        "useDealPrice": True,
+        "units": [
+            {
+                "sno": 1, "model": "Storm", "variant": "LR200",
+                "exShowroom": 1200000, "rto": 0, "insuranceAmount": 0,
+                "additionalDiscount": 0, "priceStructureSaved": True,
+                "cxDemand": pack, "useDealPrice": True, "customerPayable": pack,
+            },
+            {
+                "sno": 2, "model": "HiRange", "variant": "SR",
+                "exShowroom": 590000, "rto": 0, "insuranceAmount": 0,
+                "additionalDiscount": 0, "priceStructureSaved": True,
+                "cxDemand": 590000, "useDealPrice": True, "customerPayable": 590000,
+            },
+        ],
+    }
+    total, rows, _filled, _pending = server._refresh_unit_payables(lead)
+    # One vehicle, not the copied ₹17,70,000, and not that figure plus the sibling.
+    assert ce.num(rows[0].get("customerPayable")) < 1300000
+    assert ce.num(rows[0].get("cxDemand") or 0) != pack
+    assert ce.num(rows[1].get("customerPayable")) == 590000
+    assert total == ce.round2(ce.num(rows[0].get("customerPayable")) + 590000)
+    assert total != pack + 590000
+
+
+def test_refresh_keeps_agreed_price_a_few_thousand_above_gvc():
+    """RTO / insurance cut: payable stays, the gap is extra from the customer."""
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "exShowroom": 785000,
+        "cxDemand": 1610000, "customerPayable": 1610000,
+        "useDealPrice": True,
+        "units": [
+            {
+                "sno": 1, "model": "Turbo Max", "variant": "Maxx (PV)",
+                "exShowroom": 785000, "rto": 0, "insuranceAmount": 10000,
+                "additionalDiscount": 4500, "priceStructureSaved": True,
+                "cxDemand": 805000, "useDealPrice": True, "customerPayable": 805000,
+            },
+            {
+                "sno": 2, "model": "Turbo Max", "variant": "Maxx (PV)",
+                "exShowroom": 785000, "rto": 5500, "insuranceAmount": 19000,
+                "additionalDiscount": 4500, "priceStructureSaved": True,
+                "cxDemand": 805000, "useDealPrice": True, "customerPayable": 805000,
+            },
+        ],
+    }
+    total, rows, _filled, _pending = server._refresh_unit_payables(lead)
+    assert ce.num(rows[0].get("customerPayable")) == 805000
+    assert ce.num(rows[0].get("additionalDiscount")) == 0
+    assert ce.num(rows[0].get("extraIncomeFromCustomer")) == 10000
+    assert ce.num(rows[1].get("customerPayable")) == 805000
+    assert ce.num(rows[1].get("additionalDiscount")) == 4500
+    assert total == 1610000
+
+
 def test_pack_billing_summary_lists_each_unit_then_totals():
     lead = {
         "leadId": "LD-PACK-BILL",

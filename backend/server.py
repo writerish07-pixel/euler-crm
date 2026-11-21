@@ -1779,6 +1779,18 @@ async def recompute_lead(lead_id):
         updates["oemExtraSupportReceived"] = oem_pack["oemExtraSupportReceived"]
         updates["oemExtraSupportPassed"] = oem_pack["oemExtraSupportPassed"]
         updates["oemExtraSupportRetained"] = oem_pack["oemExtraSupportRetained"]
+        # Single files add extra-from-customer in the margin above. Pack units
+        # record it per vehicle; the lead total has to include each unit once
+        # or Dealer Earnings drops the amount.
+        pack_extra = ce.round2(sum(
+            ce.num((u or {}).get("extraIncomeFromCustomer")) for u in (pack_units or [])))
+        updates["extraIncomeFromCustomer"] = pack_extra
+        updates["dealerMarginNetExGst"] = ce.round2(margin["marginNetExGst"] + pack_extra)
+        updates["dealerTotalEarnings"] = ce.round2(
+            margin["marginNetExGst"] + income["retainedIncomeTotal"] + _oem_extra_earn
+            + extra_income + _dealer_ins_income + pack_extra
+            - _dealer_funded_benefit
+            - _wo["oemUnpayableScheme"])
     # Authoritative Insurance Benefit projection (parallel to loyaltyBonus offer field).
     # Available amount is stored on insuranceBenefit; CB feeds the Dealer Earnings sheet
     # column Customer Insurance Benefit Passed. Historical leads without auth allocation
@@ -8273,6 +8285,36 @@ def _lead_overlay_unit(lead, unit, index=0):
     return out
 
 
+def _cx_copies_pack_total(cx, lead, units, idx):
+    """True when this unit's Cx Demand is the order total copied onto the unit.
+
+    A lower RTO / insurance can leave the agreed price a few thousand above
+    today's on-road cost. That is still one vehicle. The copied order total
+    matches the lead's Cx Demand and also covers another unit's ex-showroom.
+    """
+    cx = ce.round2(ce.num(cx))
+    if cx <= 0 or not isinstance(units, list) or len(units) < 2:
+        return False
+    lead_cx = ce.round2(ce.num(
+        (lead or {}).get("cxDemand") or (lead or {}).get("customerPayable")
+        or (lead or {}).get("budget")))
+    if abs(cx - lead_cx) > ce.DEAL_AMOUNT_EQUAL_RUPEES:
+        return False
+    this_ex = ce.round2(ce.num((units[idx] or {}).get("exShowroom") or (lead or {}).get("exShowroom")))
+    if this_ex <= 0:
+        return False
+    for j, other in enumerate(units):
+        if j == idx or not isinstance(other, dict):
+            continue
+        other_ex = ce.round2(ce.num(other.get("exShowroom")))
+        if other_ex <= ce.DEAL_AMOUNT_EQUAL_RUPEES:
+            continue
+        # The figure includes about half of another vehicle, not just RTO / insurance.
+        if cx > this_ex + other_ex * 0.5 + ce.DEAL_AMOUNT_EQUAL_RUPEES:
+            return True
+    return False
+
+
 def _refresh_unit_payables(lead, scheme_rows=None):
     """Write each unit's payable and return (total_of_counted, units, filled, pending)."""
     units = list((lead or {}).get("units") or [])
@@ -8305,7 +8347,8 @@ def _refresh_unit_payables(lead, scheme_rows=None):
         if (not pack) and u.get("useDealPrice") and ce.num(u.get("cxDemand")) > 0:
             pay = ce.round2(ce.num(u.get("cxDemand")))
         elif pack:
-            if ce.pack_unit_cx_is_pack_rollup(u.get("cxDemand"), snap, u):
+            if (ce.pack_unit_cx_is_pack_rollup(u.get("cxDemand"), snap, u)
+                    or _cx_copies_pack_total(u.get("cxDemand"), lead, units, i)):
                 u.pop("cxDemand", None)
                 u["useDealPrice"] = False
             lock = ce.pack_unit_locked_cx_demand(snap, u)
@@ -8323,8 +8366,10 @@ def _refresh_unit_payables(lead, scheme_rows=None):
                     u["useDealPrice"] = True
                     pay = lock
                 else:
+                    u["extraIncomeFromCustomer"] = 0
                     pay = ce.round2(ce.num(totals.get("customerPayable")))
             else:
+                u["extraIncomeFromCustomer"] = 0
                 pay = ce.round2(ce.num(totals.get("customerPayable")))
         else:
             pay = ce.round2(ce.num(totals.get("customerPayable")))

@@ -365,6 +365,9 @@ async def test_confirmed_rto_cut_leaves_additional_200(client):
     assert ce.num(big_u2["cxDemand"]) == pay
     assert ce.num(big_u2["additionalDiscount"]) == 0
     assert ce.num(big_u2.get("extraIncomeFromCustomer")) == 10000
+    base_margin = ce.compute_dealer_margin({"exShowroom": ex})["marginNetExGst"]
+    assert ce.num(big_doc.get("extraIncomeFromCustomer")) == 10000
+    assert ce.num(big_doc.get("dealerMarginNetExGst")) == ce.round2(base_margin + 10000)
 
 
 @pytest.mark.asyncio
