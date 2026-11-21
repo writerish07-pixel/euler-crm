@@ -120,6 +120,8 @@ async def test_unit_1_change_updates_the_file_header_only(client):
     after = await server.db.leads.find_one({"leadId": lid})
     assert after["interestedModel"] == "Storm"
     assert after["variant"] == "Unit Edit C"
+    assert after["exShowroom"] == 800000
+    assert after["units"][0]["exShowroom"] == 800000
     assert after["units"][0]["variant"] == "Unit Edit C"
     assert after["units"][1]["variant"] == before["units"][1]["variant"]
     assert after["units"][1]["model"] == before["units"][1]["model"]
@@ -240,3 +242,71 @@ async def test_resaving_same_variant_drops_a_locked_cx_when_ex_already_matches(c
     assert unit2["exShowroom"] == 800000
     assert unit2["customerPayable"] != 707000
     assert unit2.get("cxDemand") in (None, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_booked_unit_1_price_save_uses_its_own_variant_not_the_header(client):
+    """Unit 1 is variant C. The lead header still has variant A's ex-showroom.
+
+    Saving price must write C's Price Master price. A later RTO edit keeps
+    that customer price and moves Additional.
+    """
+    lid = await _pack(client, "9813307108")
+    before = await server.db.leads.find_one({"leadId": lid})
+    units = before["units"]
+    units[0]["model"] = "Storm"
+    units[0]["variant"] = "Unit Edit C"
+    units[0]["exShowroom"] = 500000
+    units[0]["rto"] = 1000
+    units[0]["insuranceAmount"] = 2000
+    units[0]["cxDemand"] = 503000
+    units[0]["useDealPrice"] = True
+    units[0]["customerPayable"] = 503000
+    units[0]["additionalDiscount"] = 0
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "units": units,
+        "currentStatus": "Booked",
+        "bookingDate": "2026-11-06",
+        "exShowroom": 500000,
+        "interestedModel": "Turbo Max",
+        "variant": "Unit Edit A",
+    }})
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 500000, "rto": 5000, "insuranceAmount": 6000, "unitSno": 1,
+    })
+    assert saved.status_code == 200, saved.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    unit1 = after["units"][0]
+    assert unit1["exShowroom"] == 800000
+    assert unit1["customerPayable"] != 503000
+    assert unit1["customerPayable"] >= 800000
+    assert after["exShowroom"] == 800000
+    assert after["units"][1]["exShowroom"] == before["units"][1].get("exShowroom")
+    pay = unit1["customerPayable"]
+    cut = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 800000, "rto": 2000, "insuranceAmount": 6000, "unitSno": 1,
+    })
+    assert cut.status_code == 200, cut.text
+    recut = (await server.db.leads.find_one({"leadId": lid}))["units"][0]
+    assert recut["exShowroom"] == 800000
+    assert recut["customerPayable"] == pay
+    assert recut["rto"] == 2000
+
+
+@pytest.mark.asyncio
+async def test_blank_unit_1_of_another_variant_does_not_copy_the_header_price(client):
+    lid = await _pack(client, "9813307109")
+    lead = await server.db.leads.find_one({"leadId": lid})
+    units = lead["units"]
+    units[0]["model"] = "Storm"
+    units[0]["variant"] = "Unit Edit C"
+    units[0]["exShowroom"] = 0
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "units": units,
+        "exShowroom": 500000,
+        "interestedModel": "Turbo Max",
+        "variant": "Unit Edit A",
+    }})
+    await server.recompute_lead(lid)
+    unit1 = (await server.db.leads.find_one({"leadId": lid}))["units"][0]
+    assert unit1["exShowroom"] == 800000
