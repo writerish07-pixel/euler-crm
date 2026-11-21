@@ -473,6 +473,48 @@ async def test_showroom_admin_sets_real_rto_and_insurance(client):
     assert owner_addl.status_code == 200, owner_addl.text
 
 
+@pytest.mark.asyncio
+async def test_lower_rto_and_insurance_do_not_reduce_gross(client):
+    """Pawan Kumar: RTO 2,200 and insurance 17,955 must not pull Gross below list."""
+    lid = "LD-GROSS-HELD"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Pawan Kumar", "mobile": "9571964334",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)", "executive": "Amit",
+        "accountStatus": "Active", "currentStatus": "Delivered",
+        "deliveryStatus": "Delivered", "deliveryDate": "2026-11-06",
+        "bookingDate": "2026-09-15", "priceStructureSaved": True,
+        "exShowroom": 775000, "rto": 5500, "insuranceAmount": 19000, "insurance": 19000,
+        "additionalDiscount": 9500, "customerPayable": 790000,
+        "cxDemand": 790000, "useDealPrice": True,
+    })
+    await server.recompute_lead(lid)
+    before = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(before.get("grossVehicleCost")) == 799500
+    cut = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "rto", "value": 2200})
+    assert cut.status_code == 200, cut.text
+    ins = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "insuranceAmount", "value": 17955})
+    assert ins.status_code == 200, ins.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(after.get("rto")) == 2200
+    assert ce.num(after.get("insuranceAmount")) == 17955
+    assert ce.num(after.get("grossVehicleCost")) == 799500
+    assert ce.num(after.get("rtoInsuranceHeldInGross")) == 4345
+    assert ce.num(after.get("customerPayable")) == 790000
+    assert ce.num(after.get("additionalDiscount")) == 5155
+    view = await client.get(f"/api/leads/{lid}/360")
+    assert view.status_code == 200, view.text
+    card = view.json()["commercials"]
+    assert ce.num(card.get("grossVehicleCost")) == 799500
+    assert ce.num(card.get("rtoInsuranceHeldInGross")) == 4345
+    higher = await client.put(f"/api/leads/{lid}/owner-field", json={"field": "rto", "value": 6500})
+    assert higher.status_code == 200, higher.text
+    raised = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(raised.get("grossVehicleCost")) == 800500
+    assert ce.num(raised.get("customerPayable")) == 790000
+    assert ce.num(raised.get("additionalDiscount")) == 9455
+
+
 def test_recut_cx_demand_round_trips_derive_additional():
     gvc, scheme, addl = 989500, 0, 29500
     recut = ce.recut_cx_demand_for_additional(gvc, scheme, addl)

@@ -1675,8 +1675,18 @@ async def recompute_lead(lead_id):
     extra_from_cx = 0.0
     if derived_pass and derived_pass.get("applied"):
         extra_from_cx = ce.round2(ce.num(derived_pass.get("extraFromCustomer")))
+    actual_gvc = ce.num(totals.get("grossVehicleCost"))
+    # A booked deal keeps its gross when RTO or insurance comes in cheaper.
+    # Additional already moved against the actual charges.
+    held_gvc = actual_gvc
+    rto_held = 0.0
+    if (deal_cx > 0 and lead.get("useDealPrice") and not lead.get("dealCancelled")
+            and not oem_sync.is_same_order_pack(lead)):
+        rto_held = ce.rto_insurance_shortfall(snap)
+        held_gvc = ce.round2(actual_gvc + rto_held)
     updates = {
-        "grossVehicleCost": totals["grossVehicleCost"],
+        "grossVehicleCost": held_gvc,
+        "rtoInsuranceHeldInGross": rto_held,
         "tcs": totals.get("tcs", 0),
         "tcsBase": totals.get("tcsBase", 0),
         "tcsApplicable": totals.get("tcsApplicable") or ("Yes" if ce.num(totals.get("tcs")) > 0 else "No"),
@@ -1767,6 +1777,10 @@ async def recompute_lead(lead_id):
             if (u0.get("useDealPrice") and "additionalDiscount" in u0
                     and lead.get("useDealPrice")):
                 updates["additionalDiscount"] = u0["additionalDiscount"]
+        pack_card = _pack_overview_commercials(
+            {**lead, **updates, "units": pack_units or lead.get("units") or []}, scheme_rows)
+        updates["grossVehicleCost"] = pack_card["grossVehicleCost"]
+        updates["rtoInsuranceHeldInGross"] = pack_card.get("rtoInsuranceHeldInGross") or 0
         if pack_total is not None:
             updates["customerPayable"] = pack_total
             updates["cxDemand"] = pack_total
@@ -2268,6 +2282,8 @@ class ActivityIn(BaseModel):
 
 class SnapshotComputeIn(BaseModel):
     exShowroom: float = 0
+    model: str = ""
+    variant: str = ""
     accessories: float = 0
     insurance: float = 0
     insuranceArrangedBy: str = "dealer"
@@ -6699,6 +6715,13 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
     except Exception as exc:
         logger.exception("commercials failed for %s: %s", lead_id, exc)
         commercials = {}
+    if (ce.num(lead.get("cxDemand")) > 0 and lead.get("useDealPrice")
+            and not lead.get("dealCancelled")
+            and not oem_sync.is_same_order_pack(lead)):
+        actual_gvc = ce.num(commercials.get("grossVehicleCost"))
+        held_gvc = ce.gross_with_rto_insurance_held(snap, actual_gvc)
+        commercials["rtoInsuranceHeldInGross"] = ce.round2(held_gvc - actual_gvc)
+        commercials["grossVehicleCost"] = held_gvc
     if oem_sync.is_same_order_pack(lead):
         try:
             pack_c = _pack_overview_commercials(lead, scheme_rows)
@@ -8636,19 +8659,25 @@ async def _hydrate_pack_unit_prices(lead):
 def _pack_overview_commercials(lead, scheme_rows=None):
     """Sum each unit's own GVC / discount / payable. Never apply unit-1 scheme to the pack."""
     units, _ = _prepare_pack_unit_scheme(lead, _ensure_lead_units(lead))
-    gvc = tcs = disc = passed = pay = 0.0
+    gvc = tcs = disc = passed = pay = held = 0.0
     for i, u in enumerate(units):
         if not _unit_has_price_amount(lead, u, i):
             continue
         snap = lead_to_snapshot(_lead_overlay_unit(lead, u, i))
         totals = ce.compute_commercial_totals(snap, scheme_rows)
-        gvc += ce.num(totals.get("grossVehicleCost"))
+        actual = ce.num(totals.get("grossVehicleCost"))
+        part = actual
+        if ce.num(u.get("cxDemand")) > 0 and u.get("useDealPrice"):
+            part = ce.gross_with_rto_insurance_held(snap, actual)
+            held += part - actual
+        gvc += part
         tcs += ce.num(totals.get("tcs"))
         disc += ce.num(totals.get("totalDiscount"))
         passed += ce.num(totals.get("totalPassedToCustomer"))
         pay += ce.num(totals.get("customerPayable"))
     return {
         "grossVehicleCost": ce.round2(gvc),
+        "rtoInsuranceHeldInGross": ce.round2(held),
         "tcs": ce.round2(tcs),
         "totalDiscount": ce.round2(disc),
         "totalPassedToCustomer": ce.round2(passed),
@@ -20071,6 +20100,10 @@ async def commercial_compute(body: SnapshotComputeIn, user=Depends(current_user)
                 ce.num(result.get("totalDiscount")) - old_addl + new_addl)
             result["dealerDiscount"] = ce.round2(
                 ce.num(result.get("dealerDiscount")) - old_addl + new_addl)
+        actual_gvc = ce.num(result.get("grossVehicleCost"))
+        held_gvc = ce.gross_with_rto_insurance_held(raw, actual_gvc)
+        result["rtoInsuranceHeldInGross"] = ce.round2(held_gvc - actual_gvc)
+        result["grossVehicleCost"] = held_gvc
     if not _is_owner_user(user):
         return _staff_safe_commercials(result)
     return result
