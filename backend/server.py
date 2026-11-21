@@ -7462,6 +7462,9 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
         patch["interestedModel"] = model
         patch["variant"] = variant
         patch.update(lead_scheme)
+        # Unit 1's header price moves with this variant. The old ex-showroom
+        # used to stay on the lead and a later price save copied it back.
+        patch.update(master_ps)
     await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
     await recompute_lead(lead_id)
     await write_audit(
@@ -7740,6 +7743,44 @@ def _lead_price_as_of(lead=None, on=None, unit=None):
         if booked:
             return booked
     return today()
+
+
+def _stored_ex_matches_row(stored, row, as_of=None):
+    """True when this ex-showroom is already the Price Master price for this row.
+
+    The booked figure may be the base price or the September Turbo price.
+    A different variant's ex-showroom does not match.
+    """
+    stored = ce.num(stored)
+    if stored <= 0 or not row:
+        return False
+    base = ce.num(row.get("exShowroom"))
+    selling = ce.num(_turbo_selling_ex(row, as_of))
+    candidates = [base, selling]
+    if not row.get("oemSyncedAt") and _is_turbo_vehicle(row.get("model"), row.get("variant")):
+        candidates.append(ce.round2(base + TURBO_EXSHOWROOM_UPLIFT))
+    return any(abs(stored - c) < 1 for c in candidates)
+
+
+async def _stored_ex_is_another_variant(stored, model, variant, as_of=None):
+    """True when this ex-showroom is the list price of a different vehicle."""
+    stored = ce.num(stored)
+    if stored <= 0:
+        return False
+    rows = await db.price_master.find({}).to_list(500)
+    active = [r for r in rows if str(r.get("status") or "active").lower() == "active"] or rows
+    want_model = str(model or "").strip().lower()
+    want_variant = str(variant or "").strip().lower()
+    for row in active:
+        same = (
+            str(row.get("model") or "").strip().lower() == want_model
+            and str(row.get("variant") or "").strip().lower() == want_variant
+        )
+        if same:
+            continue
+        if _stored_ex_matches_row(stored, row, as_of):
+            return True
+    return False
 
 
 def _turbo_selling_ex(row, as_of=None):
@@ -8566,6 +8607,28 @@ def _apply_unit_money(lead, units, received, payables):
     return out
 
 
+def _unit_matches_header_vehicle(unit, lead):
+    """True when unit 1 is the header vehicle, including catalog aliases.
+
+    Maxx (DV200) and Maxx (DV220) are the same SKU. A blank unit has not
+    chosen a different vehicle, so it still belongs to the header.
+    """
+    unit_model = str((unit or {}).get("model") or "").strip()
+    unit_variant = str((unit or {}).get("variant") or "").strip()
+    header_model = str((lead or {}).get("interestedModel") or "").strip()
+    header_variant = str((lead or {}).get("variant") or "").strip()
+    if not unit_model and not unit_variant:
+        return True
+    um, uv = oem_cat.canonical_model_variant(
+        unit_model or header_model, unit_variant or header_variant)
+    hm, hv = oem_cat.canonical_model_variant(header_model, header_variant)
+    if not unit_model:
+        um = hm
+    if not unit_variant:
+        uv = hv
+    return str(um).strip().lower() == str(hm).strip().lower() and str(uv).strip().lower() == str(hv).strip().lower()
+
+
 async def _hydrate_pack_unit_prices(lead):
     """Write Price Master charges onto pack units that still have ₹0."""
     if not oem_sync.is_same_order_pack(lead or {}):
@@ -8578,7 +8641,8 @@ async def _hydrate_pack_unit_prices(lead):
         if ce.num(u.get("exShowroom")) > 0:
             units[i] = u
             continue
-        if i == 0 and ce.num((lead or {}).get("exShowroom")) > 0:
+        same_vehicle = _unit_matches_header_vehicle(u, lead)
+        if i == 0 and same_vehicle and ce.num((lead or {}).get("exShowroom")) > 0:
             _copy_unit_commercials(lead, u)
             for k in PACK_UNIT_ROLLUP_KEYS:
                 u.pop(k, None)
@@ -9513,21 +9577,51 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
                 f"{variant or '(none)'}. Select a valid vehicle before pricing.")
     payload["priceStructureSaved"] = True
     payload["insurance"] = ce.num(payload.get("insuranceAmount"))
-    if idx == 0 and (_is_booked_lead(lead) or _is_delivered_lead(lead)):
-        # Booked / delivered unit 1 prices stay. Staff may still mark the step saved
-        # and edit non-ex-showroom fields when the owner re-edit gate allows.
-        if ce.num(lead.get("exShowroom")) > 0:
-            payload["exShowroom"] = ce.num(lead.get("exShowroom"))
+    pack = oem_sync.is_same_order_pack(lead)
+    booked_price = idx == 0 and (_is_booked_lead(lead) or _is_delivered_lead(lead))
+    if booked_price and not pack and ce.num(lead.get("exShowroom")) > 0:
+        # A one-vehicle file keeps the ex-showroom it was booked on.
+        payload["exShowroom"] = ce.num(lead.get("exShowroom"))
+    elif booked_price and pack and row:
+        # Keep this variant's booked ex-showroom, including after a later list
+        # change. Replace it only when the saved figure is another variant's
+        # price — that is how a DV unit was left on the PV price.
+        stored = ce.num(chosen.get("exShowroom"))
+        as_of_price = _lead_price_as_of(lead, unit=chosen)
+        other_variant = await _stored_ex_is_another_variant(
+            stored, row.get("model"), row.get("variant"), as_of_price)
+        if stored > 0 and (
+            _stored_ex_matches_row(stored, row, as_of_price) or not other_variant
+        ):
+            payload["exShowroom"] = stored
     units = _ensure_lead_units(lead)
     if idx >= len(units):
         raise HTTPException(422, "That unit is not on this order.")
     rec = dict(units[idx])
+    previous_ex = ce.num(rec.get("exShowroom"))
     rec.update({k: payload[k] for k in payload if k != "unitSno"})
     rec["sno"] = idx + 1
+    applied_ex = ce.num(rec.get("exShowroom"))
+    ex_moved = pack and previous_ex > 0 and applied_ex > 0 and abs(applied_ex - previous_ex) >= 1
+    # No ex-showroom means this payable is not a booked price for the vehicle
+    # being saved. Locking it would keep the stale deal on the new list price.
+    stale_blank = (
+        pack and previous_ex <= 0 and applied_ex > 0
+        and ce.num(rec.get("cxDemand")) <= 0
+        and ce.num(rec.get("customerPayable")) > 0
+    )
+    if ex_moved or stale_blank:
+        # The rupees belonged to the previous vehicle. RTO and insurance edits
+        # do not move ex-showroom, so those deals stay. Additional is stored
+        # as zero: a missing key is filled again from the lead header.
+        for key in ("cxDemand", "budget", "extraIncomeFromCustomer", "customerPayable"):
+            rec.pop(key, None)
+        rec["additionalDiscount"] = 0
+        rec["useDealPrice"] = False
     # Real RTO / insurance must not cheapen the agreed customer price.
     # Lock Cx Demand to the payable already on the file when the deal
     # was never stored as cxDemand.
-    if ce.num(rec.get("cxDemand")) <= 0 and ce.num(rec.get("customerPayable")) > 0:
+    elif ce.num(rec.get("cxDemand")) <= 0 and ce.num(rec.get("customerPayable")) > 0:
         rec["cxDemand"] = ce.round2(ce.num(rec.get("customerPayable")))
         rec["useDealPrice"] = True
     units[idx] = rec
