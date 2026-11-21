@@ -392,3 +392,59 @@ async def test_variant_correction_does_not_restore_header_additional(client):
     assert unit1["exShowroom"] == 800000
     assert unit1["additionalDiscount"] == 0
     assert unit1["customerPayable"] == 811000
+
+
+@pytest.mark.asyncio
+async def test_blank_unit_price_save_drops_the_stale_payable(client):
+    """A unit with no ex-showroom must not lock an old payable onto the new price."""
+    lid = await _pack(client, "9813307112")
+    lead = await server.db.leads.find_one({"leadId": lid})
+    units = lead["units"]
+    units[0]["model"] = "Storm"
+    units[0]["variant"] = "Unit Edit C"
+    units[0]["exShowroom"] = 0
+    units[0]["customerPayable"] = 503000
+    units[0].pop("cxDemand", None)
+    units[0]["useDealPrice"] = False
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "units": units,
+        "currentStatus": "Booked",
+        "bookingDate": "2026-11-06",
+        "additionalDiscount": 0,
+    }})
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 800000, "rto": 5000, "insuranceAmount": 6000, "unitSno": 1,
+    })
+    assert saved.status_code == 200, saved.text
+    unit1 = (await server.db.leads.find_one({"leadId": lid}))["units"][0]
+    assert unit1["exShowroom"] == 800000
+    assert unit1["customerPayable"] == 811000
+    assert unit1.get("cxDemand") in (None, 0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_alias_variant_keeps_the_booked_header_price(client):
+    """Maxx (DV200) is the same vehicle as Maxx (DV220). A blank unit keeps the booked price."""
+    lid = await _pack(client, "9813307113")
+    await server.db.price_master.delete_many({"priceId": "PM-PUV-DV"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-PUV-DV", "model": "Turbo Max", "variant": "Maxx (DV220)",
+        "exShowroom": 809999, "rto": 5500, "insurance": 19000, "handlingCharges": 0,
+        "status": "active",
+    })
+    lead = await server.db.leads.find_one({"leadId": lid})
+    units = lead["units"]
+    units[0]["model"] = "Turbo Max"
+    units[0]["variant"] = "Maxx (DV200)"
+    units[0]["exShowroom"] = 0
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "units": units,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (DV220)",
+        "exShowroom": 825000,
+        "currentStatus": "Booked",
+        "bookingDate": "2026-11-06",
+    }})
+    await server.recompute_lead(lid)
+    unit1 = (await server.db.leads.find_one({"leadId": lid}))["units"][0]
+    assert unit1["exShowroom"] == 825000

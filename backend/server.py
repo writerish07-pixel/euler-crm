@@ -8607,6 +8607,28 @@ def _apply_unit_money(lead, units, received, payables):
     return out
 
 
+def _unit_matches_header_vehicle(unit, lead):
+    """True when unit 1 is the header vehicle, including catalog aliases.
+
+    Maxx (DV200) and Maxx (DV220) are the same SKU. A blank unit has not
+    chosen a different vehicle, so it still belongs to the header.
+    """
+    unit_model = str((unit or {}).get("model") or "").strip()
+    unit_variant = str((unit or {}).get("variant") or "").strip()
+    header_model = str((lead or {}).get("interestedModel") or "").strip()
+    header_variant = str((lead or {}).get("variant") or "").strip()
+    if not unit_model and not unit_variant:
+        return True
+    um, uv = oem_cat.canonical_model_variant(
+        unit_model or header_model, unit_variant or header_variant)
+    hm, hv = oem_cat.canonical_model_variant(header_model, header_variant)
+    if not unit_model:
+        um = hm
+    if not unit_variant:
+        uv = hv
+    return str(um).strip().lower() == str(hm).strip().lower() and str(uv).strip().lower() == str(hv).strip().lower()
+
+
 async def _hydrate_pack_unit_prices(lead):
     """Write Price Master charges onto pack units that still have ₹0."""
     if not oem_sync.is_same_order_pack(lead or {}):
@@ -8619,14 +8641,7 @@ async def _hydrate_pack_unit_prices(lead):
         if ce.num(u.get("exShowroom")) > 0:
             units[i] = u
             continue
-        unit_variant = str(u.get("variant") or "").strip().lower()
-        header_variant = str((lead or {}).get("variant") or "").strip().lower()
-        unit_model = str(u.get("model") or "").strip().lower()
-        header_model = str((lead or {}).get("interestedModel") or "").strip().lower()
-        same_vehicle = (
-            (not unit_variant or unit_variant == header_variant)
-            and (not unit_model or unit_model == header_model)
-        )
+        same_vehicle = _unit_matches_header_vehicle(u, lead)
         if i == 0 and same_vehicle and ce.num((lead or {}).get("exShowroom")) > 0:
             _copy_unit_commercials(lead, u)
             for k in PACK_UNIT_ROLLUP_KEYS:
@@ -9588,7 +9603,14 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     rec["sno"] = idx + 1
     applied_ex = ce.num(rec.get("exShowroom"))
     ex_moved = pack and previous_ex > 0 and applied_ex > 0 and abs(applied_ex - previous_ex) >= 1
-    if ex_moved:
+    # No ex-showroom means this payable is not a booked price for the vehicle
+    # being saved. Locking it would keep the stale deal on the new list price.
+    stale_blank = (
+        pack and previous_ex <= 0 and applied_ex > 0
+        and ce.num(rec.get("cxDemand")) <= 0
+        and ce.num(rec.get("customerPayable")) > 0
+    )
+    if ex_moved or stale_blank:
         # The rupees belonged to the previous vehicle. RTO and insurance edits
         # do not move ex-showroom, so those deals stay. Additional is stored
         # as zero: a missing key is filled again from the lead header.
