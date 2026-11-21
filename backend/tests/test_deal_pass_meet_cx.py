@@ -515,6 +515,120 @@ async def test_lower_rto_and_insurance_do_not_reduce_gross(client):
     assert ce.num(raised.get("additionalDiscount")) == 9455
 
 
+@pytest.mark.asyncio
+async def test_unpriced_enquiry_does_not_invent_a_gross(client):
+    lid = "LD-GROSS-UNPRICED"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Unpriced", "mobile": "9571964301",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)", "executive": "Amit",
+        "accountStatus": "Active", "currentStatus": "New",
+        "exShowroom": 0, "rto": 0, "insuranceAmount": 0,
+        "cxDemand": 790000, "useDealPrice": True,
+    })
+    await server.recompute_lead(lid)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("grossVehicleCost")) == 0
+    assert ce.num(lead.get("rtoInsuranceHeldInGross")) == 0
+
+
+@pytest.mark.asyncio
+async def test_gross_holds_against_the_quoted_price_not_the_family_list(client):
+    lid = "LD-GROSS-QUOTE"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-GROSS-QUOTE"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-GROSS-QUOTE", "model": "Turbo Max", "variant": "Maxx (FB)",
+        "exShowroom": 775000, "rto": 5500, "insurance": 24000, "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Quoted High", "mobile": "9571964302",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)", "executive": "Amit",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-09-15",
+        "exShowroom": 775000, "rto": 5500, "insuranceAmount": 22000, "insurance": 22000,
+        "cxDemand": 790000, "useDealPrice": True,
+        "dealFormat": {"rto": 5500, "insurance": 24000, "exShowroom": 775000},
+    })
+    await server.recompute_lead(lid)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("grossVehicleCost")) == 804500
+    assert ce.num(lead.get("rtoInsuranceHeldInGross")) == 2000
+    assert ce.num(lead.get("customerPayable")) == 790000
+
+
+@pytest.mark.asyncio
+async def test_custom_list_at_the_actual_premium_does_not_add_the_family_gap(client):
+    lid = "LD-GROSS-CUSTOM"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.price_master.delete_many({"priceId": "PM-GROSS-CUSTOM"})
+    await server.db.price_master.insert_one({
+        "priceId": "PM-GROSS-CUSTOM", "model": "Turbo Max", "variant": "Gross Hold Custom",
+        "exShowroom": 775000, "rto": 5500, "insurance": 15000, "status": "active",
+    })
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Custom List", "mobile": "9571964303",
+        "interestedModel": "Turbo Max", "variant": "Gross Hold Custom", "executive": "Amit",
+        "accountStatus": "Active", "currentStatus": "Booked", "bookingDate": "2026-09-15",
+        "exShowroom": 775000, "rto": 5500, "insuranceAmount": 15000, "insurance": 15000,
+        "cxDemand": 790000, "useDealPrice": True,
+    })
+    await server.recompute_lead(lid)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("grossVehicleCost")) == 795500
+    assert ce.num(lead.get("rtoInsuranceHeldInGross")) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_deal_does_not_keep_the_gross_hold(client):
+    lid = "LD-GROSS-CANCEL"
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Cancelled", "mobile": "9571964304",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)", "executive": "Amit",
+        "accountStatus": "Cancelled", "currentStatus": "Lost", "dealCancelled": True,
+        "exShowroom": 775000, "rto": 2200, "insuranceAmount": 17955, "insurance": 17955,
+        "cxDemand": 790000, "useDealPrice": True,
+    })
+    await server.recompute_lead(lid)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("grossVehicleCost")) == 795155
+    assert ce.num(lead.get("rtoInsuranceHeldInGross")) == 0
+    preview = await client.post("/api/commercial/compute", json={
+        "exShowroom": 775000, "model": "Turbo Max", "variant": "Maxx (FB)",
+        "registrationRto": 2200, "insurance": 17955, "cxDemand": 790000,
+        "dealCancelled": True,
+    })
+    assert preview.status_code == 200, preview.text
+    assert ce.num(preview.json().get("grossVehicleCost")) == 795155
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pack_does_not_keep_the_gross_hold(client):
+    lid = "LD-GROSS-PACK-CANCEL"
+    await server.db.leads.delete_many({"leadId": lid})
+    unit = {
+        "model": "Turbo Max", "variant": "Maxx (FB)",
+        "exShowroom": 775000, "insuranceAmount": 19000, "insurance": 19000,
+        "cxDemand": 790000, "useDealPrice": True,
+    }
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Pack Cancel", "mobile": "9571964305",
+        "interestedModel": "Turbo Max", "variant": "Maxx (FB)", "executive": "Amit",
+        "accountStatus": "Cancelled", "currentStatus": "Lost", "dealCancelled": True,
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "exShowroom": 775000, "rto": 2200, "insuranceAmount": 19000,
+        "cxDemand": 1580000, "useDealPrice": True,
+        "units": [
+            {**unit, "sno": 1, "rto": 2200},
+            {**unit, "sno": 2, "rto": 5500},
+        ],
+    })
+    await server.recompute_lead(lid)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert ce.num(lead.get("grossVehicleCost")) == 1595700
+    assert ce.num(lead.get("rtoInsuranceHeldInGross")) == 0
+
+
 def test_recut_cx_demand_round_trips_derive_additional():
     gvc, scheme, addl = 989500, 0, 29500
     recut = ce.recut_cx_demand_for_additional(gvc, scheme, addl)

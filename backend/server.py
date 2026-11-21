@@ -1527,6 +1527,7 @@ def lead_to_snapshot(lead):
         "oemExtraSupportPassed": lead.get("oemExtraSupportPassed", 0),
         "model": lead.get("interestedModel", ""),
         "variant": lead.get("variant", ""),
+        "dealCancelled": bool(lead.get("dealCancelled")),
         # The dealer's per-component allocation decision drives the whole scheme
         # engine, so it must reach every snapshot-based calculation.
         "schemeAllocation": lead.get("schemeAllocation"),
@@ -1682,7 +1683,8 @@ async def recompute_lead(lead_id):
     rto_held = 0.0
     if (deal_cx > 0 and lead.get("useDealPrice") and not lead.get("dealCancelled")
             and not oem_sync.is_same_order_pack(lead)):
-        rto_held = ce.rto_insurance_shortfall(snap)
+        list_rates = await _hold_list_rates(lead)
+        rto_held = ce.rto_insurance_shortfall(snap, list_rates)
         held_gvc = ce.round2(actual_gvc + rto_held)
     updates = {
         "grossVehicleCost": held_gvc,
@@ -1777,7 +1779,7 @@ async def recompute_lead(lead_id):
             if (u0.get("useDealPrice") and "additionalDiscount" in u0
                     and lead.get("useDealPrice")):
                 updates["additionalDiscount"] = u0["additionalDiscount"]
-        pack_card = _pack_overview_commercials(
+        pack_card = await _pack_overview_commercials(
             {**lead, **updates, "units": pack_units or lead.get("units") or []}, scheme_rows)
         updates["grossVehicleCost"] = pack_card["grossVehicleCost"]
         updates["rtoInsuranceHeldInGross"] = pack_card.get("rtoInsuranceHeldInGross") or 0
@@ -2306,6 +2308,9 @@ class SnapshotComputeIn(BaseModel):
     # Agreed customer price. A lower RTO / insurance then reduces Additional
     # (Dealer) and this payable stays put.
     cxDemand: float = 0
+    dealCancelled: bool = False
+    listRto: Optional[float] = None
+    listInsurance: Optional[float] = None
 
 
 # ---------------------------------------------------------------- misc
@@ -6719,12 +6724,13 @@ async def customer_360(lead_id: str, user=Depends(current_user)):
             and not lead.get("dealCancelled")
             and not oem_sync.is_same_order_pack(lead)):
         actual_gvc = ce.num(commercials.get("grossVehicleCost"))
-        held_gvc = ce.gross_with_rto_insurance_held(snap, actual_gvc)
+        held_gvc = ce.gross_with_rto_insurance_held(
+            snap, actual_gvc, await _hold_list_rates(lead))
         commercials["rtoInsuranceHeldInGross"] = ce.round2(held_gvc - actual_gvc)
         commercials["grossVehicleCost"] = held_gvc
     if oem_sync.is_same_order_pack(lead):
         try:
-            pack_c = _pack_overview_commercials(lead, scheme_rows)
+            pack_c = await _pack_overview_commercials(lead, scheme_rows)
             commercials = {**commercials, **pack_c}
             # Drawer payable / outstanding follow the pack sum, not unit-1 minus pack discount.
             if pack_c.get("customerPayable") is not None:
@@ -8656,10 +8662,37 @@ async def _hydrate_pack_unit_prices(lead):
     return lead, True
 
 
-def _pack_overview_commercials(lead, scheme_rows=None):
+async def _hold_list_rates(doc, use_quote=True):
+    """RTO and insurance the gross is held against.
+
+    The stored deal quote wins. Otherwise the vehicle's Price Master row.
+    The family list is only the fallback for an older file with neither.
+    """
+    doc = doc or {}
+    if use_quote:
+        deal = doc.get("dealFormat") or {}
+        if isinstance(deal, dict):
+            rto = ce.num(deal.get("rto"))
+            ins = ce.num(deal.get("insurance") if deal.get("insurance") not in (None, "")
+                         else deal.get("insuranceAmount"))
+            if rto > 0 or ins > 0:
+                return (rto, ins)
+    model = doc.get("interestedModel") or doc.get("model")
+    variant = doc.get("variant")
+    row = await _price_master_row(model, variant) if model else None
+    if row:
+        rto = ce._rto_amount(row)
+        ins = ce._insurance_premium_amount(row)
+        if rto > 0 or ins > 0:
+            return (rto, ins)
+    return ce.default_rto_insurance_for_model(model, variant)
+
+
+async def _pack_overview_commercials(lead, scheme_rows=None):
     """Sum each unit's own GVC / discount / payable. Never apply unit-1 scheme to the pack."""
     units, _ = _prepare_pack_unit_scheme(lead, _ensure_lead_units(lead))
     gvc = tcs = disc = passed = pay = held = 0.0
+    cancelled = bool((lead or {}).get("dealCancelled"))
     for i, u in enumerate(units):
         if not _unit_has_price_amount(lead, u, i):
             continue
@@ -8667,8 +8700,10 @@ def _pack_overview_commercials(lead, scheme_rows=None):
         totals = ce.compute_commercial_totals(snap, scheme_rows)
         actual = ce.num(totals.get("grossVehicleCost"))
         part = actual
-        if ce.num(u.get("cxDemand")) > 0 and u.get("useDealPrice"):
-            part = ce.gross_with_rto_insurance_held(snap, actual)
+        if (not cancelled and ce.num(u.get("cxDemand")) > 0 and u.get("useDealPrice")):
+            overlay = _lead_overlay_unit(lead, u, i)
+            rates = await _hold_list_rates(overlay, use_quote=(i == 0))
+            part = ce.gross_with_rto_insurance_held(snap, actual, rates)
             held += part - actual
         gvc += part
         tcs += ce.num(totals.get("tcs"))
@@ -20084,8 +20119,11 @@ async def share_dashboard():
 async def commercial_compute(body: SnapshotComputeIn, user=Depends(current_user)):
     raw = body.model_dump()
     cx = ce.round2(max(0.0, ce.num(raw.pop("cxDemand", 0))))
+    cancelled = bool(raw.pop("dealCancelled", False))
+    list_rto = raw.pop("listRto", None)
+    list_ins = raw.pop("listInsurance", None)
     result = ce.compute_full_commercials(raw)
-    if cx > 0:
+    if cx > 0 and not cancelled:
         derived = ce.derive_deal_customer_pass(
             result.get("grossVehicleCost"), cx,
             result.get("customerBenefitPassed") or 0,
@@ -20101,7 +20139,13 @@ async def commercial_compute(body: SnapshotComputeIn, user=Depends(current_user)
             result["dealerDiscount"] = ce.round2(
                 ce.num(result.get("dealerDiscount")) - old_addl + new_addl)
         actual_gvc = ce.num(result.get("grossVehicleCost"))
-        held_gvc = ce.gross_with_rto_insurance_held(raw, actual_gvc)
+        if ce.num(list_rto) > 0 or ce.num(list_ins) > 0:
+            rates = (ce.num(list_rto), ce.num(list_ins))
+        else:
+            rates = await _hold_list_rates(
+                {"interestedModel": raw.get("model"), "variant": raw.get("variant")},
+                use_quote=False)
+        held_gvc = ce.gross_with_rto_insurance_held(raw, actual_gvc, rates)
         result["rtoInsuranceHeldInGross"] = ce.round2(held_gvc - actual_gvc)
         result["grossVehicleCost"] = held_gvc
     if not _is_owner_user(user):
