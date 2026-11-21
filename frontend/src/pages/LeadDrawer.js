@@ -45,6 +45,30 @@ function unitIsDelivered(u) {
   return ["yes", "y", "true", "1", "done"].includes(String(u?.delivered || "").toLowerCase());
 }
 
+function parseJsonMap(raw) {
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+/** Scheme rupees that actually reduce the price. A copied pool does not. */
+function selectedSchemeOffers(src) {
+  const keys = ["consumerDiscount", "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount"];
+  const used = parseJsonMap(src && src.schemeComponentsUsed);
+  const breakup = parseJsonMap(src && src.benefitPassedBreakup);
+  const chosen = !!(src && (src.schemeAllocationExplicit
+    || Object.keys(used).length
+    || Object.keys(breakup).length));
+  const out = {};
+  keys.forEach((k) => {
+    if (!chosen) { out[k] = 0; return; }
+    if (Object.prototype.hasOwnProperty.call(used, k) && !used[k]) { out[k] = 0; return; }
+    if (Object.prototype.hasOwnProperty.call(breakup, k)) { out[k] = Number(breakup[k]) || 0; return; }
+    out[k] = (src.benefitMode === "Full Benefit" && src.schemeAllocationV2) ? (Number(src[k]) || 0) : 0;
+  });
+  return out;
+}
+
 function unitBilledDate(u, lead) {
   const billed = String((u && u.soldDate) || "").slice(0, 10);
   if (billed.length === 10) return billed;
@@ -1676,6 +1700,8 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
 
   const computePreview = useCallback(() => {
     const locked = Number(src.cxDemand || 0) || (Number(src.customerPayable || 0) > 0 ? Number(src.customerPayable) : 0);
+    const offers = selectedSchemeOffers(src);
+    const schemeSelected = Object.values(offers).some((n) => Number(n) > 0);
     post("/commercial/compute", {
       exShowroom: +form.exShowroom, accessories: +form.accessoriesAmount, insurance: +form.insuranceAmount,
       insuranceArrangedBy: form.insuranceArrangedBy,
@@ -1683,9 +1709,9 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
       extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
       rsaAmc: +form.rsaAmc,
       tcsApplicable: form.tcsApplicable, finalExchangeValue: +form.finalExchangeValue,
-      consumerDiscount: src.consumerDiscount, exchangeBonus: src.exchangeBonus, loyaltyBonus: src.loyaltyBonus,
-      referralBonus: src.referralBonus, dsaDiscount: src.dsaDiscount, additionalDiscount: src.additionalDiscount,
-      benefitMode: src.benefitMode || "Full Benefit",
+      ...offers,
+      additionalDiscount: src.additionalDiscount,
+      benefitMode: schemeSelected ? "Full Benefit" : "No Benefit",
       cxDemand: locked,
     }).then(setPreview);
   }, [form, src]);
