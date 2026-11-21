@@ -365,12 +365,15 @@ async def test_price_structure_insurance_change_recomputes_payable_and_tally(cli
     after = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(after.get("insuranceAmount")) == new_ins
     delta = ce.round2(new_ins - old_ins)
-    assert ce.num(after.get("grossVehicleCost")) == ce.round2(
-        ce.num(before.get("grossVehicleCost")) + delta)
+    if after.get("useDealPrice") and ce.num(after.get("cxDemand")) > 0 and delta < 0:
+        assert ce.num(after.get("grossVehicleCost")) == ce.num(before.get("grossVehicleCost"))
+    else:
+        assert ce.num(after.get("grossVehicleCost")) == ce.round2(
+            ce.num(before.get("grossVehicleCost")) + delta)
     if after.get("useDealPrice") and ce.num(after.get("cxDemand")) > 0:
         assert ce.num(after.get("customerPayable")) == ce.num(before.get("customerPayable"))
-        assert ce.num(after.get("additionalDiscount")) == ce.round2(
-            ce.num(before.get("additionalDiscount")) + delta)
+        assert ce.num(after.get("additionalDiscount")) == ce.round2(max(
+            0.0, ce.num(before.get("additionalDiscount")) + delta))
     else:
         assert ce.num(after.get("customerPayable")) == ce.round2(
             ce.num(before.get("customerPayable")) + delta)

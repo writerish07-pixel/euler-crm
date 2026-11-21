@@ -153,6 +153,42 @@ def _gvc_from_charges(s):
     ))
 
 
+def rto_insurance_shortfall(s, list_rates=None):
+    """Rupees by which actual RTO and insurance sit below the quoted list.
+
+    list_rates is (rto, insurance) from the deal quote or Price Master.
+    Without that, the family list is the fallback. A higher actual is not a
+    shortfall. An unpriced vehicle and a cancelled deal are not held.
+    Self insurance is already out of the gross, so it is not added back.
+    """
+    s = s or {}
+    if num(s.get("exShowroom")) <= 0 or s.get("dealCancelled"):
+        return 0.0
+    if list_rates:
+        list_rto, list_ins = list_rates
+    else:
+        defaults = default_rto_insurance_for_model(
+            s.get("model") or s.get("interestedModel"), s.get("variant"))
+        if not defaults:
+            return 0.0
+        list_rto, list_ins = defaults
+    rto_short = max(0.0, num(list_rto) - _rto_amount(s))
+    if normalize_insurance_arranged_by(s.get("insuranceArrangedBy")) == "self":
+        ins_short = 0.0
+    else:
+        ins_short = max(0.0, num(list_ins) - insurance_charge_for_payable(s))
+    return round2(rto_short + ins_short)
+
+
+def gross_with_rto_insurance_held(s, actual_gvc, list_rates=None):
+    """Gross does not fall when actual RTO or insurance is below the list.
+
+    Additional is still derived from the actual charge total, so the customer
+    payable stays and the dealer discount shrinks by the same rupees.
+    """
+    return round2(num(actual_gvc) + rto_insurance_shortfall(s, list_rates))
+
+
 def pack_unit_cx_is_pack_rollup(cx, snap, unit=None):
     """True when cxDemand is the order total, not this unit's deal.
 

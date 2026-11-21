@@ -1350,6 +1350,11 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
       <Card className="p-4">
         <h4 className="font-heading font-bold text-ink text-sm mb-2">Commercial Breakup</h4>
         <KV label="Gross Vehicle Cost" value={inr(c.grossVehicleCost)} />
+        {Number(c.rtoInsuranceHeldInGross) > 0 && (
+          <p className="text-[11px] text-ink-faint -mt-1 mb-1" data-testid="rto-held-in-gross">
+            RTO and insurance are {inr(c.rtoInsuranceHeldInGross)} below list. That difference stays in the gross.
+          </p>
+        )}
         {packUnits ? (
           <div className="rounded-md border border-line bg-zinc-50/70 px-2 py-1.5 mb-1" data-testid="pack-cx-demand-group">
             <div className="text-[10px] uppercase tracking-wide text-ink-faint mb-1">Cx Demand · each unit</div>
@@ -1677,7 +1682,10 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
   const computePreview = useCallback(() => {
     const locked = Number(src.cxDemand || 0) || (Number(src.customerPayable || 0) > 0 ? Number(src.customerPayable) : 0);
     post("/commercial/compute", {
-      exShowroom: +form.exShowroom, accessories: +form.accessoriesAmount, insurance: +form.insuranceAmount,
+      exShowroom: +form.exShowroom,
+      model: src.interestedModel || lead.interestedModel || "",
+      variant: src.variant || lead.variant || "",
+      accessories: +form.accessoriesAmount, insurance: +form.insuranceAmount,
       insuranceArrangedBy: form.insuranceArrangedBy,
       registrationRto: +form.rto, fastag: +form.fastag, handlingCharges: +form.handlingCharges, trc: +form.trc,
       extendedWarranty: +form.extendedWarranty, otherCharges: +form.otherCharges,
@@ -1687,6 +1695,11 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
       referralBonus: src.referralBonus, dsaDiscount: src.dsaDiscount, additionalDiscount: src.additionalDiscount,
       benefitMode: src.benefitMode || "Full Benefit",
       cxDemand: locked,
+      holdGross: !!src.useDealPrice && !lead.dealCancelled,
+      dealCancelled: !!lead.dealCancelled,
+      ...(Number(lead.dealFormat?.rto) > 0 || Number(lead.dealFormat?.insurance) > 0
+        ? { listRto: Number(lead.dealFormat.rto) || 0, listInsurance: Number(lead.dealFormat.insurance) || 0 }
+        : {}),
     }).then(setPreview);
   }, [form, src]);
   useEffect(() => { computePreview(); }, [computePreview]);
@@ -1780,6 +1793,11 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
         <Card className="p-4 mt-4 bg-cobalt-tint/40 border-cobalt/20">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
             <Prev label="Gross Vehicle Cost" v={preview.grossVehicleCost} />
+            {Number(preview.rtoInsuranceHeldInGross) > 0 && (
+              <p className="col-span-2 sm:col-span-4 text-[11px] text-ink-faint" data-testid="price-rto-held-in-gross">
+                RTO and insurance are {inr(preview.rtoInsuranceHeldInGross)} below list. Gross is not reduced.
+              </p>
+            )}
             <Prev label="TCS" v={preview.tcs} />
             <Prev label="Additional (Dealer)" v={preview.additionalDiscount} />
             <Prev label="Customer Payable" v={preview.customerPayable} highlight />
