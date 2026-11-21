@@ -158,21 +158,24 @@ def pack_unit_cx_is_pack_rollup(cx, snap, unit=None):
 
     recompute_lead stores pack payable on the lead. Overlay used to copy that
     onto unit 1, so Unit 1 locked to the sum of every unit.
+
+    A lower RTO / insurance drops today's gross vehicle cost under the agreed
+    price. That gap is the extra-discount rule (Additional shrinks, payable
+    stays), so a price above today's GVC is still this unit. The pack total
+    is another vehicle: more than one and a half times this unit's ex-showroom.
     """
     cx = round2(num(cx))
     if cx <= 0:
         return False
     snap = snap or {}
     unit = unit or {}
+    ex = round2(num(snap.get("exShowroom") or unit.get("exShowroom")))
+    if ex > 0:
+        return cx > ex * 1.5 + DEAL_AMOUNT_EQUAL_RUPEES
     gvc = _gvc_from_charges(snap)
     if gvc <= 0:
         gvc = _gvc_from_charges(unit)
-    if gvc > 0 and cx > gvc + DEAL_AMOUNT_EQUAL_RUPEES:
-        return True
-    ex = round2(num(snap.get("exShowroom") or unit.get("exShowroom")))
-    if ex > 0 and cx > ex * 1.5 + DEAL_AMOUNT_EQUAL_RUPEES:
-        return True
-    return False
+    return gvc > 0 and cx > gvc + DEAL_AMOUNT_EQUAL_RUPEES
 
 
 def pack_unit_locked_cx_demand(snap, unit=None):

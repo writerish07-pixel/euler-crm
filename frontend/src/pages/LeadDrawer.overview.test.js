@@ -191,6 +191,34 @@ test("owner can edit additional when Cx Demand locks the deal", async () => {
   host.remove();
 });
 
+test("scheme additional follows a price save that shrinks the discount", async () => {
+  const { host, root } = await renderScheme({ isOwner: true, dealLocked: true });
+  expect(Number(host.querySelector('[data-testid="scheme-additionalDiscount"]').value)).toBe(29500);
+  await act(async () => {
+    root.render(
+      <SchemeTab
+        lead={{
+          leadId: "LD-SCHEME-ADDL",
+          cxDemand: 960000,
+          budget: 960000,
+          useDealPrice: true,
+          additionalDiscount: 200,
+          interestedModel: "Storm",
+          variant: "Storm TR",
+        }}
+        c={{}}
+        actions={{ canScheme: true }}
+        isOwner
+        masters={{}}
+        onSaved={() => {}}
+      />,
+    );
+  });
+  expect(Number(host.querySelector('[data-testid="scheme-additionalDiscount"]').value)).toBe(200);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
 test("staff additional stays locked when Cx Demand is the deal", async () => {
   const { host, root } = await renderScheme({ isOwner: false, dealLocked: true });
   const input = host.querySelector('[data-testid="scheme-additionalDiscount"]');

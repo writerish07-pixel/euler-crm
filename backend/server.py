@@ -7489,36 +7489,47 @@ async def owner_set_lead_field(lead_id: str, body: OwnerFieldIn, act=Depends(act
         else:
             patch_val = ce.round2(max(0.0, ce.num(value)))
         old = {field: lead.get(field)}
+        pack = oem_sync.is_same_order_pack(lead)
+        units = [dict(u or {}) for u in (lead.get("units") or [])]
+        target = None
+        if body.unitSno:
+            target, resolved = _resolve_unit_index(lead, body.unitSno)
+            units = [dict(u or {}) for u in resolved]
+        elif units and isinstance(units[0], dict):
+            target = 0
+        # Unit 2+ keeps its own RTO / insurance. The lead header is unit 1.
+        header_edit = target in (None, 0)
         price_set = {
-            field: patch_val, "lastUpdated": now_iso(),
+            "lastUpdated": now_iso(),
             "lastUpdatedBy": act.get("email", ""),
         }
-        if field == "insuranceAmount":
-            price_set["insurance"] = patch_val
-        saved_prices = [str(x) for x in (lead.get("savedPriceFields") or []) if str(x or "").strip()]
-        if field not in saved_prices:
-            saved_prices.append(field)
-        price_set["savedPriceFields"] = saved_prices
-        if not oem_sync.is_same_order_pack(lead):
-            cx_now = ce.num(lead.get("cxDemand"))
-            pay_now = ce.num(lead.get("customerPayable"))
-            if cx_now <= 0 and pay_now > 0:
-                price_set["cxDemand"] = ce.round2(pay_now)
-                price_set["useDealPrice"] = True
-        units = list(lead.get("units") or [])
-        if units and isinstance(units[0], dict) and not body.unitSno:
-            u0 = dict(units[0])
-            u0[field] = patch_val
+        if header_edit:
+            price_set[field] = patch_val
             if field == "insuranceAmount":
-                u0["insurance"] = patch_val
-            unit_saved = [str(x) for x in (u0.get("savedPriceFields") or []) if str(x or "").strip()]
+                price_set["insurance"] = patch_val
+            saved_prices = [str(x) for x in (lead.get("savedPriceFields") or []) if str(x or "").strip()]
+            if field not in saved_prices:
+                saved_prices.append(field)
+            price_set["savedPriceFields"] = saved_prices
+            if not pack:
+                cx_now = ce.num(lead.get("cxDemand"))
+                pay_now = ce.num(lead.get("customerPayable"))
+                if cx_now <= 0 and pay_now > 0:
+                    price_set["cxDemand"] = ce.round2(pay_now)
+                    price_set["useDealPrice"] = True
+        if target is not None and target < len(units) and isinstance(units[target], dict):
+            u = dict(units[target])
+            u[field] = patch_val
+            if field == "insuranceAmount":
+                u["insurance"] = patch_val
+            unit_saved = [str(x) for x in (u.get("savedPriceFields") or []) if str(x or "").strip()]
             if field not in unit_saved:
                 unit_saved.append(field)
-            u0["savedPriceFields"] = unit_saved
-            if ce.num(u0.get("cxDemand")) <= 0 and ce.num(u0.get("customerPayable")) > 0:
-                u0["cxDemand"] = ce.round2(ce.num(u0.get("customerPayable")))
-                u0["useDealPrice"] = True
-            units[0] = u0
+            u["savedPriceFields"] = unit_saved
+            if ce.num(u.get("cxDemand")) <= 0 and ce.num(u.get("customerPayable")) > 0:
+                u["cxDemand"] = ce.round2(ce.num(u.get("customerPayable")))
+                u["useDealPrice"] = True
+            units[target] = u
             price_set["units"] = units
         await db.leads.update_one({"leadId": lead_id}, {"$set": price_set})
         await recompute_lead(lead_id)

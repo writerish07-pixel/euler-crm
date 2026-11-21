@@ -1875,8 +1875,9 @@ export function SchemeTab({ lead, c, actions = {}, isOwner = false, masters, onS
     });
     setUsedMap(inferred);
     // Billed date drives scheme month per pack unit; a model / variant change
-    // brings different scheme pools.
-  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate, unitSoldDate, src.interestedModel, src.variant]);
+    // brings different scheme pools. Additional follows a price save: a lower
+    // RTO / insurance shrinks it, and this form must not save the old figure.
+  }, [lead.leadId, unitSno, lead.schemeAsOf, lead.bookingDate, unitSoldDate, src.interestedModel, src.variant, src.additionalDiscount]);
   useEffect(() => {
     if (!lead.leadId || !schemeDate) return;
     get(`/leads/${lead.leadId}/scheme-rules`, { on: schemeDate, ...(units ? { unit: unitSno } : {}) })

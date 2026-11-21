@@ -176,6 +176,17 @@ def test_pack_unit_lock_ignores_pack_total_cx_on_unit():
     assert ce.pack_unit_locked_cx_demand(snap, unit) == 0
     own = {"additionalDiscount": 59500, "cxDemand": 790000, "exShowroom": 825000}
     assert ce.pack_unit_locked_cx_demand(snap, own) == 790000
+    # Agreed price sits above today's GVC after a large RTO / insurance cut.
+    # That is this unit's deal, not the pack total.
+    reduced = {
+        "model": "Turbo Max", "variant": "Maxx (PV)",
+        "exShowroom": 785000, "registrationRto": 0, "insurance": 10000,
+        "accessories": 0, "fastag": 0, "handlingCharges": 0, "trc": 0,
+        "extendedWarranty": 0, "rsaAmc": 0, "otherCharges": 0,
+    }
+    agreed = {"additionalDiscount": 4500, "cxDemand": 805000, "exShowroom": 785000}
+    assert ce.pack_unit_cx_is_pack_rollup(805000, reduced, agreed) is False
+    assert ce.pack_unit_locked_cx_demand(reduced, agreed) == 805000
 
 
 def test_additional_discount_has_no_maximum():
@@ -257,6 +268,103 @@ async def test_pack_rto_insurance_cut_shrinks_additional_not_payable(client):
     assert ce.num(u1.get("additionalDiscount")) == 20574
     assert ce.num(u2.get("additionalDiscount")) == 25000
     assert ce.num(u1.get("customerPayable")) != 820074
+
+
+@pytest.mark.asyncio
+async def test_confirmed_rto_cut_leaves_additional_200(client):
+    """Extra discount 4,500 on list RTO 5,500 / insurance 19,000.
+
+    RTO 2,200 and insurance 18,000 cut 4,300, so Additional becomes 200.
+    Payable stays. Same on one vehicle, on pack unit 2, and when the cut
+    is larger than the discount (Additional goes to 0, payable stays).
+    """
+    ex, list_rto, list_ins = 785000, 5500, 19000
+    pay = ex + list_rto + list_ins - 4500  # 805000
+
+    async def make(lid, *, pack=False):
+        await server.db.leads.delete_many({"leadId": lid})
+        await server.db.price_master.delete_many({"priceId": f"PM-{lid}"})
+        await server.db.price_master.insert_one({
+            "priceId": f"PM-{lid}", "model": "Turbo Max", "variant": "Maxx Confirmed",
+            "exShowroom": ex, "rto": list_rto, "insurance": list_ins,
+            "status": "active", "oemSyncedAt": "2026-11-01T00:00:00",
+        })
+        unit = {
+            "model": "Turbo Max", "variant": "Maxx Confirmed",
+            "exShowroom": ex, "rto": list_rto, "insuranceAmount": list_ins, "insurance": list_ins,
+            "additionalDiscount": 4500, "customerPayable": pay, "cxDemand": pay,
+            "useDealPrice": True, "priceStructureSaved": True,
+            "schemeAllocationExplicit": True, "benefitPassedBreakup": "{}",
+        }
+        doc = {
+            "leadId": lid, "customerName": lid, "mobile": "9000003344",
+            "interestedModel": "Turbo Max", "variant": "Maxx Confirmed",
+            "executive": "Amit", "accountStatus": "Active", "currentStatus": "Booked",
+            "bookingDate": "2026-11-06", "priceStructureSaved": True,
+            "schemeAllocationExplicit": True, "benefitPassedBreakup": "{}",
+            "exShowroom": ex, "rto": list_rto, "insuranceAmount": list_ins, "insurance": list_ins,
+            "additionalDiscount": 4500, "customerPayable": pay, "cxDemand": pay, "useDealPrice": True,
+            "units": [dict(unit, sno=1)],
+        }
+        if pack:
+            doc["sameOrderMultiUnit"] = True
+            doc["units"] = [dict(unit, sno=1), dict(unit, sno=2)]
+            doc["customerPayable"] = pay * 2
+            doc["cxDemand"] = pay * 2
+        await server.db.leads.insert_one(doc)
+
+    await make("LD-CONF-RTO")
+    saved = await client.put("/api/leads/LD-CONF-RTO/price-structure", json={
+        "exShowroom": ex, "rto": 2200, "insuranceAmount": 18000,
+    })
+    assert saved.status_code == 200, saved.text
+    one = saved.json()
+    assert ce.num(one["customerPayable"]) == pay
+    assert ce.num(one["additionalDiscount"]) == 200
+
+    await make("LD-CONF-RTO-PACK", pack=True)
+    pack_saved = await client.put("/api/leads/LD-CONF-RTO-PACK/price-structure", json={
+        "exShowroom": ex, "rto": 2200, "insuranceAmount": 18000, "unitSno": 2,
+    })
+    assert pack_saved.status_code == 200, pack_saved.text
+    after = await server.db.leads.find_one({"leadId": "LD-CONF-RTO-PACK"})
+    u1, u2 = after["units"][0], after["units"][1]
+    assert ce.num(u2["customerPayable"]) == pay
+    assert ce.num(u2["additionalDiscount"]) == 200
+    assert ce.num(u1["additionalDiscount"]) == 4500
+    assert ce.num(u1["rto"]) == list_rto
+
+    await make("LD-CONF-RTO-OF", pack=True)
+    rto = await client.put("/api/leads/LD-CONF-RTO-OF/owner-field", json={
+        "field": "rto", "value": 2200, "unitSno": 2,
+    })
+    assert rto.status_code == 200, rto.text
+    ins = await client.put("/api/leads/LD-CONF-RTO-OF/owner-field", json={
+        "field": "insuranceAmount", "value": 18000, "unitSno": 2,
+    })
+    assert ins.status_code == 200, ins.text
+    edited = await server.db.leads.find_one({"leadId": "LD-CONF-RTO-OF"})
+    edited_u1, edited_u2 = edited["units"][0], edited["units"][1]
+    assert ce.num(edited_u2["rto"]) == 2200
+    assert ce.num(edited_u2["insuranceAmount"]) == 18000
+    assert ce.num(edited_u2["customerPayable"]) == pay
+    assert ce.num(edited_u2["additionalDiscount"]) == 200
+    assert ce.num(edited_u1["additionalDiscount"]) == 4500
+    assert ce.num(edited["rto"]) == list_rto
+
+    # Cut 14,500 is larger than Additional 4,500. Discount goes to 0.
+    # Payable stays; the rest is extra from the customer, not a cheaper price.
+    await make("LD-CONF-RTO-BIG", pack=True)
+    big = await client.put("/api/leads/LD-CONF-RTO-BIG/price-structure", json={
+        "exShowroom": ex, "rto": 0, "insuranceAmount": 10000, "unitSno": 2,
+    })
+    assert big.status_code == 200, big.text
+    big_doc = await server.db.leads.find_one({"leadId": "LD-CONF-RTO-BIG"})
+    big_u2 = big_doc["units"][1]
+    assert ce.num(big_u2["customerPayable"]) == pay
+    assert ce.num(big_u2["cxDemand"]) == pay
+    assert ce.num(big_u2["additionalDiscount"]) == 0
+    assert ce.num(big_u2.get("extraIncomeFromCustomer")) == 10000
 
 
 @pytest.mark.asyncio
