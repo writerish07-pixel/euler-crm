@@ -1562,6 +1562,76 @@ def _retained_component_fields(retained_by_component):
     return out
 
 
+_OEM_SCHEME_POOL_KEYS = (
+    "consumerDiscount", "exchangeBonus", "loyaltyBonus", "referralBonus", "dsaDiscount",
+)
+
+
+def _scheme_choice_recorded(doc):
+    """A saved Use Scheme / customer-benefit decision, not a copied Scheme Master pool."""
+    return ce.scheme_choice_recorded(doc)
+
+
+def _unselected_scheme_pool(doc):
+    """Rupees of OEM scheme sitting on a file nobody has selected."""
+    if not isinstance(doc, dict) or _scheme_choice_recorded(doc):
+        return 0.0
+    return ce.round2(sum(ce.num(doc.get(k)) for k in _OEM_SCHEME_POOL_KEYS))
+
+
+def _clear_unselected_scheme_pools(lead):
+    """Remove scheme amounts that were copied on before anyone chose them.
+
+    A Cx Demand lock that only matches the payable after that copy is released
+    too, so the price goes back to Ex-Showroom + RTO + insurance.
+    """
+    updates = {}
+
+    def clear(doc, *, release_lock):
+        pool = _unselected_scheme_pool(doc)
+        if pool <= 0:
+            return False
+        if release_lock and doc.get("useDealPrice"):
+            cx = ce.num(doc.get("cxDemand"))
+            pay = ce.num(doc.get("customerPayable"))
+            if cx > 0 and abs(cx - pay) <= 1:
+                doc["cxDemand"] = 0
+                doc["useDealPrice"] = False
+                if abs(ce.num(doc.get("budget")) - cx) <= 1:
+                    doc["budget"] = 0
+        for key in _OEM_SCHEME_POOL_KEYS:
+            if ce.num(doc.get(key)) > 0:
+                doc[key] = 0
+        return True
+
+    pack = oem_sync.is_same_order_pack(lead) or len(lead.get("units") or []) > 1
+    if clear(lead, release_lock=not pack):
+        for key in _OEM_SCHEME_POOL_KEYS:
+            updates[key] = lead.get(key, 0)
+        if not pack:
+            updates["cxDemand"] = lead.get("cxDemand", 0)
+            updates["budget"] = lead.get("budget", 0)
+            updates["useDealPrice"] = bool(lead.get("useDealPrice"))
+    units = [dict(u) if isinstance(u, dict) else u for u in (lead.get("units") or [])]
+    changed_units = False
+    for i, raw in enumerate(units):
+        if not isinstance(raw, dict):
+            continue
+        if clear(raw, release_lock=True):
+            units[i] = raw
+            changed_units = True
+    if changed_units:
+        lead["units"] = units
+        updates["units"] = units
+    return updates
+
+
+def _lead_has_unselected_scheme_pool(lead):
+    if _unselected_scheme_pool(lead) > 0:
+        return True
+    return any(_unselected_scheme_pool(u) > 0 for u in (lead.get("units") or []))
+
+
 async def recompute_lead(lead_id):
     """Recompute all derived commercial + payment fields for a lead and persist."""
     lead = await db.leads.find_one({"leadId": lead_id})
@@ -1569,6 +1639,7 @@ async def recompute_lead(lead_id):
         return None
     if oem_sync.is_same_order_pack(lead):
         lead, _hydrated = await _hydrate_pack_unit_prices(lead)
+    stripped = _clear_unselected_scheme_pools(lead)
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
     totals = ce.compute_commercial_totals(snap, scheme_rows)
@@ -1821,6 +1892,11 @@ async def recompute_lead(lead_id):
     if flat_decisions:
         import json as _json
         updates["schemeAllocation"] = _json.dumps(flat_decisions)
+    for key, value in (stripped or {}).items():
+        if key == "units" and "units" in updates:
+            continue
+        if key not in updates:
+            updates[key] = value
     await db.leads.update_one({"leadId": lead_id}, {"$set": updates})
     merged = {**lead, **updates}
     # The Lead Register is the dealership's primary register and must reflect the
@@ -6627,6 +6703,9 @@ async def update_lead_request(request_id: str, body: LeadRequestUpdateIn,
 async def get_lead(lead_id: str, user=Depends(current_user)):
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
+    if _lead_has_unselected_scheme_pool(lead):
+        await recompute_lead(lead_id)
+        lead = await get_lead_or_404(lead_id)
     lead = clean(await _ensure_booking_advance_receipt(lead) or lead)
     lead = (await _attach_approval_request_ids([clean(lead)]))[0]
     return _lead_for_viewer(lead, user)
@@ -12305,25 +12384,14 @@ async def _copy_create_docs_from_sibling(lead_id, *, mobile="", name="", viewer=
 
 
 async def _apply_list_price_and_scheme(lead_id, model, variant, as_of=None):
-    """Fill Price Master + Scheme Master pools for this unit's model. No Cx deal."""
+    """Fill Price Master for this unit's model. Scheme stays off until someone selects it."""
     on = str(as_of or today())[:10]
     row = await _price_master_row(model, variant) if model else None
     patch = {}
     if row:
         patch.update(_price_structure_from_master(row, on))
         patch["priceStructureSaved"] = False
-    scheme_rows = await get_scheme_rows()
-    rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
-        model or "", variant or "", on, scheme_rows)
-    for key, rule in (rules_ctx.get("rules") or {}).items():
-        if key == "additionalDiscount":
-            continue
-        if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
-            patch[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
-        else:
-            patch[key] = 0
     if patch:
-        patch["schemeAsOf"] = on
         patch["lastUpdated"] = now_iso()
         await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
         await recompute_lead(lead_id)
@@ -12331,26 +12399,18 @@ async def _apply_list_price_and_scheme(lead_id, model, variant, as_of=None):
 
 
 async def _price_unit_from_master(model, variant, as_of=None):
-    """Price Master + Scheme Master for one SKU. Does not write the lead."""
+    """Price Master charges for one SKU. Does not write the lead or apply a scheme."""
     on = str(as_of or today())[:10]
     out = {"model": model or "", "variant": variant or ""}
     row = await _price_master_row(model, variant) if model else None
     if row:
         out.update(_price_structure_from_master(row, on))
-    scheme_rows = await get_scheme_rows()
-    rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
-        model or "", variant or "", on, scheme_rows)
-    for key, rule in (rules_ctx.get("rules") or {}).items():
-        if key == "additionalDiscount":
-            continue
-        if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
-            out[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
-        else:
-            out[key] = 0
+    for key in _OEM_SCHEME_POOL_KEYS:
+        out.pop(key, None)
     snap = lead_to_snapshot({
         **out, "interestedModel": model or "", "variant": variant or "",
     })
-    totals = ce.compute_commercial_totals(snap, scheme_rows)
+    totals = ce.compute_commercial_totals(snap)
     out["customerPayable"] = totals.get("customerPayable") or 0
     out["grossVehicleCost"] = totals.get("grossVehicleCost") or 0
     return out

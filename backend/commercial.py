@@ -980,6 +980,37 @@ def _offer_partial_waterfall(s, full_by_key):
 
 # ============================================================================
 
+def _parse_used_map(raw):
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        import json
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def scheme_choice_recorded(s):
+    """True once a person saved a scheme decision for this file or unit.
+
+    Copying the Scheme Master pool onto loyaltyBonus (or any other offer
+    field) is not a decision. Neither is Benefit Mode on its own.
+    """
+    s = s or {}
+    if s.get("schemeAllocationExplicit"):
+        return True
+    if _explicit_allocation(s):
+        return True
+    breakup = _parse_benefit_breakup(s)
+    if isinstance(breakup, dict) and len(breakup) > 0:
+        return True
+    used = _parse_used_map(s.get("schemeComponentsUsed"))
+    return bool(used)
+
+
 def _explicit_allocation(s):
     """Persisted per-component customer benefit: {componentKey: amount}.
 
