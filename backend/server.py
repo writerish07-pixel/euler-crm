@@ -7388,10 +7388,9 @@ async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)
 async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act=Depends(actor)):
     """Change one pack unit's model and variant. Siblings stay as they are.
 
-    Unit 1 also updates the file header, which the register shows. A unit the
-    customer has already paid keeps that price — only the name moves — so a
-    catalog change cannot open a balance. Every other unit is repriced from
-    Price Master and its saved scheme is realigned to the new vehicle.
+    Unit 1 also updates the file header, which the register shows. The new
+    variant brings its Price Master price. The previous vehicle's Cx Demand
+    does not stay locked on the new one.
     """
     role = str((act or {}).get("role") or "").strip().lower()
     if role == "executive":
@@ -7422,25 +7421,35 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
     variant = row.get("variant") or variant
     old_model = rec.get("model") or (lead.get("interestedModel") if idx == 0 else "") or ""
     old_variant = rec.get("variant") or (lead.get("variant") if idx == 0 else "") or ""
-    if model == old_model and variant == old_variant:
+    as_of = _scheme_as_of(lead, unit=rec) or _lead_price_as_of(lead, unit=rec)
+    master_ps = _price_structure_from_master(row, as_of)
+    same_name = model == old_model and variant == old_variant
+    same_price = abs(ce.num(rec.get("exShowroom")) - ce.num(master_ps.get("exShowroom"))) < 1
+    price_locked = bool(rec.get("useDealPrice")) or ce.num(rec.get("cxDemand")) > 0
+    # Saving the variant already on the unit still replaces a price left
+    # behind from the previous vehicle.
+    if same_name and same_price and not price_locked:
         return _lead_for_viewer(clean(lead), act)
     rec["model"] = model
     rec["variant"] = variant
     rec["sno"] = idx + 1
     rec["oemSkuConfirmed"] = True
     rec["oemSkuNeedsReview"] = False
-    settled = _unit_settled(lead, rec)
+    rec.update(master_ps)
+    # The agreed price belonged to the previous variant. Drop it so the new
+    # vehicle is priced from Price Master.
+    rec.pop("cxDemand", None)
+    rec["useDealPrice"] = False
+    rec.pop("additionalDiscount", None)
+    rec.pop("extraIncomeFromCustomer", None)
     lead_scheme = {}
-    if not settled:
-        as_of = _scheme_as_of(lead, unit=rec) or _lead_price_as_of(lead, unit=rec)
-        rec.update(_price_structure_from_master(row, as_of))
-        if _unit_has_scheme(lead, rec, idx):
-            scheme_rows = await get_scheme_rows()
-            source = rec if _has_persisted_scheme(rec) else lead
-            aligned = _scheme_realign_patch(source, model, variant, as_of, scheme_rows)
-            rec.update(aligned)
-            if idx == 0 and _has_persisted_scheme(lead):
-                lead_scheme = _scheme_realign_patch(lead, model, variant, as_of, scheme_rows)
+    if _unit_has_scheme(lead, rec, idx):
+        scheme_rows = await get_scheme_rows()
+        source = rec if _has_persisted_scheme(rec) else lead
+        aligned = _scheme_realign_patch(source, model, variant, as_of, scheme_rows)
+        rec.update(aligned)
+        if idx == 0 and _has_persisted_scheme(lead):
+            lead_scheme = _scheme_realign_patch(lead, model, variant, as_of, scheme_rows)
     units[idx] = rec
     patch = {
         "units": units,

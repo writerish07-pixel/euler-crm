@@ -159,12 +159,17 @@ async def test_showroom_admin_can_edit_an_open_unit(client):
 
 
 @pytest.mark.asyncio
-async def test_a_paid_unit_keeps_its_price_when_the_name_changes(client):
+async def test_a_paid_unit_takes_the_new_variant_price(client):
+    """Changing unit 2's variant replaces the price, even when that unit is paid."""
     lid = await _pack(client, "9813307105")
     before = await server.db.leads.find_one({"leadId": lid})
     units = before["units"]
-    kept = units[1].get("exShowroom")
-    units[1]["totalReceived"] = units[1].get("customerPayable") or 1
+    old_ex = units[1].get("exShowroom")
+    old_pay = units[1].get("customerPayable") or old_ex
+    units[1]["cxDemand"] = old_pay
+    units[1]["useDealPrice"] = True
+    units[1]["customerPayable"] = old_pay
+    units[1]["totalReceived"] = old_pay
     units[1]["customerOutstanding"] = 0
     units[1]["chassisNumber"] = "MD9UNIT2KEEP"
     await server.db.leads.update_one({"leadId": lid}, {"$set": {"units": units}})
@@ -173,6 +178,65 @@ async def test_a_paid_unit_keeps_its_price_when_the_name_changes(client):
     })
     assert r.status_code == 200, r.text
     after = await server.db.leads.find_one({"leadId": lid})
-    assert after["units"][1]["variant"] == "Unit Edit C"
-    assert after["units"][1]["exShowroom"] == kept
-    assert after["units"][1]["chassisNumber"] == "MD9UNIT2KEEP"
+    unit2 = after["units"][1]
+    assert unit2["variant"] == "Unit Edit C"
+    assert unit2["exShowroom"] == 800000
+    assert unit2["exShowroom"] != old_ex
+    assert unit2["rto"] == 5000
+    assert unit2["insuranceAmount"] == 6000
+    assert unit2.get("useDealPrice") is not True
+    assert unit2.get("cxDemand") in (None, 0, 0.0)
+    assert unit2["customerPayable"] != old_pay
+    assert unit2["customerPayable"] >= 800000
+    assert unit2["chassisNumber"] == "MD9UNIT2KEEP"
+    assert after["units"][0].get("exShowroom") == before["units"][0].get("exShowroom")
+
+
+@pytest.mark.asyncio
+async def test_resaving_the_same_variant_releases_the_old_price(client):
+    """Unit 2 already says DV, but the customer price is still the previous deal."""
+    lid = await _pack(client, "9813307106")
+    before = await server.db.leads.find_one({"leadId": lid})
+    units = before["units"]
+    units[1]["model"] = "Storm"
+    units[1]["variant"] = "Unit Edit C"
+    units[1]["exShowroom"] = 700000
+    units[1]["cxDemand"] = 707000
+    units[1]["useDealPrice"] = True
+    units[1]["customerPayable"] = 707000
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"units": units}})
+    r = await client.put(f"/api/leads/{lid}/units/2/vehicle", json={
+        "model": "Storm", "variant": "Unit Edit C",
+    })
+    assert r.status_code == 200, r.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    unit2 = after["units"][1]
+    assert unit2["variant"] == "Unit Edit C"
+    assert unit2["exShowroom"] == 800000
+    assert unit2["customerPayable"] != 707000
+    assert unit2.get("useDealPrice") is not True
+
+
+@pytest.mark.asyncio
+async def test_resaving_same_variant_drops_a_locked_cx_when_ex_already_matches(client):
+    """Ex-showroom can already be the new variant while the payable is still the old deal."""
+    lid = await _pack(client, "9813307107")
+    before = await server.db.leads.find_one({"leadId": lid})
+    units = before["units"]
+    units[1]["model"] = "Storm"
+    units[1]["variant"] = "Unit Edit C"
+    units[1]["exShowroom"] = 800000
+    units[1]["rto"] = 5000
+    units[1]["insuranceAmount"] = 6000
+    units[1]["cxDemand"] = 707000
+    units[1]["useDealPrice"] = False
+    units[1]["customerPayable"] = 707000
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"units": units}})
+    r = await client.put(f"/api/leads/{lid}/units/2/vehicle", json={
+        "model": "Storm", "variant": "Unit Edit C",
+    })
+    assert r.status_code == 200, r.text
+    unit2 = (await server.db.leads.find_one({"leadId": lid}))["units"][1]
+    assert unit2["exShowroom"] == 800000
+    assert unit2["customerPayable"] != 707000
+    assert unit2.get("cxDemand") in (None, 0, 0.0)
