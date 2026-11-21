@@ -207,7 +207,7 @@ function PackAdditionalGroup({ lead, units, onSaved }) {
   );
 }
 
-function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved, canEditBilledDate }) {
+function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved, canEditBilledDate, canEditUnitVehicle }) {
   return (
     <div className="space-y-3" data-testid="pack-units-tab">
       <p className="text-sm text-ink-soft">
@@ -251,8 +251,16 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
           <Card key={sno} className={`p-4 ${activeUnit === sno ? "ring-1 ring-cobalt" : ""}`} data-testid={`units-tab-row-${sno}`}>
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold text-ink">
-                  Unit {sno}{(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}{(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
+                <div className="text-sm font-semibold text-ink flex flex-wrap items-center gap-1">
+                  <span>Unit {sno}</span>
+                  <UnitVehicleEdit
+                    leadId={lead.leadId}
+                    sno={sno}
+                    model={u.model || lead.interestedModel || ""}
+                    variant={u.variant || (sno === 1 ? lead.variant : "") || ""}
+                    canEdit={typeof canEditUnitVehicle === "function" ? canEditUnitVehicle(u, sno) : !!canEditUnitVehicle}
+                    onSaved={onSaved}
+                  />
                 </div>
                 <div className="font-mono font-bold text-cobalt mt-1" data-testid={`units-tab-payable-${sno}`}>
                   {inr(u.customerPayable)}
@@ -338,6 +346,11 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
   const fieldView = isField || !!data.fieldView || !!actions.fieldView;
   const execHandover = isExecutive || !!actions.execPipelineOnly;
   const leadLocked = !!actions.isLocked || !actions.isActive;
+  const canEditUnitVehicle = (unit) => {
+    if (leadLocked || !(isOwner || isShowroomAdmin)) return false;
+    if (isOwner) return true;
+    return !unitIsDelivered(unit);
+  };
 
   const tabs = fieldView
     ? [
@@ -544,6 +557,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
           onOpenScheme={(sno) => { setFocusUnit(sno); setTab("scheme"); }}
           onSaved={refresh}
           canEditBilledDate={!leadLocked && canEditCommercials}
+          canEditUnitVehicle={canEditUnitVehicle}
         />
       )}
       {tab === "overview" && (fieldView
@@ -554,8 +568,9 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             onAddAnotherVehicle={() => setAddUnit(true)}
             canAddPackUnit={!leadLocked && canEditCommercials && !actions.isDelivered}
             canAddAnotherVehicle={isExecutive || isTl || isTeamLead || isOwner || isSalesGm}
-            canEditBilledDate={!leadLocked && canEditCommercials} />)}
-      {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} onSaved={() => advance("scheme")} />}
+            canEditBilledDate={!leadLocked && canEditCommercials}
+            canEditUnitVehicle={canEditUnitVehicle} />)}
+      {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} canEditUnitVehicle={canEditUnitVehicle} onSaved={() => advance("scheme")} onRefresh={refresh} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} documents={data.documents} onSaved={() => advance("payments")} onRefresh={refresh} />}
       {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} unitSno={activeUnit} onSaved={refresh} />}
       {tab === "delivery" && (
@@ -931,6 +946,95 @@ export function VehicleKV({ lead, models, leadId, onSaved }) {
   );
 }
 
+/** Model + variant for one vehicle on a multi-unit file. */
+export function UnitVehicleEdit({ leadId, sno, model: modelProp, variant: variantProp, canEdit, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [model, setModel] = useState(modelProp || "");
+  const [variant, setVariant] = useState(variantProp || "");
+  const [models, setModels] = useState([]);
+  const [variants, setVariants] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const label = [modelProp, variantProp].filter(Boolean).join(" ") || "No model";
+
+  useEffect(() => {
+    if (!editing) return undefined;
+    setModel(modelProp || "");
+    setVariant(variantProp || "");
+    let live = true;
+    get("/price-master").then((rows) => {
+      if (!live) return;
+      setModels([...new Set((rows || []).map((r) => r.model).filter(Boolean))]);
+    }).catch(() => { if (live) setModels([]); });
+    return () => { live = false; };
+  }, [editing, modelProp, variantProp]);
+
+  useEffect(() => {
+    if (!editing || !model) { setVariants([]); return undefined; }
+    let live = true;
+    setLoading(true);
+    get("/price-master/variants", { model })
+      .then((rows) => {
+        if (!live) return;
+        const list = rows || [];
+        setVariants(list);
+        if (!list.some((v) => v.variant === variant)) setVariant("");
+      })
+      .catch(() => { if (live) setVariants([]); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [editing, model]);
+
+  if (!editing) {
+    return (
+      <span className="inline-flex items-center gap-1 min-w-0" data-testid={`unit-vehicle-${sno}`}>
+        <span className="truncate">{label}</span>
+        {canEdit && (
+          <button type="button" className="inline-flex items-center text-cobalt shrink-0"
+            data-testid={`unit-vehicle-edit-${sno}`} onClick={() => setEditing(true)}
+            aria-label={`Edit unit ${sno} model and variant`}>
+            <Pencil size={11} />
+          </button>
+        )}
+      </span>
+    );
+  }
+  const save = async () => {
+    if (!model || !variant) return toast.error("Pick both a model and a variant");
+    setBusy(true);
+    try {
+      await put(`/leads/${leadId}/units/${sno}/vehicle`, { model, variant });
+      toast.success(`Unit ${sno} set to ${model} · ${variant}`);
+      setEditing(false);
+      onSaved && onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not change this unit"));
+    } finally { setBusy(false); }
+  };
+  const sel = "rounded-md ring-1 ring-inset ring-line text-xs py-1 px-1.5 max-w-[14rem]";
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1" data-testid={`unit-vehicle-form-${sno}`}>
+      <select className={sel} value={model} onChange={(e) => setModel(e.target.value)}
+        data-testid={`unit-vehicle-model-${sno}`}>
+        <option value="">Model</option>
+        {models.map((m) => <option key={m} value={m}>{m}</option>)}
+      </select>
+      <select className={sel} value={variant} onChange={(e) => setVariant(e.target.value)}
+        disabled={!model || loading} data-testid={`unit-vehicle-variant-${sno}`}>
+        <option value="">{loading ? "Loading…" : "Variant"}</option>
+        {variants.map((v) => (
+          <option key={v.priceId || v.variant} value={v.variant}>
+            {v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}
+          </option>
+        ))}
+      </select>
+      <Button className="!py-0.5 !px-1.5 text-[11px]" onClick={save} disabled={busy || !model || !variant}
+        data-testid={`unit-vehicle-save-${sno}`}>Save</Button>
+      <Button variant="ghost" className="!py-0.5 !px-1.5 text-[11px]" onClick={() => setEditing(false)}>Cancel</Button>
+    </span>
+  );
+}
+
 function unitBodyNote(u) {
   const billed = String(u?.oemBilledBodyType || u?.bodyType || "").trim();
   const avail = String(u?.availableBodyType || "").trim();
@@ -1035,6 +1139,7 @@ function UnitDeliveryDateField({ leadId, sno, value, canEdit, onSaved }) {
 export function OverviewUnits({
   lead, onOpenUnit, onSaved, onAddPackUnit, onAddAnotherVehicle,
   canAddPackUnit, canAddAnotherVehicle, canEditBilledDate, hideExecScheme,
+  canEditUnitVehicle,
 }) {
   const units = (lead.units || []).length
     ? lead.units
@@ -1075,15 +1180,23 @@ export function OverviewUnits({
             || (i === 0 && (lead.schemeAllocationExplicit || lead.benefitPassedBreakup)));
           return (
             <li key={sno} className="flex flex-wrap items-center gap-2 text-xs text-ink" data-testid={`overview-unit-${sno}`}>
-              <span className="min-w-0">
-                Unit {sno}
-                {(u.model || lead.interestedModel) ? ` · ${u.model || lead.interestedModel}` : ""}
-                {(u.variant || lead.variant) ? ` ${u.variant || lead.variant}` : ""}
+              <span className="min-w-0 inline-flex flex-wrap items-center gap-1">
+                <span>Unit {sno}</span>
+                <UnitVehicleEdit
+                  leadId={lead.leadId}
+                  sno={sno}
+                  model={u.model || lead.interestedModel || ""}
+                  variant={u.variant || (sno === 1 ? lead.variant : "") || ""}
+                  canEdit={typeof canEditUnitVehicle === "function" ? canEditUnitVehicle(u, sno) : !!canEditUnitVehicle}
+                  onSaved={onSaved}
+                />
+                <span>
                 {Number(u.customerPayable) > 0 ? ` · ${inr(u.customerPayable)}` : " · no price yet"}
                 {Number(u.customerOutstanding) > 0.01 ? ` · due ${inr(u.customerOutstanding)}` : (Number(u.totalReceived) > 0 ? " · paid" : "")}
                 {unitIsDelivered(u) ? " · delivered" : ""}
                 {unitBodyNote(u) ? ` · ${unitBodyNote(u)}` : ""}
                 {priced && schemed ? " · filled" : (hideExecScheme ? "" : " · Price / Scheme open")}
+                </span>
               </span>
               <UnitBilledDateField
                 leadId={lead.leadId}
@@ -1223,7 +1336,8 @@ function VariantConfirmCard({ lead, canConfirm, onSaved }) {
 }
 
 export function Overview({ lead, c, actions = {}, onSaved, documents = [], masters = {}, onOpenUnit,
-  onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate }) {
+  onAddPackUnit, onAddAnotherVehicle, canAddPackUnit, canAddAnotherVehicle, canEditBilledDate,
+  canEditUnitVehicle }) {
   const { isOwner, isSalesGm, isAccounts, isExecutive, isTl, isTeamLead, isShowroomAdmin, canSeeOwnerCommercials, canManageShowroom } = useAuth();
   const booked = !!actions.isBooked;
   const kycDocKinds = kycKinds(lead.customerType);
@@ -1416,6 +1530,7 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
             canAddPackUnit={canAddPackUnit}
             canAddAnotherVehicle={canAddAnotherVehicle}
             canEditBilledDate={canEditBilledDate}
+            canEditUnitVehicle={canEditUnitVehicle}
             hideExecScheme={isExecutive}
           />
           {!packUnits && (
@@ -1499,7 +1614,7 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
 }
 
 /* -------------------------------------------------- Price Structure */
-function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno: unitSnoProp, onUnitSno }) {
+function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefresh, unitSno: unitSnoProp, onUnitSno, canEditUnitVehicle }) {
   const { isShowroomAdmin } = useAuth();
   const units = packUnitList(lead);
   const [unitSnoLocal, setUnitSnoLocal] = useState(unitSnoProp || 1);
@@ -1601,12 +1716,20 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, unitSno:
   return (
     <div>
       {units && (
-        <p className="text-sm font-semibold text-ink mb-3" data-testid="price-unit-heading">
-          Price Structure · Unit {unitSno}
-          {src.interestedModel ? ` · ${src.interestedModel}` : ""}
-          {src.variant ? ` ${src.variant}` : ""}
-          {Number(src.customerPayable) > 0 ? ` · ${inr(src.customerPayable)}` : ""}
-        </p>
+        <div className="text-sm font-semibold text-ink mb-3 flex flex-wrap items-center gap-2" data-testid="price-unit-heading">
+          <span>Price Structure · Unit {unitSno}</span>
+          <UnitVehicleEdit
+            leadId={lead.leadId}
+            sno={unitSno}
+            model={src.interestedModel || ""}
+            variant={src.variant || ""}
+            canEdit={typeof canEditUnitVehicle === "function"
+              ? canEditUnitVehicle(units[unitIdx] || {}, unitSno)
+              : !!canEditUnitVehicle}
+            onSaved={onRefresh || onSaved}
+          />
+          {Number(src.customerPayable) > 0 ? <span>· {inr(src.customerPayable)}</span> : null}
+        </div>
       )}
       {inactive && <StepLock text="This lead is not Active — price structure is read-only." />}
       {!inactive && staffLocked && <StepLock text="Price structure is saved. Only the owner or Showroom Admin can edit a completed step." />}
@@ -3190,11 +3313,16 @@ function BillingSummaryPanel({ summary, leadId, documents, canUploadTally = fals
 
 /* -------------------------------------------------- Edit lead details */
 function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, onSaved }) {
-  const vehicleLocked = !isOwner && (!!actions.priceCompleted || !!actions.schemeCompleted);
+  const { isShowroomAdmin } = useAuth();
+  const pack = packUnitList(lead);
+  const unit1 = (pack && pack[0]) || {};
+  const vehicleLocked = !isOwner && !isShowroomAdmin && (!!actions.priceCompleted || !!actions.schemeCompleted);
   const [form, setForm] = useState({
     customerName: lead.customerName || "", mobile: lead.mobile || "", altMobile: lead.altMobile || "",
     village: lead.village || "", city: lead.city || "", leadSource: lead.leadSource || "Walk-in",
-    interestedModel: lead.interestedModel || "", variant: lead.variant || "", executive: lead.executive || "",
+    interestedModel: (pack ? (unit1.model || lead.interestedModel) : lead.interestedModel) || "",
+    variant: (pack ? (unit1.variant || lead.variant) : lead.variant) || "",
+    executive: lead.executive || "",
     currentStatus: lead.currentStatus || "New", priority: lead.priority || "Normal", budget: lead.budget || lead.cxDemand || 0,
     remarks: lead.remarks || "", financeRequired: lead.financeRequired || "No",
     exchangeRequired: lead.exchangeRequired || "No", nextFollowupDate: lead.nextFollowupDate || "",
@@ -3202,25 +3330,72 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
     customerType: lead.customerType || "Individual",
     gstin: lead.gstin || "",
   });
+  const [extraVehicles, setExtraVehicles] = useState(() => (pack || []).slice(1).map((u, i) => ({
+    sno: u.sno || i + 2,
+    model: u.model || "",
+    variant: u.variant || "",
+    delivered: unitIsDelivered(u),
+  })));
+  const [extraVariantLists, setExtraVariantLists] = useState([]);
   const [variants, setVariants] = useState([]);
   const [clash, setClash] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const extraModelKey = extraVehicles.map((u) => u.model).join("|");
   useEffect(() => { if (form.interestedModel) get("/price-master/variants", { model: form.interestedModel }).then(setVariants); }, [form.interestedModel]);
+  useEffect(() => {
+    let live = true;
+    const models = extraModelKey ? extraModelKey.split("|") : [];
+    Promise.all(models.map((model) => (
+      model ? get("/price-master/variants", { model }).catch(() => []) : Promise.resolve([])
+    ))).then((lists) => { if (live) setExtraVariantLists(lists); });
+    return () => { live = false; };
+  }, [extraModelKey]);
   const isBookedLead = Boolean(lead.bookingDate)
     || ["booked", "finance process", "delivered", "close won"].includes(String(lead.currentStatus || "").toLowerCase());
 
   const save = async (extra = {}) => {
     if (!form.customerName) return toast.error("Customer name is required");
-    const vehicleChanged = form.interestedModel !== (lead.interestedModel || "")
-      || form.variant !== (lead.variant || "");
+    const u1Model = pack ? (unit1.model || lead.interestedModel || "") : (lead.interestedModel || "");
+    const u1Variant = pack ? (unit1.variant || lead.variant || "") : (lead.variant || "");
+    const unit1Changed = form.interestedModel !== u1Model || form.variant !== u1Variant;
+    const extraChanged = pack ? extraVehicles.some((u, i) => {
+      const orig = (pack || []).slice(1)[i] || {};
+      return u.model !== (orig.model || "") || u.variant !== (orig.variant || "");
+    }) : false;
+    const vehicleChanged = unit1Changed || extraChanged;
+    if (vehicleChanged && (!form.interestedModel || !form.variant)) {
+      return toast.error("Pick both a model and a variant");
+    }
+    if (extraChanged && extraVehicles.some((u) => !u.model || !u.variant)) {
+      return toast.error("Pick both a model and a variant on every unit");
+    }
     try {
       const body = { ...form, budget: Number(form.budget), ...extra };
       if (isBookedLead) body.bookingAmount = Number(form.bookingAmount) || 0;
       else delete body.bookingAmount;
+      if (pack) {
+        delete body.interestedModel;
+        delete body.variant;
+      }
       await put(`/leads/${lead.leadId}`, body);
+      if (pack && unit1Changed) {
+        await put(`/leads/${lead.leadId}/units/${unit1.sno || 1}/vehicle`, {
+          model: form.interestedModel, variant: form.variant,
+        });
+      }
+      if (pack && extraChanged) {
+        for (let i = 0; i < extraVehicles.length; i += 1) {
+          const u = extraVehicles[i];
+          const orig = (pack || []).slice(1)[i] || {};
+          if (u.model === (orig.model || "") && u.variant === (orig.variant || "")) continue;
+          await put(`/leads/${lead.leadId}/units/${u.sno}/vehicle`, {
+            model: u.model, variant: u.variant,
+          });
+        }
+      }
       setClash(null);
       toast.success(vehicleChanged
-        ? "Lead updated — Ex-Showroom & scheme recalculated from masters"
+        ? "Lead updated — each changed unit was repriced from Price Master"
         : "Lead updated");
       onSaved({ vehicleChanged });
     } catch (e) {
@@ -3242,7 +3417,9 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           Correct any details captured against this lead.
           {vehicleLocked
             ? " Model/variant is locked after pricing — ask the owner to change the vehicle."
-            : " Changing model/variant refreshes Ex-Showroom from Price Master and realigns scheme."}
+            : pack
+              ? " Each unit has its own model and variant. Changing one reprices that unit from Price Master."
+              : " Changing model/variant refreshes Ex-Showroom from Price Master and realigns scheme."}
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           <div className="sm:col-span-2"><Field label="Customer Name *"><Input data-testid="edit-name" value={form.customerName} onChange={set("customerName")} /></Field></div>
@@ -3253,8 +3430,36 @@ function EditLeadModal({ lead, masters, isOwner = false, actions = {}, onClose, 
           <Field label="Village"><Input value={form.village} onChange={set("village")} /></Field>
           <Field label="Lead Source"><Select value={form.leadSource} onChange={set("leadSource")}>{(m.leadSources || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
           <Field label="Executive"><Select value={form.executive} onChange={set("executive")}><option value="">—</option>{(m.executives || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
-          <Field label="Model"><Select value={form.interestedModel} onChange={set("interestedModel")} disabled={vehicleLocked}><option value="">—</option>{(m.models || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
-          <Field label="Variant"><Select value={form.variant} onChange={set("variant")} disabled={vehicleLocked}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
+          <Field label={pack ? "Unit 1 model" : "Model"}><Select data-testid="edit-model" value={form.interestedModel} onChange={set("interestedModel")} disabled={vehicleLocked || (pack && unitIsDelivered(unit1) && !isOwner)}><option value="">—</option>{(m.models || []).map((s) => <option key={s}>{s}</option>)}</Select></Field>
+          <Field label={pack ? "Unit 1 variant" : "Variant"}><Select data-testid="edit-variant" value={form.variant} onChange={set("variant")} disabled={vehicleLocked || (pack && unitIsDelivered(unit1) && !isOwner)}><option value="">—</option>{variants.map((v) => <option key={v.priceId} value={v.variant}>{v.variant}{v.inYard ? ` · ${v.inYard} in yard` : ""}</option>)}</Select></Field>
+          {pack && extraVehicles.map((u, i) => (
+            <React.Fragment key={u.sno}>
+              <Field label={`Unit ${u.sno} model`}>
+                <Select data-testid={`edit-unit-model-${u.sno}`} value={u.model}
+                  disabled={vehicleLocked || (u.delivered && !isOwner)}
+                  onChange={(e) => {
+                    const model = e.target.value;
+                    setExtraVehicles((rows) => rows.map((row, idx) => (idx === i ? { ...row, model, variant: "" } : row)));
+                  }}>
+                  <option value="">—</option>
+                  {(m.models || []).map((s) => <option key={s}>{s}</option>)}
+                </Select>
+              </Field>
+              <Field label={`Unit ${u.sno} variant`}>
+                <Select data-testid={`edit-unit-variant-${u.sno}`} value={u.variant}
+                  disabled={vehicleLocked || (u.delivered && !isOwner)}
+                  onChange={(e) => {
+                    const variant = e.target.value;
+                    setExtraVehicles((rows) => rows.map((row, idx) => (idx === i ? { ...row, variant } : row)));
+                  }}>
+                  <option value="">—</option>
+                  {(extraVariantLists[i] || []).map((v) => (
+                    <option key={v.priceId || v.variant} value={v.variant}>{v.variant}</option>
+                  ))}
+                </Select>
+              </Field>
+            </React.Fragment>
+          ))}
           <Field label="Priority"><Select value={form.priority} onChange={set("priority")}>{(m.priorities || ["Low","Normal","High","Urgent"]).map((s) => <option key={s}>{s}</option>)}</Select></Field>
           {packUnitList(lead) ? (
             <p className="sm:col-span-2 lg:col-span-3 text-xs text-ink-soft" data-testid="edit-pack-cx-hint">
