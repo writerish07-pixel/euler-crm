@@ -600,6 +600,19 @@ async def test_cancelled_deal_does_not_keep_the_gross_hold(client):
     })
     assert preview.status_code == 200, preview.text
     assert ce.num(preview.json().get("grossVehicleCost")) == 795155
+    unlocked = await client.post("/api/commercial/compute", json={
+        "exShowroom": 775000, "model": "Turbo Max", "variant": "Maxx (FB)",
+        "registrationRto": 2200, "insurance": 17955, "cxDemand": 790000,
+    })
+    assert unlocked.status_code == 200, unlocked.text
+    assert ce.num(unlocked.json().get("grossVehicleCost")) == 795155
+    locked = await client.post("/api/commercial/compute", json={
+        "exShowroom": 775000, "model": "Turbo Max", "variant": "Maxx (FB)",
+        "registrationRto": 2200, "insurance": 17955, "cxDemand": 790000,
+        "holdGross": True,
+    })
+    assert locked.status_code == 200, locked.text
+    assert ce.num(locked.json().get("grossVehicleCost")) == 799500
 
 
 @pytest.mark.asyncio

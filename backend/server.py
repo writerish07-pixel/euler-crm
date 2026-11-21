@@ -2308,6 +2308,9 @@ class SnapshotComputeIn(BaseModel):
     # Agreed customer price. A lower RTO / insurance then reduces Additional
     # (Dealer) and this payable stays put.
     cxDemand: float = 0
+    # True only when the file already locks payable to Cx Demand.
+    # A payable copied into cxDemand for the preview must not hold the gross.
+    holdGross: bool = False
     dealCancelled: bool = False
     listRto: Optional[float] = None
     listInsurance: Optional[float] = None
@@ -20119,6 +20122,7 @@ async def share_dashboard():
 async def commercial_compute(body: SnapshotComputeIn, user=Depends(current_user)):
     raw = body.model_dump()
     cx = ce.round2(max(0.0, ce.num(raw.pop("cxDemand", 0))))
+    hold_gross = bool(raw.pop("holdGross", False))
     cancelled = bool(raw.pop("dealCancelled", False))
     list_rto = raw.pop("listRto", None)
     list_ins = raw.pop("listInsurance", None)
@@ -20138,16 +20142,17 @@ async def commercial_compute(body: SnapshotComputeIn, user=Depends(current_user)
                 ce.num(result.get("totalDiscount")) - old_addl + new_addl)
             result["dealerDiscount"] = ce.round2(
                 ce.num(result.get("dealerDiscount")) - old_addl + new_addl)
-        actual_gvc = ce.num(result.get("grossVehicleCost"))
-        if ce.num(list_rto) > 0 or ce.num(list_ins) > 0:
-            rates = (ce.num(list_rto), ce.num(list_ins))
-        else:
-            rates = await _hold_list_rates(
-                {"interestedModel": raw.get("model"), "variant": raw.get("variant")},
-                use_quote=False)
-        held_gvc = ce.gross_with_rto_insurance_held(raw, actual_gvc, rates)
-        result["rtoInsuranceHeldInGross"] = ce.round2(held_gvc - actual_gvc)
-        result["grossVehicleCost"] = held_gvc
+        if hold_gross:
+            actual_gvc = ce.num(result.get("grossVehicleCost"))
+            if ce.num(list_rto) > 0 or ce.num(list_ins) > 0:
+                rates = (ce.num(list_rto), ce.num(list_ins))
+            else:
+                rates = await _hold_list_rates(
+                    {"interestedModel": raw.get("model"), "variant": raw.get("variant")},
+                    use_quote=False)
+            held_gvc = ce.gross_with_rto_insurance_held(raw, actual_gvc, rates)
+            result["rtoInsuranceHeldInGross"] = ce.round2(held_gvc - actual_gvc)
+            result["grossVehicleCost"] = held_gvc
     if not _is_owner_user(user):
         return _staff_safe_commercials(result)
     return result

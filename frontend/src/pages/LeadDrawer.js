@@ -1695,6 +1695,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
       referralBonus: src.referralBonus, dsaDiscount: src.dsaDiscount, additionalDiscount: src.additionalDiscount,
       benefitMode: src.benefitMode || "Full Benefit",
       cxDemand: locked,
+      holdGross: !!src.useDealPrice && !lead.dealCancelled,
       dealCancelled: !!lead.dealCancelled,
       ...(Number(lead.dealFormat?.rto) > 0 || Number(lead.dealFormat?.insurance) > 0
         ? { listRto: Number(lead.dealFormat.rto) || 0, listInsurance: Number(lead.dealFormat.insurance) || 0 }
