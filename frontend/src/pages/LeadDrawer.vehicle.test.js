@@ -36,7 +36,7 @@ jest.mock("../components/TallyPackCheck", () => () => null);
 jest.mock("./DealVerify", () => ({ DealVerifyCard: () => null }));
 
 import { toast } from "sonner";
-import { VehicleKV } from "./LeadDrawer";
+import { UnitVehicleEdit, VehicleKV } from "./LeadDrawer";
 
 const VARIANTS = {
   "Turbo Max": [{ priceId: "P1", variant: "Maxx (FB)", inYard: 2 }, { priceId: "P2", variant: "Maxx (PV)", inYard: 0 }],
@@ -88,6 +88,52 @@ test("variant is a Price Master dropdown and changes with the model", async () =
   await act(async () => { await Promise.resolve(); });
   expect(mockPut).toHaveBeenCalledWith("/leads/LD1/vehicle", { model: "Storm", variant: "Storm LR (PV) Reg C7 6.6kWh" });
   expect(onSaved).toHaveBeenCalled();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("each pack unit can change its own model and variant", async () => {
+  const onSaved = jest.fn();
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  mockGet.mockImplementation((url, params) => {
+    if (String(url).includes("variants")) return Promise.resolve(VARIANTS[params?.model] || []);
+    return Promise.resolve([{ model: "Turbo Max" }, { model: "Storm" }]);
+  });
+  await act(async () => {
+    root.render(
+      <UnitVehicleEdit leadId="LD1" sno={2} model="Turbo Max" variant="Maxx (FB)" canEdit onSaved={onSaved} />,
+    );
+  });
+  const q = (id) => host.querySelector(`[data-testid="${id}"]`);
+  expect(q("unit-vehicle-edit-2")).toBeTruthy();
+  expect(q("unit-vehicle-2").textContent).toMatch(/Maxx \(FB\)/);
+  await act(async () => { q("unit-vehicle-edit-2").click(); });
+  await act(async () => { await Promise.resolve(); });
+  await act(async () => { choose(q("unit-vehicle-model-2"), "Storm"); });
+  await act(async () => { await Promise.resolve(); });
+  expect(q("unit-vehicle-variant-2").value).toBe("");
+  await act(async () => { choose(q("unit-vehicle-variant-2"), "Storm LR (PV) Reg C7 6.6kWh"); });
+  await act(async () => { q("unit-vehicle-save-2").click(); });
+  await act(async () => { await Promise.resolve(); });
+  expect(mockPut).toHaveBeenCalledWith("/leads/LD1/units/2/vehicle", {
+    model: "Storm", variant: "Storm LR (PV) Reg C7 6.6kWh",
+  });
+  expect(onSaved).toHaveBeenCalled();
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("a unit without edit permission shows the vehicle and no pencil", async () => {
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<UnitVehicleEdit leadId="LD1" sno={3} model="Turbo Max" variant="Maxx (PV)" canEdit={false} />);
+  });
+  expect(host.querySelector('[data-testid="unit-vehicle-edit-3"]')).toBeNull();
+  expect(host.textContent).toMatch(/Maxx \(PV\)/);
   await act(async () => { root.unmount(); });
   host.remove();
 });

@@ -7361,7 +7361,7 @@ async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)
         raise HTTPException(422, "Pick both a model and a variant.")
     lead = await get_lead_or_404(lead_id)
     if oem_sync.is_same_order_pack(lead):
-        raise HTTPException(422, "This order has several vehicles — change each unit from its Price step.")
+        raise HTTPException(422, "This order has several vehicles — change the model and variant on each unit.")
     row = await _price_master_row(model, variant)
     if not row:
         raise HTTPException(422, f"{model} · {variant} is not in Price Master. Pick a variant from the list.")
@@ -7370,6 +7370,85 @@ async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)
     if model == (lead.get("interestedModel") or "") and variant == (lead.get("variant") or ""):
         return clean(lead)
     return await update_lead(lead_id, LeadUpdateIn(interestedModel=model, variant=variant), act, None)
+
+
+@api.put("/leads/{lead_id}/units/{unit_sno}/vehicle")
+async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act=Depends(actor)):
+    """Change one pack unit's model and variant. Siblings stay as they are.
+
+    Unit 1 also updates the file header, which the register shows. A unit the
+    customer has already paid keeps that price — only the name moves — so a
+    catalog change cannot open a balance. Every other unit is repriced from
+    Price Master and its saved scheme is realigned to the new vehicle.
+    """
+    role = str((act or {}).get("role") or "").strip().lower()
+    if role == "executive":
+        raise HTTPException(403, "Executives cannot edit lead details. Ask the Team Leader or Owner.")
+    model = str(body.model or "").strip()
+    variant = str(body.variant or "").strip()
+    if not model or not variant:
+        raise HTTPException(422, "Pick both a model and a variant.")
+    lead = await get_lead_or_404(lead_id)
+    _require_mutable_lead(lead, "model / variant", act)
+    if not oem_sync.is_same_order_pack(lead):
+        if int(unit_sno or 1) != 1:
+            raise HTTPException(422, "That unit is not on this order.")
+        return await set_lead_vehicle(lead_id, body, act)
+    idx, units = _resolve_unit_index(lead, unit_sno)
+    units = _ensure_lead_units(lead)
+    if idx >= len(units):
+        raise HTTPException(422, "That unit is not on this order.")
+    rec = dict(units[idx] or {})
+    _require_unit_mutable(lead, rec, "model / variant", act, idx)
+    priced = _unit_is_priced(lead, rec, idx) or _unit_has_scheme(lead, rec, idx)
+    if priced and not authmod.is_showroom_admin(act):
+        _require_owner_reedit(act, True, "Model / variant")
+    row = await _price_master_row(model, variant)
+    if not row:
+        raise HTTPException(422, f"{model} · {variant} is not in Price Master. Pick a variant from the list.")
+    model = row.get("model") or model
+    variant = row.get("variant") or variant
+    old_model = rec.get("model") or (lead.get("interestedModel") if idx == 0 else "") or ""
+    old_variant = rec.get("variant") or (lead.get("variant") if idx == 0 else "") or ""
+    if model == old_model and variant == old_variant:
+        return _lead_for_viewer(clean(lead), act)
+    rec["model"] = model
+    rec["variant"] = variant
+    rec["sno"] = idx + 1
+    rec["oemSkuConfirmed"] = True
+    rec["oemSkuNeedsReview"] = False
+    settled = _unit_settled(lead, rec)
+    lead_scheme = {}
+    if not settled:
+        as_of = _scheme_as_of(lead, unit=rec) or _lead_price_as_of(lead, unit=rec)
+        rec.update(_price_structure_from_master(row, as_of))
+        if _unit_has_scheme(lead, rec, idx):
+            scheme_rows = await get_scheme_rows()
+            source = rec if _has_persisted_scheme(rec) else lead
+            aligned = _scheme_realign_patch(source, model, variant, as_of, scheme_rows)
+            rec.update(aligned)
+            if idx == 0 and _has_persisted_scheme(lead):
+                lead_scheme = _scheme_realign_patch(lead, model, variant, as_of, scheme_rows)
+    units[idx] = rec
+    patch = {
+        "units": units,
+        "sameOrderMultiUnit": True,
+        "vehicleCount": max(len(units), 1),
+        "lastUpdated": now_iso(),
+        "lastUpdatedBy": act.get("email", ""),
+    }
+    if idx == 0:
+        patch["interestedModel"] = model
+        patch["variant"] = variant
+        patch.update(lead_scheme)
+    await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
+    await recompute_lead(lead_id)
+    await write_audit(
+        act, "update", "unit-vehicle", leadId=lead_id,
+        old={"unitSno": idx + 1, "model": old_model, "variant": old_variant},
+        new={"unitSno": idx + 1, "model": model, "variant": variant})
+    updated = await db.leads.find_one({"leadId": lead_id})
+    return _lead_for_viewer(clean(updated), act)
 
 
 @api.put("/leads/{lead_id}/owner-field")
@@ -8697,6 +8776,66 @@ async def _apply_quoted_deal(lead_id, model, variant, cx_demand, on=None,
     return clean(await db.leads.find_one({"leadId": lead_id}))
 
 
+def _scheme_realign_patch(doc, model, variant, as_of, scheme_rows):
+    """Rematerialise scheme pools for a new vehicle and clamp saved benefits.
+
+    Empty when this file or unit has no saved scheme — a name change must not
+    invent a scheme that staff have not filled.
+    """
+    if not _has_persisted_scheme(doc or {}):
+        return {}
+    import json as _json
+    rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
+        model or "", variant or "", as_of, scheme_rows)
+    patch = {}
+    for key, rule in (rules_ctx.get("rules") or {}).items():
+        if key == "additionalDiscount":
+            continue
+        if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+            patch[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
+        else:
+            patch[key] = 0
+    raw_bk = (doc or {}).get("benefitPassedBreakup") or "{}"
+    try:
+        bk = _json.loads(raw_bk) if isinstance(raw_bk, str) else dict(raw_bk or {})
+    except Exception:
+        bk = {}
+    if not isinstance(bk, dict):
+        bk = {}
+    raw_used = (doc or {}).get("schemeComponentsUsed") or "{}"
+    try:
+        used = _json.loads(raw_used) if isinstance(raw_used, str) else dict(raw_used or {})
+    except Exception:
+        used = {}
+    if not isinstance(used, dict):
+        used = {}
+    allowed = set()
+    for key, rule in (rules_ctx.get("rules") or {}).items():
+        if key != "additionalDiscount" and rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
+            allowed.add(key)
+    for ent in (rules_ctx.get("entitlements") or []):
+        if ce.num(ent.get("schemeAvailable") or ent.get("totalBenefit")) > 0:
+            allowed.add(ent["key"])
+    clean_bk, clean_used = {}, {}
+    for key in allowed:
+        cap = ce.num(patch.get(key))
+        if key in (rules_ctx.get("rules") or {}) and (rules_ctx["rules"][key].get("allowed")):
+            cap = ce.num(rules_ctx["rules"][key].get("schemeAvailable")
+                         or rules_ctx["rules"][key].get("maxAmount") or cap)
+        for ent in (rules_ctx.get("entitlements") or []):
+            if ent.get("key") == key:
+                cap = ce.num(ent.get("schemeAvailable") or ent.get("totalBenefit") or cap)
+        cb = ce.round2(max(0.0, min(ce.num(bk.get(key)), cap)))
+        clean_bk[key] = cb
+        clean_used[key] = bool(used.get(key)) if key in used else (cb > 0)
+    patch["benefitPassedBreakup"] = _json.dumps(clean_bk)
+    patch["schemeComponentsUsed"] = _json.dumps(clean_used)
+    patch["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
+    patch["schemeAllocationExplicit"] = True
+    patch["schemeAllocationV2"] = True
+    return patch
+
+
 async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, realign_scheme=True):
     """After model/variant or price edits, refresh Master-backed fields and recompute.
 
@@ -8725,60 +8864,15 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
             as_of = _lead_price_as_of(lead, unit=u0 if isinstance(u0, dict) else None)
             patch.update(_price_structure_from_master(row, as_of))
 
-    if realign_scheme and _has_persisted_scheme(lead):
-        import json as _json
+    if realign_scheme:
         scheme_rows = await get_scheme_rows()
-        model = lead.get("interestedModel") or ""
-        variant = lead.get("variant") or ""
-        booking_date = _scheme_as_of(lead)
-        rules_ctx = ce.get_scheme_offer_rules_for_vehicle(
-            model, variant, booking_date, scheme_rows)
-        for key, rule in (rules_ctx.get("rules") or {}).items():
-            if key == "additionalDiscount":
-                continue
-            if rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
-                patch[key] = ce.num(rule.get("schemeAvailable") or rule.get("maxAmount"))
-            else:
-                patch[key] = 0
-        # Drop / clamp breakup keys that are no longer eligible.
-        raw_bk = lead.get("benefitPassedBreakup") or "{}"
-        try:
-            bk = _json.loads(raw_bk) if isinstance(raw_bk, str) else dict(raw_bk or {})
-        except Exception:
-            bk = {}
-        if not isinstance(bk, dict):
-            bk = {}
-        raw_used = lead.get("schemeComponentsUsed") or "{}"
-        try:
-            used = _json.loads(raw_used) if isinstance(raw_used, str) else dict(raw_used or {})
-        except Exception:
-            used = {}
-        if not isinstance(used, dict):
-            used = {}
-        allowed = set()
-        for key, rule in (rules_ctx.get("rules") or {}).items():
-            if key != "additionalDiscount" and rule.get("allowed") and ce.num(rule.get("maxAmount")) > 0:
-                allowed.add(key)
-        for ent in (rules_ctx.get("entitlements") or []):
-            if ce.num(ent.get("schemeAvailable") or ent.get("totalBenefit")) > 0:
-                allowed.add(ent["key"])
-        clean_bk, clean_used = {}, {}
-        for key in allowed:
-            cap = ce.num(patch.get(key))
-            if key in (rules_ctx.get("rules") or {}) and (rules_ctx["rules"][key].get("allowed")):
-                cap = ce.num(rules_ctx["rules"][key].get("schemeAvailable")
-                             or rules_ctx["rules"][key].get("maxAmount") or cap)
-            for ent in (rules_ctx.get("entitlements") or []):
-                if ent.get("key") == key:
-                    cap = ce.num(ent.get("schemeAvailable") or ent.get("totalBenefit") or cap)
-            cb = ce.round2(max(0.0, min(ce.num(bk.get(key)), cap)))
-            clean_bk[key] = cb
-            clean_used[key] = bool(used.get(key)) if key in used else (cb > 0)
-        patch["benefitPassedBreakup"] = _json.dumps(clean_bk)
-        patch["schemeComponentsUsed"] = _json.dumps(clean_used)
-        patch["customerBenefitPassed"] = ce.round2(sum(clean_bk.values()))
-        patch["schemeAllocationExplicit"] = True
-        patch["schemeAllocationV2"] = True
+        patch.update(_scheme_realign_patch(
+            lead,
+            lead.get("interestedModel") or "",
+            lead.get("variant") or "",
+            _scheme_as_of(lead),
+            scheme_rows,
+        ))
 
     # A single-vehicle file keeps a copy of its vehicle on units[0], and price
     # preview / scheme rules read that copy first. Move it to the new model /
