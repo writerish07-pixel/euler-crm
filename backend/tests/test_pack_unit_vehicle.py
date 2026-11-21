@@ -310,3 +310,85 @@ async def test_blank_unit_1_of_another_variant_does_not_copy_the_header_price(cl
     await server.recompute_lead(lid)
     unit1 = (await server.db.leads.find_one({"leadId": lid}))["units"][0]
     assert unit1["exShowroom"] == 800000
+
+
+@pytest.mark.asyncio
+async def test_same_variant_list_rise_does_not_drop_the_agreed_price(client):
+    """Recording actual RTO must not rebill a booked unit from a newer list price."""
+    lid = await _pack(client, "9813307110")
+    lead = await server.db.leads.find_one({"leadId": lid})
+    pay = 498500
+    units = []
+    for u in lead["units"]:
+        rec = dict(u)
+        rec["model"] = "Turbo Max"
+        rec["variant"] = "Unit Edit A"
+        rec["exShowroom"] = 500000
+        rec["rto"] = 1000
+        rec["insuranceAmount"] = 2000
+        rec["cxDemand"] = pay
+        rec["useDealPrice"] = True
+        rec["customerPayable"] = pay
+        rec["additionalDiscount"] = 4500
+        units.append(rec)
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "units": units,
+        "currentStatus": "Booked",
+        "bookingDate": "2026-11-06",
+        "interestedModel": "Turbo Max",
+        "variant": "Unit Edit A",
+        "exShowroom": 500000,
+        "additionalDiscount": 4500,
+        "cxDemand": pay,
+        "useDealPrice": True,
+    }})
+    await server.db.price_master.update_one(
+        {"priceId": "PM-PUV-A"}, {"$set": {"exShowroom": 520000}})
+    cut = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 520000, "rto": 0, "insuranceAmount": 2000, "unitSno": 1,
+    })
+    assert cut.status_code == 200, cut.text
+    unit1 = (await server.db.leads.find_one({"leadId": lid}))["units"][0]
+    assert unit1["exShowroom"] == 500000
+    assert unit1["customerPayable"] == pay
+    assert unit1["rto"] == 0
+    assert unit1["additionalDiscount"] == 3500
+
+
+@pytest.mark.asyncio
+async def test_variant_correction_does_not_restore_header_additional(client):
+    """A zeroed Additional must stay zero when the header still has the old discount."""
+    lid = await _pack(client, "9813307111")
+    lead = await server.db.leads.find_one({"leadId": lid})
+    units = lead["units"]
+    units[0]["model"] = "Storm"
+    units[0]["variant"] = "Unit Edit C"
+    units[0]["exShowroom"] = 500000
+    units[0]["rto"] = 1000
+    units[0]["insuranceAmount"] = 2000
+    units[0]["cxDemand"] = 498000
+    units[0]["useDealPrice"] = True
+    units[0]["customerPayable"] = 498000
+    units[0]["additionalDiscount"] = 5000
+    units[1]["model"] = "Storm"
+    units[1]["variant"] = "Unit Edit C"
+    units[1]["exShowroom"] = 800000
+    units[1]["additionalDiscount"] = 0
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "units": units,
+        "currentStatus": "Booked",
+        "bookingDate": "2026-11-06",
+        "interestedModel": "Turbo Max",
+        "variant": "Unit Edit A",
+        "exShowroom": 500000,
+        "additionalDiscount": 5000,
+    }})
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 500000, "rto": 5000, "insuranceAmount": 6000, "unitSno": 1,
+    })
+    assert saved.status_code == 200, saved.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    unit1 = after["units"][0]
+    assert unit1["exShowroom"] == 800000
+    assert unit1["additionalDiscount"] == 0
+    assert unit1["customerPayable"] == 811000

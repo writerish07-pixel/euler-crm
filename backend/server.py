@@ -7762,6 +7762,27 @@ def _stored_ex_matches_row(stored, row, as_of=None):
     return any(abs(stored - c) < 1 for c in candidates)
 
 
+async def _stored_ex_is_another_variant(stored, model, variant, as_of=None):
+    """True when this ex-showroom is the list price of a different vehicle."""
+    stored = ce.num(stored)
+    if stored <= 0:
+        return False
+    rows = await db.price_master.find({}).to_list(500)
+    active = [r for r in rows if str(r.get("status") or "active").lower() == "active"] or rows
+    want_model = str(model or "").strip().lower()
+    want_variant = str(variant or "").strip().lower()
+    for row in active:
+        same = (
+            str(row.get("model") or "").strip().lower() == want_model
+            and str(row.get("variant") or "").strip().lower() == want_variant
+        )
+        if same:
+            continue
+        if _stored_ex_matches_row(stored, row, as_of):
+            return True
+    return False
+
+
 def _turbo_selling_ex(row, as_of=None):
     """Stored list price for quotes.
 
@@ -9547,12 +9568,16 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
         # A one-vehicle file keeps the ex-showroom it was booked on.
         payload["exShowroom"] = ce.num(lead.get("exShowroom"))
     elif booked_price and pack and row:
-        # Unit 1 keeps its own variant's price. The lead header can still hold
-        # the previous vehicle's ex-showroom, and copying that back is how a
-        # DV unit was priced as PV.
+        # Keep this variant's booked ex-showroom, including after a later list
+        # change. Replace it only when the saved figure is another variant's
+        # price — that is how a DV unit was left on the PV price.
         stored = ce.num(chosen.get("exShowroom"))
         as_of_price = _lead_price_as_of(lead, unit=chosen)
-        if stored > 0 and _stored_ex_matches_row(stored, row, as_of_price):
+        other_variant = await _stored_ex_is_another_variant(
+            stored, row.get("model"), row.get("variant"), as_of_price)
+        if stored > 0 and (
+            _stored_ex_matches_row(stored, row, as_of_price) or not other_variant
+        ):
             payload["exShowroom"] = stored
     units = _ensure_lead_units(lead)
     if idx >= len(units):
@@ -9565,10 +9590,11 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     ex_moved = pack and previous_ex > 0 and applied_ex > 0 and abs(applied_ex - previous_ex) >= 1
     if ex_moved:
         # The rupees belonged to the previous vehicle. RTO and insurance edits
-        # do not move ex-showroom, so those deals stay.
-        for key in ("cxDemand", "budget", "additionalDiscount",
-                    "extraIncomeFromCustomer", "customerPayable"):
+        # do not move ex-showroom, so those deals stay. Additional is stored
+        # as zero: a missing key is filled again from the lead header.
+        for key in ("cxDemand", "budget", "extraIncomeFromCustomer", "customerPayable"):
             rec.pop(key, None)
+        rec["additionalDiscount"] = 0
         rec["useDealPrice"] = False
     # Real RTO / insurance must not cheapen the agreed customer price.
     # Lock Cx Demand to the payable already on the file when the deal
