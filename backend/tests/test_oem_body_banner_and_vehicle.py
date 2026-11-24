@@ -60,6 +60,26 @@ def test_no_note_for_a_wrong_model_chassis_or_no_sold_row():
     assert oem_sync.body_change_notes(_lead(), []) == []
 
 
+def test_confirmed_dealer_body_is_labelled_against_the_oem_invoice():
+    """OEM billed FB, the dealer confirmed DV. The banner says so. It does not
+    describe a Coulson conversion that did not happen."""
+    lead = _lead(
+        variant="Maxx (DV220)", oemSkuConfirmed=True,
+        units=[{
+            "sno": 1, "chassisNumber": CHASSIS, "model": "Turbo Max",
+            "variant": "Maxx (DV220)", "bodyType": "DV220", "oemSkuConfirmed": True,
+        }],
+    )
+    sold = {**CONVERTED, "variant": "Maxx (FB)", "loadBody": "FB", "updatedLoadBody": "FB",
+            "oemSkuKey": "turbo.maxx.fb"}
+    notes = oem_sync.body_change_notes(lead, [sold])
+    dealer = [n for n in notes if n.get("kind") == "dealer"]
+    assert len(dealer) == 1
+    assert dealer[0]["oemBody"] == "FB"
+    assert dealer[0]["customerBody"] == "DV220"
+    assert [n for n in notes if n.get("kind") == "coulson"] == []
+
+
 def test_pack_notes_are_per_unit():
     other = {**CONVERTED, "chassis": "MD9EVDAD26K0BODY3", "updatedLoadBody": ""}
     pack = _lead(sameOrderMultiUnit=True, units=[
@@ -132,6 +152,7 @@ async def test_vehicle_change_reprices_and_moves_the_unit(client):
     assert r.status_code == 200, r.text
     after = await server.db.leads.find_one({"leadId": lid})
     assert after["variant"] == other["variant"]
+    assert after.get("oemSkuConfirmed") is True
     assert after["exShowroom"] != before["exShowroom"]          # auto-repriced
     preview = (await client.get(f"/api/leads/{lid}/price-preview")).json()
     assert preview["variant"] == other["variant"]              # unit 1 moved too
