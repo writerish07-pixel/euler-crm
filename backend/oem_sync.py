@@ -269,12 +269,23 @@ async def _record_sync(db, ok, error="", extra=None):
 
 
 def _inventory_doc(vehicle, sku, price):
+    emch = str(
+        vehicle.get("emch") or vehicle.get("registration_number")
+        or vehicle.get("registration_no") or vehicle.get("registrationNo") or ""
+    ).strip()
+    registration = _first_str(vehicle, (
+        "registration_number", "registration_no", "registrationNo",
+        "regNo", "reg_no", "number_plate", "numberPlate", "vehicle_number",
+    ))
+    # Coulson often copies the EMCH into registration_number. That is not a plate.
+    if registration.lower() == emch.lower():
+        registration = ""
     return {
         "chassis": vehicle_chassis(vehicle) or vehicle.get("chassis") or "",
         "motorNumber": vehicle_motor(vehicle),
         "batteryNumber": vehicle_battery(vehicle),
-        "emch": vehicle.get("emch") or vehicle.get("registration_number")
-                or vehicle.get("registration_no") or vehicle.get("registrationNo") or "",
+        "emch": emch,
+        "registrationNumber": registration,
         "colour": vehicle.get("colour") or "",
         "model": sku.crm_model if sku else vehicle_model(vehicle),
         "variant": sku.crm_variant if sku else vehicle_variant(vehicle),
@@ -301,11 +312,11 @@ def _inventory_doc(vehicle, sku, price):
 
 
 async def _access_token(db, username=None, password=None):
-    """Prefer a pasted Coulson session. Only call euler-auth /login when there is none.
+    """Prefer a pasted Coulson session. Otherwise sign in on the Coulson host.
 
-    Euler accepts the dealer password in a browser on coulson.eulerlogistics.com and
-    refuses the same password from this server. A live session skips that login.
-    Returns (token, source) — source is session / settings / env / inline, or empty.
+    The password is hashed the same way the dealer page hashes it. A live
+    session still skips that login. Returns (token, source) — source is
+    session / settings / env / inline, or empty.
     """
     if username and password:
         return await asyncio.to_thread(coulson_client.login, username, password), "inline"

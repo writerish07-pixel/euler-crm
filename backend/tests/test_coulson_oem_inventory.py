@@ -218,6 +218,8 @@ async def test_mocked_coulson_sync(client, monkeypatch):
     inv = (await client.get("/api/inventory")).json()
     assert len(inv) == 1
     assert inv[0]["chassis"] == "MD9TESTCHASSIS0001"
+    assert inv[0]["emch"] == "EMCS-1"
+    assert inv[0]["registrationNumber"] == ""
     assert inv[0]["motorNumber"] == "MTR-77821"
     assert inv[0]["batteryNumber"] == "BAT-44190"
     assert inv[0]["model"] == "Turbo Max"
@@ -314,6 +316,31 @@ async def test_save_verifies_valid_coulson_login(client, monkeypatch):
     assert body["configured"] is True
     assert body["username"] == "dealer.user"
     assert "secret" not in str(body)
+
+
+def test_inventory_keeps_registration_separate_from_emch():
+    doc = oem_sync._inventory_doc({
+        "chassis": "MD9TESTCHASSIS0001",
+        "emch": "EMCS-1",
+        "registration_number": "RJ14AB1234",
+    }, None, 0)
+    assert doc["emch"] == "EMCS-1"
+    assert doc["registrationNumber"] == "RJ14AB1234"
+    repeated = oem_sync._inventory_doc({
+        "chassis": "MD9TESTCHASSIS0001",
+        "emch": "EMCS-1",
+        "registration_number": "EMCS-1",
+    }, None, 0)
+    assert repeated["emch"] == "EMCS-1"
+    assert repeated["registrationNumber"] == ""
+    for key in ("regNo", "reg_no", "numberPlate", "number_plate", "vehicle_number"):
+        aliased = oem_sync._inventory_doc({
+            "chassis": "MD9TESTCHASSIS0001",
+            "emch": "EMCS-1",
+            key: "RJ14CD5678",
+        }, None, 0)
+        assert aliased["registrationNumber"] == "RJ14CD5678", key
+        assert aliased["emch"] == "EMCS-1"
 
 
 def test_basic_auth_matches_browser_btoa():
@@ -499,7 +526,8 @@ def test_login_posts_an_empty_body_like_the_coulson_spa(monkeypatch):
             return FakeResp()
 
     monkeypatch.setattr(coulson_client.httpx, "Client", FakeClient)
-    assert coulson_client.login("vaibhav.akar", "secret") == "tok"
+    monkeypatch.setenv("COULSON_AUTH_URL", "https://euler-auth.eulerlogistics.com/api/v1")
+    assert coulson_client.login("vaibhav.akar", "secret\n") == "tok"
     assert capture["content"] is None
     assert capture["data"] is None
     assert capture["json"] is None
@@ -507,7 +535,12 @@ def test_login_posts_an_empty_body_like_the_coulson_spa(monkeypatch):
     assert "Content-Type" not in hdrs and "content-type" not in hdrs
     assert hdrs["Authorization"].startswith("Basic ")
     assert hdrs["Origin"] == "https://coulson.eulerlogistics.com"
-    assert "/login" in capture["url"]
+    assert capture["url"] == "https://coulson.eulerlogistics.com/api/v1/login"
+    import base64
+    import hashlib
+    raw = base64.b64decode(hdrs["Authorization"].split(" ", 1)[1]).decode()
+    assert raw == "vaibhav.akar:" + hashlib.sha256(b"secret").hexdigest() + ":coulson"
+    assert "secret" not in raw.split(":")[1]
 
 
 def test_diagnose_treats_http_203_as_a_refused_login(monkeypatch):

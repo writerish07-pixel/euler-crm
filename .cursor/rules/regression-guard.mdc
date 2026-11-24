@@ -26,6 +26,7 @@ These rules are the ones recent fixes kept breaking. Check them before changing 
 
 ## OEM sync
 
+- Coulson sign-in posts to `https://coulson.eulerlogistics.com/api/v1/login` with Basic `username:SHA256(password):coulson` and an empty body. The typed password and the old `euler-auth` host are both refused.
 - Chassis, invoice, and plate still come from Coulson for the chassis on the file.
 - A different model family is not written on as a body change.
 - After the whole file is delivered, the working variant stays until someone chooses Use billed body + price.
