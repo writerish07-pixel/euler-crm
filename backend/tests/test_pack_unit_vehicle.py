@@ -193,6 +193,33 @@ async def test_a_paid_unit_keeps_its_price_when_the_variant_changes(client):
 
 
 @pytest.mark.asyncio
+async def test_a_paid_unit_without_cx_demand_keeps_its_payable(client):
+    """Receipts already cover the unit. A name change must not inherit a sibling discount."""
+    lid = await _pack(client, "9813307109")
+    before = await server.db.leads.find_one({"leadId": lid})
+    units = before["units"]
+    old_pay = float(units[1].get("customerPayable") or units[1].get("exShowroom") or 0)
+    assert old_pay > 0
+    units[0]["additionalDiscount"] = 5000
+    units[1]["cxDemand"] = 0
+    units[1]["useDealPrice"] = False
+    units[1].pop("cxDemand", None)
+    units[1]["customerPayable"] = old_pay
+    units[1]["totalReceived"] = old_pay
+    units[1]["customerOutstanding"] = 0
+    units[1]["additionalDiscount"] = 0
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"units": units}})
+    r = await client.put(f"/api/leads/{lid}/units/2/vehicle", json={
+        "model": "Turbo Max", "variant": "Unit Edit A",
+    })
+    assert r.status_code == 200, r.text
+    unit2 = (await server.db.leads.find_one({"leadId": lid}))["units"][1]
+    assert unit2["variant"] == "Unit Edit A"
+    assert unit2.get("useDealPrice") is True
+    assert abs(float(unit2.get("customerPayable") or 0) - old_pay) < 1
+
+
+@pytest.mark.asyncio
 async def test_resaving_the_same_variant_releases_the_old_price(client):
     """Unit 2 already says DV, but the customer price is still the previous deal."""
     lid = await _pack(client, "9813307106")

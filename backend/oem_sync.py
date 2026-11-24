@@ -1835,13 +1835,21 @@ def available_differs_from_billed(available, billed):
 
 
 def _short_body(fields):
-    """Body label for the banner: PV / FB / DV220 … (variant's bracket, else body type)."""
+    """Body label for the banner: PV / FB / DV220.
+
+    A confirmed dealer choice follows the variant they saved. A stale bodyType
+    left by an earlier OEM invoice must not hide that choice.
+    """
     fields = fields or {}
+    variant = str(fields.get("variant") or "")
+    match = re.search(r"\(([^)]+)\)", variant)
+    from_variant = match.group(1).strip() if match else ""
+    if fields.get("oemSkuConfirmed") and from_variant:
+        return from_variant
     body = str(fields.get("bodyType") or "").strip()
     if body:
         return body
-    m = re.search(r"\(([^)]+)\)", str(fields.get("variant") or ""))
-    return m.group(1).strip() if m else str(fields.get("variant") or "").strip()
+    return from_variant or variant.strip()
 
 
 def body_change_notes(lead, sold_rows):
@@ -2910,13 +2918,16 @@ async def apply_sold_vehicle_ids_to_leads(db, *, on_body_adopted=None, on_varian
         body_mismatch = False
         if can_adopt_sold_body(lead, row):
             fields = sold_body_fields(row)
-            adopt = lead_allows_body_adopt(lead)
+            kept = confirmed_chassis_stands(lead, row)
+            # A confirmed dealer body is a label update, not an adoption.
+            # Adoption is what reprices the file from Price Master.
+            adopt = lead_allows_body_adopt(lead) and not kept
             patch.update(sold_body_adopt_patch(lead, row, adopt=adopt))
             stamped_units = apply_sold_body_to_units(
                 stamped_units or list((lead or {}).get("units") or []),
                 row, fields, adopt=adopt)
             body_adopted = adopt
-            body_mismatch = not adopt
+            body_mismatch = not adopt and not kept
         working_units = stamped_units or list((lead or {}).get("units") or [])
         family = sold_rows_for_lead(
             {**lead, "units": working_units}, sold,

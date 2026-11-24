@@ -1,0 +1,31 @@
+---
+description: Euler CRM invariants later fixes must not break
+alwaysApply: true
+---
+
+# Euler CRM regression guard
+
+These rules are the ones recent fixes kept breaking. Check them before changing OEM sync, variant save, delivery, scheme, or pack price.
+
+## Dealer body vs OEM invoice
+
+- A variant saved in Euler sets `oemSkuConfirmed`. Later OEM sync and Mark Delivered leave that model, variant, body type, and price in place.
+- The invoice body is stored on `oemBilledModel`, `oemBilledVariant`, and `oemBilledBodyType`. The drawer says which body OEM billed and which body was billed to the customer.
+- A chassis nobody has confirmed still takes its own invoice body. One unit's body is never copied onto a sibling.
+- A Coulson yard-body to invoice-body change (built FB, billed DV) still follows the invoice when the dealer has not confirmed a different body.
+- Confirming a body is not an adoption. Do not run the Price Master reprice callback unless the working variant actually changed.
+- Mark Delivered stamps the selected unit after the OEM patch is built. The final write must keep those delivery flags. Overlay names and labels onto the stamped units. Do not replace the unit list with the pre-stamp snapshot.
+- Saving the current variant on a locked or delivered file still goes through the file lock. Showroom Admin cannot confirm a body on a delivered file.
+
+## Price
+
+- A pack unit already paid in full keeps that payable when only the body name changes, including when Cx Demand was not already locked.
+- An unpaid unit takes the new variant's Price Master price, and the previous Cx Demand does not stay on it.
+- A lower RTO or insurance does not reduce Gross Vehicle Cost while a customer price is locked.
+- A scheme amount changes the price only after someone selects that scheme.
+
+## OEM sync
+
+- Chassis, invoice, and plate still come from Coulson for the chassis on the file.
+- A different model family is not written on as a body change.
+- After the whole file is delivered, the working variant stays until someone chooses Use billed body + price.
