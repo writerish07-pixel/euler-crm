@@ -7941,16 +7941,23 @@ def _parse_iso_date(raw, *, field="Date"):
 
 
 def _lead_price_as_of(lead=None, on=None, unit=None):
-    """Unit billed date, else booking date, else today."""
-    if on:
-        return str(on)[:10]
-    billed = _unit_billed_date(unit)
-    if billed:
-        return billed
-    if lead:
-        booked = str(lead.get("bookingDate") or "")[:10]
-        if booked:
-            return booked
+    """OEM billed date decides the list price for a lead or pack unit.
+
+    Same order as scheme month: this unit's sold date, then the file's sold
+    date, then an explicit date, schemeAsOf, booking date, then today. Price
+    Master uplift and opening a saved file both follow that billed day.
+    """
+    for raw in (
+        (unit or {}).get("soldDate"),
+        (lead or {}).get("soldDate"),
+        on,
+        (unit or {}).get("schemeAsOf"),
+        (lead or {}).get("schemeAsOf"),
+        (lead or {}).get("bookingDate"),
+    ):
+        d = str(raw or "").strip()[:10]
+        if len(d) == 10 and d[4] == "-" and d[7] == "-":
+            return d
     return today()
 
 
@@ -9296,9 +9303,9 @@ def _saved_ex_for_preview(lead, chosen=None, idx=0):
 async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(current_user)):
     """Price Structure for this lead's model/variant.
 
-    Empty files take today's Price Master. A file that already has an
-    ex-showroom keeps that figure — OEM sync must not rewrite older bookings
-    when the drawer opens.
+    OEM billed date picks the list (uplift, asOf). A file that already has an
+    ex-showroom keeps that figure when the drawer opens — OEM sync must not
+    rewrite older billed vehicles to today's master.
     """
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)

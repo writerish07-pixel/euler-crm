@@ -1687,31 +1687,27 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
     // insurance stayed in the form and were saved back.
   }, [lead.leadId, unitSno, src.interestedModel, src.variant]);
 
-  // Ex-Showroom is locked. A price already on this file stays; only an empty
-  // file takes today's Price Master. OEM sync must not rewrite older bookings.
+  // Ex-Showroom is locked. OEM billed date picks the list; a price already on
+  // this unit stays. Do not read Unit 1's ex from the lead onto a later unit.
   useEffect(() => {
     let alive = true;
     const q = units ? { unit: unitSno } : undefined;
-    const savedEx = Number(src.exShowroom || 0);
     get(`/leads/${lead.leadId}/price-preview`, q)
       .then((d) => {
         if (!alive) return;
         if (d?.found && d.priceStructure) {
-          const nextEx = savedEx > 0
-            ? savedEx
-            : (Number(d.priceStructure.exShowroom) || 0);
-          setForm((f) => ({ ...f, exShowroom: nextEx }));
-          const kept = savedEx > 0 || d.keptSavedEx;
-          setMasterMsg(kept
-            ? `Unit ${unitSno} · ${d.model || ""} ${d.variant || ""} — Ex-Showroom is the price already on this file and cannot be edited.`
-            : `Unit ${unitSno} · ${d.model || ""} ${d.variant || ""} — Ex-Showroom is fixed from Price Master and cannot be edited.`);
+          setForm((f) => ({ ...f, exShowroom: Number(d.priceStructure.exShowroom) || 0 }));
+          const billed = d.asOf ? ` (OEM billed ${d.asOf})` : "";
+          setMasterMsg(d.keptSavedEx
+            ? `Unit ${unitSno} · ${d.model || ""} ${d.variant || ""}${billed} — Ex-Showroom is the price already on this file and cannot be edited.`
+            : `Unit ${unitSno} · ${d.model || ""} ${d.variant || ""}${billed} — Ex-Showroom is fixed from Price Master and cannot be edited.`);
         } else {
           setMasterMsg(d?.message || "Price Master entry not found — select a valid model/variant.");
         }
       })
       .catch(() => { if (alive) setMasterMsg("Could not load Price Master for this vehicle."); });
     return () => { alive = false; };
-  }, [lead.leadId, unitSno, src.interestedModel, src.variant, src.exShowroom]);
+  }, [lead.leadId, unitSno, src.interestedModel, src.variant]);
 
   const computePreview = useCallback(() => {
     const locked = Number(src.cxDemand || 0) || (Number(src.customerPayable || 0) > 0 ? Number(src.customerPayable) : 0);

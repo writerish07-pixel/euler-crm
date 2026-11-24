@@ -122,3 +122,54 @@ async def test_opening_an_august_lead_keeps_the_saved_price_after_oem_sync(clien
     assert preview.get("masterExShowroom") == OEM_MAXX_PV + 15000
     after = await server.db.leads.find_one({"leadId": lid})
     assert after["exShowroom"] == OEM_MAXX_PV
+
+
+def test_oem_billed_date_decides_price_as_of():
+    lead = {"bookingDate": "2026-08-20", "soldDate": "2026-08-31"}
+    assert server._lead_price_as_of(lead) == "2026-08-31"
+    unit = {"soldDate": "2026-09-15"}
+    assert server._lead_price_as_of(lead, unit=unit) == "2026-09-15"
+    assert server._lead_price_as_of({"bookingDate": "2026-08-20"}) == "2026-08-20"
+
+
+@pytest.mark.asyncio
+async def test_pack_unit_without_its_own_ex_does_not_take_unit1_price(client):
+    """Unit 2 must take Price Master for its billed day, not Unit 1's saved ex."""
+    created = await client.post("/api/leads", json={
+        "customerName": "Pack Price", "mobile": "9535010004",
+        "interestedModel": TURBO[0], "variant": TURBO[1], "executive": "Amit",
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": TURBO[0], "variant": TURBO[1]},
+            {"sno": 2, "model": TURBO[0], "variant": "Maxx (FB)"},
+        ],
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "bookingDate": "2026-08-20",
+        "soldDate": "2026-08-31",
+        "exShowroom": OEM_MAXX_PV,
+        "priceStructureSaved": True,
+        "sameOrderMultiUnit": True,
+        "vehicleCount": 2,
+        "units": [
+            {
+                "sno": 1, "model": TURBO[0], "variant": TURBO[1],
+                "soldDate": "2026-08-31", "exShowroom": OEM_MAXX_PV,
+                "priceStructureSaved": True,
+            },
+            {
+                "sno": 2, "model": TURBO[0], "variant": "Maxx (FB)",
+                "soldDate": "2026-08-31",
+            },
+        ],
+    }})
+    u1 = (await client.get(f"/api/leads/{lid}/price-preview", params={"unit": 1})).json()
+    u2 = (await client.get(f"/api/leads/{lid}/price-preview", params={"unit": 2})).json()
+    assert u1["asOf"] == "2026-08-31"
+    assert u1["keptSavedEx"] is True
+    assert u1["priceStructure"]["exShowroom"] == OEM_MAXX_PV
+    assert u2["asOf"] == "2026-08-31"
+    assert u2.get("keptSavedEx") is False
+    assert abs(float(u2["priceStructure"]["exShowroom"]) - OEM_MAXX_PV) > 1
