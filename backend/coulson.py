@@ -1,12 +1,13 @@
 """Coulson (Euler OEM portal) HTTP client.
 
-Login is Basic auth against euler-auth: base64(username:password:coulson),
+Login is Basic auth against the Coulson site: base64(username:SHA256(password):coulson),
 then Bearer JWT on coulson.eulerlogistics.com. Credentials come from owner Settings (Mongo), with optional env fallback
 (COULSON_USERNAME / COULSON_PASSWORD). Never log the password.
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -22,7 +23,10 @@ import jwt
 
 log = logging.getLogger("coulson")
 
-DEFAULT_AUTH_URL = "https://euler-auth.eulerlogistics.com/api/v1"
+DEFAULT_AUTH_URL = "https://coulson.eulerlogistics.com/api/v1"
+# The dealer site stopped signing in on euler-auth. A saved env that still
+# points there is the same as no setting: use the host the live page uses.
+RETIRED_AUTH_URL = "https://euler-auth.eulerlogistics.com/api/v1"
 DEFAULT_API_URL = "https://coulson.eulerlogistics.com/api/v1"
 APP_NAME = "coulson"
 # Login / session ping must stay short so Settings Save cannot freeze the desk.
@@ -47,7 +51,10 @@ def _env(name, default=""):
 
 
 def auth_url():
-    return _env("COULSON_AUTH_URL", DEFAULT_AUTH_URL).rstrip("/")
+    url = _env("COULSON_AUTH_URL", DEFAULT_AUTH_URL).rstrip("/")
+    if url == RETIRED_AUTH_URL:
+        return DEFAULT_AUTH_URL
+    return url
 
 
 def api_url():
@@ -171,34 +178,29 @@ def login_headers(username: str, password: str) -> dict:
     }
 
 
-def login_service(username: str, password: str) -> str:
-    """Sign in to the service portal.
+def portal_secret(password: str) -> str:
+    """SHA256 hex of the typed password. The live Coulson page sends this, not the password."""
+    return hashlib.sha256(clean_credential(password).encode()).hexdigest()
 
-    The live Coulson page sends SHA256(password) inside the Basic token.
-    The sales login still sends the password as typed. This helper is only
-    for the service workshop desk.
-    """
-    import hashlib
-    username, password = clean_credential(username), clean_credential(password)
-    if not username or not password:
-        raise CoulsonError("Coulson username and password are required")
-    digest = hashlib.sha256(password.encode()).hexdigest()
-    return login(username, digest)
+
+def login_service(username: str, password: str) -> str:
+    """Sign in to the service portal. Same host and hash as the sales login."""
+    return login(username, password)
 
 
 def login(username: str, password: str) -> str:
     """Log in the same way coulson.eulerlogistics.com does.
 
-    The SPA is: POST euler-auth .../login with Authorization Basic
-    btoa(`${user}:${pass}:coulson`) and an empty body. urllib was sending
-    Content-Length 0 as a form POST, which Euler treats as a missing
-    credential and answers "Username/password is not valid".
+    The SPA posts to its own /api/v1/login with Authorization Basic
+    btoa(`${user}:${SHA256(password)}:coulson`) and an empty body.
+    A typed password, or the old euler-auth host, is refused as
+    "Invalid username or password".
     """
     username, password = clean_credential(username), clean_credential(password)
     if not username or not password:
         raise CoulsonError("Coulson username and password are required")
     url = f"{auth_url()}/login"
-    headers = login_headers(username, password)
+    headers = login_headers(username, portal_secret(password))
     try:
         with httpx.Client(timeout=LOGIN_TIMEOUT, follow_redirects=False) as client:
             # No content=/json=/data= — a body-less POST, like `new Request(..., {method:"POST"})`.

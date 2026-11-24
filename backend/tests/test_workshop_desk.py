@@ -1,6 +1,5 @@
 """Workshop desk: a mail joins a Coulson request, and a missing paid part
 becomes an advance instead of a second purchase."""
-import hashlib
 import os
 import sys
 
@@ -433,11 +432,11 @@ def test_service_sync_signs_in_with_the_login_id_and_password(monkeypatch):
     monkeypatch.setattr(coulson_client, "get_json", fake_get)
     snapshot = workshop_api.pull_service("service.user", "secret")
     assert seen["username"] == "service.user"
-    assert seen["password"] == hashlib.sha256(b"secret").hexdigest()
+    assert seen["password"] == "secret"
     assert isinstance(snapshot["lines"], list)
 
 
-def test_service_login_sends_the_password_hash_the_portal_expects(monkeypatch):
+def test_service_login_sends_the_password_once_for_login_to_hash(monkeypatch):
     seen = {}
 
     def fake_login(username, password):
@@ -448,8 +447,8 @@ def test_service_login_sends_the_password_hash_the_portal_expects(monkeypatch):
     monkeypatch.setattr(coulson_client, "login", fake_login)
     assert coulson_client.login_service("Rishabh.Akar", "secret") == "token"
     assert seen["username"] == "Rishabh.Akar"
-    assert seen["password"] == hashlib.sha256(b"secret").hexdigest()
-    assert seen["password"] != "secret"
+    # login() hashes. Hashing here as well would send SHA256 twice.
+    assert seen["password"] == "secret"
 
 
 def test_each_sender_is_learned_and_the_open_step_names_who_is_holding_it():
