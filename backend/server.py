@@ -1259,9 +1259,11 @@ async def _sold_body_updates_for_lead(lead):
             family.append(extra)
     patch = oem_sync.fill_lead_skus(lead, family)
     fields = oem_sync.sold_body_fields(row) if row else None
+    kept = bool(row and oem_sync.confirmed_chassis_stands(lead, row))
     adopt = bool(
         row and fields and oem_sync.can_adopt_sold_body(lead, row)
         and oem_sync.lead_allows_body_adopt(lead)
+        and not kept
     )
     if adopt:
         extra = oem_sync.sold_body_adopt_patch(lead, row, adopt=True)
@@ -1272,6 +1274,51 @@ async def _sold_body_updates_for_lead(lead):
         if units:
             patch["units"] = units
     return patch, adopt
+
+
+_SOLD_UNIT_LABEL_KEYS = (
+    "model", "variant", "bodyType", "oemSkuKey",
+    "oemBilledModel", "oemBilledVariant", "oemBilledBodyType",
+    "availableModel", "availableVariant", "availableBodyType",
+    "originalModel", "originalVariant",
+    "oemSkuConfirmed", "oemSkuNeedsReview", "oemSkuReviewReason",
+)
+
+
+def _overlay_sold_labels(stamped, sold_units):
+    """Copy OEM names and labels onto delivery units. Leave delivery flags alone.
+
+    The sold-body patch is built before Mark Delivered stamps the selected
+    unit. Replacing the unit list with that patch drops delivered.
+    """
+    by_ch = {}
+    by_sno = {}
+    for i, unit in enumerate(sold_units or []):
+        if not isinstance(unit, dict):
+            continue
+        ch = oem_sync._norm_chassis(unit.get("chassisNumber"))
+        if ch:
+            by_ch[ch] = unit
+        try:
+            by_sno[int(unit.get("sno") or i + 1)] = unit
+        except (TypeError, ValueError):
+            continue
+    out = []
+    for i, rec in enumerate(stamped or []):
+        rec = dict(rec or {})
+        ch = oem_sync._norm_chassis(rec.get("chassisNumber"))
+        src = by_ch.get(ch) if ch else None
+        if src is None:
+            try:
+                src = by_sno.get(int(rec.get("sno") or i + 1))
+            except (TypeError, ValueError):
+                src = None
+        if src:
+            for key in _SOLD_UNIT_LABEL_KEYS:
+                if src.get(key) not in (None, ""):
+                    rec[key] = src[key]
+        out.append(rec)
+    return out
 
 
 def _merge_delivery_units(existing, sold_units, lead=None):
@@ -7473,7 +7520,8 @@ async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)
 
     The variant must exist in Price Master for that model, so a file can never be
     "Storm + Maxx (FB)". Price is refreshed from Price Master and the scheme
-    realigned (same cascade as any vehicle change).
+    realigned (same cascade as any vehicle change). The save confirms the body,
+    so a later OEM sync keeps it and only records the invoice body as a label.
     """
     role = str((act or {}).get("role") or "").strip().lower()
     if role != "owner" and not authmod.is_showroom_admin(act):
@@ -7483,6 +7531,7 @@ async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)
     if not model or not variant:
         raise HTTPException(422, "Pick both a model and a variant.")
     lead = await get_lead_or_404(lead_id)
+    _require_mutable_lead(lead, "model / variant", act)
     if oem_sync.is_same_order_pack(lead):
         raise HTTPException(422, "This order has several vehicles — change the model and variant on each unit.")
     row = await _price_master_row(model, variant)
@@ -7490,9 +7539,35 @@ async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)
         raise HTTPException(422, f"{model} · {variant} is not in Price Master. Pick a variant from the list.")
     model = row.get("model") or model
     variant = row.get("variant") or variant
-    if model == (lead.get("interestedModel") or "") and variant == (lead.get("variant") or ""):
-        return clean(lead)
-    return await update_lead(lead_id, LeadUpdateIn(interestedModel=model, variant=variant), act, None)
+    body_type = str((oem_cat.resolve_sku(model, variant).body_type
+                     if oem_cat.resolve_sku(model, variant) else "") or "")
+    same = (
+        model == (lead.get("interestedModel") or "")
+        and variant == (lead.get("variant") or "")
+    )
+    if not same:
+        await update_lead(lead_id, LeadUpdateIn(interestedModel=model, variant=variant), act, None)
+    fresh = await db.leads.find_one({"leadId": lead_id}) or lead
+    units = [dict(u) for u in (fresh.get("units") or []) if isinstance(u, dict)]
+    if units:
+        units[0]["model"] = units[0].get("model") or model
+        units[0]["variant"] = variant
+        units[0]["oemSkuConfirmed"] = True
+        units[0]["oemSkuNeedsReview"] = False
+        units[0]["oemSkuReviewReason"] = ""
+        if body_type:
+            units[0]["bodyType"] = body_type
+    confirm = {
+        "oemSkuConfirmed": True,
+        "oemSkuNeedsReview": False,
+        "oemSkuReviewReason": "",
+        **({"units": units} if units else {}),
+    }
+    if body_type:
+        confirm["bodyType"] = body_type
+    await db.leads.update_one({"leadId": lead_id}, {"$set": confirm})
+    fresh = await db.leads.find_one({"leadId": lead_id}) or fresh
+    return clean(fresh)
 
 
 @api.put("/leads/{lead_id}/units/{unit_sno}/vehicle")
@@ -7501,7 +7576,9 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
 
     Unit 1 also updates the file header, which the register shows. The new
     variant brings its Price Master price. The previous vehicle's Cx Demand
-    does not stay locked on the new one.
+    does not stay locked on the new one. A unit the customer has already
+    paid in full keeps that price and only the name changes. The save
+    confirms the body, so OEM sync will not put the invoice body back.
     """
     role = str((act or {}).get("role") or "").strip().lower()
     if role == "executive":
@@ -7537,30 +7614,45 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
     same_name = model == old_model and variant == old_variant
     same_price = abs(ce.num(rec.get("exShowroom")) - ce.num(master_ps.get("exShowroom"))) < 1
     price_locked = bool(rec.get("useDealPrice")) or ce.num(rec.get("cxDemand")) > 0
+    settled = _unit_settled(lead, rec)
     # Saving the variant already on the unit still replaces a price left
-    # behind from the previous vehicle.
-    if same_name and same_price and not price_locked:
+    # behind from the previous vehicle. A settled unit keeps the price the
+    # customer already paid.
+    keep_price = settled or (same_name and same_price and not price_locked)
+    if keep_price and same_name and rec.get("oemSkuConfirmed"):
         return _lead_for_viewer(clean(lead), act)
     rec["model"] = model
     rec["variant"] = variant
+    body_type = str((oem_cat.resolve_sku(model, variant).body_type
+                     if oem_cat.resolve_sku(model, variant) else "") or "")
+    if body_type:
+        rec["bodyType"] = body_type
     rec["sno"] = idx + 1
     rec["oemSkuConfirmed"] = True
     rec["oemSkuNeedsReview"] = False
-    rec.update(master_ps)
-    # The agreed price belonged to the previous variant. Drop it so the new
-    # vehicle is priced from Price Master.
-    rec.pop("cxDemand", None)
-    rec["useDealPrice"] = False
-    rec.pop("additionalDiscount", None)
-    rec.pop("extraIncomeFromCustomer", None)
+    rec["oemSkuReviewReason"] = ""
+    if settled and ce.num(rec.get("cxDemand")) <= 0:
+        paid = ce.num(rec.get("customerPayable")) or ce.num(rec.get("totalReceived"))
+        if paid > 0:
+            rec["cxDemand"] = ce.round2(paid)
+            rec["budget"] = rec["cxDemand"]
+            rec["useDealPrice"] = True
     lead_scheme = {}
-    if _unit_has_scheme(lead, rec, idx):
-        scheme_rows = await get_scheme_rows()
-        source = rec if _has_persisted_scheme(rec) else lead
-        aligned = _scheme_realign_patch(source, model, variant, as_of, scheme_rows)
-        rec.update(aligned)
-        if idx == 0 and _has_persisted_scheme(lead):
-            lead_scheme = _scheme_realign_patch(lead, model, variant, as_of, scheme_rows)
+    if not keep_price:
+        rec.update(master_ps)
+        # The agreed price belonged to the previous variant. Drop it so the new
+        # vehicle is priced from Price Master.
+        rec.pop("cxDemand", None)
+        rec["useDealPrice"] = False
+        rec.pop("additionalDiscount", None)
+        rec.pop("extraIncomeFromCustomer", None)
+        if _unit_has_scheme(lead, rec, idx):
+            scheme_rows = await get_scheme_rows()
+            source = rec if _has_persisted_scheme(rec) else lead
+            aligned = _scheme_realign_patch(source, model, variant, as_of, scheme_rows)
+            rec.update(aligned)
+            if idx == 0 and _has_persisted_scheme(lead):
+                lead_scheme = _scheme_realign_patch(lead, model, variant, as_of, scheme_rows)
     units[idx] = rec
     patch = {
         "units": units,
@@ -7572,10 +7664,16 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
     if idx == 0:
         patch["interestedModel"] = model
         patch["variant"] = variant
-        patch.update(lead_scheme)
-        # Unit 1's header price moves with this variant. The old ex-showroom
-        # used to stay on the lead and a later price save copied it back.
-        patch.update(master_ps)
+        patch["oemSkuConfirmed"] = True
+        patch["oemSkuNeedsReview"] = False
+        patch["oemSkuReviewReason"] = ""
+        if body_type:
+            patch["bodyType"] = body_type
+        if not keep_price:
+            patch.update(lead_scheme)
+            # Unit 1's header price moves with this variant. The old ex-showroom
+            # used to stay on the lead and a later price save copied it back.
+            patch.update(master_ps)
     await db.leads.update_one({"leadId": lead_id}, {"$set": patch})
     await recompute_lead(lead_id)
     await write_audit(
@@ -14096,7 +14194,10 @@ async def mark_delivery(lead_id: str, body: DeliveryIn, act=Depends(actor), _des
         lead_updates["insuranceAgentId"] = _agent["agentId"]
         lead_updates["insuranceAgentName"] = _agent.get("agentName", "")
     if sold_body_patch:
-        lead_updates.update(sold_body_patch)
+        sold_units = sold_body_patch.get("units")
+        lead_updates.update({k: v for k, v in sold_body_patch.items() if k != "units"})
+        if sold_units and lead_updates.get("units"):
+            lead_updates["units"] = _overlay_sold_labels(lead_updates["units"], sold_units)
     if file_delivered:
         lead_updates.update({"deliveryStatus": "Delivered", "currentStatus": "Delivered",
                              "deliveryDate": body.deliveryDate or today()})

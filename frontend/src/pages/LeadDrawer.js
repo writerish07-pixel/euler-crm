@@ -1515,9 +1515,11 @@ export function Overview({ lead, c, actions = {}, onSaved, documents = [], maste
             : (
               <div className="space-y-0.5">
                 {(lead.oemBodyChanges || []).map((n) => (
-                  <p key={n.chassis} className="text-sm text-amber-900" data-testid={`oem-body-change-${n.chassis}`}>
+                  <p key={`${n.kind || "coulson"}-${n.chassis}`} className="text-sm text-amber-900" data-testid={n.kind === "dealer" ? `oem-body-dealer-${n.chassis}` : `oem-body-change-${n.chassis}`}>
                     {(lead.oemBodyChanges || []).length > 1 ? `Unit ${n.unitSno}: ` : ""}
-                    Built {n.builtBody} → billed {n.billedBody} (body changed on Coulson)
+                    {n.kind === "dealer"
+                      ? `OEM billed ${n.oemBody}, billed to customer as ${n.customerBody}`
+                      : `Built ${n.builtBody} → billed ${n.billedBody} (body changed on Coulson)`}
                   </p>
                 ))}
               </div>

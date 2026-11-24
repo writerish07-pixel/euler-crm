@@ -1052,6 +1052,54 @@ def test_stale_sibling_billed_label_follows_that_chassis():
     assert header.get("variant", "Maxx (DV220)") == "Maxx (DV220)"
 
 
+def test_confirmed_dealer_body_survives_the_oem_invoice():
+    """FB on the OEM invoice does not replace a DV the dealer already confirmed.
+
+    An unconfirmed sibling still takes its own invoice body. The invoice is
+    kept as the OEM billed label, and the confirmed price is not rewritten.
+    """
+    lead = {
+        "leadId": "LD-DEALER-DV",
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "oemSkuConfirmed": True, "chassisNumber": "MD9DEALERDV",
+        "sameOrderMultiUnit": True, "exShowroom": 790000,
+        "units": [
+            {"sno": 1, "chassisNumber": "MD9DEALERDV", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "bodyType": "DV220",
+             "oemSkuConfirmed": True, "exShowroom": 790000},
+            {"sno": 2, "chassisNumber": "MD9OPENFB", "model": "Turbo Max",
+             "variant": "Maxx (DV220)", "exShowroom": 809999},
+        ],
+    }
+    sold = [
+        {"chassis": "MD9DEALERDV", "model": "Turbo Max", "variant": "Maxx (FB)",
+         "oemSkuKey": "turbo.maxx.fb"},
+        {"chassis": "MD9OPENFB", "model": "Turbo Max", "variant": "Maxx (FB)",
+         "oemSkuKey": "turbo.maxx.fb"},
+    ]
+    units = oem_sync.fill_pack_unit_skus(lead, sold)
+    by = {u["chassisNumber"]: u for u in units}
+    assert by["MD9DEALERDV"]["variant"] == "Maxx (DV220)"
+    assert by["MD9DEALERDV"]["bodyType"] == "DV220"
+    assert by["MD9DEALERDV"]["exShowroom"] == 790000
+    assert by["MD9DEALERDV"]["oemSkuConfirmed"] is True
+    assert by["MD9DEALERDV"]["oemBilledVariant"] == "Maxx (FB)"
+    assert by["MD9OPENFB"]["variant"] == "Maxx (FB)"
+    header = oem_sync.fill_lead_skus(lead, sold)
+    assert header.get("variant", "Maxx (DV220)") == "Maxx (DV220)"
+    assert header.get("interestedModel", "Turbo Max") == "Turbo Max"
+    assert header.get("oemBilledVariant") == "Maxx (FB)"
+    assert header.get("oemBodyMismatch") is not True
+    fields = oem_sync.sold_body_fields(sold[0])
+    adopted = oem_sync.sold_body_adopt_patch(lead, sold[0], adopt=True)
+    assert "variant" not in adopted
+    assert adopted.get("oemBilledVariant") == "Maxx (FB)"
+    assert adopted.get("oemBodyMismatch") is False
+    rewritten = oem_sync.apply_sold_body_to_units(lead["units"], sold[0], fields, adopt=True)
+    assert rewritten[0]["variant"] == "Maxx (DV220)"
+    assert rewritten[0]["oemBilledVariant"] == "Maxx (FB)"
+
+
 @pytest.mark.asyncio
 async def test_sync_replaces_a_stale_header_label_and_leaves_a_blank_one(client):
     """OEM sync loads a projected header. The billed-body label must be in that

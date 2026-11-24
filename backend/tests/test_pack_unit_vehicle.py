@@ -161,8 +161,8 @@ async def test_showroom_admin_can_edit_an_open_unit(client):
 
 
 @pytest.mark.asyncio
-async def test_a_paid_unit_takes_the_new_variant_price(client):
-    """Changing unit 2's variant replaces the price, even when that unit is paid."""
+async def test_a_paid_unit_keeps_its_price_when_the_variant_changes(client):
+    """A pack unit already paid in full changes name and keeps the paid price."""
     lid = await _pack(client, "9813307105")
     before = await server.db.leads.find_one({"leadId": lid})
     units = before["units"]
@@ -182,16 +182,41 @@ async def test_a_paid_unit_takes_the_new_variant_price(client):
     after = await server.db.leads.find_one({"leadId": lid})
     unit2 = after["units"][1]
     assert unit2["variant"] == "Unit Edit C"
-    assert unit2["exShowroom"] == 800000
-    assert unit2["exShowroom"] != old_ex
-    assert unit2["rto"] == 5000
-    assert unit2["insuranceAmount"] == 6000
-    assert unit2.get("useDealPrice") is not True
-    assert unit2.get("cxDemand") in (None, 0, 0.0)
-    assert unit2["customerPayable"] != old_pay
-    assert unit2["customerPayable"] >= 800000
+    assert unit2.get("oemSkuConfirmed") is True
+    assert unit2["exShowroom"] == old_ex
+    assert unit2.get("useDealPrice") is True
+    assert float(unit2.get("cxDemand") or 0) == float(old_pay)
+    assert abs(float(unit2.get("customerPayable") or 0) - float(old_pay)) < 1
     assert unit2["chassisNumber"] == "MD9UNIT2KEEP"
     assert after["units"][0].get("exShowroom") == before["units"][0].get("exShowroom")
+    assert after["units"][0]["variant"] == before["units"][0]["variant"]
+
+
+@pytest.mark.asyncio
+async def test_a_paid_unit_without_cx_demand_keeps_its_payable(client):
+    """Receipts already cover the unit. A name change must not inherit a sibling discount."""
+    lid = await _pack(client, "9813307109")
+    before = await server.db.leads.find_one({"leadId": lid})
+    units = before["units"]
+    old_pay = float(units[1].get("customerPayable") or units[1].get("exShowroom") or 0)
+    assert old_pay > 0
+    units[0]["additionalDiscount"] = 5000
+    units[1]["cxDemand"] = 0
+    units[1]["useDealPrice"] = False
+    units[1].pop("cxDemand", None)
+    units[1]["customerPayable"] = old_pay
+    units[1]["totalReceived"] = old_pay
+    units[1]["customerOutstanding"] = 0
+    units[1]["additionalDiscount"] = 0
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"units": units}})
+    r = await client.put(f"/api/leads/{lid}/units/2/vehicle", json={
+        "model": "Turbo Max", "variant": "Unit Edit A",
+    })
+    assert r.status_code == 200, r.text
+    unit2 = (await server.db.leads.find_one({"leadId": lid}))["units"][1]
+    assert unit2["variant"] == "Unit Edit A"
+    assert unit2.get("useDealPrice") is True
+    assert abs(float(unit2.get("customerPayable") or 0) - old_pay) < 1
 
 
 @pytest.mark.asyncio

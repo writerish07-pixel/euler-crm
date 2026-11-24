@@ -60,6 +60,57 @@ def test_no_note_for_a_wrong_model_chassis_or_no_sold_row():
     assert oem_sync.body_change_notes(_lead(), []) == []
 
 
+def test_confirmed_dealer_body_is_labelled_against_the_oem_invoice():
+    """OEM billed FB, the dealer confirmed DV. The banner says so. It does not
+    describe a Coulson conversion that did not happen."""
+    lead = _lead(
+        variant="Maxx (DV220)", oemSkuConfirmed=True,
+        units=[{
+            "sno": 1, "chassisNumber": CHASSIS, "model": "Turbo Max",
+            "variant": "Maxx (DV220)", "bodyType": "DV220", "oemSkuConfirmed": True,
+        }],
+    )
+    sold = {**CONVERTED, "variant": "Maxx (FB)", "loadBody": "FB", "updatedLoadBody": "FB",
+            "oemSkuKey": "turbo.maxx.fb"}
+    notes = oem_sync.body_change_notes(lead, [sold])
+    dealer = [n for n in notes if n.get("kind") == "dealer"]
+    assert len(dealer) == 1
+    assert dealer[0]["oemBody"] == "FB"
+    assert dealer[0]["customerBody"] == "DV220"
+    assert [n for n in notes if n.get("kind") == "coulson"] == []
+
+
+def test_confirmed_note_follows_the_saved_variant_when_body_type_is_stale():
+    lead = _lead(
+        variant="Maxx (DV220)", bodyType="FB", oemSkuConfirmed=True,
+        units=[{
+            "sno": 1, "chassisNumber": CHASSIS, "model": "Turbo Max",
+            "variant": "Maxx (DV220)", "bodyType": "FB", "oemSkuConfirmed": True,
+        }],
+    )
+    sold = {**CONVERTED, "variant": "Maxx (FB)", "loadBody": "FB", "updatedLoadBody": "FB",
+            "oemSkuKey": "turbo.maxx.fb"}
+    dealer = [n for n in oem_sync.body_change_notes(lead, [sold]) if n.get("kind") == "dealer"]
+    assert len(dealer) == 1
+    assert dealer[0]["customerBody"] == "DV220"
+    assert dealer[0]["oemBody"] == "FB"
+
+
+def test_delivery_label_overlay_keeps_the_delivered_flag():
+    stamped = [{
+        "sno": 1, "chassisNumber": CHASSIS, "variant": "Maxx (DV220)",
+        "delivered": "Yes", "deliveryStatus": "Delivered",
+    }]
+    sold_units = [{
+        "sno": 1, "chassisNumber": CHASSIS, "variant": "Maxx (DV220)",
+        "oemBilledVariant": "Maxx (FB)", "delivered": "", "deliveryStatus": "",
+    }]
+    out = server._overlay_sold_labels(stamped, sold_units)
+    assert out[0]["deliveryStatus"] == "Delivered"
+    assert out[0]["delivered"] == "Yes"
+    assert out[0]["oemBilledVariant"] == "Maxx (FB)"
+
+
 def test_pack_notes_are_per_unit():
     other = {**CONVERTED, "chassis": "MD9EVDAD26K0BODY3", "updatedLoadBody": ""}
     pack = _lead(sameOrderMultiUnit=True, units=[
@@ -121,6 +172,57 @@ async def test_360_carries_the_live_body_change(client):
 
 
 @pytest.mark.asyncio
+async def test_confirmed_body_sync_does_not_reprice(client):
+    lid = await _new_lead(client, "9024111006", variant="Maxx (DV220)")
+    chassis = "MD9KEEPPRICE1"
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "chassisNumber": chassis, "oemSkuConfirmed": True,
+        "interestedModel": "Turbo Max", "variant": "Maxx (DV220)",
+        "insuranceAmount": 12345, "currentStatus": "Booked",
+        "units": [{
+            "sno": 1, "chassisNumber": chassis, "model": "Turbo Max",
+            "variant": "Maxx (DV220)", "oemSkuConfirmed": True,
+            "insuranceAmount": 12345,
+        }],
+    }})
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": "9024111006", "model": "Turbo Max",
+        "variant": "Maxx (FB)", "oemSkuKey": "turbo.maxx.fb",
+        "coulsonStatus": "SOLD", "customerName": "Vehicle Edit 1006",
+    })
+    called = []
+
+    async def _adopt(lead_id):
+        called.append(lead_id)
+
+    await oem_sync.apply_sold_vehicle_ids_to_leads(
+        server.db, on_body_adopted=_adopt)
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["variant"] == "Maxx (DV220)"
+    assert float(after.get("insuranceAmount") or 0) == 12345
+    assert lid not in called
+
+
+@pytest.mark.asyncio
+async def test_same_variant_save_stays_locked_after_delivery(client):
+    lid = await _new_lead(client, "9024111007")
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "deliveryStatus": "Delivered", "currentStatus": "Delivered",
+    }})
+    who = await _login_as("tl", "tl-lock@euler.com")
+    try:
+        r = await who.put(f"/api/leads/{lid}/vehicle", json={
+            "model": "Turbo Max", "variant": "Maxx (PV)",
+        })
+        assert r.status_code == 409, r.text
+    finally:
+        await who.aclose()
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after.get("oemSkuConfirmed") is not True
+
+
+@pytest.mark.asyncio
 async def test_vehicle_change_reprices_and_moves_the_unit(client):
     lid = await _new_lead(client, "9024111003")
     before = await server.db.leads.find_one({"leadId": lid})
@@ -132,6 +234,7 @@ async def test_vehicle_change_reprices_and_moves_the_unit(client):
     assert r.status_code == 200, r.text
     after = await server.db.leads.find_one({"leadId": lid})
     assert after["variant"] == other["variant"]
+    assert after.get("oemSkuConfirmed") is True
     assert after["exShowroom"] != before["exShowroom"]          # auto-repriced
     preview = (await client.get(f"/api/leads/{lid}/price-preview")).json()
     assert preview["variant"] == other["variant"]              # unit 1 moved too
