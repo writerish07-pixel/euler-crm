@@ -218,6 +218,8 @@ async def test_mocked_coulson_sync(client, monkeypatch):
     inv = (await client.get("/api/inventory")).json()
     assert len(inv) == 1
     assert inv[0]["chassis"] == "MD9TESTCHASSIS0001"
+    assert inv[0]["emch"] == "EMCS-1"
+    assert inv[0]["registrationNumber"] == ""
     assert inv[0]["motorNumber"] == "MTR-77821"
     assert inv[0]["batteryNumber"] == "BAT-44190"
     assert inv[0]["model"] == "Turbo Max"
@@ -324,6 +326,13 @@ def test_inventory_keeps_registration_separate_from_emch():
     }, None, 0)
     assert doc["emch"] == "EMCS-1"
     assert doc["registrationNumber"] == "RJ14AB1234"
+    repeated = oem_sync._inventory_doc({
+        "chassis": "MD9TESTCHASSIS0001",
+        "emch": "EMCS-1",
+        "registration_number": "EMCS-1",
+    }, None, 0)
+    assert repeated["emch"] == "EMCS-1"
+    assert repeated["registrationNumber"] == ""
 
 
 def test_basic_auth_matches_browser_btoa():

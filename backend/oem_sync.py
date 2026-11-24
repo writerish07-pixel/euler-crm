@@ -269,16 +269,23 @@ async def _record_sync(db, ok, error="", extra=None):
 
 
 def _inventory_doc(vehicle, sku, price):
+    emch = str(
+        vehicle.get("emch") or vehicle.get("registration_number")
+        or vehicle.get("registration_no") or vehicle.get("registrationNo") or ""
+    ).strip()
+    registration = str(
+        vehicle.get("registration_number") or vehicle.get("registration_no")
+        or vehicle.get("registrationNo") or ""
+    ).strip()
+    # Coulson often copies the EMCH into registration_number. That is not a plate.
+    if registration.lower() == emch.lower():
+        registration = ""
     return {
         "chassis": vehicle_chassis(vehicle) or vehicle.get("chassis") or "",
         "motorNumber": vehicle_motor(vehicle),
         "batteryNumber": vehicle_battery(vehicle),
-        "emch": vehicle.get("emch") or vehicle.get("registration_number")
-                or vehicle.get("registration_no") or vehicle.get("registrationNo") or "",
-        "registrationNumber": str(
-            vehicle.get("registration_number") or vehicle.get("registration_no")
-            or vehicle.get("registrationNo") or ""
-        ).strip(),
+        "emch": emch,
+        "registrationNumber": registration,
         "colour": vehicle.get("colour") or "",
         "model": sku.crm_model if sku else vehicle_model(vehicle),
         "variant": sku.crm_variant if sku else vehicle_variant(vehicle),
