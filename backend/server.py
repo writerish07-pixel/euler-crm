@@ -9305,7 +9305,8 @@ async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(c
 
     OEM billed date picks the list (uplift, asOf). A file that already has an
     ex-showroom keeps that figure when the drawer opens — OEM sync must not
-    rewrite older billed vehicles to today's master.
+    rewrite older billed vehicles to today's master. ASM / RM field view stays
+    pipeline-only: no Price Structure or stored deal prices.
     """
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
@@ -9313,6 +9314,13 @@ async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(c
     chosen = units[idx] if units else {}
     model = chosen.get("model") or lead.get("interestedModel")
     variant = chosen.get("variant") or lead.get("variant")
+    role = ((user or {}).get("role") or "").strip().lower()
+    if role in authmod.FIELD_ROLES:
+        return {
+            "found": False, "fieldView": True,
+            "model": model, "variant": variant,
+            "message": "Price Structure is not available in field view.",
+        }
     row = await _price_master_row(model, variant)
     if not row:
         return {"found": False, "model": model, "variant": variant,
@@ -9861,7 +9869,10 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     payload["priceStructureSaved"] = True
     payload["insurance"] = ce.num(payload.get("insuranceAmount"))
     pack = oem_sync.is_same_order_pack(lead)
-    booked_price = idx == 0 and (_is_booked_lead(lead) or _is_delivered_lead(lead))
+    lead_booked = _is_booked_lead(lead) or _is_delivered_lead(lead)
+    # Same booked-price rule for every pack unit — not only Unit 1. A charge
+    # edit (RTO / insurance) must not write today's master over a later unit.
+    booked_price = lead_booked and (idx == 0 or pack)
     if booked_price and not pack and ce.num(lead.get("exShowroom")) > 0:
         # A one-vehicle file keeps the ex-showroom it was booked on.
         payload["exShowroom"] = ce.num(lead.get("exShowroom"))
@@ -9869,7 +9880,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
         # Keep this variant's booked ex-showroom, including after a later list
         # change. Replace it only when the saved figure is another variant's
         # price — that is how a DV unit was left on the PV price.
-        stored = ce.num(chosen.get("exShowroom"))
+        stored = _saved_ex_for_preview(lead, chosen, idx)
         as_of_price = _lead_price_as_of(lead, unit=chosen)
         other_variant = await _stored_ex_is_another_variant(
             stored, row.get("model"), row.get("variant"), as_of_price)

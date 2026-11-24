@@ -173,3 +173,96 @@ async def test_pack_unit_without_its_own_ex_does_not_take_unit1_price(client):
     assert u2["asOf"] == "2026-08-31"
     assert u2.get("keptSavedEx") is False
     assert abs(float(u2["priceStructure"]["exShowroom"]) - OEM_MAXX_PV) > 1
+
+
+@pytest.mark.asyncio
+async def test_pack_unit2_charge_edit_keeps_saved_ex_after_oem_hike(client):
+    """Saving insurance on unit 2 must not write today's master or drop Cx Demand."""
+    created = await client.post("/api/leads", json={
+        "customerName": "Pack Charge", "mobile": "9535010005",
+        "interestedModel": TURBO[0], "variant": TURBO[1], "executive": "Amit",
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": TURBO[0], "variant": TURBO[1]},
+            {"sno": 2, "model": TURBO[0], "variant": TURBO[1]},
+        ],
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "currentStatus": "Booked",
+        "bookingDate": "2026-08-20",
+        "soldDate": "2026-08-31",
+        "exShowroom": OEM_MAXX_PV,
+        "priceStructureSaved": True,
+        "sameOrderMultiUnit": True,
+        "vehicleCount": 2,
+        "units": [
+            {
+                "sno": 1, "model": TURBO[0], "variant": TURBO[1],
+                "soldDate": "2026-08-31", "exShowroom": OEM_MAXX_PV,
+                "priceStructureSaved": True, "rto": 5000, "insuranceAmount": 8000,
+                "cxDemand": 783000, "useDealPrice": True, "customerPayable": 783000,
+            },
+            {
+                "sno": 2, "model": TURBO[0], "variant": TURBO[1],
+                "soldDate": "2026-08-31", "exShowroom": OEM_MAXX_PV,
+                "priceStructureSaved": True, "rto": 5000, "insuranceAmount": 8000,
+                "cxDemand": 783000, "useDealPrice": True, "customerPayable": 783000,
+            },
+        ],
+    }})
+    await server.db.price_master.update_one(
+        {"model": TURBO[0], "variant": TURBO[1]},
+        {"$set": {
+            "exShowroom": OEM_MAXX_PV + 15000,
+            "oemSyncedAt": "2026-11-22T05:36:53+00:00",
+        }},
+    )
+    preview = (await client.get(
+        f"/api/leads/{lid}/price-preview", params={"unit": 2})).json()
+    assert preview["keptSavedEx"] is True
+    assert preview["priceStructure"]["exShowroom"] == OEM_MAXX_PV
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": OEM_MAXX_PV, "rto": 5000, "insuranceAmount": 9000, "unitSno": 2,
+    })
+    assert saved.status_code == 200, saved.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    u2 = after["units"][1]
+    assert u2["exShowroom"] == OEM_MAXX_PV
+    assert u2["insuranceAmount"] == 9000
+    assert u2.get("useDealPrice") is True
+    assert abs(float(u2.get("cxDemand") or 0) - 783000) < 1
+
+
+@pytest.mark.asyncio
+async def test_field_role_price_preview_hides_deal_prices(client):
+    """ASM / RM field view must not receive stored deal commercials."""
+    lid = await _lead(client, "Field Hide", "9535010006")
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "bookingDate": "2026-08-20", "exShowroom": OEM_MAXX_PV,
+        "priceStructureSaved": True,
+    }})
+    await server.db.users.update_one(
+        {"email": "asm@euler.com"},
+        {"$set": {
+            "email": "asm@euler.com", "role": "ASM", "name": "ASM",
+            "passwordHash": (await server.db.users.find_one(
+                {"email": "owner@euler.com"}))["passwordHash"],
+            "active": True,
+        }},
+        upsert=True,
+    )
+    login = await client.post("/api/auth/login", json={
+        "email": "asm@euler.com", "password": "euler@123"})
+    assert login.status_code == 200, login.text
+    token = login.json()["token"]
+    r = await client.get(
+        f"/api/leads/{lid}/price-preview",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("found") is False
+    assert body.get("fieldView") is True
+    assert "priceStructure" not in body or not body.get("priceStructure")
