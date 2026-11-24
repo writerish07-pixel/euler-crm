@@ -333,6 +333,14 @@ def test_inventory_keeps_registration_separate_from_emch():
     }, None, 0)
     assert repeated["emch"] == "EMCS-1"
     assert repeated["registrationNumber"] == ""
+    for key in ("regNo", "reg_no", "numberPlate", "number_plate", "vehicle_number"):
+        aliased = oem_sync._inventory_doc({
+            "chassis": "MD9TESTCHASSIS0001",
+            "emch": "EMCS-1",
+            key: "RJ14CD5678",
+        }, None, 0)
+        assert aliased["registrationNumber"] == "RJ14CD5678", key
+        assert aliased["emch"] == "EMCS-1"
 
 
 def test_basic_auth_matches_browser_btoa():

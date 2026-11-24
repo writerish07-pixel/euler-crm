@@ -273,10 +273,10 @@ def _inventory_doc(vehicle, sku, price):
         vehicle.get("emch") or vehicle.get("registration_number")
         or vehicle.get("registration_no") or vehicle.get("registrationNo") or ""
     ).strip()
-    registration = str(
-        vehicle.get("registration_number") or vehicle.get("registration_no")
-        or vehicle.get("registrationNo") or ""
-    ).strip()
+    registration = _first_str(vehicle, (
+        "registration_number", "registration_no", "registrationNo",
+        "regNo", "reg_no", "number_plate", "numberPlate", "vehicle_number",
+    ))
     # Coulson often copies the EMCH into registration_number. That is not a plate.
     if registration.lower() == emch.lower():
         registration = ""
