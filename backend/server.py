@@ -9274,11 +9274,32 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
     return await recompute_lead(lead_id)
 
 
+def _saved_ex_for_preview(lead, chosen=None, idx=0):
+    """Ex-showroom already on this file. Opening the drawer must not replace it.
+
+    Price Master is overwritten by each OEM sync. An August booking that stored
+    ₹7,70,000 would otherwise flip to today's list when Price Structure loads.
+    """
+    if isinstance(chosen, dict):
+        stored = ce.num(chosen.get("exShowroom"))
+        if stored > 0:
+            return ce.round2(stored)
+        if int(idx or 0) == 0:
+            stored = ce.num((lead or {}).get("exShowroom"))
+            if stored > 0:
+                return ce.round2(stored)
+        return 0.0
+    return ce.round2(ce.num((lead or {}).get("exShowroom")))
+
+
 @api.get("/leads/{lead_id}/price-preview")
 async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(current_user)):
-    """What Price Master resolves to for this lead's model/variant, before booking.
-    Lets the UI show the real commercial structure (or a precise 'not found')
-    instead of discovering it only at booking time."""
+    """Price Structure for this lead's model/variant.
+
+    Empty files take today's Price Master. A file that already has an
+    ex-showroom keeps that figure — OEM sync must not rewrite older bookings
+    when the drawer opens.
+    """
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
     idx, units = _resolve_unit_index(lead, unit)
@@ -9291,9 +9312,20 @@ async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(c
                 "message": f"Price Master entry not found for: Model = {model or '(none)'}, "
                            f"Variant = {variant or '(none)'}"}
     as_of = _lead_price_as_of(lead, unit=chosen)
-    return {"found": True, "model": model, "variant": variant,
-            "priceId": row.get("priceId"), "asOf": as_of,
-            "priceStructure": _price_structure_from_master(row, as_of)}
+    structure = _price_structure_from_master(row, as_of)
+    master_ex = ce.round2(ce.num(structure.get("exShowroom")))
+    saved_ex = _saved_ex_for_preview(lead, chosen, idx)
+    kept = saved_ex > 0
+    if kept:
+        structure = dict(structure)
+        structure["exShowroom"] = saved_ex
+    return {
+        "found": True, "model": model, "variant": variant,
+        "priceId": row.get("priceId"), "asOf": as_of,
+        "priceStructure": structure,
+        "masterExShowroom": master_ex,
+        "keptSavedEx": kept,
+    }
 
 
 class GstinIn(BaseModel):

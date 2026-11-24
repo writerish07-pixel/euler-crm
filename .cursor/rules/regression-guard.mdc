@@ -19,10 +19,12 @@ These rules are the ones recent fixes kept breaking. Check them before changing 
 
 ## Price
 
+- Opening a lead or Price Structure must not replace an ex-showroom already on the file with today's Price Master. August (and other older) bookings keep the price stored on the lead after OEM sync updates the master list.
 - A pack unit already paid in full keeps that payable when only the body name changes, including when Cx Demand was not already locked.
 - An unpaid unit takes the new variant's Price Master price, and the previous Cx Demand does not stay on it.
 - A lower RTO or insurance does not reduce Gross Vehicle Cost while a customer price is locked.
 - A scheme amount changes the price only after someone selects that scheme.
+- Turbo list uplift applies from 1 Sep 2026 only when Price Master has never been OEM-synced. Synced rows are the OEM invoice base.
 
 ## OEM sync
 

@@ -98,3 +98,27 @@ async def test_september_booking_adds_uplift(client):
     assert lead["exShowroom"] == OEM_MAXX_PV + UPLIFT
     preview = (await client.get(f"/api/leads/{lid}/price-preview")).json()
     assert preview["priceStructure"]["exShowroom"] == OEM_MAXX_PV + UPLIFT
+
+
+@pytest.mark.asyncio
+async def test_opening_an_august_lead_keeps_the_saved_price_after_oem_sync(client):
+    """Price Master is overwritten by Coulson. Opening Price Structure must not."""
+    lid = await _lead(client, "Aug Keep", "9535010003")
+    booked = await client.post(f"/api/leads/{lid}/convert-booking", json={
+        "bookingDate": "2026-08-20", "bookingAmount": 0})
+    assert booked.status_code == 200, booked.text
+    before = await server.db.leads.find_one({"leadId": lid})
+    assert before["exShowroom"] == OEM_MAXX_PV
+    await server.db.price_master.update_one(
+        {"model": TURBO[0], "variant": TURBO[1]},
+        {"$set": {
+            "exShowroom": OEM_MAXX_PV + 15000,
+            "oemSyncedAt": "2026-11-22T05:36:53+00:00",
+        }},
+    )
+    preview = (await client.get(f"/api/leads/{lid}/price-preview")).json()
+    assert preview["priceStructure"]["exShowroom"] == OEM_MAXX_PV
+    assert preview.get("keptSavedEx") is True
+    assert preview.get("masterExShowroom") == OEM_MAXX_PV + 15000
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["exShowroom"] == OEM_MAXX_PV
