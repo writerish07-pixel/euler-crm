@@ -585,6 +585,21 @@ def fetch_inventory_by_status(token: str, vehicle_status: str, limit=INVENTORY_P
     }, limit=limit, meta=meta)
 
 
+def fetch_pdi_pending_sold(token: str, limit=INVENTORY_PAGE, meta=None):
+    """Sold vehicles whose OEM PDI is not done.
+
+    Same query the Coulson dealer page runs for its "Sold, PDI pending" tile
+    (vehicle-inventory/pending-tasks → filter vehicle_status=SOLD,
+    is_pdi_done=false). Read-only.
+    """
+    return _page_rows(token, "vehicle-inventory/transfer", {
+        "view_type": "table",
+        "sort": json.dumps(["created_at", "DESC"]),
+        "vehicle_status": "SOLD",
+        "is_pdi_done": "false",
+    }, limit=limit, meta=meta)
+
+
 def fetch_present_inventory(token: str, limit=INVENTORY_PAGE):
     """Yard stock currently PRESENT at the logged-in dealer."""
     return fetch_inventory_by_status(token, "PRESENT", limit=limit)

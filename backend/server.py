@@ -3323,13 +3323,18 @@ def _staff_safe_nested_shares(obj):
 def _staff_safe_commercials(c):
     if not c:
         return c
-    out = {k: v for k, v in dict(c).items() if k not in OWNER_PNL_COMMERCIAL_KEYS}
+    # Lead-level owner keys can also appear on a commercials snapshot
+    # (oemExtraSupportRetained): drop both sets for staff.
+    out = {k: v for k, v in dict(c).items()
+           if k not in OWNER_PNL_COMMERCIAL_KEYS and k not in OWNER_PNL_LEAD_KEYS}
     extra = out.get("oemExtraSupport")
     if isinstance(extra, dict):
         extra = dict(extra)
         extra.pop("oemExtraSupportRetained", None)
         extra.pop("oemClaimable", None)
         extra.pop("retained", None)
+        # compute_oem_extra_support also returns the retained amount as dealerRetained.
+        extra.pop("dealerRetained", None)
         out["oemExtraSupport"] = extra
     if "schemeAllocation" in out:
         out["schemeAllocation"] = _staff_safe_nested_shares(out["schemeAllocation"])
@@ -8048,6 +8053,11 @@ def _is_todays_synced_list(stored, row, as_of=None):
     """True when the file holds today's Price Master but the billed day wants another list."""
     stored = ce.round2(ce.num(stored))
     if stored <= 0 or not row:
+        return False
+    # Only a Coulson-synced row holds "today's list". On an unsynced catalog row
+    # the raw base is a valid booked price (see _stored_ex_matches_row); treating
+    # it as stale re-priced booked files +₹15,000 on an RTO / insurance edit.
+    if not row.get("oemSyncedAt"):
         return False
     base = ce.round2(ce.num(row.get("exShowroom")))
     selling = ce.round2(ce.num(_turbo_selling_ex(row, as_of)))
@@ -13178,6 +13188,51 @@ def _oem_billing_payload(rows, period):
         "period": getattr(period, "label", "") or "All",
         "repair": {"pairs": [], "safeCount": 0, "reviewCount": 0, "stubCount": 0},
     }
+
+
+@api.get("/oem-pdi-pending", dependencies=[Depends(oem_claim_desk_only)])
+async def list_oem_pdi_pending():
+    """Coulson "Sold, PDI pending": OEM-billed chassis whose PDI is not done.
+
+    Stored by the OEM sync (oem_pdi_pending) and joined to CRM files by
+    chassis, including pack unit chassis. Read-only — nothing is written to
+    Coulson or to the lead.
+    """
+    rows = [clean(r) for r in await db.oem_pdi_pending.find().to_list(None)]
+    leads = await db.leads.find(
+        {},
+        {"_id": 0, "leadId": 1, "customerName": 1, "chassisNumber": 1, "units": 1,
+         "currentStatus": 1, "deliveryStatus": 1, "deliveryDate": 1, "executive": 1,
+         "interestedModel": 1, "variant": 1, "dealCancelled": 1}).to_list(None)
+    by_chassis = {}
+    for lead in leads:
+        for ch in oem_sync.lead_chassis_list(lead):
+            by_chassis.setdefault(ch, lead)
+    out = []
+    counts = {"total": 0, "onLead": 0, "delivered": 0, "notInCrm": 0}
+    for r in rows:
+        lead = by_chassis.get(oem_sync._norm_chassis(r.get("chassis"))) or {}
+        delivered = bool(lead) and (_is_delivered_lead(lead) or
+                                    str(lead.get("currentStatus") or "").lower() == "close won")
+        out.append({
+            **r,
+            "leadId": lead.get("leadId") or "",
+            "customerName": lead.get("customerName") or "",
+            "executive": lead.get("executive") or "",
+            "crmStatus": lead.get("currentStatus") or "",
+            "crmDeliveryDate": lead.get("deliveryDate") or "",
+            "deliveredInCrm": delivered,
+        })
+        counts["total"] += 1
+        if lead:
+            counts["onLead"] += 1
+        else:
+            counts["notInCrm"] += 1
+        if delivered:
+            counts["delivered"] += 1
+    out.sort(key=lambda x: (not x["deliveredInCrm"], str(x.get("soldDate") or "")))
+    return {"rows": out, "counts": counts,
+            "syncedAt": max((r.get("syncedAt") or "" for r in rows), default="")}
 
 
 @api.get("/oem-billing", dependencies=[Depends(oem_claim_desk_only)])
@@ -18460,7 +18515,7 @@ class ManualClaimIn(BaseModel):
 
 @api.post("/claims/manual")
 async def create_manual_claim(body: ManualClaimIn, act=Depends(actor), _money=Depends(money_desk_only)):
-    """Manually record a claim (e.g. OEM incentive received as a claim). Both Owner and staff can add.
+    """Manually record a claim (e.g. OEM incentive received as a claim). Money desk only (owner, Showroom Admin, accounts) since PR #41.
     Appears in the claim register; received amounts are recorded later via /claims/receipt."""
     if body.claimAmount <= 0:
         raise HTTPException(422, "Enter a valid claim amount")

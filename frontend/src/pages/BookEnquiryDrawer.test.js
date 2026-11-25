@@ -16,6 +16,7 @@ const previewState = {
   needsApproval: false,
   additionalDiscount: 0,
   docs: [],
+  priceMissing: false,
 };
 
 jest.mock("sonner", () => ({ toast: { error: jest.fn(), success: jest.fn() } }));
@@ -29,6 +30,9 @@ jest.mock("../lib/api", () => ({
       return Promise.resolve([{ priceId: "p1", variant: "Maxx (PV)", inYard: 1 }]);
     }
     if (path.indexOf("commercial/deal-preview") >= 0) {
+      if (previewState.priceMissing) {
+        return Promise.resolve({ priceFound: false, exShowroom: 0, priceTotal: 0, schemeOffers: [] });
+      }
       return Promise.resolve({
         exShowroom: 785000, rto: 5500, insurance: 19000, priceTotal: 809500,
         netToCx: 809500, priceFound: true,
@@ -65,6 +69,11 @@ jest.mock("../context/AuthContext", () => ({
 jest.mock("../components/CallLink", () => () => null);
 
 import BookEnquiryDrawer, { bookingDealAlreadyApproved } from "./BookEnquiryDrawer";
+
+afterEach(() => {
+  previewState.priceMissing = false;
+  document.body.innerHTML = "";
+});
 
 const SCHEME_LEAD = {
   leadId: "LD26009901",
@@ -205,6 +214,35 @@ test("team leader convert to booking hides OEM scheme offers and pass-on radios"
   expect(drawer.querySelector('[data-testid="deal-oem-scheme"]')).toBeFalsy();
   expect(drawer.querySelector('[data-testid="pass-yes-loyaltyBonus"]')).toBeFalsy();
   expect(drawer.textContent).not.toMatch(/Loyalty Bonus/i);
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("PR #12 guard: no Price Master row keeps Confirm Booking disabled and never posts", async () => {
+  const api = require("../lib/api");
+  api.post.mockClear();
+  mockAuth.isExecutive = true;
+  mockAuth.isTeamLead = false;
+  previewState.priceMissing = true;
+  const { host, root, drawer } = await renderBookDrawer({
+    ...SCHEME_LEAD, variant: "No Such Variant", dealFormat: null,
+  });
+  expect(drawer.querySelector('[data-testid="price-error"]')).toBeTruthy();
+  const btn = drawer.querySelector('[data-testid="confirm-booking-btn"]');
+  expect(btn.disabled).toBe(true);
+  await act(async () => { btn.click(); });
+  expect(api.post).not.toHaveBeenCalled();
+  previewState.priceMissing = false;
+  await act(async () => { root.unmount(); });
+  host.remove();
+});
+
+test("PR #12 guard: a found Price Master row enables Confirm Booking", async () => {
+  mockAuth.isExecutive = true;
+  mockAuth.isTeamLead = false;
+  const { host, root, drawer } = await renderBookDrawer();
+  expect(drawer.querySelector('[data-testid="price-error"]')).toBeFalsy();
+  expect(drawer.querySelector('[data-testid="confirm-booking-btn"]').disabled).toBe(false);
   await act(async () => { root.unmount(); });
   host.remove();
 });
