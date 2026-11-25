@@ -8024,7 +8024,14 @@ def _turbo_selling_ex(row, as_of=None):
     variant = (row or {}).get("variant") or ""
     turbo = _is_turbo_vehicle(model, variant)
     if (row or {}).get("oemSyncedAt"):
-        if turbo and as_of < TURBO_EXSHOWROOM_UPLIFT_FROM:
+        # Peel only when the sync itself is on/after 1 Sep — earlier Coulson
+        # writes already stored the August list and must not be reduced again.
+        synced_on = str(row.get("oemSyncedAt") or "")[:10]
+        if (
+            turbo
+            and as_of < TURBO_EXSHOWROOM_UPLIFT_FROM
+            and synced_on >= TURBO_EXSHOWROOM_UPLIFT_FROM
+        ):
             return ce.round2(max(0.0, base - TURBO_EXSHOWROOM_UPLIFT))
         return base
     if as_of < TURBO_EXSHOWROOM_UPLIFT_FROM or not turbo:

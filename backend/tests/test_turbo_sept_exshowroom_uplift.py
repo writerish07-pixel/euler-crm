@@ -59,8 +59,14 @@ def test_live_oem_sync_skips_turbo_overlay():
         "exShowroom": 785713.33, "oemSyncedAt": "2026-09-04T08:00:00+00:00",
     }
     assert server._turbo_selling_ex(live, "2026-09-04") == 785713.33
-    # August billed day peels the Sept uplift off the synced list.
+    # August billed day peels the Sept uplift off a post-Sept synced list.
     assert server._turbo_selling_ex(live, "2026-08-31") == 785713.33 - UPLIFT
+    # Sync before 1 Sep already stored the August list — do not peel again.
+    aug_sync = {
+        "model": "Turbo Max", "variant": "Maxx (DV220)",
+        "exShowroom": 809999, "oemSyncedAt": "2026-08-20T10:00:00+00:00",
+    }
+    assert server._turbo_selling_ex(aug_sync, "2026-08-31") == 809999
     unsynced = {"model": "Turbo Max", "variant": "Maxx (DV220)", "exShowroom": 809999}
     assert server._turbo_selling_ex(unsynced, "2026-09-04") == 809999 + UPLIFT
     assert server._turbo_selling_ex(unsynced, "2026-08-20") == 809999
