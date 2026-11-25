@@ -37,3 +37,46 @@ These rules are the ones recent fixes kept breaking. Check them before changing 
 - Chassis, invoice, and plate still come from Coulson for the chassis on the file.
 - A different model family is not written on as a body change.
 - After the whole file is delivered, the working variant stays until someone chooses Use billed body + price.
+
+- `_is_todays_synced_list` is true only for a Coulson-synced row (`oemSyncedAt`). On an unsynced catalog row the raw base is a valid booked price. (Regressed by PR #307, restored; guard: `test_deal_pass_meet_cx.py::test_pack_rto_insurance_cut_shrinks_additional_not_payable`, `regression_claude/test_approved_invariants.py::test_rto_edit_never_moves_saved_ex_on_unsynced_turbo_row`.)
+
+## Booking and Price Master (PR #11, #12, #13)
+
+- Booking needs a Price Master row; the API answers 422 otherwise and the lead stays New.
+- The Convert to Booking drawer keeps Confirm disabled while the price preview loads and when Price Master has no row. (Lost in PR #215 `2592d1e`, restored; guard: `frontend/src/pages/BookEnquiryDrawer.test.js` "PR #12 guard" tests.)
+- A booked file keeps its booked price when Price Master changes later.
+
+## Money
+
+- Customer receipt: amount > 0; above Customer Payable → 422 unless `allowExcess`; identical receipt within 4 s → 409; non-cash needs a reference (PR #4, #55, #162, U4).
+- `totalReceived` equals the sum of payment rows; `customerOutstanding = customerPayable − totalReceived` (never negative; surplus is `excessReceived`).
+- Finance-mode receipt moves outstanding from customer to financer; the financer's disbursement does not change customer outstanding (PR #15, #55).
+- Claim and financer receipts: duplicate → 409, beyond the eligible / committed amount → 422, total and receipt list written together (CLD-06). The frontend never auto-retries `/leads/{id}/payments|refund|convert-booking`, `/claims/receipt`, `/finance/{file}/receipt`, or `POST /leads`.
+- Sales GM never posts customer or Finance receipts (PR #94; regressed 27 Sep `070836e`, restored CLD-13).
+- Delivery needs a cleared customer outstanding and the full checklist; Close needs a reason, and a delivered close needs RC + number plate (PRD Iteration 8-9; guard: `regression_claude/test_approved_invariants.py`).
+
+## Scheme and dealer earnings
+
+- Scheme month = OEM billed date, then explicit date, then booking date; last month never carries forward.
+- Eligibility is not assignment; company share is applied first; an unused component gives no OEM claim and no retained income (PR #20, #21, #33).
+- Customer-passed benefit is never dealer-retained income. Dealer total on the lead equals the Dealer Earnings report row (guard: `regression_claude/test_cld10_cld24_reset_and_earnings.py`).
+- Insurance payout is a separate ledger; MIS upload overwrites expected payout only when uploaded (PR #119, chat T265).
+
+## Lead data safety
+
+- No GET request and no boot job deletes or merges leads. Duplicate cleanup is owner-only, dry-run first, archived and audited (CLD-01; regressed by `f1e648e`).
+- `PUT /leads/{id}` is a partial update (PR #3).
+- A different 10-digit mobile is a different customer even with the same name (PR #286).
+- Go-live reset also clears lead-keyed KYC, WhatsApp and lead requests (CLD-10).
+
+## Roles and privacy
+
+- Staff payloads (lead, list, 360, previews) never carry owner P&L keys: `OWNER_PNL_LEAD_KEYS`, `OWNER_PNL_COMMERCIAL_KEYS`, `OWNER_PNL_SHARE_KEYS`, and `oemExtraSupport.dealerRetained`. (360 view leaked `oemExtraSupportRetained` until this fix; guard: `test_staff_payloads_never_carry_owner_pnl_keys`.)
+- Executives see only their own leads; dealer earnings and owner reports are owner-only; insurance and manual claims are money-desk only (PR #41).
+- The public share board returns counts only, no names (CLD-02). Webhooks without a configured secret write nothing (CLD-07). No plaintext passwords are stored or returned (CLD-04).
+
+## Process (why #307 shipped a money regression)
+
+- "Critical regression" failed on `main` for PR #307 and the PR was merged anyway. Never merge with a red `critical-regression`, `backend-full` or `frontend-tests` check.
+- When a test that guards money fails, fix the code or get the owner's written approval to change the rule. Do not edit the expected amount to make it green.
+- Before editing a shared pricing helper (`_turbo_selling_ex`, `_stored_ex_matches_row`, `_is_todays_synced_list`, `_saved_ex_for_preview`, `_reprice_pack_deal`, `set_price_structure`, `price_preview`), run `test_deal_pass_meet_cx.py`, `test_turbo_sept_exshowroom_uplift.py`, `test_same_order_multi_unit.py`, `test_rto_insurance_deal_approval.py` and `tests/regression_claude/`.

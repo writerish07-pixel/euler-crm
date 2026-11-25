@@ -119,9 +119,14 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
   const kycErr = kycReady(customerType, kycFiles, gstin);
   const extraErr = extraSupportReady(oemExtra, extraProof, docs);
   const sheetErr = needsApproval ? dealSheetReady(dealSheet, docs) : "";
+  // PR #12: booking is gated on the backend price. While the lookup runs, or
+  // when Price Master has no row, Confirm stays off (the API refuses it too).
+  const priceBlocked = Boolean(model && variant && (dealLoading || !priceFound));
 
   const submit = async () => {
     if (!model || !variant) return toast.error("Select model and variant");
+    if (dealLoading) return toast.error("Loading the Price Master price — wait a moment");
+    if (!priceFound) return toast.error(`Price Master entry not found for ${model} / ${variant}`);
     if (!form.bookingDate) return toast.error("Booking date is required");
     if (kycErr) return toast.error(kycErr);
     if (extraErr) return toast.error(extraErr);
@@ -210,7 +215,7 @@ export default function BookEnquiryDrawer({ lead, onClose, onDone }) {
       )}
       footer={<div className="flex justify-end gap-2">
         <Button variant="secondary" onClick={onClose}>Cancel</Button>
-        <Button data-testid="confirm-booking-btn" onClick={submit} disabled={busy}>
+        <Button data-testid="confirm-booking-btn" onClick={submit} disabled={busy || priceBlocked}>
           {busy ? "Saving…" : (needsApproval ? "Send for approval" : "Confirm Booking")}
         </Button>
       </div>}

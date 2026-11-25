@@ -3323,13 +3323,18 @@ def _staff_safe_nested_shares(obj):
 def _staff_safe_commercials(c):
     if not c:
         return c
-    out = {k: v for k, v in dict(c).items() if k not in OWNER_PNL_COMMERCIAL_KEYS}
+    # Lead-level owner keys can also appear on a commercials snapshot
+    # (oemExtraSupportRetained): drop both sets for staff.
+    out = {k: v for k, v in dict(c).items()
+           if k not in OWNER_PNL_COMMERCIAL_KEYS and k not in OWNER_PNL_LEAD_KEYS}
     extra = out.get("oemExtraSupport")
     if isinstance(extra, dict):
         extra = dict(extra)
         extra.pop("oemExtraSupportRetained", None)
         extra.pop("oemClaimable", None)
         extra.pop("retained", None)
+        # compute_oem_extra_support also returns the retained amount as dealerRetained.
+        extra.pop("dealerRetained", None)
         out["oemExtraSupport"] = extra
     if "schemeAllocation" in out:
         out["schemeAllocation"] = _staff_safe_nested_shares(out["schemeAllocation"])
@@ -8048,6 +8053,11 @@ def _is_todays_synced_list(stored, row, as_of=None):
     """True when the file holds today's Price Master but the billed day wants another list."""
     stored = ce.round2(ce.num(stored))
     if stored <= 0 or not row:
+        return False
+    # Only a Coulson-synced row holds "today's list". On an unsynced catalog row
+    # the raw base is a valid booked price (see _stored_ex_matches_row); treating
+    # it as stale re-priced booked files +₹15,000 on an RTO / insurance edit.
+    if not row.get("oemSyncedAt"):
         return False
     base = ce.round2(ce.num(row.get("exShowroom")))
     selling = ce.round2(ce.num(_turbo_selling_ex(row, as_of)))
@@ -18460,7 +18470,7 @@ class ManualClaimIn(BaseModel):
 
 @api.post("/claims/manual")
 async def create_manual_claim(body: ManualClaimIn, act=Depends(actor), _money=Depends(money_desk_only)):
-    """Manually record a claim (e.g. OEM incentive received as a claim). Both Owner and staff can add.
+    """Manually record a claim (e.g. OEM incentive received as a claim). Money desk only (owner, Showroom Admin, accounts) since PR #41.
     Appears in the claim register; received amounts are recorded later via /claims/receipt."""
     if body.claimAmount <= 0:
         raise HTTPException(422, "Enter a valid claim amount")
