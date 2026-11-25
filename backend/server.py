@@ -1686,6 +1686,9 @@ async def recompute_lead(lead_id):
         return None
     if oem_sync.is_same_order_pack(lead):
         lead, _hydrated = await _hydrate_pack_unit_prices(lead)
+        # Variant label already DV but Ex still FB (or any other list) —
+        # move Ex to this unit's billed-day master; keep Cx Demand.
+        lead, _repaired = await _repair_stale_pack_unit_lists(lead)
     stripped = _clear_unselected_scheme_pools(lead)
     snap = lead_to_snapshot(lead)
     scheme_rows = await get_scheme_rows()
@@ -1891,12 +1894,17 @@ async def recompute_lead(lead_id):
             updates["packUnitsFilled"] = pack_filled
             updates["packUnitsPending"] = pack_pending
             updates["packUnitsTotal"] = len(pack_units)
-            u0 = pack_units[0] or {}
-            # Pack leftover additional lives on the lead. Only fold unit 1's
-            # recut back when this file already has a Cx Demand deal lock.
-            if (u0.get("useDealPrice") and "additionalDiscount" in u0
-                    and lead.get("useDealPrice")):
-                updates["additionalDiscount"] = u0["additionalDiscount"]
+            # Pack Additional is the sum of each unit's dealer-funded gap —
+            # never Unit 1 alone (Messenger overview was short by every
+            # sibling). Only overwrite the header when units carry a deal.
+            if any(
+                (u or {}).get("useDealPrice")
+                or ce.num((u or {}).get("cxDemand")) > 0
+                for u in (pack_units or [])
+            ):
+                updates["additionalDiscount"] = ce.round2(sum(
+                    ce.num((u or {}).get("additionalDiscount"))
+                    for u in (pack_units or [])))
         pack_card = await _pack_overview_commercials(
             {**lead, **updates, "units": pack_units or lead.get("units") or []}, scheme_rows)
         updates["grossVehicleCost"] = pack_card["grossVehicleCost"]
@@ -7524,6 +7532,110 @@ class LeadVehicleIn(BaseModel):
     variant: str = ""
 
 
+# Charges that move with a catalog variant. Cx Demand / payable stay separate.
+_VARIANT_LIST_KEYS = (
+    "exShowroom", "rto", "insuranceAmount", "accessoriesAmount",
+    "handlingCharges", "trc", "fastag", "extendedWarranty", "otherCharges",
+    "tcsApplicable",
+)
+
+
+def _merge_variant_list_keep_deal(rec, master_ps, previous_ps=None):
+    """Refresh list charges for a new variant; keep the agreed Cx Demand.
+
+    Ex-Showroom always takes the billed-day master. RTO / insurance that still
+    match the previous variant's list defaults move with the catalog; typed
+    showroom actuals stay. Additional is re-derived on recompute.
+    """
+    rec = rec if isinstance(rec, dict) else {}
+    master_ps = master_ps or {}
+    previous_ps = previous_ps or {}
+    for key in _VARIANT_LIST_KEYS:
+        if key not in master_ps:
+            continue
+        new_v = master_ps.get(key)
+        if key == "exShowroom":
+            rec[key] = new_v
+            continue
+        if key == "tcsApplicable":
+            cur = rec.get(key)
+            prev = previous_ps.get(key)
+            if cur in (None, "", prev) or (prev is not None and cur == prev):
+                rec[key] = new_v
+            continue
+        cur = ce.num(rec.get(key))
+        prev = ce.num(previous_ps.get(key)) if previous_ps else None
+        if previous_ps and abs(cur - prev) < 1:
+            rec[key] = new_v
+        elif cur <= 0:
+            rec[key] = new_v
+    if "insuranceAmount" in rec:
+        rec["insurance"] = ce.num(rec.get("insuranceAmount"))
+    return rec
+
+
+async def _repair_stale_pack_unit_lists(lead):
+    """Fix pack units whose variant label no longer matches Ex-Showroom.
+
+    Messenger-style: unit says Maxx (DV220) but Ex is still Maxx (FB). Keep
+    Cx Demand / payable; Additional re-derives on the next refresh. Only
+    auto-corrects when the stored Ex is another variant's list (or today's
+    synced list) and the unit already has a deal or is settled — never a
+    free-typed mid-edit figure.
+    """
+    if not oem_sync.is_same_order_pack(lead or {}):
+        return lead, False
+    units = [dict(u or {}) for u in _ensure_lead_units(lead)]
+    changed = False
+    for i, u in enumerate(units):
+        model = (
+            u.get("model")
+            or (lead.get("interestedModel") if i == 0 else "")
+            or ""
+        )
+        variant = (
+            u.get("variant")
+            or (lead.get("variant") if i == 0 else "")
+            or ""
+        )
+        stored = ce.num(u.get("exShowroom"))
+        if stored <= 0 or not model or not variant:
+            continue
+        as_of = _lead_price_as_of(lead, unit=u)
+        row = await _price_master_row(model, variant)
+        if not row:
+            continue
+        master_ps = _price_structure_from_master(row, as_of)
+        master_ex = ce.num(master_ps.get("exShowroom"))
+        if master_ex <= 0 or abs(stored - master_ex) < 1:
+            continue
+        other = await _stored_ex_is_another_variant(stored, model, variant, as_of)
+        todays = _is_todays_synced_list(stored, row, as_of)
+        if not other and not todays:
+            continue
+        deal_locked = bool(u.get("useDealPrice")) or ce.num(u.get("cxDemand")) > 0
+        if not deal_locked and not _unit_settled(lead, u):
+            continue
+        _merge_variant_list_keep_deal(u, master_ps, previous_ps=None)
+        units[i] = u
+        changed = True
+    if not changed:
+        return lead, False
+    lead = dict(lead)
+    lead["units"] = units
+    patch = {
+        "units": units,
+        "sameOrderMultiUnit": True,
+        "vehicleCount": max(len(units), 1),
+        "lastUpdated": now_iso(),
+    }
+    u0 = units[0] if units else {}
+    if ce.num(u0.get("exShowroom")) > 0:
+        patch["exShowroom"] = u0.get("exShowroom")
+    await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": patch})
+    return lead, True
+
+
 @api.put("/leads/{lead_id}/vehicle")
 async def set_lead_vehicle(lead_id: str, body: LeadVehicleIn, act=Depends(actor)):
     """Owner / Showroom Admin: change model + variant together, from Price Master.
@@ -7585,10 +7697,11 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
     """Change one pack unit's model and variant. Siblings stay as they are.
 
     Unit 1 also updates the file header, which the register shows. The new
-    variant brings its Price Master price. The previous vehicle's Cx Demand
-    does not stay locked on the new one. A unit the customer has already
-    paid in full keeps that price and only the name changes. The save
-    confirms the body, so OEM sync will not put the invoice body back.
+    variant brings its Price Master list. An open (unsettled) unit drops the
+    previous vehicle's Cx Demand so the quote rebuilds. A settled unit keeps
+    Cx Demand / payable but always takes the new variant's Ex-Showroom — so
+    FB→DV no longer leaves FB list + FB Additional. The save confirms the
+    body, so OEM sync will not put the invoice body back.
     """
     role = str((act or {}).get("role") or "").strip().lower()
     if role == "executive":
@@ -7623,14 +7736,15 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
     master_ps = _price_structure_from_master(row, as_of)
     same_name = model == old_model and variant == old_variant
     same_price = abs(ce.num(rec.get("exShowroom")) - ce.num(master_ps.get("exShowroom"))) < 1
-    price_locked = bool(rec.get("useDealPrice")) or ce.num(rec.get("cxDemand")) > 0
     settled = _unit_settled(lead, rec)
-    # Saving the variant already on the unit still replaces a price left
-    # behind from the previous vehicle. A settled unit keeps the price the
-    # customer already paid.
-    keep_price = settled or (same_name and same_price and not price_locked)
-    if keep_price and same_name and rec.get("oemSkuConfirmed"):
+    # Nothing to do — name and list already match.
+    if same_name and same_price and rec.get("oemSkuConfirmed"):
         return _lead_for_viewer(clean(lead), act)
+    old_row = (
+        await _price_master_row(old_model, old_variant)
+        if old_model and old_variant else None
+    )
+    old_ps = _price_structure_from_master(old_row, as_of) if old_row else None
     rec["model"] = model
     rec["variant"] = variant
     body_type = str((oem_cat.resolve_sku(model, variant).body_type
@@ -7647,11 +7761,32 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
             rec["cxDemand"] = ce.round2(paid)
             rec["budget"] = rec["cxDemand"]
             rec["useDealPrice"] = True
+    # Settled = customer already paid this unit. Keep Cx / payable; move list.
+    keep_deal = settled and (
+        ce.num(rec.get("cxDemand")) > 0
+        or ce.num(rec.get("customerPayable")) > 0
+        or ce.num(rec.get("totalReceived")) > 0
+    )
     lead_scheme = {}
-    if not keep_price:
+    if keep_deal:
+        _merge_variant_list_keep_deal(rec, master_ps, old_ps)
+        if _unit_has_scheme(lead, rec, idx):
+            scheme_rows = await get_scheme_rows()
+            source = rec if _has_persisted_scheme(rec) else lead
+            aligned = _scheme_realign_patch(source, model, variant, as_of, scheme_rows)
+            # Scheme realign must not wipe the locked deal.
+            for k in ("cxDemand", "budget", "useDealPrice", "customerPayable",
+                      "additionalDiscount", "extraIncomeFromCustomer"):
+                aligned.pop(k, None)
+            rec.update(aligned)
+            if idx == 0 and _has_persisted_scheme(lead):
+                lead_scheme = _scheme_realign_patch(lead, model, variant, as_of, scheme_rows)
+                for k in ("cxDemand", "budget", "useDealPrice", "customerPayable",
+                          "additionalDiscount", "extraIncomeFromCustomer"):
+                    lead_scheme.pop(k, None)
+    else:
         rec.update(master_ps)
-        # The agreed price belonged to the previous variant. Drop it so the new
-        # vehicle is priced from Price Master.
+        # Open unit: previous vehicle's deal does not stay on the new SKU.
         rec.pop("cxDemand", None)
         rec["useDealPrice"] = False
         rec.pop("additionalDiscount", None)
@@ -7679,7 +7814,16 @@ async def set_unit_vehicle(lead_id: str, unit_sno: int, body: LeadVehicleIn, act
         patch["oemSkuReviewReason"] = ""
         if body_type:
             patch["bodyType"] = body_type
-        if not keep_price:
+        if keep_deal:
+            if lead_scheme:
+                patch.update(lead_scheme)
+            patch["exShowroom"] = rec.get("exShowroom")
+            for k in _VARIANT_LIST_KEYS:
+                if k in rec and k != "exShowroom":
+                    patch[k] = rec[k]
+            if "insurance" in rec:
+                patch["insurance"] = rec["insurance"]
+        else:
             patch.update(lead_scheme)
             # Unit 1's header price moves with this variant. The old ex-showroom
             # used to stay on the lead and a later price save copied it back.
