@@ -289,6 +289,107 @@ async def test_pack_unit2_charge_edit_keeps_saved_ex_after_oem_hike(client):
 
 
 @pytest.mark.asyncio
+async def test_sept_unit_on_aug_pack_keeps_sept_list(client):
+    """Adding a September-billed unit to an August booking must not take August price."""
+    created = await client.post("/api/leads", json={
+        "customerName": "Pack Mixed Dates", "mobile": "9535010008",
+        "interestedModel": TURBO[0], "variant": "Maxx (DV220)", "executive": "Amit",
+        "sameOrderMultiUnit": True, "vehicleCount": 1,
+        "units": [{"sno": 1, "model": TURBO[0], "variant": "Maxx (DV220)"}],
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    await server.db.price_master.update_one(
+        {"model": TURBO[0], "variant": "Maxx (DV220)"},
+        {"$set": {
+            "exShowroom": 824999,
+            "oemSyncedAt": "2026-11-25T06:11:09+00:00",
+            "status": "active",
+        }},
+        upsert=True,
+    )
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "currentStatus": "Booked",
+        "bookingDate": "2026-08-31",
+        "soldDate": "2026-08-31",
+        "exShowroom": 824999 - UPLIFT,
+        "priceStructureSaved": True,
+        "sameOrderMultiUnit": True,
+        "units": [{
+            "sno": 1, "model": TURBO[0], "variant": "Maxx (DV220)",
+            "soldDate": "2026-08-31", "exShowroom": 824999 - UPLIFT,
+            "priceStructureSaved": True,
+        }],
+    }})
+    added = await client.post(f"/api/leads/{lid}/units", json={
+        "model": TURBO[0], "variant": "Maxx (DV220)", "soldDate": "2026-09-02",
+    })
+    assert added.status_code == 200, added.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert len(after["units"]) == 2
+    assert after["units"][0]["exShowroom"] == 824999 - UPLIFT
+    assert after["units"][1]["exShowroom"] == 824999
+    assert after["units"][1].get("soldDate") == "2026-09-02"
+
+
+@pytest.mark.asyncio
+async def test_pack_charge_edit_keeps_cx_when_correcting_billed_day_list(client):
+    """Correcting today's synced list on save must not clear the agreed payable."""
+    created = await client.post("/api/leads", json={
+        "customerName": "Pack Cx Keep", "mobile": "9535010009",
+        "interestedModel": TURBO[0], "variant": "Maxx (DV220)", "executive": "Amit",
+        "sameOrderMultiUnit": True, "vehicleCount": 2,
+        "units": [
+            {"sno": 1, "model": TURBO[0], "variant": "Maxx (DV220)"},
+            {"sno": 2, "model": TURBO[0], "variant": "Maxx (DV220)"},
+        ],
+    })
+    assert created.status_code == 200, created.text
+    lid = created.json()["leadId"]
+    await server.db.price_master.update_one(
+        {"model": TURBO[0], "variant": "Maxx (DV220)"},
+        {"$set": {
+            "exShowroom": 824999,
+            "oemSyncedAt": "2026-11-25T06:11:09+00:00",
+            "status": "active",
+        }},
+        upsert=True,
+    )
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "currentStatus": "Booked",
+        "bookingDate": "2026-08-31",
+        "soldDate": "2026-08-31",
+        "exShowroom": 824999,
+        "priceStructureSaved": True,
+        "sameOrderMultiUnit": True,
+        "vehicleCount": 2,
+        "units": [
+            {
+                "sno": 1, "model": TURBO[0], "variant": "Maxx (DV220)",
+                "soldDate": "2026-08-31", "exShowroom": 824999,
+                "priceStructureSaved": True, "rto": 700, "insuranceAmount": 18049,
+                "cxDemand": 830000, "useDealPrice": True, "customerPayable": 830000,
+            },
+            {
+                "sno": 2, "model": TURBO[0], "variant": "Maxx (DV220)",
+                "soldDate": "2026-08-31", "exShowroom": 824999,
+                "priceStructureSaved": True, "rto": 700, "insuranceAmount": 18049,
+                "cxDemand": 830000, "useDealPrice": True, "customerPayable": 830000,
+            },
+        ],
+    }})
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 824999, "rto": 700, "insuranceAmount": 18049, "unitSno": 2,
+    })
+    assert saved.status_code == 200, saved.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    u2 = after["units"][1]
+    assert u2["exShowroom"] == 824999 - UPLIFT
+    assert u2.get("useDealPrice") is True
+    assert abs(float(u2.get("cxDemand") or 0) - 830000) < 1
+
+
+@pytest.mark.asyncio
 async def test_field_role_price_preview_hides_deal_prices(client):
     """ASM / RM field view must not receive stored deal commercials."""
     lid = await _lead(client, "Field Hide", "9535010006")

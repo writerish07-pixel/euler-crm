@@ -5830,9 +5830,13 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
 
 
 async def _reprice_pack_deal(lead, *, cx_demand=None, keep_unit1_prices=False):
-    """Rebuild pack dealFormat + payable. Never rewrite booked/delivered unit 1 prices."""
+    """Rebuild pack dealFormat + payable. Never rewrite booked/delivered unit 1 prices.
+
+    Each unit uses its own OEM billed date for the list — a September-billed
+    extra unit on an August booking must not take the August Turbo price.
+    """
     units = _ensure_lead_units(lead)
-    as_of = str(lead.get("bookingDate") or lead.get("createdDate") or today())[:10]
+    pack_as_of = _lead_price_as_of(lead)
     priced = []
     for i, u in enumerate(units):
         rec = dict(u)
@@ -5840,7 +5844,8 @@ async def _reprice_pack_deal(lead, *, cx_demand=None, keep_unit1_prices=False):
                 keep_unit1_prices and ce.num(rec.get("exShowroom")) > 0)):
             priced.append(rec)
             continue
-        master = await _price_unit_from_master(rec.get("model"), rec.get("variant"), as_of)
+        unit_as_of = _lead_price_as_of(lead, unit=rec)
+        master = await _price_unit_from_master(rec.get("model"), rec.get("variant"), unit_as_of)
         for k, v in master.items():
             if k in ("chassisNumber", "invoiceNumber", "numberPlate"):
                 continue
@@ -5850,10 +5855,10 @@ async def _reprice_pack_deal(lead, *, cx_demand=None, keep_unit1_prices=False):
     for i, u in enumerate(priced):
         u["sno"] = i + 1
     cx = ce.round2(ce.num(cx_demand if cx_demand is not None else lead.get("cxDemand")))
-    deal = await _deal_format_for_pack(priced, cx, as_of, lead.get("schemePassOn"))
+    deal = await _deal_format_for_pack(priced, cx, pack_as_of, lead.get("schemePassOn"))
     if cx <= 0:
         cx = ce.round2(ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx")))
-        deal = await _deal_format_for_pack(priced, cx, as_of, lead.get("schemePassOn"))
+        deal = await _deal_format_for_pack(priced, cx, pack_as_of, lead.get("schemePassOn"))
     patch = {
         "units": priced,
         "sameOrderMultiUnit": True,
@@ -9090,8 +9095,15 @@ async def _deal_format_for_pack(unit_specs, cx_demand=0, on=None, scheme_pass_on
     own_cxs = []
     for spec in unit_specs or []:
         unit_cx = ce.round2(ce.num((spec or {}).get("cxDemand")))
+        # Each pack line follows its own OEM billed day when present.
+        unit_on = str(
+            (spec or {}).get("soldDate")
+            or (spec or {}).get("schemeAsOf")
+            or on
+            or today()
+        )[:10]
         line = await _deal_format_for(
-            spec.get("model"), spec.get("variant"), unit_cx, on, scheme_pass_on)
+            spec.get("model"), spec.get("variant"), unit_cx, unit_on, scheme_pass_on)
         line["chassisNumber"] = spec.get("chassisNumber") or ""
         if unit_cx > 0:
             line["cxDemand"] = unit_cx
@@ -9943,6 +9955,14 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     rec["sno"] = idx + 1
     applied_ex = ce.num(rec.get("exShowroom"))
     ex_moved = pack and previous_ex > 0 and applied_ex > 0 and abs(applied_ex - previous_ex) >= 1
+    # Same model/variant, only correcting today's synced list back to the
+    # OEM billed-day list — keep the agreed customer price.
+    billed_day_list_fix = (
+        ex_moved and row is not None
+        and _is_todays_synced_list(previous_ex, row, as_of_price)
+        and abs(applied_ex - ce.num(
+            _price_structure_from_master(row, as_of_price).get("exShowroom"))) < 1
+    )
     # No ex-showroom means this payable is not a booked price for the vehicle
     # being saved. Locking it would keep the stale deal on the new list price.
     stale_blank = (
@@ -9950,7 +9970,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
         and ce.num(rec.get("cxDemand")) <= 0
         and ce.num(rec.get("customerPayable")) > 0
     )
-    if ex_moved or stale_blank:
+    if (ex_moved and not billed_day_list_fix) or stale_blank:
         # The rupees belonged to the previous vehicle. RTO and insurance edits
         # do not move ex-showroom, so those deals stay. Additional is stored
         # as zero: a missing key is filled again from the lead header.
