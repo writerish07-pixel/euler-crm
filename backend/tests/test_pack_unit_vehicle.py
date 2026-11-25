@@ -338,8 +338,8 @@ async def test_blank_unit_1_of_another_variant_does_not_copy_the_header_price(cl
 
 
 @pytest.mark.asyncio
-async def test_same_variant_list_rise_does_not_drop_the_agreed_price(client):
-    """Recording actual RTO must not rebill a booked unit from a newer list price."""
+async def test_same_variant_list_rise_keeps_cx_when_billed_day_list_applies(client):
+    """List rose after booking: billed-day master wins; agreed Cx Demand stays."""
     lid = await _pack(client, "9813307110")
     lead = await server.db.leads.find_one({"leadId": lid})
     pay = 498500
@@ -368,16 +368,21 @@ async def test_same_variant_list_rise_does_not_drop_the_agreed_price(client):
         "useDealPrice": True,
     }})
     await server.db.price_master.update_one(
-        {"priceId": "PM-PUV-A"}, {"$set": {"exShowroom": 520000}})
+        {"priceId": "PM-PUV-A"}, {"$set": {
+            "exShowroom": 520000,
+            # Synced list — selling price is the stored base (no Turbo overlay).
+            "oemSyncedAt": "2026-11-06T10:00:00+00:00",
+        }})
     cut = await client.put(f"/api/leads/{lid}/price-structure", json={
         "exShowroom": 520000, "rto": 0, "insuranceAmount": 2000, "unitSno": 1,
     })
     assert cut.status_code == 200, cut.text
     unit1 = (await server.db.leads.find_one({"leadId": lid}))["units"][0]
-    assert unit1["exShowroom"] == 500000
+    assert unit1["exShowroom"] == 520000
+    assert unit1.get("useDealPrice") is True
+    assert abs(float(unit1.get("cxDemand") or 0) - pay) < 1
     assert unit1["customerPayable"] == pay
     assert unit1["rto"] == 0
-    assert unit1["additionalDiscount"] == 3500
 
 
 @pytest.mark.asyncio
