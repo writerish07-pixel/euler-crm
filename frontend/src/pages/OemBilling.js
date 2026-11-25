@@ -9,6 +9,7 @@ import ReportActions from "../components/ReportActions";
 import { useLeadDrawer, LeadLink } from "../components/LeadLink";
 import { usePeriodState, thisMonth, thisYear } from "../lib/period";
 import { useAuth } from "../context/AuthContext";
+import OemPdiPendingCard from "../components/OemPdiPendingCard";
 
 const TABS = [
   ["pending_delivery", "Pending delivery"],
@@ -406,6 +407,7 @@ export default function OemBilling() {
           deletes the empty copy.
         </p>
       )}
+      <OemPdiPendingCard onOpenLead={openLead} />
       {drawer}
     </div>
   );

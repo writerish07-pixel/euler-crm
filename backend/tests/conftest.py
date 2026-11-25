@@ -43,6 +43,15 @@ def _block_live_google_sheet_writes(monkeypatch, request):
             monkeypatch.setattr(server, "sheet_sync", _no_sync, raising=False)
     except Exception:
         pass
+    # Sync tests stub each Coulson fetch by name. The PDI-pending pull is newer
+    # than most of them, so stub it here: tests must never call the live OEM.
+    try:
+        import coulson
+        if not request.node.get_closest_marker("real_coulson_pdi"):
+            monkeypatch.setattr(coulson, "fetch_pdi_pending_sold",
+                                lambda *a, **k: [], raising=False)
+    except Exception:
+        pass
     try:
         import gsheets
         monkeypatch.setattr(gsheets, "sync", _no_sync, raising=False)
@@ -57,5 +66,7 @@ def _block_live_google_sheet_writes(monkeypatch, request):
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "real_sheet_sync: use live server.sheet_sync (Google still mocked)")
+    config.addinivalue_line(
+        "markers", "real_coulson_pdi: use the real coulson.fetch_pdi_pending_sold (HTTP still mocked)")
     config.addinivalue_line(
         "markers", "live_http: needs REACT_APP_BACKEND_URL; skipped when it is unset")

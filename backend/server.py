@@ -13190,6 +13190,51 @@ def _oem_billing_payload(rows, period):
     }
 
 
+@api.get("/oem-pdi-pending", dependencies=[Depends(oem_claim_desk_only)])
+async def list_oem_pdi_pending():
+    """Coulson "Sold, PDI pending": OEM-billed chassis whose PDI is not done.
+
+    Stored by the OEM sync (oem_pdi_pending) and joined to CRM files by
+    chassis, including pack unit chassis. Read-only — nothing is written to
+    Coulson or to the lead.
+    """
+    rows = [clean(r) for r in await db.oem_pdi_pending.find().to_list(None)]
+    leads = await db.leads.find(
+        {},
+        {"_id": 0, "leadId": 1, "customerName": 1, "chassisNumber": 1, "units": 1,
+         "currentStatus": 1, "deliveryStatus": 1, "deliveryDate": 1, "executive": 1,
+         "interestedModel": 1, "variant": 1, "dealCancelled": 1}).to_list(None)
+    by_chassis = {}
+    for lead in leads:
+        for ch in oem_sync.lead_chassis_list(lead):
+            by_chassis.setdefault(ch, lead)
+    out = []
+    counts = {"total": 0, "onLead": 0, "delivered": 0, "notInCrm": 0}
+    for r in rows:
+        lead = by_chassis.get(oem_sync._norm_chassis(r.get("chassis"))) or {}
+        delivered = bool(lead) and (_is_delivered_lead(lead) or
+                                    str(lead.get("currentStatus") or "").lower() == "close won")
+        out.append({
+            **r,
+            "leadId": lead.get("leadId") or "",
+            "customerName": lead.get("customerName") or "",
+            "executive": lead.get("executive") or "",
+            "crmStatus": lead.get("currentStatus") or "",
+            "crmDeliveryDate": lead.get("deliveryDate") or "",
+            "deliveredInCrm": delivered,
+        })
+        counts["total"] += 1
+        if lead:
+            counts["onLead"] += 1
+        else:
+            counts["notInCrm"] += 1
+        if delivered:
+            counts["delivered"] += 1
+    out.sort(key=lambda x: (not x["deliveredInCrm"], str(x.get("soldDate") or "")))
+    return {"rows": out, "counts": counts,
+            "syncedAt": max((r.get("syncedAt") or "" for r in rows), default="")}
+
+
 @api.get("/oem-billing", dependencies=[Depends(oem_claim_desk_only)])
 async def list_oem_billing(month: Optional[str] = None, year: Optional[str] = None,
                            bucket: str = ""):

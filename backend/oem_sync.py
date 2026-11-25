@@ -386,6 +386,17 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         log.warning("Coulson booked/pilot/demo inventory skipped: %s", e)
     except Exception:
         log.exception("Coulson booked/pilot/demo inventory failed")
+    pdi_pending_count = None
+    try:
+        pdi_meta = {}
+        pdi_rows = await asyncio.to_thread(
+            coulson_client.fetch_pdi_pending_sold, token, meta=pdi_meta) or []
+        pdi_pending_count = await replace_pdi_pending(
+            db, pdi_rows, complete=bool(pdi_meta.get("complete")))
+    except coulson_client.CoulsonError as e:
+        log.warning("Coulson PDI-pending list skipped: %s", e)
+    except Exception:
+        log.exception("Coulson PDI-pending list failed")
 
     # Index OEM rows by catalog sku key (multiple SAP ids can share a SKU).
     by_key = {s.key: [] for s in cat.CATALOG}
@@ -540,6 +551,7 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         "schemesKept": live_import.get("schemesKept") or 0,
         "oemReadsOk": live_import.get("oemReadsOk") or 0,
         "oemReadsFailed": live_import.get("oemReadsFailed") or 0,
+        "pdiPendingCount": pdi_pending_count,
         "credentialSource": src,
         "changedPriceIds": list(dict.fromkeys(
             (catalog_result.get("changedPriceIds") or []) + changed_ids)),
@@ -1336,6 +1348,44 @@ async def replace_held_inventory(db, vehicles, oem_by_id, by_key):
 # Page every Vehicle Invoice. A 800-row newest-first cap hid billed days
 # older than a few weeks and made OEM Billing disagree with Coulson.
 BILLING_INVOICE_MAX_ROWS = None
+
+
+def _pdi_pending_doc(vehicle):
+    """Store only vehicle facts — never the OEM row's customer name / phone."""
+    v = vehicle or {}
+    return {
+        "chassis": vehicle_chassis(v) or _norm_chassis(v.get("chassis")),
+        "invoiceNumber": vehicle_invoice(v),
+        "soldDate": str(vehicle_sold_date(v) or "")[:10],
+        "oemModel": str(v.get("model") or ""),
+        "oemVariant": str(v.get("variant") or ""),
+        "sapProductName": str(v.get("sap_product_name") or ""),
+        "oemDeliveryDate": str(v.get("delivery_date") or "")[:10],
+        "syncedAt": now_iso(),
+    }
+
+
+async def replace_pdi_pending(db, vehicles, *, complete):
+    """OEM "Sold, PDI pending" list. Replaced only on a complete pull.
+
+    A failed or partial pull keeps the last good list, the same fail-soft rule
+    as Sold / held stock, so a Coulson timeout never empties the desk view.
+    """
+    if not complete:
+        return await db.oem_pdi_pending.count_documents({})
+    docs, seen = [], set()
+    for v in vehicles or []:
+        doc = _pdi_pending_doc(v)
+        ch = _norm_chassis(doc.get("chassis"))
+        if not ch or ch in seen:
+            continue
+        seen.add(ch)
+        doc["chassis"] = ch
+        docs.append(doc)
+    await db.oem_pdi_pending.delete_many({})
+    if docs:
+        await db.oem_pdi_pending.insert_many(docs)
+    return len(docs)
 
 
 async def refresh_sold_inventory(db, *, interactive=True):
