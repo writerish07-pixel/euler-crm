@@ -19,6 +19,9 @@ os.environ.setdefault("GSHEET_ID", "FAKE_SHEET")
 
 import gsheets  # noqa: E402
 
+# Sheets sync logic runs against an in-memory fake service (see conftest.py).
+pytestmark = pytest.mark.fake_sheets
+
 PROD_ID = "PROD_SHEET_ID"
 TEST_ID = "PREVIEW_SHEET_ID"
 

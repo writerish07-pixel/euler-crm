@@ -18,6 +18,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("GSHEET_ID", "FAKE_SHEET")
 
 import gsheets  # noqa: E402
+
+# Sheets sync logic runs against an in-memory fake service (see conftest.py).
+pytestmark = pytest.mark.fake_sheets
 from gsheets import HEADER_ALIASES, SYNC_MAP, _col_letter, _norm  # noqa: E402
 
 from live_headers import LIVE_HEADERS, PENDING_SHEET_COLUMNS  # noqa: E402
@@ -66,8 +69,23 @@ def resolve(tab, fields):
 
 
 
+def _skip_unrecorded_tab(entity):
+    """A tab with no recorded live header can only be checked if it is written.
+
+    Since f3a95d8 (10 Sep) only LIVE_SHEET_ENTITIES (the Scheme Claim Register)
+    are written to the live workbook. A mapped tab that is neither recorded in
+    LIVE_HEADERS nor written live has no live layout to check against.
+    """
+    tab = SYNC_MAP[entity][0]
+    if tab not in LIVE_HEADERS:
+        assert entity not in gsheets.LIVE_SHEET_ENTITIES, (
+            f"{tab} is written to the live sheet but has no recorded header snapshot")
+        pytest.skip(f"{tab} is not written to the live sheet and has no header snapshot")
+
+
 @pytest.mark.parametrize("entity", sorted(SYNC_MAP))
 def test_every_sync_field_resolves_to_a_real_column(entity):
+    _skip_unrecorded_tab(entity)
     tab, _id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
     _mapping, missing = resolve(tab, fields)
     pending = PENDING_SHEET_COLUMNS.get(entity, [])
@@ -95,6 +113,7 @@ def test_the_id_header_is_never_pending():
 
 @pytest.mark.parametrize("entity", sorted(SYNC_MAP))
 def test_no_two_fields_share_a_column(entity):
+    _skip_unrecorded_tab(entity)
     """Guards the class of bug that once collapsed 'Customer Insurance Benefit Passed'
     onto 'Dealer Insurance Income' — two different columns, two different meanings."""
     tab, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][2]
@@ -108,6 +127,7 @@ def test_no_two_fields_share_a_column(entity):
 
 @pytest.mark.parametrize("entity", sorted(SYNC_MAP))
 def test_stable_id_field_resolves(entity):
+    _skip_unrecorded_tab(entity)
     tab, id_field, fields = SYNC_MAP[entity][0], SYNC_MAP[entity][1], SYNC_MAP[entity][2]
     mapping, _ = resolve(tab, fields)
     assert id_field in mapping, f"{tab}: stable ID '{id_field}' has no column — upsert impossible"
@@ -192,6 +212,8 @@ def test_every_operational_column_is_either_mapped_or_declared_source_required()
     unaccounted = []
     for entity, spec in SYNC_MAP.items():
         tab, fields = spec[0], spec[2]
+        if tab not in LIVE_HEADERS and entity not in gsheets.LIVE_SHEET_ENTITIES:
+            continue  # never written live and no header snapshot (see _skip_unrecorded_tab)
         _hr, headers = LIVE_HEADERS[tab]
         mapping, _ = resolve(tab, fields)
         owned = set(mapping.values())

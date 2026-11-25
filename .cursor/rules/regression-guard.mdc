@@ -80,3 +80,18 @@ These rules are the ones recent fixes kept breaking. Check them before changing 
 - "Critical regression" failed on `main` for PR #307 and the PR was merged anyway. Never merge with a red `critical-regression`, `backend-full` or `frontend-tests` check.
 - When a test that guards money fails, fix the code or get the owner's written approval to change the rule. Do not edit the expected amount to make it green.
 - Before editing a shared pricing helper (`_turbo_selling_ex`, `_stored_ex_matches_row`, `_is_todays_synced_list`, `_saved_ex_for_preview`, `_reprice_pack_deal`, `set_price_structure`, `price_preview`), run `test_deal_pass_meet_cx.py`, `test_turbo_sept_exshowroom_uplift.py`, `test_same_order_multi_unit.py`, `test_rto_insurance_deal_approval.py` and `tests/regression_claude/`.
+
+## Added 25 Nov 2026 (verified against code, tests and production)
+
+- Convert to Booking judges "dealer discount" on the requested booking date, the same date the price was filled for. A back-dated booking with no discount is not parked for approval. (`convert_booking` → `_require_booking_deal_approval`; guard: `test_scheme_retained_and_step_locks.py::test_booking_autofill_does_not_lock_price_for_staff`.)
+- WhatsApp model-interest replies are numbered against the menu the customer received (`lead.modelAskMenu`), never against today's Price Master list. (guard: `test_iter33_model_ask.py`.)
+- BotSpace webhook: with no secret saved, callbacks are processed (inbox, delivery status, opt-out). With a secret saved (Settings → WhatsApp → Webhook secret, or `BOTSPACE_WEBHOOK_SECRET`) it is required via `?secret=` or `x-botspace-secret`. Never drop unsigned callbacks silently. Exotel stays fail-closed. (guard: `regression_claude/test_cld07_webhooks.py`.)
+- OEM "Sold, PDI pending": read-only pull (`vehicle_status=SOLD`, `is_pdi_done=false`), stored without customer name/phone, replaced only on a complete pull. (guard: `test_oem_pdi_pending.py`.)
+- Price Master reprice: owner edits reach live Active, unsettled, not-delivered leads booked on/after 1 Sep; OEM-sourced rows keep Coulson's ex-showroom. (guard: `test_iter27_price_master_reprice.py`.)
+- Only the Scheme Claim Register is written to the live Google Sheet (`LIVE_SHEET_ENTITIES`).
+
+## Test discipline
+
+- Tests never reach live services: Google Sheets is blocked by `conftest.py` (modules that test sync logic use `pytestmark = pytest.mark.fake_sheets` with an in-memory fake); Coulson fetches are stubbed by name; a new Coulson fetch needs a conftest stub.
+- Run the backend suite with `python scripts/run_tests_isolated.py` (one process per module). Modules share one in-memory DB through `server`; a single process makes results order-dependent.
+- A test that fails after a rule change is updated only with a comment naming the PR/commit that changed the rule. Never weaken a money assertion to get green.

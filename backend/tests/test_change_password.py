@@ -91,14 +91,18 @@ async def test_executive_can_change_password(client):
                            json={"email": "executive@euler.com", "password": "execNew99"})
     assert ok.status_code == 200
 
-    # Owner User Accounts Password column is overwritten with the new value.
+    # Since PR #295 (CLD-04, owner decision D1) the owner list never returns a
+    # password: it shows that one is set and when it changed; no plaintext is kept.
     owner_tok = (await client.post("/api/auth/login",
                                    json={"email": "owner@euler.com", "password": "euler@123"})).json()["token"]
     listed = (await client.get("/api/auth/users",
                                headers={"Authorization": f"Bearer {owner_tok}"})).json()
     row = next(u for u in listed if u["email"] == "executive@euler.com")
-    assert row["password"] == "execNew99"
+    assert "password" not in row
+    assert row.get("passwordSet") is True
     assert row.get("passwordChangedAt")
+    stored = await server.db.users.find_one({"email": "executive@euler.com"})
+    assert not stored.get("passwordPlain")
 
 
 @pytest.mark.asyncio

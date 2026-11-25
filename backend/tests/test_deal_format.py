@@ -167,7 +167,20 @@ async def test_approve_sets_outstanding_to_deal_price(client):
             "executive": "Executive", "budget": 1400000,
         })
         assert sub.status_code == 200, sub.text
-        lid = sub.json()["leadId"]
+        # An executive's lead waits for GM / Owner approval (PR #95); the lead
+        # is created when the request is approved.
+        body = sub.json()
+        assert body.get("pending") is True and body.get("requestId"), body
+        # Approval needs the KYC papers and the deal sheet on the request.
+        for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan", "deal_sheet"):
+            up = await ex.post(
+                f"/api/lead-requests/{body['requestId']}/documents",
+                files={"file": ("scan.png", io.BytesIO(PNG), "image/png")},
+                data={"kind": kind})
+            assert up.status_code == 200, up.text
+    ok = await client.post(f"/api/lead-requests/{body['requestId']}/approve")
+    assert ok.status_code == 200, ok.text
+    lid = ok.json()["leadId"]
     lead = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(lead["customerOutstanding"]) == 1400000
     assert ce.num(lead["customerPayable"]) == 1400000

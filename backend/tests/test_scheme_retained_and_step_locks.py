@@ -1,5 +1,6 @@
 """Company-kept scheme retained + staff step locks + owner cascade."""
 import json
+import io
 import os
 import sys
 
@@ -205,8 +206,16 @@ async def test_booking_autofill_does_not_lock_price_for_staff(client):
     await _login(client, "owner@euler.com")
     lid = await _lead(client, "9777700003", executive="Executive")
     await _login(client, "executive@euler.com")
-    await client.post(f"/api/leads/{lid}/convert-booking",
-                      json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+    # Executive bookings need Aadhaar front/back + PAN on the file (exec journey docs).
+    for kind in ("kyc_aadhaar_front", "kyc_aadhaar_back", "kyc_pan"):
+        up = await client.post(
+            f"/api/leads/{lid}/documents",
+            files={"file": ("scan.png", io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"kyc" * 16), "image/png")},
+            data={"kind": kind})
+        assert up.status_code == 200, up.text
+    booked = await client.post(f"/api/leads/{lid}/convert-booking",
+                               json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+    assert booked.status_code == 200, booked.text
     lead = await server.db.leads.find_one({"leadId": lid})
     assert ce.num(lead.get("exShowroom")) > 0
     assert lead.get("priceStructureSaved") is False

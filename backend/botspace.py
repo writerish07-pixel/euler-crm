@@ -891,6 +891,9 @@ async def run_model_ask_campaign(*, dry_run: bool = True, limit: int = 500,
         if res.get("ok"):
             await db.leads.update_one({"leadId": lead["leadId"]}, {"$set": {
                 "modelAskSentAt": datetime.now(timezone.utc).isoformat(),
+                # The numbers the customer saw. A later Price Master change (e.g.
+                # an OEM catalog import adding a model) must not shift "3".
+                "modelAskMenu": list(models),
             }})
             await _activity(lead, "WhatsApp model-interest ask sent")
 
@@ -912,7 +915,8 @@ async def apply_model_reply(lead: dict, text: str) -> dict:
     """
     if str(lead.get("interestedModel") or "").strip():
         return {"updated": False, "reason": "model-already-set"}
-    models = await _crm_models()
+    sent_menu = [str(m) for m in (lead.get("modelAskMenu") or []) if str(m or "").strip()]
+    models = sent_menu or await _crm_models()
     picked = match_model_reply(text, models)
     if not picked:
         return {"updated": False, "reason": "no-confident-match", "models": models}

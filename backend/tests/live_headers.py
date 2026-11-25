@@ -73,6 +73,10 @@ LIVE_HEADERS = {
 # Drop an entry the moment its header appears in LIVE_HEADERS above; the contract
 # test test_pending_columns_are_still_actually_pending fails until you do.
 PENDING_SHEET_COLUMNS = {
+    # d468ce8 (4 Sep) added the unpayable OEM write-off to Dealer Earnings. Since
+    # f3a95d8 (10 Sep) only the Scheme Claim Register is written to the live sheet,
+    # so this column has never been created there.
+    "dealer_earnings": ["oemUnpayableWriteOff"],
     "insurance": ["insuranceAgentName", "payoutRateSource", "lastPayoutDate"],
     # Added by Settings -> "Add Cancellation columns" / "Add Insurance Agent columns"
     # / "Add TCS / RSA / Exchange columns", and automatically by Backfill.
