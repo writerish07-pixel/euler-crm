@@ -161,8 +161,11 @@ async def test_showroom_admin_can_edit_an_open_unit(client):
 
 
 @pytest.mark.asyncio
-async def test_a_paid_unit_keeps_its_price_when_the_variant_changes(client):
-    """A pack unit already paid in full changes name and keeps the paid price."""
+async def test_a_paid_unit_keeps_cx_and_takes_new_list_when_variant_changes(client):
+    """Settled pack unit: Cx / payable stay; Ex-Showroom follows the new variant.
+
+    Messenger FB→DV used to keep FB list because the unit was paid in full.
+    """
     lid = await _pack(client, "9813307105")
     before = await server.db.leads.find_one({"leadId": lid})
     units = before["units"]
@@ -183,13 +186,68 @@ async def test_a_paid_unit_keeps_its_price_when_the_variant_changes(client):
     unit2 = after["units"][1]
     assert unit2["variant"] == "Unit Edit C"
     assert unit2.get("oemSkuConfirmed") is True
-    assert unit2["exShowroom"] == old_ex
+    assert unit2["exShowroom"] == 800000  # Storm · Unit Edit C list
+    assert abs(float(unit2["exShowroom"]) - float(old_ex)) > 1
     assert unit2.get("useDealPrice") is True
     assert float(unit2.get("cxDemand") or 0) == float(old_pay)
     assert abs(float(unit2.get("customerPayable") or 0) - float(old_pay)) < 1
     assert unit2["chassisNumber"] == "MD9UNIT2KEEP"
     assert after["units"][0].get("exShowroom") == before["units"][0].get("exShowroom")
     assert after["units"][0]["variant"] == before["units"][0]["variant"]
+
+
+@pytest.mark.asyncio
+async def test_messenger_stale_fb_ex_on_dv_label_repairs_on_recompute(client):
+    """Variant already says DV; Ex still FB list → repair keeps Cx, moves Ex."""
+    lid = await _pack(client, "9813307114")
+    await server.db.price_master.delete_many({"priceId": {"$in": ["PM-PUV-FB", "PM-PUV-DV"]}})
+    await server.db.price_master.insert_many([
+        {"priceId": "PM-PUV-FB", "model": "Turbo Max", "variant": "Maxx (FB)",
+         "exShowroom": 775000, "rto": 5500, "insurance": 19000, "status": "active",
+         "oemSyncedAt": "2026-11-25T08:00:00+00:00"},
+        {"priceId": "PM-PUV-DV", "model": "Turbo Max", "variant": "Maxx (DV220)",
+         "exShowroom": 824999, "rto": 5500, "insurance": 19000, "status": "active",
+         "oemSyncedAt": "2026-11-25T08:00:00+00:00"},
+    ])
+    lead = await server.db.leads.find_one({"leadId": lid})
+    units = lead["units"]
+    for i, u in enumerate(units):
+        u["model"] = "Turbo Max"
+        u["variant"] = "Maxx (DV220)"
+        u["exShowroom"] = 775000 if i == 1 else 824999
+        u["rto"] = 5500
+        u["insuranceAmount"] = 19000
+        u["cxDemand"] = 790000
+        u["useDealPrice"] = True
+        u["customerPayable"] = 790000
+        u["totalReceived"] = 790000
+        u["customerOutstanding"] = 0
+        u["oemSkuConfirmed"] = True
+        u["soldDate"] = "2026-10-16"
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "units": units,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (DV220)",
+        "exShowroom": 824999,
+        "cxDemand": 1580000,
+        "budget": 1580000,
+        "useDealPrice": True,
+        "currentStatus": "Booked",
+        "bookingDate": "2026-10-16",
+        "sameOrderMultiUnit": True,
+    }})
+    await server.recompute_lead(lid)
+    after = await server.db.leads.find_one({"leadId": lid})
+    u2 = after["units"][1]
+    assert u2["variant"] == "Maxx (DV220)"
+    assert u2["exShowroom"] == 824999
+    assert float(u2.get("cxDemand") or 0) == 790000
+    assert abs(float(u2.get("customerPayable") or 0) - 790000) < 1
+    # DV GVC 824999+5500+19000 − 790000 = 59499
+    assert abs(float(u2.get("additionalDiscount") or 0) - 59499) < 1
+    # Pack header Additional is the sum of units, not Unit 1 alone.
+    pack_addl = sum(float(u.get("additionalDiscount") or 0) for u in after["units"])
+    assert abs(float(after.get("additionalDiscount") or 0) - pack_addl) < 1
 
 
 @pytest.mark.asyncio

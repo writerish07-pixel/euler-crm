@@ -286,8 +286,13 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
                     onSaved={onSaved}
                   />
                 </div>
-                <div className="font-mono font-bold text-cobalt mt-1" data-testid={`units-tab-payable-${sno}`}>
-                  {inr(u.customerPayable)}
+                {Number(u.exShowroom) > 0 && (
+                  <div className="text-xs text-ink-soft mt-1" data-testid={`units-tab-ex-${sno}`}>
+                    Ex-Showroom {inr(u.exShowroom)}
+                  </div>
+                )}
+                <div className="font-mono font-bold text-cobalt mt-0.5" data-testid={`units-tab-payable-${sno}`}>
+                  Cx / Payable {inr(u.cxDemand || u.customerPayable)}
                 </div>
                 <div className="mt-1 flex flex-wrap gap-2">
                   <UnitBilledDateField
