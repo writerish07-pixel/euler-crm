@@ -1700,7 +1700,7 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
           const billed = d.asOf ? ` (OEM billed ${d.asOf})` : "";
           setMasterMsg(d.keptSavedEx
             ? `Unit ${unitSno} · ${d.model || ""} ${d.variant || ""}${billed} — Ex-Showroom is the price already on this file and cannot be edited.`
-            : `Unit ${unitSno} · ${d.model || ""} ${d.variant || ""}${billed} — Ex-Showroom is fixed from Price Master and cannot be edited.`);
+            : `Unit ${unitSno} · ${d.model || ""} ${d.variant || ""}${billed} — Ex-Showroom is the OEM billed-day list from Price Master and cannot be edited.`);
         } else {
           setMasterMsg(d?.message || "Price Master entry not found — select a valid model/variant.");
         }
