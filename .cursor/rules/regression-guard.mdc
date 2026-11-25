@@ -20,10 +20,11 @@ These rules are the ones recent fixes kept breaking. Check them before changing 
 ## Price
 
 - OEM billed date (`soldDate` on the unit, then the file) decides which list price applies — same order as scheme month. Booking date is only the fallback when nothing is billed yet.
-- Opening a lead or Price Structure must not replace an ex-showroom already on that unit with today's Price Master. A later pack unit without its own ex does not inherit Unit 1's header price.
-- Saving RTO or insurance on a booked pack unit must keep that unit's saved ex-showroom. Preview and save use the same booked-price rule for every unit, not only Unit 1.
+- Coulson sync writes today's Turbo list into Price Master. For an OEM billed day before 1 Sep 2026, peel the ₹15,000 Turbo uplift only when that sync itself is on/after 1 Sep — an August sync already stored the August list.
+- Opening Price Structure must not keep today's synced master on an August-billed file. A real booked figure that already matches the billed day (or is not today's sync) stays. A later pack unit without its own ex does not inherit Unit 1's header price.
+- Pack rebuild prices each unit from its own OEM billed date. A September-billed extra unit on an August booking keeps the September list.
+- Saving RTO or insurance on a booked pack unit must keep that unit's billed-day ex-showroom. A same-variant billed-day list correction must not clear Cx Demand. Preview and save use the same booked-price rule for every unit, not only Unit 1.
 - ASM / RM field view does not get Price Structure or stored deal prices.
-- August (and other older) billed vehicles keep the price stored on the file after OEM sync updates the master list.
 - A pack unit already paid in full keeps that payable when only the body name changes, including when Cx Demand was not already locked.
 - An unpaid unit takes the new variant's Price Master price, and the previous Cx Demand does not stay on it.
 - A lower RTO or insurance does not reduce Gross Vehicle Cost while a customer price is locked.

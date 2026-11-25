@@ -5830,9 +5830,13 @@ async def create_lead(body: LeadIn, user=Depends(sales_staff_only)):
 
 
 async def _reprice_pack_deal(lead, *, cx_demand=None, keep_unit1_prices=False):
-    """Rebuild pack dealFormat + payable. Never rewrite booked/delivered unit 1 prices."""
+    """Rebuild pack dealFormat + payable. Never rewrite booked/delivered unit 1 prices.
+
+    Each unit uses its own OEM billed date for the list — a September-billed
+    extra unit on an August booking must not take the August Turbo price.
+    """
     units = _ensure_lead_units(lead)
-    as_of = str(lead.get("bookingDate") or lead.get("createdDate") or today())[:10]
+    pack_as_of = _lead_price_as_of(lead)
     priced = []
     for i, u in enumerate(units):
         rec = dict(u)
@@ -5840,7 +5844,8 @@ async def _reprice_pack_deal(lead, *, cx_demand=None, keep_unit1_prices=False):
                 keep_unit1_prices and ce.num(rec.get("exShowroom")) > 0)):
             priced.append(rec)
             continue
-        master = await _price_unit_from_master(rec.get("model"), rec.get("variant"), as_of)
+        unit_as_of = _lead_price_as_of(lead, unit=rec)
+        master = await _price_unit_from_master(rec.get("model"), rec.get("variant"), unit_as_of)
         for k, v in master.items():
             if k in ("chassisNumber", "invoiceNumber", "numberPlate"):
                 continue
@@ -5850,10 +5855,10 @@ async def _reprice_pack_deal(lead, *, cx_demand=None, keep_unit1_prices=False):
     for i, u in enumerate(priced):
         u["sno"] = i + 1
     cx = ce.round2(ce.num(cx_demand if cx_demand is not None else lead.get("cxDemand")))
-    deal = await _deal_format_for_pack(priced, cx, as_of, lead.get("schemePassOn"))
+    deal = await _deal_format_for_pack(priced, cx, pack_as_of, lead.get("schemePassOn"))
     if cx <= 0:
         cx = ce.round2(ce.num(deal.get("suggestedCxDemand") or deal.get("netToCx")))
-        deal = await _deal_format_for_pack(priced, cx, as_of, lead.get("schemePassOn"))
+        deal = await _deal_format_for_pack(priced, cx, pack_as_of, lead.get("schemePassOn"))
     patch = {
         "units": priced,
         "sameOrderMultiUnit": True,
@@ -7962,20 +7967,30 @@ def _lead_price_as_of(lead=None, on=None, unit=None):
 
 
 def _stored_ex_matches_row(stored, row, as_of=None):
-    """True when this ex-showroom is already the Price Master price for this row.
+    """True when this ex-showroom is the Price Master list for this row on asOf.
 
-    The booked figure may be the base price or the September Turbo price.
-    A different variant's ex-showroom does not match.
+    Match the billed-day selling price. Do not treat today's synced base as a
+    match when asOf is before the Turbo uplift — that is how August files were
+    left on the November list.
     """
     stored = ce.num(stored)
     if stored <= 0 or not row:
         return False
-    base = ce.num(row.get("exShowroom"))
+    as_of = str(as_of or today())[:10]
     selling = ce.num(_turbo_selling_ex(row, as_of))
-    candidates = [base, selling]
-    if not row.get("oemSyncedAt") and _is_turbo_vehicle(row.get("model"), row.get("variant")):
-        candidates.append(ce.round2(base + TURBO_EXSHOWROOM_UPLIFT))
-    return any(abs(stored - c) < 1 for c in candidates)
+    if abs(stored - selling) < 1:
+        return True
+    base = ce.num(row.get("exShowroom"))
+    # Unsynced catalog: stored may be the raw OEM base before overlay.
+    if not row.get("oemSyncedAt") and abs(stored - base) < 1:
+        return True
+    if (
+        not row.get("oemSyncedAt")
+        and _is_turbo_vehicle(row.get("model"), row.get("variant"))
+        and abs(stored - ce.round2(base + TURBO_EXSHOWROOM_UPLIFT)) < 1
+    ):
+        return True
+    return False
 
 
 async def _stored_ex_is_another_variant(stored, model, variant, as_of=None):
@@ -8000,23 +8015,43 @@ async def _stored_ex_is_another_variant(stored, model, variant, as_of=None):
 
 
 def _turbo_selling_ex(row, as_of=None):
-    """Stored list price for quotes.
+    """List price for this vehicle on the given day.
 
-    A live Coulson sync (`oemSyncedAt`) is the OEM invoice base price — do not
-    add the Sept-2026 Turbo overlay on top, or Price List would no longer match
-    Coulson. Overlay remains only for catalog rows that have never been synced.
+    Coulson sync writes today's list into Price Master (`oemSyncedAt`). That
+    figure already includes the Sept-2026 Turbo uplift, so do not add the
+    overlay again for current quotes. For an OEM billed day before 1 Sep 2026,
+    peel the uplift off so August deals get the August list — not today's.
+    Unsynced catalog rows still add the overlay from 1 Sep onward.
     """
     base = ce.round2(ce.num((row or {}).get("exShowroom")))
-    if (row or {}).get("oemSyncedAt"):
-        return base
     as_of = str(as_of or today())[:10]
-    if as_of < TURBO_EXSHOWROOM_UPLIFT_FROM:
-        return base
     model = (row or {}).get("model") or (row or {}).get("oemModel") or ""
     variant = (row or {}).get("variant") or ""
-    if not _is_turbo_vehicle(model, variant):
+    turbo = _is_turbo_vehicle(model, variant)
+    if (row or {}).get("oemSyncedAt"):
+        # Peel only when the sync itself is on/after 1 Sep — earlier Coulson
+        # writes already stored the August list and must not be reduced again.
+        synced_on = str(row.get("oemSyncedAt") or "")[:10]
+        if (
+            turbo
+            and as_of < TURBO_EXSHOWROOM_UPLIFT_FROM
+            and synced_on >= TURBO_EXSHOWROOM_UPLIFT_FROM
+        ):
+            return ce.round2(max(0.0, base - TURBO_EXSHOWROOM_UPLIFT))
+        return base
+    if as_of < TURBO_EXSHOWROOM_UPLIFT_FROM or not turbo:
         return base
     return ce.round2(base + TURBO_EXSHOWROOM_UPLIFT)
+
+
+def _is_todays_synced_list(stored, row, as_of=None):
+    """True when the file holds today's Price Master but the billed day wants another list."""
+    stored = ce.round2(ce.num(stored))
+    if stored <= 0 or not row:
+        return False
+    base = ce.round2(ce.num(row.get("exShowroom")))
+    selling = ce.round2(ce.num(_turbo_selling_ex(row, as_of)))
+    return base > 0 and abs(stored - base) < 1 and abs(selling - base) >= 1
 
 
 def _price_structure_from_master(row, as_of=None):
@@ -9060,8 +9095,15 @@ async def _deal_format_for_pack(unit_specs, cx_demand=0, on=None, scheme_pass_on
     own_cxs = []
     for spec in unit_specs or []:
         unit_cx = ce.round2(ce.num((spec or {}).get("cxDemand")))
+        # Each pack line follows its own OEM billed day when present.
+        unit_on = str(
+            (spec or {}).get("soldDate")
+            or (spec or {}).get("schemeAsOf")
+            or on
+            or today()
+        )[:10]
         line = await _deal_format_for(
-            spec.get("model"), spec.get("variant"), unit_cx, on, scheme_pass_on)
+            spec.get("model"), spec.get("variant"), unit_cx, unit_on, scheme_pass_on)
         line["chassisNumber"] = spec.get("chassisNumber") or ""
         if unit_cx > 0:
             line["cxDemand"] = unit_cx
@@ -9282,11 +9324,7 @@ async def _cascade_vehicle_or_price_change(lead_id, *, refresh_price=True, reali
 
 
 def _saved_ex_for_preview(lead, chosen=None, idx=0):
-    """Ex-showroom already on this file. Opening the drawer must not replace it.
-
-    Price Master is overwritten by each OEM sync. An August booking that stored
-    ₹7,70,000 would otherwise flip to today's list when Price Structure loads.
-    """
+    """Ex-showroom already on this file (unit first, then lead header for unit 1)."""
     if isinstance(chosen, dict):
         stored = ce.num(chosen.get("exShowroom"))
         if stored > 0:
@@ -9303,10 +9341,10 @@ def _saved_ex_for_preview(lead, chosen=None, idx=0):
 async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(current_user)):
     """Price Structure for this lead's model/variant.
 
-    OEM billed date picks the list (uplift, asOf). A file that already has an
-    ex-showroom keeps that figure when the drawer opens — OEM sync must not
-    rewrite older billed vehicles to today's master. ASM / RM field view stays
-    pipeline-only: no Price Structure or stored deal prices.
+    OEM billed date picks the list (uplift, asOf). A file that still holds
+    today's synced master after an August bill is corrected to the August list.
+    A real booked figure that already matches the billed day is kept. ASM / RM
+    field view stays pipeline-only: no Price Structure or stored deal prices.
     """
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
@@ -9330,10 +9368,22 @@ async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(c
     structure = _price_structure_from_master(row, as_of)
     master_ex = ce.round2(ce.num(structure.get("exShowroom")))
     saved_ex = _saved_ex_for_preview(lead, chosen, idx)
-    kept = saved_ex > 0
-    if kept:
+    # Billed-day list wins when the file was overwritten with today's sync.
+    if saved_ex > 0 and _is_todays_synced_list(saved_ex, row, as_of):
+        kept = False
+    elif saved_ex > 0 and (
+        _stored_ex_matches_row(saved_ex, row, as_of) or abs(saved_ex - master_ex) < 1
+    ):
+        kept = True
         structure = dict(structure)
         structure["exShowroom"] = saved_ex
+    elif saved_ex > 0:
+        # Genuine booked figure from before a later catalog move — keep it.
+        kept = True
+        structure = dict(structure)
+        structure["exShowroom"] = saved_ex
+    else:
+        kept = False
     return {
         "found": True, "model": model, "variant": variant,
         "priceId": row.get("priceId"), "asOf": as_of,
@@ -9873,20 +9923,28 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     # Same booked-price rule for every pack unit — not only Unit 1. A charge
     # edit (RTO / insurance) must not write today's master over a later unit.
     booked_price = lead_booked and (idx == 0 or pack)
-    if booked_price and not pack and ce.num(lead.get("exShowroom")) > 0:
-        # A one-vehicle file keeps the ex-showroom it was booked on.
-        payload["exShowroom"] = ce.num(lead.get("exShowroom"))
-    elif booked_price and pack and row:
-        # Keep this variant's booked ex-showroom, including after a later list
-        # change. Replace it only when the saved figure is another variant's
-        # price — that is how a DV unit was left on the PV price.
-        stored = _saved_ex_for_preview(lead, chosen, idx)
-        as_of_price = _lead_price_as_of(lead, unit=chosen)
-        other_variant = await _stored_ex_is_another_variant(
-            stored, row.get("model"), row.get("variant"), as_of_price)
-        if stored > 0 and (
-            _stored_ex_matches_row(stored, row, as_of_price) or not other_variant
-        ):
+    as_of_price = _lead_price_as_of(lead, unit=chosen)
+    if booked_price and row:
+        stored = (
+            _saved_ex_for_preview(lead, chosen, idx) if pack
+            else ce.num(lead.get("exShowroom") if idx == 0 else chosen.get("exShowroom"))
+        )
+        # File already holds today's synced list while OEM billed day wants the
+        # older list — billed day wins (do not re-lock November onto August).
+        if stored > 0 and _is_todays_synced_list(stored, row, as_of_price):
+            payload["exShowroom"] = ce.num(
+                _price_structure_from_master(row, as_of_price).get("exShowroom"))
+        elif stored > 0 and _stored_ex_matches_row(stored, row, as_of_price):
+            payload["exShowroom"] = stored
+        elif stored > 0 and pack:
+            # Keep this variant's booked ex after a later list change, unless it
+            # is another variant's price (DV left on the PV figure).
+            other_variant = await _stored_ex_is_another_variant(
+                stored, row.get("model"), row.get("variant"), as_of_price)
+            if not other_variant:
+                payload["exShowroom"] = stored
+        elif stored > 0 and not pack:
+            # One-vehicle file keeps the ex it was booked on.
             payload["exShowroom"] = stored
     units = _ensure_lead_units(lead)
     if idx >= len(units):
@@ -9897,6 +9955,14 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     rec["sno"] = idx + 1
     applied_ex = ce.num(rec.get("exShowroom"))
     ex_moved = pack and previous_ex > 0 and applied_ex > 0 and abs(applied_ex - previous_ex) >= 1
+    # Same model/variant, only correcting today's synced list back to the
+    # OEM billed-day list — keep the agreed customer price.
+    billed_day_list_fix = (
+        ex_moved and row is not None
+        and _is_todays_synced_list(previous_ex, row, as_of_price)
+        and abs(applied_ex - ce.num(
+            _price_structure_from_master(row, as_of_price).get("exShowroom"))) < 1
+    )
     # No ex-showroom means this payable is not a booked price for the vehicle
     # being saved. Locking it would keep the stale deal on the new list price.
     stale_blank = (
@@ -9904,7 +9970,7 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
         and ce.num(rec.get("cxDemand")) <= 0
         and ce.num(rec.get("customerPayable")) > 0
     )
-    if ex_moved or stale_blank:
+    if (ex_moved and not billed_day_list_fix) or stale_blank:
         # The rupees belonged to the previous vehicle. RTO and insurance edits
         # do not move ex-showroom, so those deals stay. Additional is stored
         # as zero: a missing key is filled again from the lead header.
