@@ -1,4 +1,13 @@
-"""CLD-07: Exotel and BotSpace webhooks do not write when no secret is set."""
+"""CLD-07 / R-04: webhook secrets.
+
+Exotel: gather/recorded/status do not write when no secret is set (a forged
+call could stamp a customer-confirmed amount).
+
+BotSpace: an unsigned callback is processed when no secret is saved — that is
+the approved WhatsApp inbox / delivery-status behaviour (PR #57-#64). Dropping
+them (PR #295) lost every customer reply in production from 18 Nov 2026. Once a
+secret is saved it is enforced.
+"""
 import os
 import sys
 
@@ -59,12 +68,36 @@ async def test_correct_secret_records_and_wrong_secret_is_rejected(client):
     assert lead.get("dealVerifyAmount") == 123456
 
 
+INBOUND = {
+    "event": "message-event", "direction": "incoming",
+    "phone": {"countryCode": "91", "phone": "9812345678"},
+    "payload": {"type": "text", "payload": {"text": "hello"}},
+}
+
+
 @pytest.mark.asyncio
-async def test_botspace_without_secret_returns_200_and_writes_nothing(client):
-    r = await client.post("/api/integrations/botspace/webhook", json={
-        "event": "message-event", "direction": "incoming",
-        "phone": {"countryCode": "91", "phone": "9812345678"},
-        "payload": {"type": "text", "payload": {"text": "hello"}},
-    })
-    assert r.status_code == 200
+async def test_botspace_without_secret_still_records_customer_reply(client):
+    await server.db.whatsapp_messages.delete_many({"leadId": "LD26CLD07"})
+    r = await client.post("/api/integrations/botspace/webhook", json=INBOUND)
+    assert r.status_code == 200, r.text
+    assert await server.db.whatsapp_messages.count_documents(
+        {"leadId": "LD26CLD07", "direction": "inbound"}) == 1
+
+
+@pytest.mark.asyncio
+async def test_botspace_secret_is_enforced_once_saved(client):
+    await server.db.whatsapp_messages.delete_many({"leadId": "LD26CLD07"})
+    await server.db.settings.update_one(
+        {"_id": "botspace"}, {"$set": {"webhookSecret": "bs-secret-1"}}, upsert=True)
+    missing = await client.post("/api/integrations/botspace/webhook", json=INBOUND)
+    wrong = await client.post("/api/integrations/botspace/webhook", json=INBOUND,
+                              params={"secret": "nope"})
+    assert missing.status_code == 401 and wrong.status_code == 401
     assert await server.db.whatsapp_messages.count_documents({"leadId": "LD26CLD07"}) == 0
+    ok_q = await client.post("/api/integrations/botspace/webhook", json=INBOUND,
+                             params={"secret": "bs-secret-1"})
+    ok_h = await client.post("/api/integrations/botspace/webhook", json=INBOUND,
+                             headers={"x-botspace-secret": "bs-secret-1"})
+    assert ok_q.status_code == 200 and ok_h.status_code == 200
+    assert await server.db.whatsapp_messages.count_documents(
+        {"leadId": "LD26CLD07", "direction": "inbound"}) == 2

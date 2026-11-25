@@ -64,8 +64,11 @@ async def turbo_lead(c, mobile, deliver=False):
                      json={"amount": lead["customerOutstanding"], "paymentMode": "Cash"})
         await c.put(f"/api/leads/{lid}/delivery", json={
             "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-            "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22",
-            "chassisNumber": "CH-22", "numberPlate": "RJ14-22", "delivered": "Yes"})
+            "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard",
+            # Chassis / invoice / plate are unique across live leads (PR #28), so
+            # each delivered lead in this module needs its own.
+            "invoiceNumber": f"INV-22-{mobile[-4:]}", "chassisNumber": f"CH-22-{mobile[-4:]}",
+            "numberPlate": f"RJ14-22-{mobile[-4:]}", "delivered": "Yes"})
     return lid
 
 
@@ -169,8 +172,8 @@ async def test_delivery_twice_does_not_duplicate_the_payout_entry(client):
     lid = await turbo_lead(client, "9777700006", deliver=True)
     await client.put(f"/api/leads/{lid}/delivery", json={
         "insurance": "Yes", "registration": "Yes", "invoice": "Yes", "pdi": "Yes", "rc": "Yes",
-        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22",
-        "chassisNumber": "CH-22", "numberPlate": "RJ14-22", "delivered": "Yes"})
+        "insuranceAgentId": "IA26AGENT1", "insurerName": "ICICI Lombard", "invoiceNumber": "INV-22-0006",
+        "chassisNumber": "CH-22-0006", "numberPlate": "RJ14-22-0006", "delivered": "Yes"})
     assert await server.db.insurance.count_documents({"leadId": lid}) == 1
 
 

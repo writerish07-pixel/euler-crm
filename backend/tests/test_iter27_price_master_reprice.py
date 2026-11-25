@@ -35,28 +35,28 @@ import httpx  # noqa: E402
 import commercial as ce  # noqa: E402
 import server  # noqa: E402
 
-MODEL, VARIANT = "Hi-Load", "TR-NC (HiLoad)"
+# The test owns one manually priced row. The seed rows are OEM-sourced: since
+# PR #117/#118 Coulson is the price source of truth and an owner edit cannot move
+# their ex-showroom, and background catalog maintenance may recreate them.
+MODEL, VARIANT = "Hi-Load", "ITER27 Reprice (FB)"
+PRICE_ID = "PM-ITER27-REPRICE"
 BASE_EX = 500000.0
 RISE = 25000.0
-# The seed already holds a row for this vehicle. Reuse it rather than inserting a
-# second one — two Active rows for one model/variant make _price_master_row
-# ambiguous, which is a different bug from the one under test.
-PRICE_ID = None
+# Bookings on/after 1 Sep 2026: earlier bookings keep their price by design
+# (Sept price lock, PR #89 / 6c53868).
+BOOKING_DATE = "2026-09-09"
 
 
 @pytest_asyncio.fixture
 async def client():
-    global PRICE_ID
     await server.startup()
-    row = await server.db.price_master.find_one({"model": MODEL, "variant": VARIANT})
-    assert row, f"seed is missing the {MODEL}/{VARIANT} Price Master row"
-    PRICE_ID = row["priceId"]
-    await server.db.price_master.update_one(
-        {"priceId": PRICE_ID},
-        {"$set": {"exShowroom": BASE_EX, "rto": 10000, "insurance": 10000,
-                  "accessories": 0, "handlingCharges": 0, "trc": 0, "fastag": 0,
-                  "extendedWarranty": 0, "otherCharges": 0,
-                  "tcsApplicable": "No", "status": "Active"}})
+    await server.db.price_master.delete_many({"model": MODEL, "variant": VARIANT})
+    await server.db.price_master.insert_one({
+        "priceId": PRICE_ID, "model": MODEL, "variant": VARIANT,
+        "exShowroom": BASE_EX, "rto": 10000, "insurance": 10000,
+        "accessories": 0, "handlingCharges": 0, "trc": 0, "fastag": 0,
+        "extendedWarranty": 0, "otherCharges": 0,
+        "tcsApplicable": "No", "status": "Active", "priceSource": "manual"})
     transport = httpx.ASGITransport(app=server.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         r = await c.post("/api/auth/login",
@@ -86,7 +86,7 @@ async def make_lead(c, mobile, *, priced=True, booked=False, pay=0.0):
         await c.put(f"/api/leads/{lid}/price-structure", json=ps)
     if booked:
         await c.post(f"/api/leads/{lid}/convert-booking",
-                     json={"bookingDate": "2026-08-09", "bookingAmount": 0})
+                     json={"bookingDate": BOOKING_DATE, "bookingAmount": 0})
     if pay:
         await c.post(f"/api/leads/{lid}/payments", json={"amount": pay, "paymentMode": "Cash"})
     return lid

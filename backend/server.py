@@ -9505,7 +9505,12 @@ async def convert_booking(lead_id: str, body: BookingIn, act=Depends(actor), _sa
                                             "lastUpdated": now_iso()}})
         await recompute_lead(lead_id)
         lead = await db.leads.find_one({"leadId": lead_id})
-    await _require_booking_deal_approval(lead, act)
+    # Judge the discount on the same date the price was filled for. The lead has
+    # no bookingDate yet, so the gate used createdDate: a back-dated booking was
+    # priced on the booking-day list but compared with today's list, and the
+    # difference (e.g. the ₹15,000 Turbo uplift) was parked as a dealer discount.
+    await _require_booking_deal_approval(
+        {**lead, "bookingDate": lead.get("bookingDate") or bdate}, act)
     if ce.num(lead.get("grossVehicleCost")) <= 0 or ce.num(lead.get("customerPayable")) <= 0:
         # Never persist a booking whose commercial calculation did not resolve.
         raise HTTPException(422,
@@ -20228,8 +20233,11 @@ async def botspace_webhook(request: Request):
         if not hmac.compare_digest(str(got), secret):
             raise HTTPException(401, "Invalid webhook secret")
     else:
-        logger.warning("BOTSPACE_WEBHOOK_SECRET_MISSING")
-        return {"ok": True, "ignored": "webhook secret not configured"}
+        # No secret saved: keep processing (approved WhatsApp inbox / delivery
+        # status behaviour, PR #57-#64). Dropping these silently lost every
+        # customer reply and delivery update in production from 18 Nov 2026.
+        # Save a secret in Settings → WhatsApp to require it (enforced above).
+        logger.warning("BOTSPACE_WEBHOOK_SECRET_MISSING: processing unsigned callback")
     try:
         return await wa.handle_webhook(body if isinstance(body, dict) else {})
     except Exception:

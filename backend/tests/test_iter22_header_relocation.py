@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("GSHEET_ID", "FAKE_SHEET")
 
 import gsheets  # noqa: E402
+
+# Sheets sync logic runs against an in-memory fake service (see conftest.py).
+pytestmark = pytest.mark.fake_sheets
 from gsheets import SYNC_MAP, _col_letter  # noqa: E402
 
 from live_headers import LIVE_HEADERS, PENDING_SHEET_COLUMNS  # noqa: E402

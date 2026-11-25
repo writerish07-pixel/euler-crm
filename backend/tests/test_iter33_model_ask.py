@@ -235,17 +235,23 @@ async def test_the_campaign_is_owner_only(exec_client):
 async def test_the_preview_carries_the_numbered_menu(client):
     await make_lead(client, "ITER33 Menu")
     body = (await client.get("/api/integrations/botspace/model-ask/preview")).json()
-    assert body["models"] == MODELS
+    # The model list follows Price Master, which the OEM catalog import can grow
+    # (PR #278 added HiCity). Pin the shape, not a frozen list.
+    assert body["models"] == sorted(body["models"])
+    assert set(MODELS) <= set(body["models"])
     # The body text the customer sees, and the numbering the reply parser expects.
-    assert body["menu"] == "1 Hi-Load / 2 Neo HiRange / 3 Storm / 4 Turbo Max"
+    assert body["menu"] == " / ".join(f"{i + 1} {m}" for i, m in enumerate(body["models"]))
 
 
 # ==================================================== writing the answer back
 @pytest.mark.asyncio
 async def test_a_confident_reply_fills_an_empty_model(client):
     lid = await make_lead(client, "ITER33 Answers")
+    # The menu this customer received (before the catalog added HiCity).
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {"modelAskMenu": MODELS}})
     lead = await server.db.leads.find_one({"leadId": lid})
 
+    # "3" is Storm on the menu that was sent, even though today's list differs.
     res = await wa.apply_model_reply(lead, "3")
     assert res == {"updated": True, "model": "Storm"}
 
@@ -355,3 +361,22 @@ async def test_a_reply_on_a_lead_that_already_has_a_model_is_stored_but_changes_
 def test_the_model_ask_template_is_registered():
     assert wa.DEFAULT_TEMPLATES["modelAsk"] == "lead_model_interest"
     assert wa.MODEL_ASK_COOLOFF_DAYS >= 30
+
+
+@pytest.mark.asyncio
+async def test_sending_records_the_menu_the_customer_saw(client, monkeypatch):
+    lid = await make_lead(client, "ITER33 Menu Stored")
+
+    async def fake_send(**kw):
+        return {"ok": True}
+    monkeypatch.setattr(wa, "_enqueue_or_send", fake_send)
+    monkeypatch.setattr(wa, "model_ask_due", lambda lead, day: lead.get("leadId") == lid)
+    cfg = await wa.get_config()
+    monkeypatch.setattr(wa, "get_config", lambda: _async({**cfg, "enabled": True}))
+    res = await wa.run_model_ask_campaign(dry_run=False)
+    doc = await server.db.leads.find_one({"leadId": lid})
+    assert doc["modelAskMenu"] == res["models"]
+
+
+async def _async(v):
+    return v

@@ -802,20 +802,25 @@ function ExotelCard() {
   );
 }
 
-function BotspaceCard() {
+export function BotspaceCard() {
   const [cfg, setCfg] = useState(null);
   const [form, setForm] = useState({
     apiKey: "", channelId: "", reviewUrl: "", enabled: true,
-    execName: "", execMobile: "", cronToken: "",
+    execName: "", execMobile: "", cronToken: "", webhookSecret: "",
   });
   const [execs, setExecs] = useState([]);
   const [busy, setBusy] = useState(false);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [bookingBusy, setBookingBusy] = useState(false);
-  const webhookUrl = (cfg?.webhookUrl && String(cfg.webhookUrl).startsWith("http")
+  const webhookBase = (cfg?.webhookUrl && String(cfg.webhookUrl).startsWith("http")
     && !String(cfg.webhookUrl).includes("onrender.com"))
     ? cfg.webhookUrl
     : "https://euler-crm-production.up.railway.app/api/integrations/botspace/webhook";
+  // A saved secret must travel with every BotSpace callback; the copied URL carries it.
+  const savedSecret = String(cfg?.webhookSecret || "").trim();
+  const webhookUrl = savedSecret
+    ? `${webhookBase}${webhookBase.includes("?") ? "&" : "?"}secret=${encodeURIComponent(savedSecret)}`
+    : webhookBase;
 
   const load = useCallback(() => {
     get("/integrations/botspace").then((d) => {
@@ -828,6 +833,7 @@ function BotspaceCard() {
         reviewUrl: d.reviewUrl || "",
         enabled: d.enabled !== false,
         cronToken: d.cronToken || "",
+        webhookSecret: d.webhookSecret || "",
       }));
     }).catch(() => {});
   }, []);
@@ -842,6 +848,7 @@ function BotspaceCard() {
         enabled: true,
         executives: execs,
         cronToken: form.cronToken,
+        webhookSecret: form.webhookSecret,
       };
       if (form.apiKey && !form.apiKey.includes("…") && !form.apiKey.startsWith("•")) {
         body.apiKey = form.apiKey;
@@ -932,7 +939,18 @@ function BotspaceCard() {
           <Input value={form.cronToken} onChange={(e) => setForm({ ...form, cronToken: e.target.value })}
             placeholder="For Railway / cron-job.org" />
         </Field>
+        <Field label="Webhook secret (recommended)">
+          <Input data-testid="botspace-webhook-secret" value={form.webhookSecret}
+            onChange={(e) => setForm({ ...form, webhookSecret: e.target.value })}
+            placeholder="Any long random text" />
+        </Field>
       </div>
+      {!savedSecret && (
+        <p className="text-xs text-amber-700 mt-2" data-testid="botspace-secret-warning">
+          No webhook secret is saved, so anyone who knows the webhook URL could post fake replies.
+          Save a secret, then paste the new URL below into BotSpace.
+        </p>
+      )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <div className="text-xs text-ink-faint font-mono break-all" data-testid="botspace-webhook-url">
           BotSpace webhook URL: {webhookUrl}

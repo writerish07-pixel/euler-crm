@@ -75,13 +75,9 @@ async def client(monkeypatch):
     monkeypatch.setattr(server, "db", isolated)
     monkeypatch.delenv("BOTSPACE_API_KEY", raising=False)
     monkeypatch.delenv("BOTSPACE_CHANNEL_ID", raising=False)
-    # Inbound webhooks must not write when no secret is configured. These
-    # cases still exercise the handler, so the fixture supplies a test secret.
-    await isolated.settings.update_one(
-        {"_id": "botspace"},
-        {"$set": {"webhookSecret": "wa-test-secret"}},
-        upsert=True,
-    )
+    # No webhook secret is seeded: unsigned BotSpace callbacks are processed
+    # (approved inbox behaviour; R-04). Secret enforcement is covered in
+    # tests/regression_claude/test_cld07_webhooks.py.
 
     async def boom(*a, **k):
         raise RuntimeError("BotSpace must not be called in this test")
@@ -99,7 +95,6 @@ async def client(monkeypatch):
         r = await c.post("/api/auth/login", json={"email": OWNER_EMAIL, "password": OWNER_PASSWORD})
         assert r.status_code == 200, r.text
         c.headers["Authorization"] = f"Bearer {r.json()['token']}"
-        c.headers["x-botspace-secret"] = "wa-test-secret"
         yield c
 
 

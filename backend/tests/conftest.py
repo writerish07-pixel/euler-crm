@@ -52,6 +52,18 @@ def _block_live_google_sheet_writes(monkeypatch, request):
                                 lambda *a, **k: [], raising=False)
     except Exception:
         pass
+    # Modules marked fake_sheets test the Sheets sync logic itself against an
+    # in-memory fake service. They keep the real gsheets functions and opt in to
+    # writes; gsheets._init is disabled so real credentials can never be loaded.
+    if request.node.get_closest_marker("fake_sheets"):
+        monkeypatch.setenv("GSHEET_ALLOW_TEST_WRITES", "1")
+        try:
+            import gsheets
+            monkeypatch.setattr(gsheets, "_init", lambda: None, raising=False)
+        except Exception:
+            pass
+        yield
+        return
     try:
         import gsheets
         monkeypatch.setattr(gsheets, "sync", _no_sync, raising=False)
@@ -68,5 +80,7 @@ def pytest_configure(config):
         "markers", "real_sheet_sync: use live server.sheet_sync (Google still mocked)")
     config.addinivalue_line(
         "markers", "real_coulson_pdi: use the real coulson.fetch_pdi_pending_sold (HTTP still mocked)")
+    config.addinivalue_line(
+        "markers", "fake_sheets: real gsheets sync logic against an in-memory fake service")
     config.addinivalue_line(
         "markers", "live_http: needs REACT_APP_BACKEND_URL; skipped when it is unset")

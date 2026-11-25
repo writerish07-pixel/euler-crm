@@ -37,9 +37,11 @@ jobs:
           ENVIRONMENT: test
           OWNER_PASSWORD: euler@123
           SEED_DEMO_USERS: "1"
-        run: python -m pytest tests/ -q --tb=line -m "not live_http" --junitxml=backend-junit.xml
+        # One process per test module: modules share one in-memory database
+        # through `server`, so a single process made results order-dependent.
+        run: python scripts/run_tests_isolated.py -j 4 --junit-dir test-results -m "not live_http"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: backend-junit
-          path: backend/backend-junit.xml
+          path: backend/test-results/

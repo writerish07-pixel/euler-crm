@@ -136,4 +136,4 @@ Why: the OEM shows 142 sold vehicles whose PDI is not done; 140 are on CRM files
 
 ## 5. Final full-suite result
 
-(Filled in after the final run — see the commit that adds this file.)
+Superseded by `CLAUDE_PRODUCTION_GRADE_REPORT.md` section 4 (full suite 1,737 tests: 0 failed, 0 errors). R-04 was fixed in code in that later pass.
