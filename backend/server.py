@@ -9351,10 +9351,11 @@ def _saved_ex_for_preview(lead, chosen=None, idx=0):
 async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(current_user)):
     """Price Structure for this lead's model/variant.
 
-    OEM billed date picks the list (uplift, asOf). A file that still holds
-    today's synced master after an August bill is corrected to the August list.
-    A real booked figure that already matches the billed day is kept. ASM / RM
-    field view stays pipeline-only: no Price Structure or stored deal prices.
+    OEM billed date picks the list (uplift, asOf). The billed-day Price Master
+    figure always wins when the file holds any other amount — including today's
+    synced list stuck on an older bill, or a wrong typed figure. Only a saved
+    ex that already matches that billed-day list is kept. ASM / RM field view
+    stays pipeline-only: no Price Structure or stored deal prices.
     """
     lead = await get_lead_or_404(lead_id)
     await _require_lead_visible(lead, user)
@@ -9378,17 +9379,11 @@ async def price_preview(lead_id: str, unit: Optional[int] = None, user=Depends(c
     structure = _price_structure_from_master(row, as_of)
     master_ex = ce.round2(ce.num(structure.get("exShowroom")))
     saved_ex = _saved_ex_for_preview(lead, chosen, idx)
-    # Billed-day list wins when the file was overwritten with today's sync.
-    if saved_ex > 0 and _is_todays_synced_list(saved_ex, row, as_of):
-        kept = False
-    elif saved_ex > 0 and (
+    # Keep only when the file already holds the billed-day list (or a valid
+    # unsynced-catalog match). Any other saved figure yields to master.
+    if saved_ex > 0 and (
         _stored_ex_matches_row(saved_ex, row, as_of) or abs(saved_ex - master_ex) < 1
     ):
-        kept = True
-        structure = dict(structure)
-        structure["exShowroom"] = saved_ex
-    elif saved_ex > 0:
-        # Genuine booked figure from before a later catalog move — keep it.
         kept = True
         structure = dict(structure)
         structure["exShowroom"] = saved_ex
@@ -9939,28 +9934,20 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     # edit (RTO / insurance) must not write today's master over a later unit.
     booked_price = lead_booked and (idx == 0 or pack)
     as_of_price = _lead_price_as_of(lead, unit=chosen)
+    billed_day_master = ce.num(
+        _price_structure_from_master(row, as_of_price).get("exShowroom")) if row else 0.0
     if booked_price and row:
         stored = (
             _saved_ex_for_preview(lead, chosen, idx) if pack
             else ce.num(lead.get("exShowroom") if idx == 0 else chosen.get("exShowroom"))
         )
-        # File already holds today's synced list while OEM billed day wants the
-        # older list — billed day wins (do not re-lock November onto August).
-        if stored > 0 and _is_todays_synced_list(stored, row, as_of_price):
-            payload["exShowroom"] = ce.num(
-                _price_structure_from_master(row, as_of_price).get("exShowroom"))
-        elif stored > 0 and _stored_ex_matches_row(stored, row, as_of_price):
+        # Billed-day list wins for every month. Keep the file's ex only when it
+        # already is that list (or a valid unsynced-catalog match). Wrong typed
+        # figures and today's synced list on an older bill both correct here.
+        if stored > 0 and _stored_ex_matches_row(stored, row, as_of_price):
             payload["exShowroom"] = stored
-        elif stored > 0 and pack:
-            # Keep this variant's booked ex after a later list change, unless it
-            # is another variant's price (DV left on the PV figure).
-            other_variant = await _stored_ex_is_another_variant(
-                stored, row.get("model"), row.get("variant"), as_of_price)
-            if not other_variant:
-                payload["exShowroom"] = stored
-        elif stored > 0 and not pack:
-            # One-vehicle file keeps the ex it was booked on.
-            payload["exShowroom"] = stored
+        else:
+            payload["exShowroom"] = billed_day_master
     units = _ensure_lead_units(lead)
     if idx >= len(units):
         raise HTTPException(422, "That unit is not on this order.")
@@ -9970,13 +9957,13 @@ async def set_price_structure(lead_id: str, body: PriceStructureIn, act=Depends(
     rec["sno"] = idx + 1
     applied_ex = ce.num(rec.get("exShowroom"))
     ex_moved = pack and previous_ex > 0 and applied_ex > 0 and abs(applied_ex - previous_ex) >= 1
-    # Same model/variant, only correcting today's synced list back to the
-    # OEM billed-day list — keep the agreed customer price.
+    # Same vehicle, correcting any wrong saved ex back to the OEM billed-day
+    # list — keep the agreed customer price (Cx Demand / payable).
     billed_day_list_fix = (
-        ex_moved and row is not None
-        and _is_todays_synced_list(previous_ex, row, as_of_price)
-        and abs(applied_ex - ce.num(
-            _price_structure_from_master(row, as_of_price).get("exShowroom"))) < 1
+        ex_moved and row is not None and billed_day_master > 0
+        and abs(applied_ex - billed_day_master) < 1
+        and not await _stored_ex_is_another_variant(
+            previous_ex, row.get("model"), row.get("variant"), as_of_price)
     )
     # No ex-showroom means this payable is not a booked price for the vehicle
     # being saved. Locking it would keep the stale deal on the new list price.

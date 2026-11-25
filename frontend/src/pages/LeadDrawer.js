@@ -1687,8 +1687,9 @@ function PriceStructure({ lead, actions = {}, isOwner = false, onSaved, onRefres
     // insurance stayed in the form and were saved back.
   }, [lead.leadId, unitSno, src.interestedModel, src.variant]);
 
-  // Ex-Showroom is locked. OEM billed date picks the list; a price already on
-  // this unit stays. Do not read Unit 1's ex from the lead onto a later unit.
+  // Ex-Showroom is locked to the OEM billed-day list. A saved figure that
+  // already matches that list stays; any other amount yields to Price Master.
+  // Do not read Unit 1's ex from the lead onto a later unit.
   useEffect(() => {
     let alive = true;
     const q = units ? { unit: unitSno } : undefined;

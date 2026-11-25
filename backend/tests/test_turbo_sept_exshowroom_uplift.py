@@ -177,6 +177,95 @@ async def test_august_file_stuck_on_todays_list_is_corrected(client):
     assert after["exShowroom"] == 824999 - UPLIFT
 
 
+@pytest.mark.asyncio
+async def test_wrong_saved_ex_yields_to_billed_day_list_any_month(client):
+    """LD26000060 Ram Niwas: file holds ₹8,00,000; OEM billed 2026-08-31 → ₹7,70,000.
+
+    Any month: a saved ex that is neither today's sync nor the billed-day list
+    must not stay locked. Preview and save both take the billed-day master.
+    """
+    lid = await _lead(client, "Ram Niwas Style", "9535010010")
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "currentStatus": "Booked",
+        "bookingDate": "2026-08-20",
+        "soldDate": "2026-08-31",
+        "interestedModel": TURBO[0],
+        "variant": TURBO[1],
+        "exShowroom": 800000,
+        "priceStructureSaved": True,
+        "rto": 5500,
+        "insuranceAmount": 19000,
+        "cxDemand": 827500,
+        "useDealPrice": True,
+        "customerPayable": 827500,
+        "units": [{
+            "sno": 1, "model": TURBO[0], "variant": TURBO[1],
+            "soldDate": "2026-08-31", "exShowroom": 800000,
+            "priceStructureSaved": True, "rto": 5500, "insuranceAmount": 19000,
+            "cxDemand": 827500, "useDealPrice": True, "customerPayable": 827500,
+        }],
+    }})
+    await server.db.price_master.update_one(
+        {"model": TURBO[0], "variant": TURBO[1]},
+        {"$set": {
+            "exShowroom": OEM_MAXX_PV + UPLIFT,
+            "oemSyncedAt": "2026-11-25T08:20:55+00:00",
+            "status": "active",
+        }},
+    )
+    preview = (await client.get(f"/api/leads/{lid}/price-preview")).json()
+    assert preview["asOf"] == "2026-08-31"
+    assert preview.get("keptSavedEx") is False
+    assert preview["priceStructure"]["exShowroom"] == OEM_MAXX_PV
+    assert preview.get("masterExShowroom") == OEM_MAXX_PV
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": 800000, "rto": 5500, "insuranceAmount": 19000,
+    })
+    assert saved.status_code == 200, saved.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["exShowroom"] == OEM_MAXX_PV
+    assert after.get("useDealPrice") is True
+    assert abs(float(after.get("cxDemand") or 0) - 827500) < 1
+
+
+@pytest.mark.asyncio
+async def test_october_wrong_saved_ex_uses_october_billed_day_list(client):
+    """Any month follows the same rule — October bill locks October list."""
+    lid = await _lead(client, "Oct Wrong Ex", "9535010011")
+    await server.db.price_master.update_one(
+        {"model": TURBO[0], "variant": TURBO[1]},
+        {"$set": {
+            "exShowroom": OEM_MAXX_PV + UPLIFT,
+            "oemSyncedAt": "2026-11-25T08:20:55+00:00",
+            "status": "active",
+        }},
+    )
+    await server.db.leads.update_one({"leadId": lid}, {"$set": {
+        "currentStatus": "Booked",
+        "bookingDate": "2026-10-20",
+        "soldDate": "2026-10-23",
+        "interestedModel": TURBO[0],
+        "variant": TURBO[1],
+        "exShowroom": OEM_MAXX_PV,  # August figure left on an October file
+        "priceStructureSaved": True,
+        "units": [{
+            "sno": 1, "model": TURBO[0], "variant": TURBO[1],
+            "soldDate": "2026-10-23", "exShowroom": OEM_MAXX_PV,
+            "priceStructureSaved": True,
+        }],
+    }})
+    preview = (await client.get(f"/api/leads/{lid}/price-preview")).json()
+    assert preview["asOf"] == "2026-10-23"
+    assert preview.get("keptSavedEx") is False
+    assert preview["priceStructure"]["exShowroom"] == OEM_MAXX_PV + UPLIFT
+    saved = await client.put(f"/api/leads/{lid}/price-structure", json={
+        "exShowroom": OEM_MAXX_PV, "rto": 5500, "insuranceAmount": 19000,
+    })
+    assert saved.status_code == 200, saved.text
+    after = await server.db.leads.find_one({"leadId": lid})
+    assert after["exShowroom"] == OEM_MAXX_PV + UPLIFT
+
+
 def test_oem_billed_date_decides_price_as_of():
     lead = {"bookingDate": "2026-08-20", "soldDate": "2026-08-31"}
     assert server._lead_price_as_of(lead) == "2026-08-31"
