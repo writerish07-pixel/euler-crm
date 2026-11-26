@@ -807,6 +807,7 @@ export function BotspaceCard() {
   const [form, setForm] = useState({
     apiKey: "", channelId: "", reviewUrl: "", enabled: true,
     execName: "", execMobile: "", cronToken: "", webhookSecret: "",
+    financeManagerMobile: "",
   });
   const [execs, setExecs] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -834,6 +835,7 @@ export function BotspaceCard() {
         enabled: d.enabled !== false,
         cronToken: d.cronToken || "",
         webhookSecret: d.webhookSecret || "",
+        financeManagerMobile: d.financeManagerMobile || "",
       }));
     }).catch(() => {});
   }, []);
@@ -849,6 +851,7 @@ export function BotspaceCard() {
         executives: execs,
         cronToken: form.cronToken,
         webhookSecret: form.webhookSecret,
+        financeManagerMobile: form.financeManagerMobile,
       };
       if (form.apiKey && !form.apiKey.includes("…") && !form.apiKey.startsWith("•")) {
         body.apiKey = form.apiKey;
@@ -920,6 +923,7 @@ export function BotspaceCard() {
           <li><code>booking_deal_confirm</code> — booking + approval deal amount (5 variables)</li>
           <li><code>booking_confirm</code> — fallback if the deal template is not Active yet (no amount)</li>
           <li><code>lead_followup_3day</code>, <code>delivery_review</code>, <code>finance_overdue_exec</code></li>
+          <li><code>ta_daily_statement</code>, <code>ta_day25_clear</code>, <code>ta_low_balance</code> — Trade Advance (10:30 IST)</li>
         </ul>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -943,6 +947,11 @@ export function BotspaceCard() {
           <Input data-testid="botspace-webhook-secret" value={form.webhookSecret}
             onChange={(e) => setForm({ ...form, webhookSecret: e.target.value })}
             placeholder="Any long random text" />
+        </Field>
+        <Field label="Finance Manager mobile (Trade Advance alerts)">
+          <Input data-testid="botspace-finance-manager-mobile" value={form.financeManagerMobile}
+            onChange={(e) => setForm({ ...form, financeManagerMobile: e.target.value })}
+            placeholder="10-digit mobile for TA WhatsApp" />
         </Field>
       </div>
       {!savedSecret && (

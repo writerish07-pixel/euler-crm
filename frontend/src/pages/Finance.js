@@ -11,6 +11,8 @@ import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
+const TA_FINANCERS = ["Shriram", "Cholamandalam", "Mahindra", "Other"];
+
 function financerRollup(rows) {
   const map = new Map();
   for (const r of rows || []) {
@@ -46,6 +48,7 @@ export default function Finance() {
     return ["pending", "overdue", "all"].includes(q) ? q : "all";
   });
   const [receipt, setReceipt] = useState(false);
+  const [taTick, setTaTick] = useState(0);
   const period = usePeriodState();
   const load = useCallback(() => get("/finance", { view, ...period.params }).then(setRows).catch(() => {
     setRows([]);
@@ -110,6 +113,10 @@ export default function Finance() {
       />
 
       <PeriodBar month={period.month} year={period.year} onChange={period.onChange} />
+
+      {isMoneyDesk && (
+        <TradeAdvanceCard tick={taTick} onChanged={() => setTaTick((n) => n + 1)} />
+      )}
 
       {byFinancer.length > 0 && (
         <Card className="p-5 mb-6" data-testid="finance-by-financer">
@@ -210,6 +217,158 @@ export default function Finance() {
         <FinanceReceiptModal files={allFiles} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />
       )}
     </div>
+  );
+}
+
+function TradeAdvanceCard({ tick, onChanged }) {
+  const [rows, setRows] = useState([]);
+  const [draw, setDraw] = useState(false);
+  const [repayId, setRepayId] = useState("");
+  const load = useCallback(() => {
+    get("/trade-advances", { status: "Open" }).then(setRows).catch(() => setRows([]));
+  }, []);
+  useEffect(() => { load(); }, [load, tick]);
+
+  return (
+    <Card className="p-5 mb-6" data-testid="trade-advance-card">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+        <div>
+          <h3 className="font-heading font-bold text-ink">Trade Advance</h3>
+          <p className="text-xs text-ink-soft">
+            Dealer OD from the financer. Finance-mode receipts on a lead auto-deduct the oldest open tranche.
+            WhatsApp daily at 10:30 IST lists every open TA in one message.
+          </p>
+        </div>
+        <Button data-testid="ta-record-draw-btn" onClick={() => setDraw(true)}>
+          Record TA draw
+        </Button>
+      </div>
+      <Table
+        rowKey="trancheId"
+        columns={[
+          { key: "financer", label: "Financer", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge> },
+          { key: "drawnAmount", label: "Drawn", align: "right", mono: true, render: (r) => inr(r.drawnAmount) },
+          { key: "consumed", label: "Consumed", align: "right", mono: true, render: (r) => inr(r.consumed) },
+          { key: "balance", label: "Balance", align: "right", mono: true, render: (r) => (
+            <span className={r.balance < 1000000 ? "text-amber-700 font-semibold" : ""}>{inr(r.balance)}</span>
+          ) },
+          { key: "drawnOn", label: "Drawn", render: (r) => fmtDate(r.drawnOn) },
+          { key: "dueOn", label: "Due", render: (r) => fmtDate(r.dueOn) },
+          { key: "daysLeft", label: "Days left", align: "right", render: (r) => (
+            <span className={r.daysLeft <= 5 ? "text-red-600 font-semibold" : ""}>{r.daysLeft}</span>
+          ) },
+          { key: "actions", label: "", render: (r) => (
+            <Button variant="secondary" className="!py-1 !px-2 text-xs"
+              data-testid={`ta-repay-${r.trancheId}`}
+              onClick={() => setRepayId(r.trancheId)}>Clear / repay</Button>
+          ) },
+        ]}
+        rows={rows}
+        empty="No open Trade Advance — record a draw when the financer credits the dealer"
+      />
+      {draw && (
+        <TradeAdvanceDrawModal
+          onClose={() => setDraw(false)}
+          onDone={() => { setDraw(false); load(); onChanged?.(); }}
+        />
+      )}
+      {repayId && (
+        <TradeAdvanceRepayModal
+          tranche={rows.find((r) => r.trancheId === repayId)}
+          onClose={() => setRepayId("")}
+          onDone={() => { setRepayId(""); load(); onChanged?.(); }}
+        />
+      )}
+    </Card>
+  );
+}
+
+function TradeAdvanceDrawModal({ onClose, onDone }) {
+  const [form, setForm] = useState({
+    financer: "Shriram", amount: "", drawnOn: todayISO(), reference: "", other: "",
+  });
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const submit = async () => {
+    const financer = form.financer === "Other" ? form.other.trim() : form.financer;
+    if (!financer) return toast.error("Financer is required");
+    if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
+    try {
+      await post("/trade-advances", {
+        financer, amount: +form.amount, drawnOn: form.drawnOn, reference: form.reference,
+      });
+      toast.success("Trade Advance recorded");
+      onDone();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not record Trade Advance"));
+    }
+  };
+  return (
+    <Modal onClose={onClose} width="max-w-lg">
+      <div className="overflow-y-auto overscroll-contain p-6" data-testid="ta-draw-modal">
+        <h3 className="font-heading text-lg font-bold text-ink mb-1">Record Trade Advance draw</h3>
+        <p className="text-xs text-ink-soft mb-4">
+          Money the financer credited to the dealership (dealer OD). Due in 30 days from the drawn date.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field label="Financer">
+            <Select data-testid="ta-financer" value={form.financer} onChange={set("financer")}>
+              {TA_FINANCERS.map((f) => <option key={f} value={f}>{f}</option>)}
+            </Select>
+          </Field>
+          {form.financer === "Other" && (
+            <Field label="Financer name">
+              <Input data-testid="ta-financer-other" value={form.other} onChange={set("other")} />
+            </Field>
+          )}
+          <Field label="Amount (₹)">
+            <Input data-testid="ta-amount" type="number" value={form.amount} onChange={set("amount")} placeholder="10000000" />
+          </Field>
+          <Field label="Drawn on">
+            <Input data-testid="ta-drawn-on" type="date" value={form.drawnOn} onChange={set("drawnOn")} />
+          </Field>
+          <Field label="Reference">
+            <Input value={form.reference} onChange={set("reference")} placeholder="UTR / note" />
+          </Field>
+        </div>
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button data-testid="ta-save-draw-btn" onClick={submit}>Save draw</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function TradeAdvanceRepayModal({ tranche, onClose, onDone }) {
+  const [amount, setAmount] = useState(tranche ? String(tranche.balance) : "");
+  const submit = async () => {
+    if (!tranche) return;
+    if (!amount || +amount <= 0) return toast.error("Enter a valid amount");
+    try {
+      await post(`/trade-advances/${encodeURIComponent(tranche.trancheId)}/repay`, { amount: +amount });
+      toast.success("Trade Advance cleared");
+      onDone();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not clear Trade Advance"));
+    }
+  };
+  return (
+    <Modal onClose={onClose} width="max-w-md">
+      <div className="overflow-y-auto overscroll-contain p-6" data-testid="ta-repay-modal">
+        <h3 className="font-heading text-lg font-bold text-ink mb-1">Clear Trade Advance</h3>
+        <p className="text-xs text-ink-soft mb-4">
+          {tranche?.financer} · drawn {fmtDate(tranche?.drawnOn)} · balance {inr(tranche?.balance)}
+        </p>
+        <Field label="Repay amount (₹)">
+          <Input data-testid="ta-repay-amount" type="number" value={amount}
+            onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button data-testid="ta-save-repay-btn" onClick={submit}>Clear balance</Button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

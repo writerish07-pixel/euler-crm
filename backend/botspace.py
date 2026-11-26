@@ -38,6 +38,9 @@ DEFAULT_TEMPLATES = {
     "execEod": "exec_eod_statement",
     "managerEod": "manager_eod_statement",
     "ownerEod": "owner_eod_statement",
+    "taDaily": "ta_daily_statement",
+    "taDay25": "ta_day25_clear",
+    "taLow": "ta_low_balance",
     # MARKETING category, unlike everything above it. Asks a lead with no model
     # recorded which vehicle they are interested in.
     "modelAsk": "lead_model_interest",
@@ -48,7 +51,9 @@ DEFAULT_TEMPLATES = {
 MODEL_ASK_COOLOFF_DAYS = 45
 
 # Slots the daily scheduler fires. Times are IST hours, overridable from settings.
-REPORT_SLOTS = {"morning": 8, "eod": 20}
+# TA daily is 10:30 IST (hour 10 + minute gate in slots_due).
+REPORT_SLOTS = {"morning": 8, "eod": 20, "ta": 10}
+TA_SLOT_MINUTE = 30
 
 # If Meta never approved the rewritten Utility names, try the previous ones
 # rather than silently skipping the whole slot.
@@ -58,12 +63,18 @@ TEMPLATE_ALIASES = {
     "execEod": ["exec_eod_statement", "exec_eod_scorecard"],
     "managerEod": ["manager_eod_statement", "manager_eod_volume"],
     "ownerEod": ["owner_eod_statement", "owner_eod_summary"],
+    "taDaily": ["ta_daily_statement"],
+    "taDay25": ["ta_day25_clear"],
+    "taLow": ["ta_low_balance"],
 }
 
 # Messages sent to our own people, not to customers. They carry no leadId, so
 # they are kept out of the customer inbox — and they are the sends whose
 # failures had nowhere to surface.
-STAFF_KINDS = {"finance_exec", "exec_morning", "exec_eod", "manager_eod", "owner_eod"}
+STAFF_KINDS = {
+    "finance_exec", "exec_morning", "exec_eod", "manager_eod", "owner_eod",
+    "ta_daily", "ta_day25", "ta_low",
+}
 
 FOLLOWUP_STATUSES = {"new", "contacted", "follow-up", "follow up", "in progress"}
 STOP_WORDS = {"stop", "unsubscribe", "रोकें", "रोक दो", "बंद"}
@@ -232,6 +243,7 @@ async def get_config() -> dict:
         "quietEnd": int(doc.get("quietEnd") or 20),
         "webhookSecret": (os.environ.get("BOTSPACE_WEBHOOK_SECRET") or doc.get("webhookSecret") or "").strip(),
         "cronToken": (os.environ.get("BOTSPACE_CRON_TOKEN") or doc.get("cronToken") or "").strip(),
+        "financeManagerMobile": digits10(doc.get("financeManagerMobile")),
         "executives": list(doc.get("executives") or []),
         "templates": templates,
         "apiKeyMasked": _mask(api_key),
@@ -265,6 +277,8 @@ async def save_config(body: dict) -> dict:
     for k in ("channelId", "reviewUrl", "webhookSecret", "cronToken"):
         if k in body:
             updates[k] = str(body.get(k) or "").strip()
+    if "financeManagerMobile" in body:
+        updates["financeManagerMobile"] = digits10(body.get("financeManagerMobile"))
     if "enabled" in body:
         # Never persist false from the Settings form (it had no visible toggle).
         # Explicit true heals a previous accidental disable.
@@ -1172,8 +1186,11 @@ async def _send_report(staff: dict, kind: str, variables: list, text: str,
 
 
 def kind_to_template(kind: str) -> str:
-    return {"exec_morning": "execMorning", "exec_eod": "execEod",
-            "manager_eod": "managerEod", "owner_eod": "ownerEod"}.get(kind, kind)
+    return {
+        "exec_morning": "execMorning", "exec_eod": "execEod",
+        "manager_eod": "managerEod", "owner_eod": "ownerEod",
+        "ta_daily": "taDaily", "ta_day25": "taDay25", "ta_low": "taLow",
+    }.get(kind, kind)
 
 
 def template_candidates(key: str, cfg: dict) -> list:
@@ -1231,9 +1248,20 @@ def _exec_stats_for(staff: dict, executives: list) -> dict:
 
 
 def slots_due(when: Optional[datetime] = None) -> list:
-    """Slots whose IST hour has already arrived today (catch-up included)."""
+    """Slots whose IST hour has already arrived today (catch-up included).
+
+    Trade Advance daily waits until 10:30 IST so it does not ride the 08:00
+    executive morning slot.
+    """
     t = when or now_ist()
-    return [slot for slot, hour in REPORT_SLOTS.items() if t.hour >= hour]
+    out = []
+    for slot, hour in REPORT_SLOTS.items():
+        if slot == "ta":
+            if t.hour > hour or (t.hour == hour and t.minute >= TA_SLOT_MINUTE):
+                out.append(slot)
+        elif t.hour >= hour:
+            out.append(slot)
+    return out
 
 
 async def configured_report_templates() -> dict:
@@ -1268,6 +1296,126 @@ async def tick_due_reports(when: Optional[datetime] = None) -> dict:
     return results
 
 
+async def _ta_alert_recipients(cfg: Optional[dict] = None) -> list:
+    """Owner (owner_eod staff) + Finance Manager mobile from WhatsApp settings."""
+    import server
+    cfg = cfg or await get_config()
+    seen = set()
+    out = []
+    for st in await server._staff_for_report("owner_eod"):
+        d = digits10(st.get("mobile"))
+        if len(d) != 10 or d in seen:
+            continue
+        seen.add(d)
+        out.append(st)
+    fm = digits10((cfg or {}).get("financeManagerMobile"))
+    if len(fm) == 10 and fm not in seen:
+        seen.add(fm)
+        out.append({"name": "Finance Manager", "mobile": fm, "whatsappLastInboundAt": ""})
+    return out
+
+
+async def run_trade_advance_alerts(today_s: Optional[str] = None, deliver=None) -> dict:
+    """Daily TA statement (all open tranches in one message) + day-25 + <₹10L.
+
+    Uses the same deliver() callback as other report slots so session/template
+    fallback and recipient logging stay identical. Does not change TA balances.
+    """
+    import commercial as ce
+    import trade_advance as ta
+    today_s = today_s or today_ist()
+    open_rows = await ta.list_open()
+    recipients_log = []
+    sent = failed = 0
+    # When deliver is the run_daily_reports callback it already bumps sent/failed
+    # on the outer scope — track only for standalone calls.
+    track_local = deliver is None
+
+    async def _deliver(staff, kind, variables, text, body_text=""):
+        nonlocal sent, failed
+        if deliver:
+            await deliver(staff, kind, variables, text, body_text)
+            return
+        res = await _send_report(staff, kind, variables, text, body_text)
+        recipients_log.append({
+            "name": staff.get("name"), "kind": kind, "ok": bool(res.get("ok")),
+            "mobile": digits10(staff.get("mobile")),
+            "templateId": res.get("templateId") or "",
+            "error": "" if res.get("ok") else str(res.get("error") or res.get("reason") or "")[:400],
+        })
+        if res.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+
+    staff_list = await _ta_alert_recipients()
+    if not staff_list:
+        return {"sent": 0, "failed": 0, "recipients": [], "empty": True,
+                "reason": "no-owner-or-finance-manager"}
+
+    if open_rows:
+        summary = ta.format_open_summary(open_rows)
+        total_bal = ce.round2(sum(ce.num(r.get("balance")) for r in open_rows))
+        body = "\n".join([
+            f"Trade Advance statement dated {today_s}.", "",
+            f"Open tranches: {len(open_rows)}",
+            f"Total balance: Rs {_inr(total_bal)}", "",
+            summary.replace(" | ", "\n"), "",
+            "Open Euler CRM → Finance to clear or renew.",
+        ])
+        for st in staff_list:
+            await _deliver(st, "ta_daily", [
+                _one_line(today_s),
+                _one_line(summary)[:900],
+                _inr(total_bal),
+            ], f"TA statement {today_s}", body)
+
+    for row in open_rows:
+        days = int(row.get("daysSinceDrawn") or 0)
+        bal = ce.round2(ce.num(row.get("balance")))
+        # Day 25 of the tranche (5 days before 30-day due) — once per tranche.
+        if days >= ta.DAY25_ALERT and not row.get("whatsappDay25SentOn"):
+            body25 = "\n".join([
+                f"Trade Advance clear window for {row.get('financer')}.",
+                f"Tranche drawn {row.get('drawnOn')}, due {row.get('dueOn')}.",
+                f"Day {days} of {ta.TENURE_DAYS}. Balance Rs {_inr(bal)}.",
+                "Clear by the due date so a new Trade Advance can be taken.",
+            ])
+            for st in staff_list:
+                await _deliver(st, "ta_day25", [
+                    _one_line(row.get("financer")),
+                    _one_line(row.get("drawnOn")),
+                    _one_line(row.get("dueOn")),
+                    _inr(bal),
+                ], f"TA day-25 {row.get('financer')}", body25)
+            await ta.mark_whatsapp(row["trancheId"], "whatsappDay25SentOn", today_s)
+
+        # Per-tranche balance under ₹10 lakh — once until cleared/renewed.
+        if bal + 0.01 < ta.LOW_BALANCE_RS and bal > 0.01 and not row.get("whatsappLowBalanceSentOn"):
+            body_low = "\n".join([
+                f"Trade Advance low for {row.get('financer')}.",
+                f"Balance Rs {_inr(bal)} is under 10 lakh.",
+                f"{row.get('daysLeft')} days left on tranche drawn {row.get('drawnOn')}.",
+                "Renew or raise a new Trade Advance.",
+            ])
+            for st in staff_list:
+                await _deliver(st, "ta_low", [
+                    _one_line(row.get("financer")),
+                    _inr(bal),
+                    _one_line(row.get("daysLeft")),
+                    _one_line(row.get("drawnOn")),
+                ], f"TA low {row.get('financer')}", body_low)
+            await ta.mark_whatsapp(row["trancheId"], "whatsappLowBalanceSentOn", today_s)
+
+    return {
+        "sent": sent if track_local else 0,
+        "failed": failed if track_local else 0,
+        "recipients": recipients_log,
+        "empty": not open_rows,
+        "openTranches": len(open_rows),
+    }
+
+
 async def run_daily_reports(slot: str, today_s: Optional[str] = None,
                             force: bool = False) -> dict:
     """Send the reports for one slot. Idempotent per day+slot unless force=True
@@ -1281,14 +1429,15 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None,
     marker_id = f"report_{slot}_{today_s}"
     existing = await db.settings.find_one({"_id": marker_id})
     if existing and not force:
-        if (existing.get("sent") or 0) > 0 or (existing.get("failed") or 0) > 0:
+        if (existing.get("sent") or 0) > 0 or (existing.get("failed") or 0) > 0 or existing.get("empty"):
             return {"ok": True, "slot": slot, "sent": 0, "alreadySent": True}
         # sent=0 failed=0: everyone was skipped (name mismatch, empty staff). Retry.
     if existing:
         await db.settings.delete_one({"_id": marker_id})
 
-    data = await server._daily_report_data()
+    data = await server._daily_report_data() if slot != "ta" else {}
     sent, failed, recipients = 0, 0, []
+    ta_empty = False
 
     async def deliver(staff, kind, variables, text, body_text=""):
         nonlocal sent, failed
@@ -1388,12 +1537,19 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None,
                 f"({data['financePendingFiles']} files)", "",
                 "Open the Euler CRM app for the record-wise statement.",
             ]))
+    elif slot == "ta":
+        ta_result = await run_trade_advance_alerts(today_s=today_s, deliver=deliver)
+        # deliver() already bumps sent/failed; ta_result only carries empty flag
+        # and any standalone recipient rows (none when deliver is passed).
+        recipients.extend(ta_result.get("recipients") or [])
+        ta_empty = bool(ta_result.get("empty"))
     else:
         return {"ok": False, "reason": f"unknown slot '{slot}'", "sent": 0}
 
     await db.settings.update_one({"_id": marker_id}, {"$set": {
         "slot": slot, "day": today_s, "sentAt": datetime.now(timezone.utc).isoformat(),
         "sent": sent, "failed": failed, "recipients": recipients,
+        "empty": bool(ta_empty) if slot == "ta" else False,
     }}, upsert=True)
     return {"ok": True, "slot": slot, "day": today_s, "sent": sent,
             "failed": failed, "recipients": recipients}

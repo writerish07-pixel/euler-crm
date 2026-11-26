@@ -55,6 +55,7 @@ test("saved secret: no warning, copied URL carries the secret, save keeps it", a
   await act(async () => { host.querySelector('[data-testid="botspace-save-btn"]').click(); });
   expect(mockPut).toHaveBeenCalledWith("/integrations/botspace", expect.objectContaining({
     webhookSecret: "s3cr3t value",
+    financeManagerMobile: "",
   }));
   await act(async () => { root.unmount(); });
 });

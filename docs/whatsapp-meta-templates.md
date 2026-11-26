@@ -395,7 +395,8 @@ hour. **An idle or restarting host silently skips a day**, which is not
 acceptable for reports people rely on. Point an external cron at:
 
 ```
-POST https://<your-api>/api/integrations/botspace/cron?slot=morning&token=<cronToken>   # 08:30 IST
+POST https://<your-api>/api/integrations/botspace/cron?slot=morning&token=<cronToken>   # 08:00 IST
+POST https://<your-api>/api/integrations/botspace/cron?slot=ta&token=<cronToken>        # 10:30 IST
 POST https://<your-api>/api/integrations/botspace/cron?slot=eod&token=<cronToken>       # 20:00 IST
 ```
 
@@ -407,11 +408,96 @@ To resend a slot after fixing something:
 **Settings → Staff & Reports → Send EOD now**.
 
 **Cost:** roughly 6 staff x 2 messages x 30 days = ~360 Utility messages/month.
-In India that is around ₹40/month.
+In India that is around ₹40/month. Trade Advance adds one daily statement (plus
+occasional day-25 / low-balance alerts) to owner + finance manager.
 
 ---
 
-## Template I — `lead_model_interest` (MARKETING)
+## I. `ta_daily_statement`
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | English (`en`) |
+| Name | `ta_daily_statement` |
+| Sent | owner + Finance Manager mobile, **10:30 IST**, one message listing every open Trade Advance |
+
+**Body**
+```
+Trade Advance statement dated {{1}}.
+
+Open tranches: {{2}}
+Total balance: Rs {{3}}
+
+Open Euler CRM → Finance to clear or renew.
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Statement date | 2026-11-26 |
+| {{2}} | One-line summary of every open tranche (financer, drawn, due, balance, days left) | Shriram drawn 2026-11-01 due 2026-12-01 drawn Rs 1,00,00,000 consumed Rs 12,00,000 bal Rs 88,00,000 days left 5 |
+| {{3}} | Sum of open tranche balances | 88,00,000 |
+
+> {{2}} is a single line (pipe-separated when several tranches are open). Meta
+> rejects newlines inside a variable.
+
+---
+
+## J. `ta_day25_clear`
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | English (`en`) |
+| Name | `ta_day25_clear` |
+| Sent | once per tranche, on **day 25** after drawn (5 days before the 30-day due) |
+
+**Body**
+```
+Trade Advance clear window for {{1}}.
+
+Tranche drawn {{2}}, due {{3}}. Balance Rs {{4}}.
+
+Clear by the due date so a new Trade Advance can be taken.
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Financer | Shriram |
+| {{2}} | Drawn date | 2026-11-01 |
+| {{3}} | Due date (drawn + 30) | 2026-12-01 |
+| {{4}} | Remaining balance | 8,50,000 |
+
+---
+
+## K. `ta_low_balance`
+
+| Field | Value |
+|---|---|
+| Category | **Utility** |
+| Language | English (`en`) |
+| Name | `ta_low_balance` |
+| Sent | once per tranche when that tranche’s balance drops **under ₹10 lakh** |
+
+**Body**
+```
+Trade Advance low for {{1}}.
+
+Balance Rs {{2}} is under 10 lakh. {{3}} days left on tranche drawn {{4}}.
+
+Renew or raise a new Trade Advance.
+```
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| {{1}} | Financer | Shriram |
+| {{2}} | Remaining balance | 9,50,000 |
+| {{3}} | Days left until due | 12 |
+| {{4}} | Drawn date | 2026-11-01 |
+
+---
+
+## Template L — `lead_model_interest` (MARKETING)
 
 **This is the only Marketing-category template in the app.** Everything above is
 Utility. That difference matters more than it looks:
