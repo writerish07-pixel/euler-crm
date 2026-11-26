@@ -12006,27 +12006,72 @@ async def _rebuild_payment_running_totals(lead_id):
         })
 
 
-async def _finance_commitment_excluding(lead_id, file_number, exclude_receipt):
-    """Net Finance commitment on a file: positive Finance receipts minus FinanceShortfall.
-
-    FinanceShortfall rows are negative ledger entries that reopen customer
-    collectable and permanently shrink the financer's commitment.
-    """
+async def _finance_credit_and_shortfall(lead_id, file_number, exclude_receipt=""):
+    """Gross Finance credits and shortfalls on a file (excluding one receipt)."""
     q = {"leadId": lead_id, "paymentMode": "Finance", "financeFileNumber": file_number,
          "receiptNumber": {"$ne": exclude_receipt}}
     remaining = await db.payments.find(q).to_list(2000)
-    total = 0.0
+    credits = 0.0
+    shortfalls = 0.0
     for p in remaining:
         et = (p.get("entryType") or "").strip()
         if et == "Refund":
             continue
         amt = ce.num(p.get("amount"))
         if et == "FinanceShortfall":
-            # Stored negative; abs() so a wrongly-signed row still shrinks commitment.
-            total = ce.round2(total - abs(amt))
+            shortfalls = ce.round2(shortfalls + abs(amt))
         elif amt > 0:
-            total = ce.round2(total + amt)
-    return ce.round2(max(0.0, total))
+            credits = ce.round2(credits + amt)
+    return credits, shortfalls
+
+
+async def _finance_commitment_excluding(lead_id, file_number, exclude_receipt):
+    """Net Finance commitment on a file: positive Finance receipts minus FinanceShortfall.
+
+    FinanceShortfall rows are negative ledger entries that reopen customer
+    collectable and permanently shrink the financer's commitment.
+    """
+    credits, shortfalls = await _finance_credit_and_shortfall(
+        lead_id, file_number, exclude_receipt=exclude_receipt)
+    return ce.round2(max(0.0, credits - shortfalls))
+
+
+async def _finance_ledger_count(lead_id, file_number):
+    return await db.payments.count_documents({
+        "leadId": lead_id, "paymentMode": "Finance", "financeFileNumber": file_number,
+    })
+
+
+def _allocate_shortfall_unit_splits(lead, finance_payments, amount):
+    """Negative unitSplits for a shortfall, drawn from units that still hold Finance credit."""
+    amount = ce.round2(max(0.0, ce.num(amount)))
+    if amount <= 0.01:
+        return [], []
+    unit_credit, _payables = _unit_money_from_payments(lead or {}, finance_payments or [])
+    order = sorted(
+        [(sno, ce.round2(ce.num(credit))) for sno, credit in unit_credit.items()
+         if ce.round2(ce.num(credit)) > 0.01],
+        key=lambda row: (-row[1], -row[0]),
+    )
+    left = amount
+    splits = []
+    snos = []
+    for sno, credit in order:
+        if left <= 0.01:
+            break
+        take = ce.round2(min(credit, left))
+        splits.append({"unitSno": sno, "amount": ce.round2(-take)})
+        snos.append(sno)
+        left = ce.round2(left - take)
+    if left > 0.01:
+        # Rare: file outstanding above unit Finance net (legacy rows). Park on last credit unit.
+        if splits:
+            splits[-1]["amount"] = ce.round2(splits[-1]["amount"] - left)
+        else:
+            sno = (_pack_unit_sno_list(lead) or [1])[-1]
+            splits = [{"unitSno": sno, "amount": ce.round2(-amount)}]
+            snos = [sno]
+    return splits, snos
 
 
 async def _rebuild_finance_file_from_payments(lead_id, file_number):
@@ -12037,7 +12082,11 @@ async def _rebuild_finance_file_from_payments(lead_id, file_number):
         return {"ok": True, "removed": False}
     received = ce.num(f.get("receivedAgainstFile"))
     receipts = list(f.get("receipts") or [])
-    if committed <= 0.01 and received <= 0.01 and not receipts:
+    ledger_left = await _finance_ledger_count(lead_id, file_number)
+    # Only remove the file when nothing references it — keep a zero-commitment shell
+    # while Finance credits / shortfalls still exist so deleting a shortfall can restore
+    # the same file number and lead linkage.
+    if committed <= 0.01 and received <= 0.01 and not receipts and ledger_left == 0:
         await db.finance.delete_one({"fileNumber": file_number, "leadId": lead_id})
         await gsheets.delete_entity_row("finance", file_number)
         leftover = await db.finance.find_one({"leadId": lead_id})
@@ -12085,6 +12134,20 @@ async def delete_payment(receipt_number: str, act=Depends(actor)):
                 f"₹{remaining} that would remain committed. Reverse the extra financer receipt "
                 f"on the Finance Register first, or leave this customer receipt in place.",
             )
+        # Block deleting a Finance credit that would orphan FinanceShortfall rows —
+        # those negatives would otherwise reopen phantom customer debt.
+        et = (pay.get("entryType") or "").strip()
+        if et != "FinanceShortfall" and ce.num(pay.get("amount")) > 0:
+            credits_left, shortfalls_left = await _finance_credit_and_shortfall(
+                lead_id, file_number, exclude_receipt=receipt_number)
+            if shortfalls_left > credits_left + 0.01:
+                raise HTTPException(
+                    422,
+                    f"Cannot delete this Finance receipt — file {file_number} still has "
+                    f"₹{ce.round2(shortfalls_left)} recorded as finance→customer shortfall "
+                    f"against only ₹{ce.round2(credits_left)} remaining Finance credit. "
+                    f"Delete the shortfall row(s) first, then remove this receipt.",
+                )
     await db.payments.delete_one({"receiptNumber": receipt_number})
     sheet_result = await gsheets.delete_entity_row("payments", receipt_number)
     await db.sheet_sync_log.delete_many({"entityType": "payments", "entityId": receipt_number})
@@ -12566,6 +12629,7 @@ async def finance_shortfall_to_customer(
     customerOutstanding reopens by the same amount. Releases matching Trade
     Advance consume tagged to this file.
     """
+    from pymongo import ReturnDocument
     f = await db.finance.find_one({"fileNumber": file_number})
     if not f:
         raise HTTPException(404, "Finance file not found")
@@ -12608,6 +12672,10 @@ async def finance_shortfall_to_customer(
             raise
         except (TypeError, ValueError):
             pass
+    finance_pays = await db.payments.find({
+        "leadId": lead_id, "paymentMode": "Finance", "financeFileNumber": file_number,
+    }).to_list(2000)
+    unit_splits, unit_snos = _allocate_shortfall_unit_splits(lead, finance_pays, amount)
     pos_rows = await db.payments.find({"leadId": lead_id}).to_list(2000)
     running_before = ce.round2(sum(ce.num(p.get("amount")) for p in pos_rows))
     payable = _receipt_payable(lead, await get_scheme_rows())
@@ -12627,6 +12695,9 @@ async def finance_shortfall_to_customer(
         "financerName": f.get("financer") or "",
         "financeFileNumber": file_number,
         "paymentReference": "", "recordedAt": now_iso(),
+        "unitSnos": unit_snos or [1],
+        "allocation": "club" if len(unit_snos) != 1 else "separate",
+        "unitSplits": unit_splits,
     }
     await db.payments.insert_one(doc)
     await sheet_sync("payments", doc)
@@ -12637,12 +12708,35 @@ async def finance_shortfall_to_customer(
         "receiptNumber": entry_id, "recordedAt": now_iso(),
         "by": (act or {}).get("email") or (act or {}).get("name") or "",
     }
-    await db.finance.update_one({"fileNumber": file_number}, {"$set": {
-        "sanctionedAmount": new_sanctioned,
-        "fileOutstanding": new_outstanding,
-        "status": status,
-        "lastUpdated": today(),
-    }, "$push": {"shortfalls": shortfall_audit}})
+    # Snapshot match — concurrent disbursement / second shortfall loses and we roll back.
+    updated = await db.finance.find_one_and_update(
+        {
+            "fileNumber": file_number,
+            "sanctionedAmount": sanctioned,
+            "receivedAgainstFile": received,
+            "fileOutstanding": outstanding,
+        },
+        {"$set": {
+            "sanctionedAmount": new_sanctioned,
+            "fileOutstanding": new_outstanding,
+            "status": status,
+            "lastUpdated": today(),
+        }, "$push": {"shortfalls": shortfall_audit}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        await db.payments.delete_one({"receiptNumber": entry_id})
+        try:
+            await gsheets.delete_entity_row("payments", entry_id)
+        except Exception:
+            pass
+        fresh = await db.finance.find_one({"fileNumber": file_number}) or {}
+        raise HTTPException(
+            409,
+            "Finance file changed while recording this shortfall "
+            f"(remaining now ₹{ce.round2(ce.num(fresh.get('fileOutstanding')))}). "
+            "Refresh and try again.",
+        )
     ta_released = 0.0
     try:
         import trade_advance as ta
@@ -12650,8 +12744,7 @@ async def finance_shortfall_to_customer(
     except Exception:
         logging.exception("trade_advance release on shortfall failed for %s", file_number)
     await _rebuild_payment_running_totals(lead_id)
-    # Rebuild from payments so sanctioned stays consistent with the ledger
-    # (guards against a race with another Finance receipt on the same lead).
+    # Rebuild from payments so sanctioned stays consistent with the ledger.
     finance_result = await _rebuild_finance_file_from_payments(lead_id, file_number)
     await recompute_lead(lead_id)
     await _refresh_billing_summary_if_delivered(lead_id)

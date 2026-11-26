@@ -257,3 +257,91 @@ async def test_financer_receipt_still_ignores_customer_os(client):
     assert r.status_code == 200, r.text
     after = ce.num((await server.db.leads.find_one({"leadId": lid})).get("customerOutstanding"))
     assert after == pytest.approx(before, abs=0.5)
+
+
+@pytest.mark.asyncio
+async def test_full_shortfall_keeps_file_so_delete_restores(client):
+    """Full undisbursed shortfall must not delete the file — deleting FS restores FN."""
+    lid = await _booked_lead(client, "9811000008")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 50000, "paymentMode": "Finance", "financerName": "HDFC BANK",
+        "date": "2026-08-10"})
+    fn = pay.json()["financeFileNumber"]
+    moved = await client.post(f"/api/finance/{fn}/to-customer", json={"amount": 50000})
+    assert moved.status_code == 200, moved.text
+    fs = moved.json()["shortfall"]["receiptNumber"]
+
+    f = await server.db.finance.find_one({"fileNumber": fn})
+    assert f is not None, "file must stay while shortfall ledger rows exist"
+    assert ce.num(f["sanctionedAmount"]) <= 0.01
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead.get("financeFileNumber") == fn
+
+    deleted = await client.delete(f"/api/payments/{fs}")
+    assert deleted.status_code == 200, deleted.text
+    f = await server.db.finance.find_one({"fileNumber": fn})
+    assert f is not None
+    assert ce.num(f["sanctionedAmount"]) == pytest.approx(50000, abs=0.5)
+    assert ce.num(f["fileOutstanding"]) == pytest.approx(50000, abs=0.5)
+    lead = await server.db.leads.find_one({"leadId": lid})
+    assert lead.get("financeFileNumber") == fn
+
+
+@pytest.mark.asyncio
+async def test_cannot_delete_finance_credit_that_orphans_shortfall(client):
+    lid = await _booked_lead(client, "9811000009")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 50000, "paymentMode": "Finance", "financerName": "HDFC BANK",
+        "date": "2026-08-10"})
+    assert pay.status_code == 200, pay.text
+    rec = pay.json()["receiptNumber"]
+    fn = pay.json()["financeFileNumber"]
+    moved = await client.post(f"/api/finance/{fn}/to-customer", json={"amount": 20000})
+    assert moved.status_code == 200, moved.text
+
+    blocked = await client.delete(f"/api/payments/{rec}")
+    assert blocked.status_code == 422, blocked.text
+    assert "shortfall" in blocked.text.lower()
+    assert await server.db.payments.find_one({"receiptNumber": rec})
+
+
+def test_shortfall_splits_hit_financed_pack_unit():
+    lead = {
+        "sameOrderMultiUnit": True,
+        "units": [
+            {"sno": 1, "customerPayable": 100000},
+            {"sno": 2, "customerPayable": 100000},
+        ],
+    }
+    pays = [{
+        "amount": 100000,
+        "unitSnos": [2],
+        "allocation": "separate",
+        "unitSplits": [{"unitSno": 2, "amount": 100000}],
+    }]
+    splits, snos = server._allocate_shortfall_unit_splits(lead, pays, 25000)
+    assert snos == [2]
+    assert splits == [{"unitSno": 2, "amount": -25000.0}]
+
+
+@pytest.mark.asyncio
+async def test_shortfall_optimistic_lock_rolls_back_on_stale_file(client):
+    lid = await _booked_lead(client, "9811000010")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 20000, "paymentMode": "Finance", "financerName": "HDFC BANK",
+        "date": "2026-08-10"})
+    fn = pay.json()["financeFileNumber"]
+
+    # Simulate a concurrent disbursement that the shortfall's snapshot will miss
+    # by mutating after we would have read — call receipt then try shortfall of
+    # the old full amount (now only 10000 remaining).
+    rem = await client.post(f"/api/finance/{fn}/receipt", json={
+        "amount": 10000, "date": "2026-08-12"})
+    assert rem.status_code == 200, rem.text
+    over = await client.post(f"/api/finance/{fn}/to-customer", json={"amount": 20000})
+    assert over.status_code == 422, over.text
+    # Exact remaining still works.
+    ok = await client.post(f"/api/finance/{fn}/to-customer", json={"amount": 10000})
+    assert ok.status_code == 200, ok.text
+    assert await server.db.payments.count_documents({
+        "leadId": lid, "entryType": "FinanceShortfall"}) == 1
