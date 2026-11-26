@@ -301,21 +301,72 @@ async def test_ta_empty_day_marks_marker(client, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_draw_back_adjusts_existing_finance_outstanding(client):
+    """TA drawn after open Finance files consumes uncovered outstanding immediately."""
+    await server.db.trade_advances.delete_many({})
+    lid = await _booked_lead(client, "9811100201")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 200000, "paymentMode": "Finance", "date": date.today().isoformat(),
+        "financerName": "Shriram", "allowExcess": True,
+    })
+    assert pay.status_code == 200, pay.text
+    # No TA yet — consume on receipt did nothing.
+    assert await ta.list_open("Shriram") == []
+
+    draw = await client.post("/api/trade-advances", json={
+        "financer": "Shriram", "amount": 1_000_000, "drawnOn": date.today().isoformat(),
+    })
+    assert draw.status_code == 200, draw.text
+    body = draw.json()
+    assert body["backAdjusted"] == 200000
+    assert body["backAdjustedFiles"] == 1
+    assert body["balance"] == 800000
+    assert body["consumed"] == 200000
+
+    # Second draw must not re-cover the same file.
+    draw2 = await client.post("/api/trade-advances", json={
+        "financer": "Shriram", "amount": 500_000, "drawnOn": date.today().isoformat(),
+    })
+    assert draw2.status_code == 200, draw2.text
+    assert draw2.json()["backAdjusted"] == 0
+    assert draw2.json()["balance"] == 500_000
+
+
+@pytest.mark.asyncio
+async def test_draw_back_adjust_skips_other_financer(client):
+    await server.db.trade_advances.delete_many({})
+    lid = await _booked_lead(client, "9811100202")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 150000, "paymentMode": "Finance", "date": date.today().isoformat(),
+        "financerName": "HDFC BANK", "allowExcess": True,
+    })
+    assert pay.status_code == 200, pay.text
+
+    draw = await client.post("/api/trade-advances", json={
+        "financer": "Cholamandalam", "amount": 500_000, "drawnOn": date.today().isoformat(),
+    })
+    assert draw.status_code == 200, draw.text
+    assert draw.json()["backAdjusted"] == 0
+    assert draw.json()["balance"] == 500_000
+
+
+@pytest.mark.asyncio
 async def test_backdated_receipt_skips_future_draw(client):
     """Finance receipt dated before a tranche's drawnOn must not consume it."""
     await server.db.trade_advances.delete_many({})
+    # Unique financer with no pre-existing finance files so draw back-adjust is zero.
     await client.post("/api/trade-advances", json={
-        "financer": "HDFC BANK", "amount": 1_000_000, "drawnOn": "2026-11-26",
+        "financer": "FutureDraw Bank", "amount": 1_000_000, "drawnOn": "2026-11-26",
     })
     res = await ta.consume_for_finance(
-        financer="HDFC BANK", amount=100_000, receipt_number="RC-BACK",
+        financer="FutureDraw Bank", amount=100_000, receipt_number="RC-BACK",
         as_of="2026-11-25")
     assert res["adjusted"] == 0.0
-    open_rows = await ta.list_open("HDFC BANK")
+    open_rows = await ta.list_open("FutureDraw Bank")
     assert open_rows[0]["balance"] == 1_000_000
 
     res2 = await ta.consume_for_finance(
-        financer="HDFC BANK", amount=100_000, receipt_number="RC-OK",
+        financer="FutureDraw Bank", amount=100_000, receipt_number="RC-OK",
         as_of="2026-11-26")
     assert res2["adjusted"] == 100_000
 

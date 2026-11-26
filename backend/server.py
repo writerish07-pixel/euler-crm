@@ -12392,7 +12392,9 @@ async def create_trade_advance(body: TradeAdvanceIn, act=Depends(actor)):
         raise HTTPException(422, str(e))
     await write_audit(act, "create", "trade-advance",
                       new={"trancheId": row.get("trancheId"), "financer": row.get("financer"),
-                           "drawnAmount": row.get("drawnAmount"), "drawnOn": row.get("drawnOn")})
+                           "drawnAmount": row.get("drawnAmount"), "drawnOn": row.get("drawnOn"),
+                           "backAdjusted": row.get("backAdjusted"),
+                           "backAdjustedFiles": row.get("backAdjustedFiles")})
     return row
 
 

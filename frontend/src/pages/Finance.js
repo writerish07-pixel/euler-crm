@@ -300,10 +300,16 @@ function TradeAdvanceDrawModal({ financers, onClose, onDone }) {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     setBusy(true);
     try {
-      await post("/trade-advances", {
+      const row = await post("/trade-advances", {
         financer, amount: +form.amount, drawnOn: form.drawnOn, reference: form.reference,
       });
-      toast.success("Trade Advance recorded");
+      const back = Number(row?.backAdjusted) || 0;
+      const n = Number(row?.backAdjustedFiles) || 0;
+      if (back > 0) {
+        toast.success(`Trade Advance recorded — adjusted ${inr(back)} against ${n} open finance file${n === 1 ? "" : "s"}`);
+      } else {
+        toast.success("Trade Advance recorded");
+      }
       onDone();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not record Trade Advance"));
@@ -317,6 +323,7 @@ function TradeAdvanceDrawModal({ financers, onClose, onDone }) {
         <p className="text-xs text-ink-soft mb-4">
           Money the financer credited to the dealership (dealer OD). Due in 30 days from the drawn date.
           Use the same financer name as Finance receipts so auto-deduct matches.
+          If that financer already has open finance outstanding, this draw is adjusted against it immediately.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Financer">

@@ -133,7 +133,85 @@ async def create_tranche(*, financer: str, amount: float, drawn_on: Optional[str
         "lastUpdated": datetime.now(timezone.utc).isoformat(),
     }
     await _db()[COLLECTION].insert_one(doc)
-    return public_row(doc)
+    # If Finance files for this financer already have outstanding, consume this
+    # new tranche against them immediately (same dealer-OD ledger as receipt path).
+    back = await consume_existing_finance_for_tranche(tranche_id)
+    fresh = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
+    row = public_row(fresh or doc)
+    row["backAdjusted"] = back.get("adjusted", 0.0)
+    row["backAdjustedFiles"] = back.get("files", 0)
+    return row
+
+
+async def _ta_covered_for_file(file_number: str) -> float:
+    """Sum of TA adjustments already tagged to this finance file (any tranche)."""
+    fn = str(file_number or "").strip()
+    if not fn:
+        return 0.0
+    rows = await _db()[COLLECTION].find({"adjustments.financeFileNumber": fn}).to_list(200)
+    total = 0.0
+    for r in rows:
+        for adj in (r.get("adjustments") or []):
+            if str(adj.get("financeFileNumber") or "").strip() == fn:
+                total = ce.round2(total + ce.num(adj.get("amount")))
+    return total
+
+
+async def consume_existing_finance_for_tranche(tranche_id: str) -> dict:
+    """FIFO-consume this tranche against open Finance file outstanding for its financer.
+
+    Does not change customer payable or fileOutstanding — dealer OD only.
+    Skips exposure already covered by prior TA adjustments on the same file.
+    """
+    row = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
+    if not row or balance_of(row) <= 0.01:
+        return {"adjusted": 0.0, "files": 0, "splits": []}
+    financer = str(row.get("financer") or "").strip()
+    name = financer.lower()
+    if not name:
+        return {"adjusted": 0.0, "files": 0, "splits": []}
+
+    files = await _db().finance.find({}).sort(
+        [("lastUpdated", 1), ("fileNumber", 1)]).to_list(1000)
+    open_files = []
+    for f in files:
+        if str(f.get("financer") or "").strip().lower() != name:
+            continue
+        if str(f.get("status") or "") == "Received":
+            continue
+        outstanding = ce.round2(ce.num(f.get("fileOutstanding")))
+        if outstanding <= 0.01:
+            continue
+        open_files.append(f)
+
+    adjusted = 0.0
+    splits = []
+    for f in open_files:
+        row = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
+        if not row or balance_of(row) <= 0.01:
+            break
+        fn = str(f.get("fileNumber") or "").strip()
+        outstanding = ce.round2(ce.num(f.get("fileOutstanding")))
+        covered = await _ta_covered_for_file(fn)
+        uncovered = ce.round2(max(0.0, outstanding - covered))
+        take = ce.round2(min(balance_of(row), uncovered))
+        if take <= 0.01:
+            continue
+        adj = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "amount": take,
+            "leadId": f.get("leadId") or "",
+            "receiptNumber": "",
+            "financeFileNumber": fn,
+            "customerName": f.get("customerName") or "",
+            "source": "existing-finance",
+            "asOf": str(row.get("drawnOn") or "")[:10],
+        }
+        if await _try_consume_one(row, take, adj):
+            adjusted = ce.round2(adjusted + take)
+            splits.append({"trancheId": tranche_id, "fileNumber": fn,
+                           "leadId": f.get("leadId") or "", "amount": take})
+    return {"adjusted": adjusted, "files": len(splits), "splits": splits}
 
 
 async def _open_fifo(financer: str, as_of: Optional[str] = None) -> list:
