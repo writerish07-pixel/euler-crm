@@ -8700,12 +8700,14 @@ def _heal_pack_leftover_additional_cx(lead, units):
     """Stamp per-unit Cx when pack leftover Additional hid the deal.
 
     Messenger: ₹5,35,491 parked on unit 1 (= ₹59,499 × 9) while every unit
-    already received ₹7,90,000. Same-SKU packs can even-split; mixed SKU
-    (DV + FB) must derive each unit's own Additional from a shared Cx.
+    already received ₹7,90,000. Requires unit 1 itself to hold the pack pile
+    and an authoritative shared Cx (majority unit cxDemand, or receipts that
+    look like the deal — not booking advances / partial deposits).
 
     Does not invent OEM Extra claims. Does not rewrite model / variant / body.
-    Does not overwrite a unit that already has its own non-rollup cxDemand or
-    its own Additional.
+    Does not treat the lead header Additional sum as unallocated when units
+    already carry their own cuts. Does not overwrite a unit that already has
+    its own non-rollup cxDemand or its own Additional.
     """
     rows = [dict(u or {}) for u in (units or [])]
     if not oem_sync.is_same_order_pack(lead or {}) or len(rows) < 2:
@@ -8713,45 +8715,33 @@ def _heal_pack_leftover_additional_cx(lead, units):
     n = len(rows)
     u0 = rows[0]
     gvc0 = ce.num(u0.get("exShowroom") or (lead or {}).get("exShowroom"))
+    # Only unit 1's own pack pile — never the lead header roll-up alone
+    # (header = sum of already-allocated unit Additionals after recompute).
+    if "additionalDiscount" not in u0:
+        return list(units or []), False
     u1_addl = ce.round2(max(0.0, ce.num(u0.get("additionalDiscount"))))
-    lead_addl = ce.round2(max(0.0, ce.num((lead or {}).get("additionalDiscount"))))
-    pack_addl = 0.0
-    if u1_addl > 0 and _looks_like_pack_additional_total(u1_addl, n, gvc0):
-        pack_addl = u1_addl
-    elif lead_addl > 0 and _looks_like_pack_additional_total(lead_addl, n, gvc0):
-        # Lead roll-up only — unit 1 never held its own cut.
-        if "additionalDiscount" not in u0 or u1_addl <= 0:
-            pack_addl = lead_addl
-    if pack_addl <= 0:
+    if u1_addl <= 0 or not _looks_like_pack_additional_total(u1_addl, n, gvc0):
+        return list(units or []), False
+    # A locked deal on unit 1 means this Additional is that unit's cut, even
+    # when it is large enough to look like a pack leftover.
+    u1_cx = ce.round2(ce.num(u0.get("cxDemand")))
+    if (u0.get("useDealPrice") and u1_cx > 0
+            and not ce.pack_unit_cx_is_pack_rollup(u1_cx, u0, u0)
+            and not _cx_copies_pack_total(u1_cx, lead, rows, 0)):
+        return list(units or []), False
+    # Sibling Additionals already on the file — U1 must still hold nearly the
+    # whole pile (historical dump), not a header that merely mirrors them.
+    sibling_addl = ce.round2(sum(
+        ce.num((rows[i] or {}).get("additionalDiscount")) for i in range(1, n)))
+    if sibling_addl > ce.DEAL_AMOUNT_EQUAL_RUPEES and u1_addl + ce.DEAL_AMOUNT_EQUAL_RUPEES < sibling_addl:
         return list(units or []), False
 
     open_idxs = [i for i in range(n) if i == 0 or _unit_addl_open(rows[i])]
     if len(open_idxs) < 2:
         return list(units or []), False
 
+    # Authoritative Cx only — never invent from list GVC − per-share alone.
     cx = _infer_shared_pack_unit_cx(lead, rows)
-    if cx <= 0 and _pack_units_same_sku(lead, rows):
-        per = _evenly_split_amount(pack_addl, n)
-        if per >= 1000 and gvc0 > 0:
-            # Same list economics: recover Cx ≈ list GVC − per-unit Additional.
-            defaults = ce.default_rto_insurance_for_model(
-                u0.get("model") or (lead or {}).get("interestedModel"),
-                u0.get("variant") or (lead or {}).get("variant"))
-            list_rto = defaults[0] if defaults else ce.num(u0.get("rto"))
-            list_ins = defaults[1] if defaults else ce.num(
-                u0.get("insuranceAmount") or u0.get("insurance"))
-            list_gvc = ce.round2(
-                gvc0 + ce.num(list_rto) + ce.num(list_ins)
-                + ce.num(u0.get("accessoriesAmount"))
-                + ce.num(u0.get("handlingCharges"))
-                + ce.num(u0.get("trc"))
-                + ce.num(u0.get("fastag"))
-                + ce.num(u0.get("extendedWarranty"))
-                + ce.num(u0.get("otherCharges"))
-                + ce.num(u0.get("rsaAmc")))
-            cand = ce.round2(list_gvc - per)
-            if cand > 0:
-                cx = cand
     if cx <= 0:
         return list(units or []), False
 
@@ -8786,15 +8776,15 @@ def _heal_pack_leftover_additional_cx(lead, units):
 
 
 def _fill_same_sku_pack_scheme(lead, units):
-    """Same-SKU pack: split a pack-total Extra Support; split/copy Additional.
+    """Same-SKU pack: split a pack-total Extra Support; copy per-unit Additional.
 
     OEM extra on the lead is a roll-up. If unit 1 still holds that pack total
     (₹2,40,000 on a 5-unit order), split it. A per-unit figure (₹48,000) stays
     on the units staff selected — one Extra Support debit note must not invent
     claims on every sibling. Additional (dealer-funded) is copied from unit 1
-    when it looks like a per-unit discount. A pack leftover Additional
-    (₹1,15,000 / ₹5,35,491) is split evenly across open siblings — never
-    copied as-is onto every unit.
+    only when it looks like a per-unit discount — never a leftover pack figure
+    on the lead (₹1,15,000). Pack leftover Additional is healed via shared Cx
+    in `_heal_pack_leftover_additional_cx`, not by spreading U1's discount.
     """
     rows = [dict(u or {}) for u in (units or [])]
     if not _pack_units_same_sku(lead, rows):
@@ -8852,36 +8842,21 @@ def _fill_same_sku_pack_scheme(lead, units):
                 changed = True
 
     u1_addl = None
-    lead_addl = ce.round2(max(0.0, ce.num((lead or {}).get("additionalDiscount"))))
     if "additionalDiscount" in u0:
         u1_addl = ce.round2(max(0.0, ce.num(u0.get("additionalDiscount"))))
-    elif _looks_like_per_unit_additional(lead_addl, gvc):
-        u1_addl = lead_addl
+    elif _looks_like_per_unit_additional(ce.num((lead or {}).get("additionalDiscount")), gvc):
+        u1_addl = ce.round2(max(0.0, ce.num((lead or {}).get("additionalDiscount"))))
         u0 = dict(u0)
         u0["additionalDiscount"] = u1_addl
         rows[0] = u0
         changed = True
-    elif _looks_like_pack_additional_total(lead_addl, n, gvc):
-        u1_addl = lead_addl
 
-    addl_open = [i for i in range(1, n) if _unit_addl_open(rows[i])]
-    all_addl_open = len(addl_open) == n - 1
-    if (u1_addl is not None and all_addl_open
-            and _looks_like_pack_additional_total(u1_addl, n, gvc)):
-        per_addl = _evenly_split_amount(u1_addl, n)
-        if per_addl >= 1000 and (gvc <= 0 or per_addl <= 0.25 * gvc):
-            if ce.round2(ce.num(u0.get("additionalDiscount"))) != per_addl:
-                u0 = dict(u0)
-                u0["additionalDiscount"] = per_addl
-                rows[0] = u0
-                changed = True
-            for i in addl_open:
-                rec = dict(rows[i])
-                rec["additionalDiscount"] = per_addl
-                rows[i] = rec
-                changed = True
-    elif u1_addl is not None and _looks_like_per_unit_additional(u1_addl, gvc):
-        for i in addl_open:
+    # Copy only a true per-unit Additional. Never spread a pack leftover or a
+    # large U1-only discount onto undiscounted siblings here.
+    if u1_addl is not None and _looks_like_per_unit_additional(u1_addl, gvc):
+        for i in range(1, n):
+            if not _unit_addl_open(rows[i]):
+                continue
             rec = dict(rows[i])
             rec["additionalDiscount"] = u1_addl
             rows[i] = rec

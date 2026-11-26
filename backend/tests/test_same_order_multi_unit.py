@@ -1185,28 +1185,32 @@ def test_fill_splits_pack_oem_total_dumped_on_unit1():
         assert ce.num(u.get("additionalDiscount")) == 11500
 
 
-def test_fill_splits_pack_leftover_additional_evenly():
-    """Pack-sum Additional on U1 / lead is split — never copied as-is to siblings."""
+def test_fill_does_not_copy_pack_leftover_additional():
+    """Pack leftover Additional stays on U1 / lead — fill never spreads it."""
     lead = _same_sku_pack_lead(addl_u1=None, addl_lead=115000)
     lead["units"][0].pop("additionalDiscount", None)
-    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
-    assert changed is True
+    filled, _changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
     for u in filled:
-        assert ce.num(u.get("additionalDiscount")) == 23000
+        assert ce.num(u.get("additionalDiscount")) == 0
     lead2 = _same_sku_pack_lead(addl_u1=115000, addl_lead=115000)
-    filled2, changed2 = server._fill_same_sku_pack_scheme(lead2, lead2["units"])
-    assert changed2 is True
-    for u in filled2:
-        assert ce.num(u.get("additionalDiscount")) == 23000
+    filled2, _ = server._fill_same_sku_pack_scheme(lead2, lead2["units"])
+    assert ce.num(filled2[0].get("additionalDiscount")) == 115000
+    for u in filled2[1:]:
+        assert ce.num(u.get("additionalDiscount")) == 0
 
 
-def test_fill_still_copies_per_unit_additional_only():
-    """₹11,500 is one unit's cut — siblings inherit it; pack totals do not."""
-    lead = _same_sku_pack_lead(addl_u1=11500, addl_lead=115000)
-    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
-    assert changed is True
-    for u in filled:
-        assert ce.num(u.get("additionalDiscount")) == 11500
+def test_fill_does_not_spread_large_u1_only_additional():
+    """Owner ₹90k on locked U1 must not become ₹45k on an undiscounted sibling."""
+    lead = _same_sku_pack_lead(n=2, addl_u1=90000, addl_lead=90000, extra_u1=0, extra_lead=0)
+    lead["units"][0]["cxDemand"] = 780000
+    lead["units"][0]["useDealPrice"] = True
+    filled, _ = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert ce.num(filled[0].get("additionalDiscount")) == 90000
+    assert ce.num(filled[1].get("additionalDiscount")) == 0
+    healed, changed = server._heal_pack_leftover_additional_cx(lead, lead["units"])
+    assert changed is False
+    assert ce.num(healed[0].get("additionalDiscount")) == 90000
+    assert ce.num(healed[1].get("additionalDiscount")) == 0
 
 
 def test_fill_does_not_overwrite_sibling_own_extra():
@@ -1323,7 +1327,7 @@ def test_heal_does_not_overwrite_sibling_own_additional_or_cx():
 
 
 def test_heal_does_not_treat_booking_advance_as_cx():
-    """Equal ₹10k advances are payment history — never stamp them as Cx Demand."""
+    """Equal ₹10k / ₹50k deposits are payment history — never stamp them as Cx."""
     lead = _same_sku_pack_lead(n=3, addl_u1=178497, addl_lead=178497)
     for u in lead["units"]:
         u["rto"] = 5500
@@ -1331,15 +1335,59 @@ def test_heal_does_not_treat_booking_advance_as_cx():
         u["totalReceived"] = 10000
     assert server._infer_shared_pack_unit_cx(lead, lead["units"]) == 0
     rows, changed = server._heal_pack_leftover_additional_cx(lead, lead["units"])
-    # Same-SKU can still even-split Additional / recover Cx from list − per,
-    # but must not lock payable to the ₹10k advance.
-    for u in rows:
-        assert ce.num(u.get("cxDemand")) != 10000
-        assert ce.num(u.get("totalReceived")) == 10000
+    assert changed is False
+    assert ce.num(rows[0].get("additionalDiscount")) == 178497
+    for u in lead["units"]:
+        u["totalReceived"] = 50000
+    assert server._infer_shared_pack_unit_cx(lead, lead["units"]) == 0
     total, priced, _f, _p = server._refresh_unit_payables(lead, None)
     for u in priced:
         assert ce.num(u.get("customerPayable")) > 100000
-        assert ce.num(u.get("cxDemand")) != 10000
+        assert ce.num(u.get("cxDemand")) not in (10000, 50000)
+
+
+def test_heal_ignores_lead_header_rollup_after_u1_cleared():
+    """Header Additional = sum of sibling cuts — not an unallocated pack pile."""
+    units = []
+    for i in range(5):
+        rec = {
+            "sno": i + 1,
+            "model": "Turbo Max",
+            "variant": "Maxx (DV220)",
+            "exShowroom": 824999.0,
+            "rto": 5500.0,
+            "insuranceAmount": 19000.0,
+        }
+        if i == 0:
+            # Unpaid U1 after variant change — deal / Additional cleared.
+            rec["additionalDiscount"] = 0
+        elif i < 4:
+            rec["additionalDiscount"] = 59499.0
+            rec["cxDemand"] = 790000.0
+            rec["useDealPrice"] = True
+        # one sibling still open
+        units.append(rec)
+    lead = {
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (FB)",
+        "exShowroom": 775000.0,
+        # Recompute stored the sibling sum on the header.
+        "additionalDiscount": 178497.0,
+        "cxDemand": 3950000.0,
+        "units": units,
+    }
+    # Point U1 at a cheaper list after the variant change.
+    lead["units"][0]["variant"] = "Maxx (FB)"
+    lead["units"][0]["exShowroom"] = 775000.0
+    lead["units"][0].pop("additionalDiscount", None)
+    rows, changed = server._heal_pack_leftover_additional_cx(lead, lead["units"])
+    assert changed is False
+    assert "cxDemand" not in rows[0] or ce.num(rows[0].get("cxDemand")) == 0
+    total, priced, _f, _p = server._refresh_unit_payables(lead, None)
+    # Replacement U1 keeps list payable — not locked to sibling ₹7.9L.
+    assert abs(ce.num(priced[0].get("customerPayable")) - 799500) < 1
+    assert ce.num(priced[0].get("cxDemand")) == 0 or not priced[0].get("useDealPrice")
 
 
 def test_same_sku_pack_payables_each_get_extra_and_additional():
