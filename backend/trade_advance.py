@@ -136,26 +136,66 @@ async def create_tranche(*, financer: str, amount: float, drawn_on: Optional[str
     return public_row(doc)
 
 
-async def _open_fifo(financer: str) -> list:
-    """Oldest open tranches for this financer with remaining balance."""
+async def _open_fifo(financer: str, as_of: Optional[str] = None) -> list:
+    """Oldest open tranches for this financer with remaining balance.
+
+    as_of (YYYY-MM-DD): only tranches drawn on or before that business date —
+    a backdated Finance receipt must not consume a draw that did not exist yet.
+    """
     name = str(financer or "").strip().lower()
     if not name:
         return []
+    as_day = _parse_day(as_of) if as_of else None
     rows = await _db()[COLLECTION].find({"status": STATUS_OPEN}).sort(
         [("drawnOn", 1), ("createdAt", 1)]).to_list(200)
     out = []
     for r in rows:
         if str(r.get("financer") or "").strip().lower() != name:
             continue
+        if as_day:
+            drawn = _parse_day(r.get("drawnOn"))
+            if drawn and drawn > as_day:
+                continue
         if balance_of(r) <= 0.01:
             continue
         out.append(r)
     return out
 
 
+async def _try_consume_one(row: dict, take: float, adj: dict) -> bool:
+    """Atomic consume with optimistic lock on consumed+repaid. Returns True if applied."""
+    take = ce.round2(take)
+    if take <= 0.01:
+        return False
+    res = await _db()[COLLECTION].update_one(
+        {
+            "trancheId": row["trancheId"],
+            "status": STATUS_OPEN,
+            # Same snapshot the caller read — concurrent consume/repay loses and retries.
+            "consumed": ce.num(row.get("consumed")),
+            "repaid": ce.num(row.get("repaid")),
+        },
+        {
+            "$inc": {"consumed": take},
+            "$push": {"adjustments": adj},
+            "$set": {"lastUpdated": datetime.now(timezone.utc).isoformat()},
+        },
+    )
+    if not res.modified_count:
+        return False
+    fresh = await _db()[COLLECTION].find_one({"trancheId": row["trancheId"]})
+    if fresh and balance_of(fresh) <= 0.01:
+        await _db()[COLLECTION].update_one(
+            {"trancheId": row["trancheId"]},
+            {"$set": {"status": STATUS_CLOSED, "closedAt": datetime.now(timezone.utc).isoformat(),
+                      "closedReason": "consumed"}},
+        )
+    return True
+
+
 async def consume_for_finance(*, financer: str, amount: float, lead_id: str = "",
                               receipt_number: str = "", finance_file_number: str = "",
-                              customer_name: str = "") -> dict:
+                              customer_name: str = "", as_of: Optional[str] = None) -> dict:
     """FIFO-consume open TA for this financer. Does not touch customer payable.
 
     Returns {adjusted, trancheId, remainingOnTranche, openBalanceForFinancer}.
@@ -165,40 +205,33 @@ async def consume_for_finance(*, financer: str, amount: float, lead_id: str = ""
         return {"adjusted": 0.0, "trancheId": "", "splits": []}
     left = want
     splits = []
-    for row in await _open_fifo(financer):
+    # A few full FIFO passes so a lost optimistic lock can land on the refreshed balance.
+    for _pass in range(3):
         if left <= 0.01:
             break
-        bal = balance_of(row)
-        take = ce.round2(min(bal, left))
-        if take <= 0.01:
-            continue
-        new_consumed = ce.round2(ce.num(row.get("consumed")) + take)
-        patch = {
-            "consumed": new_consumed,
-            "lastUpdated": datetime.now(timezone.utc).isoformat(),
-        }
-        adj = {
-            "at": datetime.now(timezone.utc).isoformat(),
-            "amount": take,
-            "leadId": lead_id,
-            "receiptNumber": receipt_number,
-            "financeFileNumber": finance_file_number,
-            "customerName": customer_name,
-        }
-        await _db()[COLLECTION].update_one(
-            {"trancheId": row["trancheId"]},
-            {"$set": patch, "$push": {"adjustments": adj}},
-        )
-        # Auto-close when fully used (no repay needed).
-        fresh = await _db()[COLLECTION].find_one({"trancheId": row["trancheId"]})
-        if fresh and balance_of(fresh) <= 0.01:
-            await _db()[COLLECTION].update_one(
-                {"trancheId": row["trancheId"]},
-                {"$set": {"status": STATUS_CLOSED, "closedAt": datetime.now(timezone.utc).isoformat(),
-                          "closedReason": "consumed"}},
-            )
-        splits.append({"trancheId": row["trancheId"], "amount": take})
-        left = ce.round2(left - take)
+        progressed = False
+        for row in await _open_fifo(financer, as_of=as_of):
+            if left <= 0.01:
+                break
+            bal = balance_of(row)
+            take = ce.round2(min(bal, left))
+            if take <= 0.01:
+                continue
+            adj = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "amount": take,
+                "leadId": lead_id,
+                "receiptNumber": receipt_number,
+                "financeFileNumber": finance_file_number,
+                "customerName": customer_name,
+                "asOf": str(as_of or "")[:10],
+            }
+            if await _try_consume_one(row, take, adj):
+                splits.append({"trancheId": row["trancheId"], "amount": take})
+                left = ce.round2(left - take)
+                progressed = True
+        if not progressed:
+            break
     adjusted = ce.round2(want - left)
     open_bal = ce.round2(sum(r["balance"] for r in await list_open(financer)))
     return {
@@ -209,66 +242,117 @@ async def consume_for_finance(*, financer: str, amount: float, lead_id: str = ""
     }
 
 
-async def release_for_receipt(receipt_number: str) -> float:
-    """Undo TA consume when a Finance receipt is deleted. Returns amount released."""
-    rn = str(receipt_number or "").strip()
-    if not rn:
-        return 0.0
+async def _release_adjustments(rows: list, match_fn) -> float:
+    """Give back consumed amounts whose adjustments match match_fn(adj)."""
     released = 0.0
-    rows = await _db()[COLLECTION].find({"adjustments.receiptNumber": rn}).to_list(50)
-    for row in rows:
+    for row in rows or []:
         keep = []
         give_back = 0.0
         for adj in (row.get("adjustments") or []):
-            if str(adj.get("receiptNumber") or "") == rn:
+            if match_fn(adj):
                 give_back = ce.round2(give_back + ce.num(adj.get("amount")))
             else:
                 keep.append(adj)
         if give_back <= 0:
             continue
+        # Optimistic: only if consumed still matches what we read.
         new_consumed = ce.round2(max(0.0, ce.num(row.get("consumed")) - give_back))
-        patch = {
-            "consumed": new_consumed,
-            "adjustments": keep,
-            "lastUpdated": datetime.now(timezone.utc).isoformat(),
-            "status": STATUS_OPEN,
-        }
-        patch.pop("closedAt", None)
-        await _db()[COLLECTION].update_one(
-            {"trancheId": row["trancheId"]},
-            {"$set": patch, "$unset": {"closedAt": "", "closedReason": ""}},
+        res = await _db()[COLLECTION].update_one(
+            {"trancheId": row["trancheId"], "consumed": ce.num(row.get("consumed"))},
+            {"$set": {
+                "consumed": new_consumed,
+                "adjustments": keep,
+                "lastUpdated": datetime.now(timezone.utc).isoformat(),
+                "status": STATUS_OPEN,
+            }, "$unset": {"closedAt": "", "closedReason": ""}},
         )
-        released = ce.round2(released + give_back)
+        if res.modified_count:
+            released = ce.round2(released + give_back)
+        else:
+            # Concurrent update — retry once from a fresh read of this tranche.
+            fresh = await _db()[COLLECTION].find_one({"trancheId": row["trancheId"]})
+            if not fresh:
+                continue
+            keep2, give2 = [], 0.0
+            for adj in (fresh.get("adjustments") or []):
+                if match_fn(adj):
+                    give2 = ce.round2(give2 + ce.num(adj.get("amount")))
+                else:
+                    keep2.append(adj)
+            if give2 <= 0:
+                continue
+            new_c = ce.round2(max(0.0, ce.num(fresh.get("consumed")) - give2))
+            await _db()[COLLECTION].update_one(
+                {"trancheId": fresh["trancheId"]},
+                {"$set": {
+                    "consumed": new_c, "adjustments": keep2,
+                    "lastUpdated": datetime.now(timezone.utc).isoformat(),
+                    "status": STATUS_OPEN,
+                }, "$unset": {"closedAt": "", "closedReason": ""}},
+            )
+            released = ce.round2(released + give2)
     return released
+
+
+async def release_for_receipt(receipt_number: str) -> float:
+    """Undo TA consume when a Finance receipt is deleted. Returns amount released."""
+    rn = str(receipt_number or "").strip()
+    if not rn:
+        return 0.0
+    rows = await _db()[COLLECTION].find({"adjustments.receiptNumber": rn}).to_list(50)
+    if not rows:
+        return 0.0
+    return await _release_adjustments(
+        rows, lambda adj: str(adj.get("receiptNumber") or "") == rn)
+
+
+async def release_for_lead(lead_id: str) -> float:
+    """Undo every TA consume tied to a lead (lead delete cascade)."""
+    lid = str(lead_id or "").strip()
+    if not lid:
+        return 0.0
+    rows = await _db()[COLLECTION].find({"adjustments.leadId": lid}).to_list(100)
+    if not rows:
+        return 0.0
+    return await _release_adjustments(
+        rows, lambda adj: str(adj.get("leadId") or "") == lid)
 
 
 async def repay_tranche(tranche_id: str, amount: float, *, act: Optional[dict] = None) -> dict:
     """Dealer pays leftover TA back to the financer (clear for new draw)."""
-    row = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
-    if not row:
-        raise ValueError("Trade Advance tranche not found")
     pay = ce.round2(max(0.0, ce.num(amount)))
-    bal = balance_of(row)
     if pay <= 0:
         raise ValueError("Repay amount must be greater than zero")
-    if pay > bal + 0.01:
-        raise ValueError(f"Repay ₹{pay} exceeds balance ₹{bal}")
-    new_repaid = ce.round2(ce.num(row.get("repaid")) + pay)
-    patch = {
-        "repaid": new_repaid,
-        "lastUpdated": datetime.now(timezone.utc).isoformat(),
-        "lastRepaidBy": (act or {}).get("email") or "",
-    }
-    await _db()[COLLECTION].update_one({"trancheId": tranche_id}, {"$set": patch})
-    fresh = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
-    if fresh and balance_of(fresh) <= 0.01:
-        await _db()[COLLECTION].update_one(
-            {"trancheId": tranche_id},
-            {"$set": {"status": STATUS_CLOSED, "closedAt": datetime.now(timezone.utc).isoformat(),
-                      "closedReason": "repaid"}},
+    for _attempt in range(3):
+        row = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
+        if not row:
+            raise ValueError("Trade Advance tranche not found")
+        bal = balance_of(row)
+        if pay > bal + 0.01:
+            raise ValueError(f"Repay ₹{pay} exceeds balance ₹{bal}")
+        res = await _db()[COLLECTION].update_one(
+            {
+                "trancheId": tranche_id,
+                "consumed": ce.num(row.get("consumed")),
+                "repaid": ce.num(row.get("repaid")),
+            },
+            {"$inc": {"repaid": pay}, "$set": {
+                "lastUpdated": datetime.now(timezone.utc).isoformat(),
+                "lastRepaidBy": (act or {}).get("email") or "",
+            }},
         )
+        if not res.modified_count:
+            continue
         fresh = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
-    return public_row(fresh)
+        if fresh and balance_of(fresh) <= 0.01:
+            await _db()[COLLECTION].update_one(
+                {"trancheId": tranche_id},
+                {"$set": {"status": STATUS_CLOSED, "closedAt": datetime.now(timezone.utc).isoformat(),
+                          "closedReason": "repaid"}},
+            )
+            fresh = await _db()[COLLECTION].find_one({"trancheId": tranche_id})
+        return public_row(fresh)
+    raise ValueError("Trade Advance was updated by someone else — retry the repay")
 
 
 def format_open_summary(rows: list) -> str:
@@ -299,5 +383,6 @@ async def ensure_indexes():
         await _db()[COLLECTION].create_index("trancheId", unique=True)
         await _db()[COLLECTION].create_index([("status", 1), ("financer", 1), ("drawnOn", 1)])
         await _db()[COLLECTION].create_index("adjustments.receiptNumber")
+        await _db()[COLLECTION].create_index("adjustments.leadId")
     except Exception:
         logger.exception("trade_advance index ensure failed")

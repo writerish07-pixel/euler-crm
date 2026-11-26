@@ -264,6 +264,45 @@ async def test_ta_empty_day_marks_marker(client, monkeypatch):
     assert marker and marker.get("empty") is True
 
 
+@pytest.mark.asyncio
+async def test_backdated_receipt_skips_future_draw(client):
+    """Finance receipt dated before a tranche's drawnOn must not consume it."""
+    await server.db.trade_advances.delete_many({})
+    await client.post("/api/trade-advances", json={
+        "financer": "HDFC BANK", "amount": 1_000_000, "drawnOn": "2026-11-26",
+    })
+    res = await ta.consume_for_finance(
+        financer="HDFC BANK", amount=100_000, receipt_number="RC-BACK",
+        as_of="2026-11-25")
+    assert res["adjusted"] == 0.0
+    open_rows = await ta.list_open("HDFC BANK")
+    assert open_rows[0]["balance"] == 1_000_000
+
+    res2 = await ta.consume_for_finance(
+        financer="HDFC BANK", amount=100_000, receipt_number="RC-OK",
+        as_of="2026-11-26")
+    assert res2["adjusted"] == 100_000
+
+
+@pytest.mark.asyncio
+async def test_lead_delete_releases_ta(client):
+    await server.db.trade_advances.delete_many({})
+    await client.post("/api/trade-advances", json={
+        "financer": "IDFC", "amount": 500_000, "drawnOn": date.today().isoformat(),
+    })
+    lid = await _booked_lead(client, "9811100099")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 50000, "paymentMode": "Finance", "date": date.today().isoformat(),
+        "financerName": "IDFC", "allowExcess": True,
+    })
+    assert pay.status_code == 200, pay.text
+    assert (await ta.list_open("IDFC"))[0]["balance"] == 450_000
+
+    gone = await client.delete(f"/api/leads/{lid}")
+    assert gone.status_code == 200, gone.text
+    assert (await ta.list_open("IDFC"))[0]["balance"] == 500_000
+
+
 def test_documented_ta_templates_match_sender_variable_counts():
     docs = __import__("re")
     from pathlib import Path

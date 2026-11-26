@@ -11,8 +11,6 @@ import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
-const TA_FINANCERS = ["Shriram", "Cholamandalam", "Mahindra", "Other"];
-
 function financerRollup(rows) {
   const map = new Map();
   for (const r of rows || []) {
@@ -222,12 +220,16 @@ export default function Finance() {
 
 function TradeAdvanceCard({ tick, onChanged }) {
   const [rows, setRows] = useState([]);
+  const [financers, setFinancers] = useState([]);
   const [draw, setDraw] = useState(false);
   const [repayId, setRepayId] = useState("");
   const load = useCallback(() => {
     get("/trade-advances", { status: "Open" }).then(setRows).catch(() => setRows([]));
   }, []);
   useEffect(() => { load(); }, [load, tick]);
+  useEffect(() => {
+    get("/masters").then((m) => setFinancers(m?.financers || [])).catch(() => setFinancers([]));
+  }, []);
 
   return (
     <Card className="p-5 mb-6" data-testid="trade-advance-card">
@@ -268,6 +270,7 @@ function TradeAdvanceCard({ tick, onChanged }) {
       />
       {draw && (
         <TradeAdvanceDrawModal
+          financers={financers}
           onClose={() => setDraw(false)}
           onDone={() => { setDraw(false); load(); onChanged?.(); }}
         />
@@ -283,15 +286,19 @@ function TradeAdvanceCard({ tick, onChanged }) {
   );
 }
 
-function TradeAdvanceDrawModal({ onClose, onDone }) {
+function TradeAdvanceDrawModal({ financers, onClose, onDone }) {
+  const options = financers?.length ? financers : ["Shriram", "Cholamandalam", "Mahindra Finance", "HDFC BANK"];
   const [form, setForm] = useState({
-    financer: "Shriram", amount: "", drawnOn: todayISO(), reference: "", other: "",
+    financer: options[0] || "", amount: "", drawnOn: todayISO(), reference: "",
   });
+  const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
-    const financer = form.financer === "Other" ? form.other.trim() : form.financer;
-    if (!financer) return toast.error("Financer is required");
+    if (busy) return;
+    const financer = String(form.financer || "").trim();
+    if (!financer) return toast.error("Select a financer (same list as Finance receipts)");
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
+    setBusy(true);
     try {
       await post("/trade-advances", {
         financer, amount: +form.amount, drawnOn: form.drawnOn, reference: form.reference,
@@ -300,6 +307,7 @@ function TradeAdvanceDrawModal({ onClose, onDone }) {
       onDone();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not record Trade Advance"));
+      setBusy(false);
     }
   };
   return (
@@ -308,18 +316,15 @@ function TradeAdvanceDrawModal({ onClose, onDone }) {
         <h3 className="font-heading text-lg font-bold text-ink mb-1">Record Trade Advance draw</h3>
         <p className="text-xs text-ink-soft mb-4">
           Money the financer credited to the dealership (dealer OD). Due in 30 days from the drawn date.
+          Use the same financer name as Finance receipts so auto-deduct matches.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <Field label="Financer">
             <Select data-testid="ta-financer" value={form.financer} onChange={set("financer")}>
-              {TA_FINANCERS.map((f) => <option key={f} value={f}>{f}</option>)}
+              <option value="">— Select —</option>
+              {options.map((f) => <option key={f} value={f}>{f}</option>)}
             </Select>
           </Field>
-          {form.financer === "Other" && (
-            <Field label="Financer name">
-              <Input data-testid="ta-financer-other" value={form.other} onChange={set("other")} />
-            </Field>
-          )}
           <Field label="Amount (₹)">
             <Input data-testid="ta-amount" type="number" value={form.amount} onChange={set("amount")} placeholder="10000000" />
           </Field>
@@ -331,8 +336,10 @@ function TradeAdvanceDrawModal({ onClose, onDone }) {
           </Field>
         </div>
         <div className="flex justify-end gap-2 mt-5">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button data-testid="ta-save-draw-btn" onClick={submit}>Save draw</Button>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button data-testid="ta-save-draw-btn" onClick={submit} disabled={busy}>
+            {busy ? "Saving…" : "Save draw"}
+          </Button>
         </div>
       </div>
     </Modal>
@@ -341,15 +348,18 @@ function TradeAdvanceDrawModal({ onClose, onDone }) {
 
 function TradeAdvanceRepayModal({ tranche, onClose, onDone }) {
   const [amount, setAmount] = useState(tranche ? String(tranche.balance) : "");
+  const [busy, setBusy] = useState(false);
   const submit = async () => {
-    if (!tranche) return;
+    if (!tranche || busy) return;
     if (!amount || +amount <= 0) return toast.error("Enter a valid amount");
+    setBusy(true);
     try {
       await post(`/trade-advances/${encodeURIComponent(tranche.trancheId)}/repay`, { amount: +amount });
       toast.success("Trade Advance cleared");
       onDone();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Could not clear Trade Advance"));
+      setBusy(false);
     }
   };
   return (
@@ -361,11 +371,13 @@ function TradeAdvanceRepayModal({ tranche, onClose, onDone }) {
         </p>
         <Field label="Repay amount (₹)">
           <Input data-testid="ta-repay-amount" type="number" value={amount}
-            onChange={(e) => setAmount(e.target.value)} />
+            onChange={(e) => setAmount(e.target.value)} disabled={busy} />
         </Field>
         <div className="flex justify-end gap-2 mt-5">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button data-testid="ta-save-repay-btn" onClick={submit}>Clear balance</Button>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button data-testid="ta-save-repay-btn" onClick={submit} disabled={busy}>
+            {busy ? "Saving…" : "Clear balance"}
+          </Button>
         </div>
       </div>
     </Modal>

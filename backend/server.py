@@ -10006,12 +10006,22 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
     # Sheet first (while we still know the lead exists) — remove all register traces.
     sheet_result = await gsheets.delete_lead_traces(lead_id)
 
+    # Release Trade Advance consumes for this lead's Finance receipts before
+    # cascade-deleting payments (individual receipt delete already releases).
+    ta_released = 0.0
+    try:
+        import trade_advance as ta
+        ta_released = await ta.release_for_lead(lead_id)
+    except Exception:
+        logging.exception("trade_advance release_for_lead failed for %s", lead_id)
+
     counts = {}
     for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
                  "activities", "dealer_earnings", "incentive_register", "billing_summaries",
                  "whatsapp_messages", "whatsapp_outbox"]:
         r = await db[coll].delete_many({"leadId": lead_id})
         counts[coll] = r.deleted_count
+    counts["tradeAdvanceReleased"] = ta_released
     await db.leads.delete_one({"leadId": lead_id})
     # Drop pending/OK sync-log rows for this lead and its related entity IDs.
     sync_log = await db.sheet_sync_log.delete_many({
@@ -11903,6 +11913,7 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
                 receipt_number=receipt,
                 finance_file_number=finance_file_number or "",
                 customer_name=(lead or {}).get("customerName") or "",
+                as_of=str(body.date or today())[:10],
             )
             if ta_res.get("adjusted"):
                 await db.payments.update_one(
@@ -21032,7 +21043,7 @@ async def reset_transactions(act=Depends(actor)):
                  "claims", "activities", "dealer_earnings", "quotations", "incentive_register",
                  "billing_summaries", "sheet_sync_log",
                  lead_docs.COLLECTION, "whatsapp_threads", "whatsapp_messages",
-                 "whatsapp_outbox", "lead_requests"]:
+                 "whatsapp_outbox", "lead_requests", "trade_advances"]:
         r = await db[coll].delete_many({})
         counts[coll] = r.deleted_count
     await db["system"].update_one({"_id": "seed_state"},
