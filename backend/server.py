@@ -8570,6 +8570,36 @@ def _looks_like_per_unit_additional(amount, gvc):
     return True
 
 
+def _looks_like_pack_additional_total(amount, n, gvc):
+    """True when Additional on unit 1 / the lead is the pack sum, not one cut.
+
+    ₹11,500 on a 5-unit order is a normal per-unit Additional — copy it.
+    ₹1,15,000 (= ₹23,000 × 5) or ₹5,35,491 (= ₹59,499 × 9) is the pack total
+    dumped on unit 1 and must be split / healed, not copied as-is.
+
+    A lead garbage figure larger than every unit's list together (e.g. ₹50L on
+    a 3-unit file) is not a pack leftover — leave it off the units.
+    """
+    amount = ce.round2(ce.num(amount))
+    n = int(n or 0)
+    gvc = ce.num(gvc)
+    if amount <= 0 or n < 2:
+        return False
+    if _looks_like_per_unit_additional(amount, gvc):
+        return False
+    per = _evenly_split_amount(amount, n)
+    if per >= 1000:
+        # Each share must still look like a dealer cut, not larger than the vehicle.
+        if gvc > 0 and per > 0.25 * gvc:
+            return False
+        return True
+    # Mixed-SKU packs may not divide evenly (DV + FB different cuts). Cap at
+    # one vehicle's GVC × N so a bogus lead leftover cannot spread.
+    if gvc > 0 and amount > 0.15 * gvc and amount <= gvc * n + ce.DEAL_AMOUNT_EQUAL_RUPEES:
+        return True
+    return False
+
+
 def _unit_extra_open(unit):
     """Sibling can inherit extra: missing keys or both values still ₹0."""
     u = unit or {}
@@ -8580,15 +8610,148 @@ def _unit_addl_open(unit):
     return ce.num((unit or {}).get("additionalDiscount")) <= 0
 
 
+def _infer_shared_pack_unit_cx(lead, units):
+    """Agreed per-unit Cx when most pack units already show the same deal.
+
+    Prefers an existing non-rollup cxDemand shared by a majority of units.
+    Else the modal totalReceived when most units carry the same round figure
+    (Messenger: every unit shows ₹7,90,000 received). Never returns the pack
+    header total.
+    """
+    rows = [u for u in (units or []) if isinstance(u, dict)]
+    n = len(rows)
+    if n < 2:
+        return 0.0
+    need = max(2, (n + 1) // 2)
+    cx_counts = Counter()
+    for i, u in enumerate(rows):
+        cx = ce.round2(ce.num(u.get("cxDemand")))
+        if cx <= 0:
+            continue
+        if ce.pack_unit_cx_is_pack_rollup(cx, u, u):
+            continue
+        if _cx_copies_pack_total(cx, lead, rows, i):
+            continue
+        cx_counts[cx] += 1
+    if cx_counts:
+        modal_cx, cnt = cx_counts.most_common(1)[0]
+        if cnt >= need and modal_cx > 0:
+            return modal_cx
+    recv_counts = Counter()
+    for u in rows:
+        recv = ce.round2(ce.num(u.get("totalReceived")))
+        if recv <= 0:
+            continue
+        if abs(recv % 1000) > 0.005 and not _is_round_rupees(recv):
+            continue
+        recv_counts[recv] += 1
+    if not recv_counts:
+        return 0.0
+    modal_recv, cnt = recv_counts.most_common(1)[0]
+    if cnt < need or modal_recv <= 0:
+        return 0.0
+    return modal_recv
+
+
+def _heal_pack_leftover_additional_cx(lead, units):
+    """Stamp per-unit Cx when pack leftover Additional hid the deal.
+
+    Messenger: ₹5,35,491 parked on unit 1 (= ₹59,499 × 9) while every unit
+    already received ₹7,90,000. Same-SKU packs can even-split; mixed SKU
+    (DV + FB) must derive each unit's own Additional from a shared Cx.
+
+    Does not invent OEM Extra claims. Does not rewrite model / variant / body.
+    Does not overwrite a unit that already has its own non-rollup cxDemand or
+    its own Additional.
+    """
+    rows = [dict(u or {}) for u in (units or [])]
+    if not oem_sync.is_same_order_pack(lead or {}) or len(rows) < 2:
+        return list(units or []), False
+    n = len(rows)
+    u0 = rows[0]
+    gvc0 = ce.num(u0.get("exShowroom") or (lead or {}).get("exShowroom"))
+    u1_addl = ce.round2(max(0.0, ce.num(u0.get("additionalDiscount"))))
+    lead_addl = ce.round2(max(0.0, ce.num((lead or {}).get("additionalDiscount"))))
+    pack_addl = 0.0
+    if u1_addl > 0 and _looks_like_pack_additional_total(u1_addl, n, gvc0):
+        pack_addl = u1_addl
+    elif lead_addl > 0 and _looks_like_pack_additional_total(lead_addl, n, gvc0):
+        # Lead roll-up only — unit 1 never held its own cut.
+        if "additionalDiscount" not in u0 or u1_addl <= 0:
+            pack_addl = lead_addl
+    if pack_addl <= 0:
+        return list(units or []), False
+
+    open_idxs = [i for i in range(n) if i == 0 or _unit_addl_open(rows[i])]
+    if len(open_idxs) < 2:
+        return list(units or []), False
+
+    cx = _infer_shared_pack_unit_cx(lead, rows)
+    if cx <= 0 and _pack_units_same_sku(lead, rows):
+        per = _evenly_split_amount(pack_addl, n)
+        if per >= 1000 and gvc0 > 0:
+            # Same list economics: recover Cx ≈ list GVC − per-unit Additional.
+            defaults = ce.default_rto_insurance_for_model(
+                u0.get("model") or (lead or {}).get("interestedModel"),
+                u0.get("variant") or (lead or {}).get("variant"))
+            list_rto = defaults[0] if defaults else ce.num(u0.get("rto"))
+            list_ins = defaults[1] if defaults else ce.num(
+                u0.get("insuranceAmount") or u0.get("insurance"))
+            list_gvc = ce.round2(
+                gvc0 + ce.num(list_rto) + ce.num(list_ins)
+                + ce.num(u0.get("accessoriesAmount"))
+                + ce.num(u0.get("handlingCharges"))
+                + ce.num(u0.get("trc"))
+                + ce.num(u0.get("fastag"))
+                + ce.num(u0.get("extendedWarranty"))
+                + ce.num(u0.get("otherCharges"))
+                + ce.num(u0.get("rsaAmc")))
+            cand = ce.round2(list_gvc - per)
+            if cand > 0:
+                cx = cand
+    if cx <= 0:
+        return list(units or []), False
+
+    changed = False
+    for i in open_idxs:
+        rec = dict(rows[i])
+        existing = ce.round2(ce.num(rec.get("cxDemand")))
+        if existing > 0:
+            if (not ce.pack_unit_cx_is_pack_rollup(existing, rec, rec)
+                    and not _cx_copies_pack_total(existing, lead, rows, i)):
+                # Unit already has its own deal — leave Additional alone.
+                continue
+        unit_gvc = ce.round2(
+            ce.num(rec.get("exShowroom") or gvc0)
+            + ce.num(rec.get("rto"))
+            + ce.num(rec.get("insuranceAmount") or rec.get("insurance")))
+        # Never stamp a Cx above this unit's GVC (would invent customer income).
+        if unit_gvc > 0 and cx > unit_gvc + ce.DEAL_AMOUNT_EQUAL_RUPEES:
+            continue
+        if (ce.round2(ce.num(rec.get("cxDemand"))) != cx
+                or not rec.get("useDealPrice")):
+            rec["cxDemand"] = cx
+            rec["useDealPrice"] = True
+            changed = True
+        # Drop pack-sized Additional on unit 1 so derive rebuilds the unit cut.
+        if i == 0 and _looks_like_pack_additional_total(
+                ce.num(rec.get("additionalDiscount")), n, gvc0):
+            rec["additionalDiscount"] = 0
+            changed = True
+        rows[i] = rec
+    return rows, changed
+
+
 def _fill_same_sku_pack_scheme(lead, units):
-    """Same-SKU pack: split a pack-total Extra Support; copy per-unit Additional.
+    """Same-SKU pack: split a pack-total Extra Support; split/copy Additional.
 
     OEM extra on the lead is a roll-up. If unit 1 still holds that pack total
     (₹2,40,000 on a 5-unit order), split it. A per-unit figure (₹48,000) stays
     on the units staff selected — one Extra Support debit note must not invent
     claims on every sibling. Additional (dealer-funded) is copied from unit 1
-    only when it looks like a per-unit discount — never a leftover pack figure
-    on the lead (₹1,15,000).
+    when it looks like a per-unit discount. A pack leftover Additional
+    (₹1,15,000 / ₹5,35,491) is split evenly across open siblings — never
+    copied as-is onto every unit.
     """
     rows = [dict(u or {}) for u in (units or [])]
     if not _pack_units_same_sku(lead, rows):
@@ -8646,19 +8809,36 @@ def _fill_same_sku_pack_scheme(lead, units):
                 changed = True
 
     u1_addl = None
+    lead_addl = ce.round2(max(0.0, ce.num((lead or {}).get("additionalDiscount"))))
     if "additionalDiscount" in u0:
         u1_addl = ce.round2(max(0.0, ce.num(u0.get("additionalDiscount"))))
-    elif _looks_like_per_unit_additional(ce.num((lead or {}).get("additionalDiscount")), gvc):
-        u1_addl = ce.round2(max(0.0, ce.num((lead or {}).get("additionalDiscount"))))
+    elif _looks_like_per_unit_additional(lead_addl, gvc):
+        u1_addl = lead_addl
         u0 = dict(u0)
         u0["additionalDiscount"] = u1_addl
         rows[0] = u0
         changed = True
+    elif _looks_like_pack_additional_total(lead_addl, n, gvc):
+        u1_addl = lead_addl
 
-    if u1_addl is not None and _looks_like_per_unit_additional(u1_addl, gvc):
-        for i in range(1, n):
-            if not _unit_addl_open(rows[i]):
-                continue
+    addl_open = [i for i in range(1, n) if _unit_addl_open(rows[i])]
+    all_addl_open = len(addl_open) == n - 1
+    if (u1_addl is not None and all_addl_open
+            and _looks_like_pack_additional_total(u1_addl, n, gvc)):
+        per_addl = _evenly_split_amount(u1_addl, n)
+        if per_addl >= 1000 and (gvc <= 0 or per_addl <= 0.25 * gvc):
+            if ce.round2(ce.num(u0.get("additionalDiscount"))) != per_addl:
+                u0 = dict(u0)
+                u0["additionalDiscount"] = per_addl
+                rows[0] = u0
+                changed = True
+            for i in addl_open:
+                rec = dict(rows[i])
+                rec["additionalDiscount"] = per_addl
+                rows[i] = rec
+                changed = True
+    elif u1_addl is not None and _looks_like_per_unit_additional(u1_addl, gvc):
+        for i in addl_open:
             rec = dict(rows[i])
             rec["additionalDiscount"] = u1_addl
             rows[i] = rec
@@ -8668,11 +8848,12 @@ def _fill_same_sku_pack_scheme(lead, units):
 
 
 def _prepare_pack_unit_scheme(lead, units):
-    """Seed historical lead extra onto unit 1, then fill empty same-SKU siblings."""
+    """Seed historical lead extra onto unit 1, fill same-SKU siblings, heal Cx."""
     rows = list(units or [])
     rows, seeded = _seed_unit1_oem_extra_from_lead(lead, rows)
     rows, filled = _fill_same_sku_pack_scheme(lead, rows)
-    return rows, seeded or filled
+    rows, healed = _heal_pack_leftover_additional_cx(lead, rows)
+    return rows, seeded or filled or healed
 
 
 def _pack_oem_extra_totals(lead, units=None):

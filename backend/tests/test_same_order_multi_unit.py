@@ -1185,17 +1185,28 @@ def test_fill_splits_pack_oem_total_dumped_on_unit1():
         assert ce.num(u.get("additionalDiscount")) == 11500
 
 
-def test_fill_does_not_copy_pack_leftover_additional():
+def test_fill_splits_pack_leftover_additional_evenly():
+    """Pack-sum Additional on U1 / lead is split — never copied as-is to siblings."""
     lead = _same_sku_pack_lead(addl_u1=None, addl_lead=115000)
     lead["units"][0].pop("additionalDiscount", None)
-    filled, _changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert changed is True
     for u in filled:
-        assert ce.num(u.get("additionalDiscount")) == 0
+        assert ce.num(u.get("additionalDiscount")) == 23000
     lead2 = _same_sku_pack_lead(addl_u1=115000, addl_lead=115000)
-    filled2, _ = server._fill_same_sku_pack_scheme(lead2, lead2["units"])
-    assert ce.num(filled2[0].get("additionalDiscount")) == 115000
-    for u in filled2[1:]:
-        assert ce.num(u.get("additionalDiscount")) == 0
+    filled2, changed2 = server._fill_same_sku_pack_scheme(lead2, lead2["units"])
+    assert changed2 is True
+    for u in filled2:
+        assert ce.num(u.get("additionalDiscount")) == 23000
+
+
+def test_fill_still_copies_per_unit_additional_only():
+    """₹11,500 is one unit's cut — siblings inherit it; pack totals do not."""
+    lead = _same_sku_pack_lead(addl_u1=11500, addl_lead=115000)
+    filled, changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert changed is True
+    for u in filled:
+        assert ce.num(u.get("additionalDiscount")) == 11500
 
 
 def test_fill_does_not_overwrite_sibling_own_extra():
@@ -1229,6 +1240,86 @@ def test_fill_skips_different_sku_pack():
     assert changed is False
     assert "oemExtraSupportReceived" not in filled[1]
     assert ce.num(filled[1].get("additionalDiscount")) == 0
+
+
+def test_messenger_mixed_sku_pack_leftover_additional_heals_per_unit_cx():
+    """Messenger: pack Additional on U1 + shared ₹7.9L received → each unit's Cx.
+
+    DV and FB keep their own bodies. OEM Extra on U1 is not invented onto siblings.
+    Each unit's Additional is derived from Cx (59499 DV / 9500 FB), not 535491÷9.
+    """
+    units = []
+    for i in range(9):
+        dv = i < 6
+        units.append({
+            "sno": i + 1,
+            "model": "Turbo Max",
+            "variant": "Maxx (DV220)" if dv else "Maxx (FB)",
+            "bodyType": "DV220" if dv else "FB",
+            "exShowroom": 824999.0 if dv else 775000.0,
+            "rto": 5500.0,
+            "insuranceAmount": 19000.0,
+            "totalReceived": 790000.0,
+            "oemBilledBodyType": "DV220" if dv else "FB",
+            **({"additionalDiscount": 535491.0,
+                "oemExtraSupportReceived": 372000.0,
+                "oemExtraSupportPassed": 0.0} if i == 0 else {}),
+        })
+    lead = {
+        "leadId": "LD-MESSENGER-PACK",
+        "sameOrderMultiUnit": True,
+        "interestedModel": "Turbo Max",
+        "variant": "Maxx (DV220)",
+        "exShowroom": 824999.0,
+        "cxDemand": 6960003.0,
+        "customerPayable": 6960003.0,
+        "additionalDiscount": 535491.0,
+        "oemExtraSupportReceived": 372000.0,
+        "rto": 5500.0,
+        "insuranceAmount": 19000.0,
+        "units": units,
+    }
+    # Mixed SKU: fill must not invent OEM Extra / copy bodies.
+    filled, fill_changed = server._fill_same_sku_pack_scheme(lead, lead["units"])
+    assert fill_changed is False
+    assert ce.num(filled[0].get("oemExtraSupportReceived")) == 372000
+    for u in filled[1:]:
+        assert ce.num(u.get("oemExtraSupportReceived")) == 0
+        assert ce.num(u.get("additionalDiscount")) == 0
+
+    total, priced, _f, _p = server._refresh_unit_payables(lead, None)
+    assert len(priced) == 9
+    for u in priced:
+        assert ce.num(u.get("cxDemand")) == 790000
+        assert u.get("useDealPrice") is True
+        assert abs(ce.num(u.get("customerPayable")) - 790000) < 1
+        # Bodies stay chassis-own — heal never rewrites variant.
+        if u["sno"] <= 6:
+            assert u["variant"] == "Maxx (DV220)"
+            assert abs(ce.num(u.get("additionalDiscount")) - 59499) < 1
+        else:
+            assert u["variant"] == "Maxx (FB)"
+            assert abs(ce.num(u.get("additionalDiscount")) - 9500) < 1
+    # OEM Extra still only on unit 1 (mixed SKU — do not invent sibling claims).
+    assert ce.num(priced[0].get("oemExtraSupportReceived")) == 372000
+    for u in priced[1:]:
+        assert ce.num(u.get("oemExtraSupportReceived")) == 0
+    assert abs(total - 790000 * 9) < 1
+
+
+def test_heal_does_not_overwrite_sibling_own_additional_or_cx():
+    lead = _same_sku_pack_lead(n=3, addl_u1=178497, addl_lead=178497)
+    lead["units"][1]["additionalDiscount"] = 5000
+    lead["units"][1]["cxDemand"] = 800000
+    lead["units"][1]["useDealPrice"] = True
+    lead["units"][1]["totalReceived"] = 790000
+    lead["units"][0]["totalReceived"] = 790000
+    lead["units"][2]["totalReceived"] = 790000
+    rows, changed = server._heal_pack_leftover_additional_cx(lead, lead["units"])
+    assert changed is True
+    assert ce.num(rows[1].get("additionalDiscount")) == 5000
+    assert ce.num(rows[1].get("cxDemand")) == 800000
+    assert ce.num(rows[2].get("cxDemand")) == 790000
 
 
 def test_same_sku_pack_payables_each_get_extra_and_additional():
