@@ -675,9 +675,12 @@ async def test_the_sender_passes_exactly_the_documented_variable_count(wired):
 
 def test_slots_due_catches_up_after_the_hour():
     morning = datetime(2026, 9, 2, 10, 0, tzinfo=wa.IST)
+    # 10:00 IST — morning is due; TA waits until 10:30.
     assert wa.slots_due(morning) == ["morning"]
+    ta_time = datetime(2026, 9, 2, 10, 30, tzinfo=wa.IST)
+    assert wa.slots_due(ta_time) == ["morning", "ta"]
     evening = datetime(2026, 9, 2, 21, 15, tzinfo=wa.IST)
-    assert wa.slots_due(evening) == ["morning", "eod"]
+    assert wa.slots_due(evening) == ["morning", "eod", "ta"]
     before = datetime(2026, 9, 2, 7, 0, tzinfo=wa.IST)
     assert wa.slots_due(before) == []
 

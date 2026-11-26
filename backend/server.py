@@ -10006,12 +10006,22 @@ async def delete_lead(lead_id: str, act=Depends(actor)):
     # Sheet first (while we still know the lead exists) — remove all register traces.
     sheet_result = await gsheets.delete_lead_traces(lead_id)
 
+    # Release Trade Advance consumes for this lead's Finance receipts before
+    # cascade-deleting payments (individual receipt delete already releases).
+    ta_released = 0.0
+    try:
+        import trade_advance as ta
+        ta_released = await ta.release_for_lead(lead_id)
+    except Exception:
+        logging.exception("trade_advance release_for_lead failed for %s", lead_id)
+
     counts = {}
     for coll in ["payments", "bookings", "deliveries", "finance", "insurance", "claims",
                  "activities", "dealer_earnings", "incentive_register", "billing_summaries",
                  "whatsapp_messages", "whatsapp_outbox"]:
         r = await db[coll].delete_many({"leadId": lead_id})
         counts[coll] = r.deleted_count
+    counts["tradeAdvanceReleased"] = ta_released
     await db.leads.delete_one({"leadId": lead_id})
     # Drop pending/OK sync-log rows for this lead and its related entity IDs.
     sync_log = await db.sheet_sync_log.delete_many({
@@ -11892,6 +11902,32 @@ async def _add_payment_internal(lead_id, body: PaymentIn):
     await sheet_sync("payments", doc)
     if body.paymentMode == "Finance":
         await _upsert_finance_file(lead_id, body, finance_file_number)
+        # Dealer Trade Advance: FIFO-consume open tranche for this financer.
+        # Never blocks the customer receipt — TA is a dealer OD register only.
+        try:
+            import trade_advance as ta
+            ta_res = await ta.consume_for_finance(
+                financer=body.financerName or "",
+                amount=body.amount,
+                lead_id=lead_id,
+                receipt_number=receipt,
+                finance_file_number=finance_file_number or "",
+                customer_name=(lead or {}).get("customerName") or "",
+                as_of=str(body.date or today())[:10],
+            )
+            if ta_res.get("adjusted"):
+                await db.payments.update_one(
+                    {"receiptNumber": receipt},
+                    {"$set": {
+                        "tradeAdvanceAdjusted": ta_res.get("adjusted"),
+                        "tradeAdvanceTrancheId": ta_res.get("trancheId") or "",
+                        "tradeAdvanceSplits": ta_res.get("splits") or [],
+                    }},
+                )
+                doc["tradeAdvanceAdjusted"] = ta_res.get("adjusted")
+                doc["tradeAdvanceTrancheId"] = ta_res.get("trancheId") or ""
+        except Exception:
+            logging.exception("trade_advance consume failed for %s", receipt)
     return clean(doc)
 
 
@@ -12037,6 +12073,13 @@ async def delete_payment(receipt_number: str, act=Depends(actor)):
     await db.payments.delete_one({"receiptNumber": receipt_number})
     sheet_result = await gsheets.delete_entity_row("payments", receipt_number)
     await db.sheet_sync_log.delete_many({"entityType": "payments", "entityId": receipt_number})
+    # Undo any Trade Advance consume tied to this Finance receipt.
+    if (pay.get("paymentMode") or "") == "Finance":
+        try:
+            import trade_advance as ta
+            await ta.release_for_receipt(receipt_number)
+        except Exception:
+            logging.exception("trade_advance release failed for %s", receipt_number)
     await _rebuild_payment_running_totals(lead_id)
     finance_result = None
     if (pay.get("paymentMode") or "") == "Finance" and file_number:
@@ -12313,6 +12356,60 @@ async def _enrich_finance_with_delivery(files):
             row["overdue"] = False
         out.append(row)
     return out
+
+
+# ---------------------------------------------------------------- Trade Advance (dealer OD)
+class TradeAdvanceIn(BaseModel):
+    financer: str = ""
+    amount: float = 0.0
+    drawnOn: Optional[str] = None
+    reference: str = ""
+
+
+class TradeAdvanceRepayIn(BaseModel):
+    amount: float = 0.0
+
+
+@api.get("/trade-advances", dependencies=[Depends(money_desk_only)])
+async def list_trade_advances(status: Optional[str] = None, financer: Optional[str] = None):
+    """Dealer Trade Advance tranche register — Open / Closed / all."""
+    import trade_advance as ta
+    st = (status or "").strip() or None
+    if st and st.lower() == "open":
+        return await ta.list_open(financer=financer)
+    return await ta.list_tranches(status=st, financer=financer)
+
+
+@api.post("/trade-advances", dependencies=[Depends(money_desk_only)])
+async def create_trade_advance(body: TradeAdvanceIn, act=Depends(actor)):
+    """Record a new Trade Advance draw (e.g. Shriram ₹1 Cr)."""
+    import trade_advance as ta
+    try:
+        row = await ta.create_tranche(
+            financer=body.financer, amount=body.amount,
+            drawn_on=body.drawnOn, reference=body.reference, act=act)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await write_audit(act, "create", "trade-advance",
+                      new={"trancheId": row.get("trancheId"), "financer": row.get("financer"),
+                           "drawnAmount": row.get("drawnAmount"), "drawnOn": row.get("drawnOn"),
+                           "backAdjusted": row.get("backAdjusted"),
+                           "backAdjustedFiles": row.get("backAdjustedFiles")})
+    return row
+
+
+@api.post("/trade-advances/{tranche_id}/repay", dependencies=[Depends(money_desk_only)])
+async def repay_trade_advance(tranche_id: str, body: TradeAdvanceRepayIn, act=Depends(actor)):
+    """Clear leftover TA balance so a new draw can be taken."""
+    import trade_advance as ta
+    try:
+        row = await ta.repay_tranche(tranche_id, body.amount, act=act)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    await write_audit(act, "repay", "trade-advance",
+                      new={"trancheId": tranche_id, "amount": body.amount,
+                           "balance": row.get("balance"), "status": row.get("status")})
+    return row
 
 
 @api.get("/finance")
@@ -17462,6 +17559,8 @@ CRITICAL_ENDPOINTS = [
     ("POST", "/api/leads/{lead_id}/tally-pack/check"),
     ("GET", "/api/payments"), ("GET", "/api/oem-extra-support"),
     ("GET", "/api/finance"), ("POST", "/api/finance/{file_number}/receipt"),
+    ("GET", "/api/trade-advances"), ("POST", "/api/trade-advances"),
+    ("POST", "/api/trade-advances/{tranche_id}/repay"),
     ("GET", "/api/insurance"), ("POST", "/api/insurance"), ("POST", "/api/insurance/{entry_id}/receipt"),
     ("GET", "/api/insurance/agents-rollup"), ("GET", "/api/insurance/receipts"),
     ("GET", "/api/insurance-agents"), ("POST", "/api/insurance-agents"),
@@ -20108,6 +20207,7 @@ class BotspaceSettingsIn(BaseModel):
     quietEnd: Optional[int] = None
     webhookSecret: Optional[str] = None
     cronToken: Optional[str] = None
+    financeManagerMobile: Optional[str] = None
     executives: Optional[List[dict]] = None
     templates: Optional[dict] = None
 
@@ -20945,7 +21045,7 @@ async def reset_transactions(act=Depends(actor)):
                  "claims", "activities", "dealer_earnings", "quotations", "incentive_register",
                  "billing_summaries", "sheet_sync_log",
                  lead_docs.COLLECTION, "whatsapp_threads", "whatsapp_messages",
-                 "whatsapp_outbox", "lead_requests"]:
+                 "whatsapp_outbox", "lead_requests", "trade_advances"]:
         r = await db[coll].delete_many({})
         counts[coll] = r.deleted_count
     await db["system"].update_one({"_id": "seed_state"},
@@ -21430,6 +21530,11 @@ async def startup():
         await db.leads.create_index("dealVerifyNextAt")
         await db.leads.create_index("dealVerifyMismatch")
         await db.leads.create_index("reviewCallNextAt")
+        try:
+            import trade_advance as ta
+            await ta.ensure_indexes()
+        except Exception:
+            logging.exception("TRADE_ADVANCE_INDEX_ERROR")
     except Exception:
         pass
     # Insurance agents / staff / cancel reasons are small and needed on the first
