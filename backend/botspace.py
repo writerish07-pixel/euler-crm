@@ -1119,7 +1119,12 @@ async def _record_report_delivery_failure(provider_id: str, reason: str):
     if not msg or msg.get("audience") != "executive":
         return
     kind = msg.get("kind") or ""
-    slot = "morning" if kind.endswith("_morning") else "eod"
+    if kind.startswith("ta_"):
+        slot = "ta"
+    elif kind.endswith("_morning"):
+        slot = "morning"
+    else:
+        slot = "eod"
     marker_id = f"report_{slot}_{str(msg.get('createdAt') or '')[:10]}"
     marker = await db.settings.find_one({"_id": marker_id})
     if not marker:
@@ -1318,8 +1323,10 @@ async def _ta_alert_recipients(cfg: Optional[dict] = None) -> list:
 async def run_trade_advance_alerts(today_s: Optional[str] = None, deliver=None) -> dict:
     """Daily TA statement (all open tranches in one message) + day-25 + <₹10L.
 
-    Uses the same deliver() callback as other report slots so session/template
-    fallback and recipient logging stay identical. Does not change TA balances.
+    Always sends via `_send_report` so recipient rows land on the `report_ta_*`
+    marker (needed for delivery-failure updates). The optional `deliver`
+    callback is ignored — kept for call-site compatibility. Does not change
+    TA balances.
     """
     import commercial as ce
     import trade_advance as ta
@@ -1327,26 +1334,22 @@ async def run_trade_advance_alerts(today_s: Optional[str] = None, deliver=None) 
     open_rows = await ta.list_open()
     recipients_log = []
     sent = failed = 0
-    # When deliver is the run_daily_reports callback it already bumps sent/failed
-    # on the outer scope — track only for standalone calls.
-    track_local = deliver is None
 
-    async def _deliver(staff, kind, variables, text, body_text=""):
+    async def _deliver(staff, kind, variables, text, body_text="") -> bool:
         nonlocal sent, failed
-        if deliver:
-            await deliver(staff, kind, variables, text, body_text)
-            return
         res = await _send_report(staff, kind, variables, text, body_text)
+        ok = bool(res.get("ok"))
         recipients_log.append({
-            "name": staff.get("name"), "kind": kind, "ok": bool(res.get("ok")),
+            "name": staff.get("name"), "kind": kind, "ok": ok,
             "mobile": digits10(staff.get("mobile")),
             "templateId": res.get("templateId") or "",
-            "error": "" if res.get("ok") else str(res.get("error") or res.get("reason") or "")[:400],
+            "error": "" if ok else str(res.get("error") or res.get("reason") or "")[:400],
         })
-        if res.get("ok"):
+        if ok:
             sent += 1
         else:
             failed += 1
+        return ok
 
     staff_list = await _ta_alert_recipients()
     if not staff_list:
@@ -1374,6 +1377,8 @@ async def run_trade_advance_alerts(today_s: Optional[str] = None, deliver=None) 
         days = int(row.get("daysSinceDrawn") or 0)
         bal = ce.round2(ce.num(row.get("balance")))
         # Day 25 of the tranche (5 days before 30-day due) — once per tranche.
+        # Only stamp sent after at least one successful delivery so a total
+        # failure stays eligible for the next day's cron.
         if days >= ta.DAY25_ALERT and not row.get("whatsappDay25SentOn"):
             body25 = "\n".join([
                 f"Trade Advance clear window for {row.get('financer')}.",
@@ -1381,14 +1386,17 @@ async def run_trade_advance_alerts(today_s: Optional[str] = None, deliver=None) 
                 f"Day {days} of {ta.TENURE_DAYS}. Balance Rs {_inr(bal)}.",
                 "Clear by the due date so a new Trade Advance can be taken.",
             ])
+            any_ok = False
             for st in staff_list:
-                await _deliver(st, "ta_day25", [
+                if await _deliver(st, "ta_day25", [
                     _one_line(row.get("financer")),
                     _one_line(row.get("drawnOn")),
                     _one_line(row.get("dueOn")),
                     _inr(bal),
-                ], f"TA day-25 {row.get('financer')}", body25)
-            await ta.mark_whatsapp(row["trancheId"], "whatsappDay25SentOn", today_s)
+                ], f"TA day-25 {row.get('financer')}", body25):
+                    any_ok = True
+            if any_ok:
+                await ta.mark_whatsapp(row["trancheId"], "whatsappDay25SentOn", today_s)
 
         # Per-tranche balance under ₹10 lakh — once until cleared/renewed.
         if bal + 0.01 < ta.LOW_BALANCE_RS and bal > 0.01 and not row.get("whatsappLowBalanceSentOn"):
@@ -1398,18 +1406,21 @@ async def run_trade_advance_alerts(today_s: Optional[str] = None, deliver=None) 
                 f"{row.get('daysLeft')} days left on tranche drawn {row.get('drawnOn')}.",
                 "Renew or raise a new Trade Advance.",
             ])
+            any_ok = False
             for st in staff_list:
-                await _deliver(st, "ta_low", [
+                if await _deliver(st, "ta_low", [
                     _one_line(row.get("financer")),
                     _inr(bal),
                     _one_line(row.get("daysLeft")),
                     _one_line(row.get("drawnOn")),
-                ], f"TA low {row.get('financer')}", body_low)
-            await ta.mark_whatsapp(row["trancheId"], "whatsappLowBalanceSentOn", today_s)
+                ], f"TA low {row.get('financer')}", body_low):
+                    any_ok = True
+            if any_ok:
+                await ta.mark_whatsapp(row["trancheId"], "whatsappLowBalanceSentOn", today_s)
 
     return {
-        "sent": sent if track_local else 0,
-        "failed": failed if track_local else 0,
+        "sent": sent,
+        "failed": failed,
         "recipients": recipients_log,
         "empty": not open_rows,
         "openTranches": len(open_rows),
@@ -1538,9 +1549,10 @@ async def run_daily_reports(slot: str, today_s: Optional[str] = None,
                 "Open the Euler CRM app for the record-wise statement.",
             ]))
     elif slot == "ta":
-        ta_result = await run_trade_advance_alerts(today_s=today_s, deliver=deliver)
-        # deliver() already bumps sent/failed; ta_result only carries empty flag
-        # and any standalone recipient rows (none when deliver is passed).
+        # Own send path so recipients land on report_ta_* (delivery-failure map).
+        ta_result = await run_trade_advance_alerts(today_s=today_s)
+        sent += ta_result.get("sent", 0)
+        failed += ta_result.get("failed", 0)
         recipients.extend(ta_result.get("recipients") or [])
         ta_empty = bool(ta_result.get("empty"))
     else:
@@ -1610,15 +1622,19 @@ async def report_status(days: int = 7) -> dict:
     out = {"configured": cfg["enabled"], "slots": {}, "templates": {}, "generatedAt":
            datetime.now(timezone.utc).isoformat(), "dueNow": slots_due()}
     for kind, key in (("exec_morning", "execMorning"), ("exec_eod", "execEod"),
-                      ("manager_eod", "managerEod"), ("owner_eod", "ownerEod")):
+                      ("manager_eod", "managerEod"), ("owner_eod", "ownerEod"),
+                      ("ta_daily", "taDaily"), ("ta_day25", "taDay25"),
+                      ("ta_low", "taLow")):
         names = template_candidates(key, cfg)
         out["templates"][kind] = {
             "templateId": names[0] if names else DEFAULT_TEMPLATES[key],
             "aliases": names[1:],
-            "recipients": len(await server._staff_for_report(kind)),
+            "recipients": (len(await _ta_alert_recipients(cfg))
+                           if kind.startswith("ta_")
+                           else len(await server._staff_for_report(kind))),
         }
 
-    for slot in ("morning", "eod"):
+    for slot in ("morning", "eod", "ta"):
         runs = []
         for row in await db.settings.find(
                 {"_id": {"$regex": f"^report_{slot}_"}}).to_list(400):
@@ -1627,6 +1643,7 @@ async def report_status(days: int = 7) -> dict:
                 "sentAt": row.get("sentAt"), "sent": row.get("sent", 0),
                 "failed": row.get("failed", 0),
                 "recipients": row.get("recipients") or [],
+                "empty": bool(row.get("empty")),
             })
         runs.sort(key=lambda r: str(r.get("day") or ""), reverse=True)
         runs = runs[:days]

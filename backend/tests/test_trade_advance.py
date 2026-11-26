@@ -238,6 +238,42 @@ async def test_whatsapp_one_message_all_open_tas(client, monkeypatch):
     res2 = await wa.run_daily_reports("ta", force=False)
     assert res2.get("alreadySent") or len(sends) == 0
 
+    # Day-25 / low flags only stamp after a successful send.
+    shri = await server.db.trade_advances.find_one({"financer": "Shriram"})
+    chola = await server.db.trade_advances.find_one({"financer": "Cholamandalam"})
+    assert shri.get("whatsappDay25SentOn")
+    assert chola.get("whatsappLowBalanceSentOn")
+
+
+@pytest.mark.asyncio
+async def test_failed_day25_stays_eligible(client, monkeypatch):
+    """If every day-25 send fails, do not stamp — next day's cron can retry."""
+    await server.db.trade_advances.delete_many({})
+    today = date.today()
+    await client.post("/api/trade-advances", json={
+        "financer": "Shriram", "amount": 2_000_000,
+        "drawnOn": (today - timedelta(days=26)).isoformat(),
+    })
+    await server.db.staff.delete_many({})
+    await server.db.staff.insert_one({
+        "staffId": "ST-TA-FAIL", "name": "Fail Owner", "role": "owner",
+        "mobile": "9812341111", "status": "Active", "whatsappOptIn": True,
+        "reports": ["owner_eod"],
+    })
+    await server.db.settings.update_one(
+        {"_id": "botspace"},
+        {"$set": {"apiKey": "k", "channelId": "c", "enabled": True}},
+        upsert=True)
+
+    async def always_fail(*a, **k):
+        return {"ok": False, "error": "template not found"}
+
+    monkeypatch.setattr(wa, "_send_report", always_fail)
+    await server.db.settings.delete_one({"_id": f"report_ta_{wa.today_ist()}"})
+    await wa.run_daily_reports("ta", force=True)
+    row = await server.db.trade_advances.find_one({"financer": "Shriram"})
+    assert not row.get("whatsappDay25SentOn")
+
 
 @pytest.mark.asyncio
 async def test_ta_empty_day_marks_marker(client, monkeypatch):
