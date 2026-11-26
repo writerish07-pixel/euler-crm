@@ -8610,13 +8610,54 @@ def _unit_addl_open(unit):
     return ce.num((unit or {}).get("additionalDiscount")) <= 0
 
 
+def _unit_list_gvc_hint(unit, lead=None):
+    """Rough list GVC for one pack unit (ex + RTO + insurance)."""
+    u = unit or {}
+    ex = ce.num(u.get("exShowroom") or (lead or {}).get("exShowroom"))
+    if ex <= 0:
+        return 0.0
+    return ce.round2(
+        ex
+        + ce.num(u.get("rto") if u.get("rto") not in (None, "") else (lead or {}).get("rto"))
+        + ce.num(
+            u.get("insuranceAmount") if u.get("insuranceAmount") not in (None, "")
+            else u.get("insurance") if u.get("insurance") not in (None, "")
+            else (lead or {}).get("insuranceAmount") or (lead or {}).get("insurance")))
+
+
+def _receipt_looks_like_pack_unit_cx(amount, units, lead=None):
+    """True when a shared receipt figure is a deal price, not a booking advance.
+
+    Messenger units each show ₹7,90,000 against ~₹8.5L GVC (gap ≈ Additional).
+    Equal ₹10,000 booking advances must never become cxDemand.
+    """
+    amount = ce.round2(ce.num(amount))
+    if amount <= 0:
+        return False
+    gvcs = [_unit_list_gvc_hint(u, lead) for u in (units or []) if isinstance(u, dict)]
+    gvcs = [g for g in gvcs if g > 0]
+    if not gvcs:
+        return False
+    typical = sorted(gvcs)[len(gvcs) // 2]
+    # Receipt must cover most of list GVC — booking advances fail this.
+    if amount + ce.DEAL_AMOUNT_EQUAL_RUPEES < 0.70 * typical:
+        return False
+    # And the gap must look like dealer Additional room, not a half-paid file.
+    gap = ce.round2(typical - amount)
+    if gap < -ce.DEAL_AMOUNT_EQUAL_RUPEES:
+        return False
+    if gap > 0.25 * typical + ce.DEAL_AMOUNT_EQUAL_RUPEES:
+        return False
+    return True
+
+
 def _infer_shared_pack_unit_cx(lead, units):
     """Agreed per-unit Cx when most pack units already show the same deal.
 
     Prefers an existing non-rollup cxDemand shared by a majority of units.
     Else the modal totalReceived when most units carry the same round figure
-    (Messenger: every unit shows ₹7,90,000 received). Never returns the pack
-    header total.
+    that looks like the deal (Messenger: ₹7,90,000), never a booking advance.
+    Never returns the pack header total.
     """
     rows = [u for u in (units or []) if isinstance(u, dict)]
     n = len(rows)
@@ -8649,6 +8690,8 @@ def _infer_shared_pack_unit_cx(lead, units):
         return 0.0
     modal_recv, cnt = recv_counts.most_common(1)[0]
     if cnt < need or modal_recv <= 0:
+        return 0.0
+    if not _receipt_looks_like_pack_unit_cx(modal_recv, rows, lead):
         return 0.0
     return modal_recv
 

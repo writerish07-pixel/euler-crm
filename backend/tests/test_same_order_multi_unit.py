@@ -1322,6 +1322,26 @@ def test_heal_does_not_overwrite_sibling_own_additional_or_cx():
     assert ce.num(rows[2].get("cxDemand")) == 790000
 
 
+def test_heal_does_not_treat_booking_advance_as_cx():
+    """Equal ₹10k advances are payment history — never stamp them as Cx Demand."""
+    lead = _same_sku_pack_lead(n=3, addl_u1=178497, addl_lead=178497)
+    for u in lead["units"]:
+        u["rto"] = 5500
+        u["insuranceAmount"] = 19000
+        u["totalReceived"] = 10000
+    assert server._infer_shared_pack_unit_cx(lead, lead["units"]) == 0
+    rows, changed = server._heal_pack_leftover_additional_cx(lead, lead["units"])
+    # Same-SKU can still even-split Additional / recover Cx from list − per,
+    # but must not lock payable to the ₹10k advance.
+    for u in rows:
+        assert ce.num(u.get("cxDemand")) != 10000
+        assert ce.num(u.get("totalReceived")) == 10000
+    total, priced, _f, _p = server._refresh_unit_payables(lead, None)
+    for u in priced:
+        assert ce.num(u.get("customerPayable")) > 100000
+        assert ce.num(u.get("cxDemand")) != 10000
+
+
 def test_same_sku_pack_payables_each_get_extra_and_additional():
     lead = _same_sku_pack_lead()
     total, units, _filled, _pending = server._refresh_unit_payables(lead, None)
