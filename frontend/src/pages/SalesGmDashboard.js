@@ -64,8 +64,10 @@ export default function SalesGmDashboard() {
             sub={compactInr(k.financeOverdueAmount)} icon={Landmark} tone="text-violet-600" />
         </Link>
         <StatCard label="Cancellations (MTD)" value={num(k.cancellationsMtd)} sub={`${ytdCount(k.cancellationsYtd)} · ${k.lostCount || 0} lost`} icon={Ban} tone="text-amber-700" />
-        <StatCard label="Customer OS" value={compactInr(k.customerOutstanding)}
-          sub={`Scheme use ${k.schemeUseRate || 0}%`} icon={IndianRupee} tone="text-red-600" />
+        <Link to="/leads?outstanding=1" className="block" data-testid="gm-customer-outstanding">
+          <StatCard label="Customer OS" value={compactInr(k.customerOutstanding)}
+            sub={`Scheme use ${k.schemeUseRate || 0}% · open register`} icon={IndianRupee} tone="text-red-600" />
+        </Link>
       </div>
 
       <div className="flex flex-wrap gap-2 mt-5">

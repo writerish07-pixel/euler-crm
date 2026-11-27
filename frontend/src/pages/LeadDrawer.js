@@ -2347,6 +2347,7 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
   const [shortfallBusy, setShortfallBusy] = useState(false);
   const [shortfallAmount, setShortfallAmount] = useState("");
   const [shortfallReason, setShortfallReason] = useState("");
+  const [shortfallMode, setShortfallMode] = useState("customer");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
@@ -2360,7 +2361,11 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
   const excess = +(lead.excessReceived || 0);
   const refunded = +(lead.refundedAmount || 0);
   const dealCancelled = !!lead.dealCancelled;
-  const fileRemaining = Number(financeFile?.fileOutstanding) || 0;
+  const cashRemaining = Number(financeFile?.fileOutstanding) || 0;
+  const taCovered = Number(financeFile?.taCoveredAmount) || 0;
+  const fileRemaining = Number.isFinite(Number(financeFile?.effectiveOutstanding))
+    ? Number(financeFile.effectiveOutstanding)
+    : Math.max(0, cashRemaining - taCovered);
   const canMoveShortfall = isMoneyDesk && financeFile?.fileNumber && fileRemaining > 0.01 && financeFile.status !== "Received";
   const add = async (allowExcess = false) => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
@@ -2417,23 +2422,32 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
   const openShortfall = () => {
     setShortfallAmount(String(fileRemaining || ""));
     setShortfallReason("");
+    setShortfallMode("customer");
     setShortfallOpen(true);
   };
   const submitShortfall = async () => {
     if (shortfallBusy || !financeFile?.fileNumber) return;
     if (!shortfallAmount || +shortfallAmount <= 0) return toast.error("Enter a valid amount");
     if (+shortfallAmount > fileRemaining + 0.01) return toast.error(`At most ${inr(fileRemaining)} is still open on the finance file`);
+    if (shortfallMode === "finance" && !(shortfallReason || "").trim()) {
+      return toast.error("Reason is required when settling in finance");
+    }
     setShortfallBusy(true);
     try {
-      const r = await post(`/finance/${encodeURIComponent(financeFile.fileNumber)}/to-customer`, {
-        amount: +shortfallAmount, reason: shortfallReason,
+      const r = await post(`/finance/${encodeURIComponent(financeFile.fileNumber)}/settle`, {
+        amount: +shortfallAmount, reason: shortfallReason, mode: shortfallMode,
+        date: todayISO(),
       });
-      toast.success(`Moved ${inr(+shortfallAmount)} to customer collectable`
-        + (r?.customerOutstanding != null ? ` · OS ${inr(r.customerOutstanding)}` : ""));
+      if (shortfallMode === "finance") {
+        toast.success(`Settled ${inr(+shortfallAmount)} in finance without charging customer`);
+      } else {
+        toast.success(`Moved ${inr(+shortfallAmount)} to customer collectable`
+          + (r?.customerOutstanding != null ? ` · OS ${inr(r.customerOutstanding)}` : ""));
+      }
       setShortfallOpen(false);
       onSaved();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Could not record remaining as customer"));
+      toast.error(apiErrorMessage(e, "Could not settle remaining"));
     } finally {
       setShortfallBusy(false);
     }
@@ -2454,32 +2468,48 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-ink">
-                Finance file remaining: <span className="font-mono text-red-600">{inr(fileRemaining)}</span>
+                Finance file open: <span className="font-mono text-red-600">{inr(fileRemaining)}</span>
               </div>
               <div className="text-xs text-ink-soft mt-0.5">
-                {financeFile.fileNumber} · {financeFile.financer || "—"} — financer has not disbursed this leftover.
-                Move it to customer collectable when the customer will pay it instead.
+                {financeFile.fileNumber} · {financeFile.financer || "—"}
+                {taCovered > 0.01 ? ` · TA covered ${inr(taCovered)}` : ""}
+                {" — "}settle leftover: recover from customer or close in finance.
               </div>
             </div>
             <Button variant="secondary" data-testid="payments-to-customer-btn" onClick={openShortfall}>
-              Record as customer
+              Settle remaining
             </Button>
           </div>
           {shortfallOpen && (
-            <div className="mt-4 pt-4 border-t border-indigo-200 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-              <Field label="Amount (₹)">
-                <Input data-testid="payments-shortfall-amount" type="number" value={shortfallAmount}
-                  onChange={(e) => setShortfallAmount(e.target.value)} disabled={shortfallBusy} />
-              </Field>
-              <Field label="Reason">
-                <Input data-testid="payments-shortfall-reason" value={shortfallReason}
-                  onChange={(e) => setShortfallReason(e.target.value)} disabled={shortfallBusy} />
-              </Field>
-              <div className="flex gap-2">
-                <Button variant="secondary" onClick={() => setShortfallOpen(false)} disabled={shortfallBusy}>Cancel</Button>
-                <Button data-testid="payments-shortfall-save" onClick={submitShortfall} disabled={shortfallBusy}>
-                  {shortfallBusy ? "Saving…" : "Move to customer"}
-                </Button>
+            <div className="mt-4 pt-4 border-t border-indigo-200 space-y-3">
+              <div className="flex flex-wrap gap-3 text-sm">
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="ld-settle-mode" checked={shortfallMode === "customer"}
+                    onChange={() => setShortfallMode("customer")} disabled={shortfallBusy} />
+                  Recover from customer
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="ld-settle-mode" checked={shortfallMode === "finance"}
+                    data-testid="payments-settle-mode-finance"
+                    onChange={() => setShortfallMode("finance")} disabled={shortfallBusy} />
+                  Settle in finance
+                </label>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                <Field label="Amount (₹)">
+                  <Input data-testid="payments-shortfall-amount" type="number" value={shortfallAmount}
+                    onChange={(e) => setShortfallAmount(e.target.value)} disabled={shortfallBusy} />
+                </Field>
+                <Field label={shortfallMode === "finance" ? "Reason (required)" : "Reason"}>
+                  <Input data-testid="payments-shortfall-reason" value={shortfallReason}
+                    onChange={(e) => setShortfallReason(e.target.value)} disabled={shortfallBusy} />
+                </Field>
+                <div className="flex gap-2">
+                  <Button variant="secondary" onClick={() => setShortfallOpen(false)} disabled={shortfallBusy}>Cancel</Button>
+                  <Button data-testid="payments-shortfall-save" onClick={submitShortfall} disabled={shortfallBusy}>
+                    {shortfallBusy ? "Saving…" : (shortfallMode === "finance" ? "Settle in finance" : "Move to customer")}
+                  </Button>
+                </div>
               </div>
             </div>
           )}

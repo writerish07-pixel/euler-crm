@@ -82,7 +82,9 @@ export default function AccountsDashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4" data-testid="acct-period-kpis">
         <StatCard label="Collected (MTD)" value={compactInr(k.collectedMtd)} sub={ytdMoney(k.collectedYtd)} icon={Wallet} tone="text-cobalt" />
         <StatCard label="Deliveries (MTD)" value={num(k.deliveriesMtd)} sub={ytdCount(k.deliveriesYtd)} icon={Truck} tone="text-teal-600" />
-        <StatCard label="Customer outstanding" value={compactInr(k.customerOutstanding)} sub="live · not period-cut" icon={IndianRupee} tone="text-red-600" />
+        <Link to="/leads?outstanding=1" className="block" data-testid="acct-customer-outstanding">
+          <StatCard label="Customer outstanding" value={compactInr(k.customerOutstanding)} sub="live · open Lead Outstanding register" icon={IndianRupee} tone="text-red-600" />
+        </Link>
         <Link to="/finance?view=pending" className="block" data-testid="acct-finance-pending">
           <StatCard label="Finance pending" value={compactInr(k.financeOutstanding)}
             sub={`${k.financePendingFiles || 0} open files`} icon={Landmark} tone="text-violet-600" />

@@ -27,6 +27,7 @@ export default function Leads({ followup = false }) {
   const [leads, setLeads] = useState([]);
   const [status, setStatus] = useState("all");
   const [needsUpdateOnly, setNeedsUpdateOnly] = useState(() => searchParams.get("needsUpdate") === "1");
+  const [outstandingOnly, setOutstandingOnly] = useState(() => searchParams.get("outstanding") === "1");
   const [q, setQ] = useState("");
   const [active, setActive] = useState(null);
   const [proceed, setProceed] = useState(null);
@@ -46,8 +47,9 @@ export default function Leads({ followup = false }) {
     return loadList("/leads", setIfLatest, {
       status, q: searchQ || undefined, ...period.params,
       ...(followup ? { followup: 1 } : {}),
+      ...(!followup && outstandingOnly ? { outstanding: 1 } : {}),
     }, followup ? "Could not load follow-up leads" : "Could not load leads");
-  }, [status, searchQ, period.params, followup]);
+  }, [status, searchQ, period.params, followup, outstandingOnly]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { get("/masters").then(setMasters).catch(() => {}); }, []);
@@ -60,6 +62,23 @@ export default function Leads({ followup = false }) {
     setSearchParams(next, { replace: true });
     return undefined;
   }, [searchParams, setSearchParams]);
+  useEffect(() => {
+    if (followup) return undefined;
+    const on = searchParams.get("outstanding") === "1";
+    setOutstandingOnly(on);
+    return undefined;
+  }, [searchParams, followup]);
+
+  const toggleOutstanding = () => {
+    setOutstandingOnly((v) => {
+      const nextVal = !v;
+      const next = new URLSearchParams(searchParams);
+      if (nextVal) next.set("outstanding", "1");
+      else next.delete("outstanding");
+      setSearchParams(next, { replace: true });
+      return nextVal;
+    });
+  };
 
   const openLead = (r) => { setActive(r.leadId); };
 
@@ -172,10 +191,12 @@ export default function Leads({ followup = false }) {
   return (
     <div>
       <PageHeader
-        title={followup ? "Follow-up Lead Register" : "Lead Register"}
+        title={followup ? "Follow-up Lead Register" : (outstandingOnly ? "Lead Outstanding Register" : "Lead Register")}
         subtitle={followup
           ? `${shown.length} enquiries · Convert to booking (Owner / GM approve a discount) to land on Lead Register${pendingN ? ` · ${pendingN} to Proceed` : ""}`
-          : `${shown.length} booked files · ${shown.reduce((n, r) => n + (Number(r.vehicleCount || (r.units || []).length) || 1), 0)} vehicles${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}${updateN ? ` · ${updateN} need update` : ""}`}
+          : outstandingOnly
+            ? `${shown.length} leads with customer outstanding · click a row to open the file`
+            : `${shown.length} booked files · ${shown.reduce((n, r) => n + (Number(r.vehicleCount || (r.units || []).length) || 1), 0)} vehicles${isField ? " · field view" : ""}${pendingN ? ` · ${pendingN} to Proceed` : ""}${updateN ? ` · ${updateN} need update` : ""}`}
         actions={<div className="flex gap-2">
           <ReportActions onRefresh={load} />
           {!isField && !isExecutive && (
@@ -191,6 +212,15 @@ export default function Leads({ followup = false }) {
 
       <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:flex-wrap sm:items-center">
         <div className="flex gap-1 overflow-x-auto bg-white rounded-lg p-1 border border-line shadow-card scrollbar-thin -mx-1 px-1 sm:mx-0 sm:flex-wrap">
+          {!followup && !isField && (
+            <button
+              data-testid="filter-outstanding"
+              onClick={toggleOutstanding}
+              className={`shrink-0 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${outstandingOnly ? "bg-red-600 text-white" : "text-red-700 hover:bg-red-50"}`}
+            >
+              Outstanding
+            </button>
+          )}
           {!followup && isShowroomAdmin && (
             <button
               data-testid="filter-needs-update"

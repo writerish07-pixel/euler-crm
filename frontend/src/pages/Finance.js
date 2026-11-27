@@ -11,6 +11,14 @@ import PeriodBar from "../components/PeriodBar";
 import ReportActions from "../components/ReportActions";
 import { usePeriodState } from "../lib/period";
 
+function openAmount(r) {
+  const eff = Number(r?.effectiveOutstanding ?? r?.openOutstanding);
+  if (Number.isFinite(eff)) return eff;
+  const cash = Number(r?.fileOutstanding) || 0;
+  const covered = Number(r?.taCoveredAmount) || 0;
+  return Math.max(0, cash - covered);
+}
+
 function financerRollup(rows) {
   const map = new Map();
   for (const r of rows || []) {
@@ -22,19 +30,25 @@ function financerRollup(rows) {
       sanctionedAmount: 0,
       receivedAgainstFile: 0,
       fileOutstanding: 0,
+      taCoveredAmount: 0,
+      openOutstanding: 0,
     };
     cur.files += 1;
     cur.sanctionedAmount += Number(r.sanctionedAmount) || 0;
     cur.receivedAgainstFile += Number(r.receivedAgainstFile) || 0;
     cur.fileOutstanding += Number(r.fileOutstanding) || 0;
-    if ((Number(r.fileOutstanding) || 0) > 0 && r.status !== "Received") cur.pendingFiles += 1;
+    cur.taCoveredAmount += Number(r.taCoveredAmount) || 0;
+    const open = openAmount(r);
+    cur.openOutstanding += open;
+    if (isPendingFile(r)) cur.pendingFiles += 1;
     map.set(key, cur);
   }
-  return [...map.values()].sort((a, b) => b.fileOutstanding - a.fileOutstanding || a.financer.localeCompare(b.financer));
+  return [...map.values()].sort((a, b) => b.openOutstanding - a.openOutstanding || a.financer.localeCompare(b.financer));
 }
 
 function isPendingFile(r) {
-  return (Number(r.fileOutstanding) || 0) > 0 && r.status !== "Received";
+  if ((r?.status || "") === "Received") return false;
+  return openAmount(r) > 0.01;
 }
 
 export default function Finance() {
@@ -121,7 +135,7 @@ export default function Finance() {
         <Card className="p-5 mb-6" data-testid="finance-by-financer">
           <h3 className="font-heading font-bold text-ink mb-1">By financer</h3>
           <p className="text-xs text-ink-soft mb-3">
-            Click pending or remaining to list only open files. Click the financer name for every file.
+            Remaining is still open after cash receipts and Trade Advance cover. Click pending or remaining to list only open files.
           </p>
           <Table
             rowKey="financer"
@@ -149,15 +163,15 @@ export default function Finance() {
               ) },
               { key: "sanctionedAmount", label: "Committed", align: "right", mono: true, render: (r) => inr(r.sanctionedAmount) },
               { key: "receivedAgainstFile", label: "Received", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedAgainstFile)}</span> },
-              { key: "fileOutstanding", label: "Remaining", align: "right", mono: true, render: (r) => (
+              { key: "openOutstanding", label: "Remaining", align: "right", mono: true, render: (r) => (
                 <button
                   type="button"
                   data-testid={`finance-remaining-${r.financer}`}
                   onClick={(e) => { e.stopPropagation(); pickFinancer(r.financer, { pending: true }); }}
-                  className={`hover:underline ${r.fileOutstanding > 0 ? "text-red-600 font-semibold" : "text-ink"}`}
-                  title={`Show ${r.financer} pending files`}
+                  className={`hover:underline ${r.openOutstanding > 0 ? "text-red-600 font-semibold" : "text-ink"}`}
+                  title={`Show ${r.financer} open files (after TA cover)`}
                 >
-                  {inr(r.fileOutstanding)}
+                  {inr(r.openOutstanding)}
                 </button>
               ) },
             ]}
@@ -202,19 +216,34 @@ export default function Finance() {
           { key: "financer", label: "Financer", render: (r) => <Badge tone="bg-indigo-50 text-indigo-700 ring-indigo-600/20">{r.financer}</Badge> },
           { key: "sanctionedAmount", label: "Committed", align: "right", mono: true, render: (r) => inr(r.sanctionedAmount) },
           { key: "receivedAgainstFile", label: "Disbursed", align: "right", mono: true, render: (r) => <span className="text-emerald-600">{inr(r.receivedAgainstFile)}</span> },
-          { key: "fileOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.fileOutstanding > 0 ? "text-red-600 font-semibold" : ""}>{inr(r.fileOutstanding)}</span> },
-          { key: "status", label: "Status", render: (r) => <Badge>{r.status}</Badge> },
+          { key: "taCoveredAmount", label: "TA covered", align: "right", mono: true, render: (r) => (
+            (Number(r.taCoveredAmount) || 0) > 0.01
+              ? <span className="text-amber-700" title="Dealer Trade Advance allocated against this file">{inr(r.taCoveredAmount)}</span>
+              : "—"
+          ) },
+          { key: "openOutstanding", label: "Open", align: "right", mono: true, render: (r) => {
+            const open = openAmount(r);
+            return <span className={open > 0.01 ? "text-red-600 font-semibold" : ""}>{inr(open)}</span>;
+          } },
+          { key: "status", label: "Status", render: (r) => (
+            <div className="flex flex-wrap gap-1">
+              <Badge>{r.status}</Badge>
+              {(Number(r.taCoveredAmount) || 0) > 0.01 && openAmount(r) <= 0.01 && r.status !== "Received" && (
+                <Badge tone="bg-amber-50 text-amber-800 ring-amber-600/20">TA covered</Badge>
+              )}
+            </div>
+          ) },
           { key: "lastPaymentDate", label: "Last Receipt", render: (r) => fmtDate(r.lastPaymentDate) },
           ...(isMoneyDesk ? [{
             key: "actions", label: "", render: (r) => (
-              (Number(r.fileOutstanding) || 0) > 0.01 && r.status !== "Received" ? (
+              isPendingFile(r) ? (
                 <Button
                   variant="secondary"
                   className="!py-1 !px-2 text-xs"
-                  data-testid={`finance-to-customer-${r.fileNumber}`}
+                  data-testid={`finance-settle-${r.fileNumber}`}
                   onClick={(e) => { e.stopPropagation(); setShortfallFile(r); }}
                 >
-                  To customer
+                  Settle remaining
                 </Button>
               ) : null
             ),
@@ -259,8 +288,8 @@ function TradeAdvanceCard({ tick, onChanged }) {
         <div>
           <h3 className="font-heading font-bold text-ink">Trade Advance</h3>
           <p className="text-xs text-ink-soft">
-            Dealer OD from the financer. Finance-mode receipts on a lead auto-deduct the oldest open tranche.
-            WhatsApp daily at 10:30 IST lists every open TA in one message.
+            Dealer OD from the financer. Finance-mode receipts auto-deduct the oldest open tranche and
+            cover that file&apos;s open amount (not cash Disbursed). WhatsApp daily at 10:30 IST.
           </p>
         </div>
         <Button data-testid="ta-record-draw-btn" onClick={() => setDraw(true)}>
@@ -456,43 +485,72 @@ function FinanceReceiptModal({ files, onClose, onDone }) {
 }
 
 function FinanceShortfallModal({ file, onClose, onDone }) {
-  const max = Number(file?.fileOutstanding) || 0;
-  const [form, setForm] = useState({ amount: String(max || ""), date: todayISO(), reason: "" });
+  const max = openAmount(file);
+  const [form, setForm] = useState({
+    amount: String(max || ""), date: todayISO(), reason: "", mode: "customer",
+  });
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const submit = async () => {
     if (busy || !file) return;
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     if (+form.amount > max + 0.01) return toast.error(`At most ${inr(max)} is still open on this file`);
+    if (form.mode === "finance" && !(form.reason || "").trim()) {
+      return toast.error("Reason is required when settling in finance");
+    }
     setBusy(true);
     try {
-      const r = await post(`/finance/${encodeURIComponent(file.fileNumber)}/to-customer`, {
-        amount: +form.amount, date: form.date, reason: form.reason,
+      const r = await post(`/finance/${encodeURIComponent(file.fileNumber)}/settle`, {
+        amount: +form.amount, date: form.date, reason: form.reason, mode: form.mode,
       });
-      toast.success(
-        `₹${(+form.amount).toLocaleString("en-IN")} moved to customer collectable`
-        + (r?.customerOutstanding != null ? ` · customer OS ${inr(r.customerOutstanding)}` : ""),
-      );
+      if (form.mode === "finance") {
+        toast.success(`₹${(+form.amount).toLocaleString("en-IN")} settled in finance · file closed without charging customer`);
+      } else {
+        toast.success(
+          `₹${(+form.amount).toLocaleString("en-IN")} moved to customer collectable`
+          + (r?.customerOutstanding != null ? ` · customer OS ${inr(r.customerOutstanding)}` : ""),
+        );
+      }
       onDone();
     } catch (e) {
-      toast.error(apiErrorMessage(e, "Could not record remaining as customer"));
+      toast.error(apiErrorMessage(e, "Could not settle remaining"));
       setBusy(false);
     }
   };
   return (
     <Modal onClose={onClose} width="max-w-lg">
-      <div className="overflow-y-auto overscroll-contain p-6" data-testid="finance-shortfall-modal">
-        <h3 className="font-heading text-lg font-bold text-ink mb-1">Record remaining as customer</h3>
+      <div className="overflow-y-auto overscroll-contain p-6" data-testid="finance-settle-modal">
+        <h3 className="font-heading text-lg font-bold text-ink mb-1">Settle remaining</h3>
         <p className="text-xs text-ink-soft mb-4">
-          Financer will not disburse this leftover. Shrinks the file commitment and reopens the same
-          amount as customer outstanding so you can collect it as Cash / UPI / etc.
+          Financer short / leftover. Choose whether to recover it from the customer or close it
+          on the finance file without charging the customer.
         </p>
         <p className="text-sm text-ink mb-3">
           <span className="font-semibold text-cobalt">{file?.fileNumber}</span>
           {" · "}{file?.financer}{" · "}{file?.customerName}
         </p>
+        <div className="grid grid-cols-1 gap-2 mb-3" role="radiogroup" aria-label="Settle mode">
+          <label className={`flex items-start gap-2 rounded-lg border p-3 cursor-pointer ${form.mode === "customer" ? "border-cobalt bg-cobalt-tint/40" : "border-line"}`}>
+            <input type="radio" name="settle-mode" className="mt-1" checked={form.mode === "customer"}
+              data-testid="finance-settle-mode-customer"
+              onChange={() => setForm((f) => ({ ...f, mode: "customer" }))} disabled={busy} />
+            <span>
+              <span className="font-semibold text-ink text-sm">Recover from customer</span>
+              <span className="block text-xs text-ink-soft">Shrinks the file and reopens the same amount as customer outstanding.</span>
+            </span>
+          </label>
+          <label className={`flex items-start gap-2 rounded-lg border p-3 cursor-pointer ${form.mode === "finance" ? "border-cobalt bg-cobalt-tint/40" : "border-line"}`}>
+            <input type="radio" name="settle-mode" className="mt-1" checked={form.mode === "finance"}
+              data-testid="finance-settle-mode-finance"
+              onChange={() => setForm((f) => ({ ...f, mode: "finance" }))} disabled={busy} />
+            <span>
+              <span className="font-semibold text-ink text-sm">Settle in finance</span>
+              <span className="block text-xs text-ink-soft">Write off / accept the short on the file. Does not charge the customer.</span>
+            </span>
+          </label>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <Field label="Amount to customer (₹)">
+          <Field label="Amount (₹)">
             <Input data-testid="finance-shortfall-amount" type="number" value={form.amount}
               onChange={set("amount")} placeholder={String(max)} disabled={busy} />
           </Field>
@@ -501,20 +559,24 @@ function FinanceShortfallModal({ file, onClose, onDone }) {
               onChange={set("date")} disabled={busy} />
           </Field>
           <div className="sm:col-span-2">
-            <Field label="Reason / note">
+            <Field label={form.mode === "finance" ? "Reason (required)" : "Reason / note"}>
               <Input data-testid="finance-shortfall-reason" value={form.reason}
-                onChange={set("reason")} placeholder="Partial disbursement / customer will pay" disabled={busy} />
+                onChange={set("reason")}
+                placeholder={form.mode === "finance" ? "Rounding / charges / accepted short" : "Partial disbursement / customer will pay"}
+                disabled={busy} />
             </Field>
           </div>
         </div>
         <p className="text-xs text-ink-soft mt-2">
-          File remaining: <span className="font-mono font-semibold text-red-600">{inr(max)}</span>
-          {" · "}After save this amount becomes due from the customer.
+          Still open: <span className="font-mono font-semibold text-red-600">{inr(max)}</span>
+          {(Number(file?.taCoveredAmount) || 0) > 0.01 && (
+            <> · TA covered {inr(file.taCoveredAmount)}</>
+          )}
         </p>
         <div className="flex justify-end gap-2 mt-5">
           <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
           <Button data-testid="save-finance-shortfall-btn" onClick={submit} disabled={busy}>
-            {busy ? "Saving…" : "Move to customer"}
+            {busy ? "Saving…" : (form.mode === "finance" ? "Settle in finance" : "Move to customer")}
           </Button>
         </div>
       </div>
