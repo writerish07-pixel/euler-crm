@@ -2608,6 +2608,8 @@ PAYMENT_BOARD_PROJ = {"_id": 0, "leadId": 1, "amount": 1, "date": 1, "paymentMod
 FINANCE_BOARD_PROJ = {
     "_id": 0, "leadId": 1, "fileOutstanding": 1, "status": 1,
     "sanctionedAmount": 1, "receivedAgainstFile": 1, "deliveryDate": 1, "financer": 1,
+    # Needed for effective open (cash − settle-in-finance − TA cover) on dashboards.
+    "settledInFinanceAmount": 1, "taCoveredAmount": 1,
 }
 CLAIM_BOARD_PROJ = {"_id": 0, "leadId": 1, "eligibleClaim": 1, "claimAmount": 1, "receivedAmount": 1, "bookingDate": 1}
 INS_BOARD_PROJ = {
