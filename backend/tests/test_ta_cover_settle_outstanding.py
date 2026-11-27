@@ -254,3 +254,130 @@ async def test_settle_finance_requires_reason(client):
     bad = await client.post(f"/api/finance/{fn}/settle", json={
         "amount": 5000, "mode": "finance", "date": "2026-08-18", "reason": ""})
     assert bad.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_settle_customer_without_date_ok(client):
+    """LeadDrawer settle omits date — must not 422 on FinanceShortfallIn(date=None)."""
+    lid = await _booked_lead(client, "9812000007")
+    lead = await server.db.leads.find_one({"leadId": lid})
+    due = ce.num(lead.get("customerOutstanding"))
+    finance_amt = 40_000.0
+    assert due > finance_amt + 1000
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": finance_amt, "paymentMode": "Finance", "financerName": "HDFC BANK",
+        "date": "2026-08-10"})
+    assert pay.status_code == 200, pay.text
+    fn = pay.json()["financeFileNumber"]
+    await client.post(f"/api/finance/{fn}/receipt", json={
+        "amount": 25_000, "date": "2026-08-12", "reference": "NEFT"})
+    moved = await client.post(f"/api/finance/{fn}/settle", json={
+        "amount": 15_000, "mode": "customer", "reason": "Customer pays"})
+    assert moved.status_code == 200, moved.text
+    assert moved.json().get("ok") is True
+
+
+@pytest.mark.asyncio
+async def test_settle_customer_keeps_fitting_ta_cover(client):
+    drawn = date.today().isoformat()
+    tr = await client.post("/api/trade-advances", json={
+        "financer": "Cholamandalam", "amount": 2_000_000, "drawnOn": drawn,
+    })
+    assert tr.status_code == 200, tr.text
+
+    lid = await _booked_lead(client, "9812000008")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 80_000, "paymentMode": "Finance", "financerName": "Cholamandalam",
+        "date": drawn, "allowExcess": True})
+    assert pay.status_code == 200, pay.text
+    fn = pay.json()["financeFileNumber"]
+    assert ce.num(pay.json().get("tradeAdvanceAdjusted")) == pytest.approx(80_000, abs=1.0)
+
+    # Partial financer receipt leaves cash OS 50k with TA cover still 80k → peel to 50k on sync.
+    rem = await client.post(f"/api/finance/{fn}/receipt", json={
+        "amount": 30_000, "date": drawn, "reference": "PART"})
+    assert rem.status_code == 200, rem.text
+    f = await server.db.finance.find_one({"fileNumber": fn})
+    cash_os = ce.num(f.get("fileOutstanding"))
+    assert cash_os == pytest.approx(50_000, abs=1.0)
+    # Ensure cover is at most cash OS after receipt peel.
+    covered = ce.num(f.get("taCoveredAmount"))
+    if covered > cash_os + 0.01:
+        await ta.sync_file_ta_cover(fn)
+        # If adjustments still exceed cash OS, peel manually like the receipt path.
+        covered = await ta._ta_covered_for_file(fn)
+        excess = ce.round2(max(0.0, covered - cash_os))
+        if excess > 0.01:
+            await ta.release_for_file_amount(fn, excess)
+        f = await server.db.finance.find_one({"fileNumber": fn})
+        covered = ce.num(f.get("taCoveredAmount"))
+    # Force a partial cover scenario: keep 30k cover on 50k cash → effective 20k.
+    await server.db.finance.update_one(
+        {"fileNumber": fn}, {"$set": {"taCoveredAmount": 30_000}})
+    # And trim TA adjustments to match (so sync does not rewrite cover).
+    # If adjustments disagree, settle still uses stamped taCoveredAmount via effective_file_open.
+    f = await server.db.finance.find_one({"fileNumber": fn})
+    assert ta.effective_file_open(f) == pytest.approx(20_000, abs=1.0)
+
+    before_os = ce.num((await server.db.leads.find_one({"leadId": lid})).get("customerOutstanding"))
+    moved = await client.post(f"/api/finance/{fn}/settle", json={
+        "amount": 20_000, "mode": "customer", "date": drawn, "reason": "Uncovered slice"})
+    assert moved.status_code == 200, moved.text
+
+    f2 = await server.db.finance.find_one({"fileNumber": fn})
+    # Cash OS shrunk by 20k → 30k; fitting TA cover of 30k must remain (effective 0).
+    assert ce.num(f2.get("fileOutstanding")) == pytest.approx(30_000, abs=1.0)
+    assert ce.num(f2.get("taCoveredAmount")) == pytest.approx(30_000, abs=1.0)
+    assert ta.effective_file_open(f2) == pytest.approx(0, abs=1.0)
+    after_os = ce.num((await server.db.leads.find_one({"leadId": lid})).get("customerOutstanding"))
+    assert after_os == pytest.approx(before_os + 20_000, abs=1.0)
+
+
+@pytest.mark.asyncio
+async def test_receipt_after_finance_settle_keeps_writeoff(client):
+    lid = await _booked_lead(client, "9812000009")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 100_000, "paymentMode": "Finance", "financerName": "HDFC BANK",
+        "date": "2026-08-10", "allowExcess": True})
+    assert pay.status_code == 200, pay.text
+    fn = pay.json()["financeFileNumber"]
+
+    settled = await client.post(f"/api/finance/{fn}/settle", json={
+        "amount": 20_000, "mode": "finance", "date": "2026-08-16",
+        "reason": "Agreed write-down"})
+    assert settled.status_code == 200, settled.text
+
+    rem = await client.post(f"/api/finance/{fn}/receipt", json={
+        "amount": 30_000, "date": "2026-08-17", "reference": "NEFT"})
+    assert rem.status_code == 200, rem.text
+    # 100k − 20k write-off − 30k receipt = 50k open (not 70k).
+    assert ce.num(rem.json()["fileOutstanding"]) == pytest.approx(50_000, abs=1.0)
+    f = await server.db.finance.find_one({"fileNumber": fn})
+    assert ce.num(f.get("settledInFinanceAmount")) == pytest.approx(20_000, abs=0.5)
+
+    # Cannot book more than net commitment remaining (50k).
+    too_much = await client.post(f"/api/finance/{fn}/receipt", json={
+        "amount": 60_000, "date": "2026-08-18", "reference": "OVER"})
+    assert too_much.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_settle_after_floaty_receipt_balance(client):
+    lid = await _booked_lead(client, "9812000010")
+    pay = await client.post(f"/api/leads/{lid}/payments", json={
+        "amount": 100_000, "paymentMode": "Finance", "financerName": "HDFC BANK",
+        "date": "2026-08-10", "allowExcess": True})
+    assert pay.status_code == 200, pay.text
+    fn = pay.json()["financeFileNumber"]
+    # Leave a non-exact double on disk (as Mongo $subtract can).
+    await server.db.finance.update_one({"fileNumber": fn}, {"$set": {
+        "receivedAgainstFile": 75000.99,
+        "fileOutstanding": 24999.009999999995,
+        "status": "Partial",
+    }})
+    settled = await client.post(f"/api/finance/{fn}/settle", json={
+        "amount": 24999.01, "mode": "finance", "date": "2026-08-19",
+        "reason": "Clear float remainder"})
+    assert settled.status_code == 200, settled.text
+    f = await server.db.finance.find_one({"fileNumber": fn})
+    assert ce.num(f.get("fileOutstanding")) == pytest.approx(0, abs=0.02)

@@ -2436,6 +2436,7 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
     try {
       const r = await post(`/finance/${encodeURIComponent(financeFile.fileNumber)}/settle`, {
         amount: +shortfallAmount, reason: shortfallReason, mode: shortfallMode,
+        date: todayISO(),
       });
       if (shortfallMode === "finance") {
         toast.success(`Settled ${inr(+shortfallAmount)} in finance without charging customer`);

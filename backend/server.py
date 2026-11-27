@@ -5022,7 +5022,12 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
     if status and status != "all":
         query["currentStatus"] = status
     # Outstanding register: leads still owed by the customer.
+    # Field roles (ASM/RM) must not learn who owes via this filter — strip money
+    # after the query would still reveal debtors by presence in the list.
     if outstanding:
+        role = ((user or {}).get("role") or "").strip().lower()
+        if role in authmod.FIELD_ROLES:
+            raise HTTPException(403, "Lead Outstanding register is not available for field roles")
         query["customerOutstanding"] = {"$gt": 0.01}
     search_or = _lead_search_or(q)
     if search_or:
@@ -12576,7 +12581,9 @@ async def _upsert_finance_file(lead_id, body: PaymentIn, finance_file_number: st
     if existing:
         committed = ce.round2(ce.num(existing.get("sanctionedAmount")) + body.amount)
         received = ce.num(existing.get("receivedAgainstFile"))
-        outstanding = ce.round2(max(0.0, committed - received))
+        # settledInFinanceAmount is a write-down — keep it out of cash open.
+        settled = ce.round2(max(0.0, ce.num(existing.get("settledInFinanceAmount"))))
+        outstanding = ce.round2(max(0.0, committed - received - settled))
         await db.finance.update_one({"fileNumber": finance_file_number, "leadId": lead_id}, {"$set": {
             "sanctionedAmount": committed, "fileOutstanding": outstanding, "financer": body.financerName or existing.get("financer"),
             "status": "Received" if outstanding <= 0 else ("Partial" if received > 0 else "Pending"),
@@ -12877,7 +12884,9 @@ FINANCE_SHORTFALL_DEDUPE_SECONDS = 10
 @api.post("/finance/{file_number}/to-customer")
 async def finance_shortfall_to_customer(
         file_number: str, body: FinanceShortfallIn, act=Depends(actor),
-        _money=Depends(money_desk_only)):
+        _money=Depends(money_desk_only), *,
+        retain_fitting_ta: bool = False,
+        cap_at_effective_open: bool = False):
     """Convert remaining financer commitment into customer collectable.
 
     Shrinks the finance file's sanctioned amount by `amount` (must be ≤
@@ -12885,14 +12894,27 @@ async def finance_shortfall_to_customer(
     negative FinanceShortfall ledger row so customer totalReceived drops and
     customerOutstanding reopens by the same amount. Releases matching Trade
     Advance consume tagged to this file.
+
+    When called from /settle (retain_fitting_ta=True), only peel TA cover that
+    no longer fits the reduced cash OS — moving the uncovered slice must not
+    reopen a covered remainder.
     """
     from pymongo import ReturnDocument
+    import trade_advance as ta
     f = await db.finance.find_one({"fileNumber": file_number})
     if not f:
         raise HTTPException(404, "Finance file not found")
     amount = ce.round2(body.amount)
     if amount <= 0:
         raise HTTPException(422, "Enter a valid remaining amount")
+    if cap_at_effective_open:
+        open_amt = ta.effective_file_open(f)
+        if amount > open_amt + 0.01:
+            raise HTTPException(
+                422,
+                f"Amount ₹{amount} is more than this file still has open "
+                f"(₹{open_amt} after Trade Advance cover).",
+            )
     outstanding = ce.round2(ce.num(f.get("fileOutstanding")))
     if amount > outstanding + 0.01:
         raise HTTPException(
@@ -12996,8 +13018,17 @@ async def finance_shortfall_to_customer(
         )
     ta_released = 0.0
     try:
-        import trade_advance as ta
-        ta_released = await ta.release_for_file_amount(file_number, amount)
+        if retain_fitting_ta:
+            # Keep TA that still fits the reduced cash OS; only peel the excess.
+            covered = await ta._ta_covered_for_file(file_number)
+            excess = ce.round2(max(0.0, covered - new_outstanding))
+            if excess > 0.01:
+                ta_released = await ta.release_for_file_amount(file_number, excess)
+            else:
+                await ta.sync_file_ta_cover(file_number)
+        else:
+            # Legacy /to-customer: reverse the same slice of TA consume.
+            ta_released = await ta.release_for_file_amount(file_number, amount)
     except Exception:
         logging.exception("trade_advance release on shortfall failed for %s", file_number)
     await _rebuild_payment_running_totals(lead_id)
@@ -13013,13 +13044,15 @@ async def finance_shortfall_to_customer(
              "customerOutstanding": lead.get("customerOutstanding")},
         new={"amount": amount, "sanctionedAmount": new_sanctioned,
              "fileOutstanding": new_outstanding, "taReleased": ta_released,
+             "retainFittingTa": retain_fitting_ta,
              "customerOutstanding": lead_after.get("customerOutstanding"),
              "finance": finance_result},
     )
     return {
         "ok": True,
         "shortfall": clean(doc),
-        "finance": clean(await db.finance.find_one({"fileNumber": file_number}) or {}),
+        "finance": _decorate_finance_file(clean(
+            await db.finance.find_one({"fileNumber": file_number}) or {})),
         "taReleased": ta_released,
         "customerOutstanding": lead_after.get("customerOutstanding"),
         "totalReceived": lead_after.get("totalReceived"),
@@ -13039,10 +13072,14 @@ async def finance_settle_remaining(
     """
     mode = (body.mode or "customer").strip().lower()
     if mode in ("customer", "to-customer", "recover"):
+        # Cap at effective open and keep TA that still fits — unlike legacy
+        # /to-customer which reverses the same slice of cover.
         return await finance_shortfall_to_customer(
             file_number,
-            FinanceShortfallIn(amount=body.amount, date=body.date, reason=body.reason),
-            act=act, _money=_money)
+            FinanceShortfallIn(
+                amount=body.amount, date=body.date or "", reason=body.reason or ""),
+            act=act, _money=_money,
+            retain_fitting_ta=True, cap_at_effective_open=True)
     if mode not in ("finance", "settle", "write-off", "writeoff"):
         raise HTTPException(422, "Choose mode 'customer' or 'finance'")
 
@@ -13062,15 +13099,21 @@ async def finance_settle_remaining(
             f"Amount ₹{amount} is more than this file still has open "
             f"(₹{open_amt} after Trade Advance cover).",
         )
-    cash_os = ce.round2(ce.num(f.get("fileOutstanding")))
+    # Match the stored snapshot (not rounded copies) so float leftovers from
+    # receipt $subtract do not 409 a settle that still has the same open amount.
+    raw_cash_os = f.get("fileOutstanding")
+    raw_received = f.get("receivedAgainstFile")
+    raw_sanctioned = f.get("sanctionedAmount")
+    raw_settled = f.get("settledInFinanceAmount")
+    cash_os = ce.round2(ce.num(raw_cash_os))
     if amount > cash_os + 0.01:
         raise HTTPException(
             422,
             f"Amount ₹{amount} is more than cash outstanding ₹{cash_os}.",
         )
-    received = ce.round2(ce.num(f.get("receivedAgainstFile")))
-    sanctioned = ce.round2(ce.num(f.get("sanctionedAmount")))
-    prior_settled = ce.round2(max(0.0, ce.num(f.get("settledInFinanceAmount"))))
+    received = ce.round2(ce.num(raw_received))
+    sanctioned = ce.round2(ce.num(raw_sanctioned))
+    prior_settled = ce.round2(max(0.0, ce.num(raw_settled)))
     new_settled = ce.round2(prior_settled + amount)
     if new_settled > sanctioned - received + 0.01:
         raise HTTPException(
@@ -13089,14 +13132,18 @@ async def finance_settle_remaining(
         "mode": "finance", "recordedAt": now_iso(),
         "by": (act or {}).get("email") or (act or {}).get("name") or "",
     }
+    snap = {
+        "fileNumber": file_number,
+        "sanctionedAmount": raw_sanctioned,
+        "receivedAgainstFile": raw_received,
+        "fileOutstanding": raw_cash_os,
+    }
+    if "settledInFinanceAmount" in f:
+        snap["settledInFinanceAmount"] = raw_settled
+    else:
+        snap["settledInFinanceAmount"] = {"$exists": False}
     updated = await db.finance.find_one_and_update(
-        {
-            "fileNumber": file_number,
-            "sanctionedAmount": sanctioned,
-            "receivedAgainstFile": received,
-            "fileOutstanding": cash_os,
-            "settledInFinanceAmount": prior_settled,
-        },
+        snap,
         {"$set": {
             "settledInFinanceAmount": new_settled,
             "fileOutstanding": new_outstanding,
@@ -13105,23 +13152,6 @@ async def finance_settle_remaining(
         }, "$push": {"settlements": audit}},
         return_document=ReturnDocument.AFTER,
     )
-    if not updated:
-        # Files without settledInFinanceAmount key yet — retry without that match.
-        updated = await db.finance.find_one_and_update(
-            {
-                "fileNumber": file_number,
-                "sanctionedAmount": sanctioned,
-                "receivedAgainstFile": received,
-                "fileOutstanding": cash_os,
-            },
-            {"$set": {
-                "settledInFinanceAmount": new_settled,
-                "fileOutstanding": new_outstanding,
-                "status": status,
-                "lastUpdated": today(),
-            }, "$push": {"settlements": audit}},
-            return_document=ReturnDocument.AFTER,
-        )
     if not updated:
         fresh = await db.finance.find_one({"fileNumber": file_number}) or {}
         raise HTTPException(
@@ -13184,22 +13214,26 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
         if (datetime.now(timezone.utc) - prev_at).total_seconds() < FINANCE_RECEIPT_DEDUPE_SECONDS:
             raise HTTPException(409, "Duplicate submission detected — this financer receipt was just "
                                      "recorded. Open the file to confirm before recording it again.")
-    received = ce.round2(ce.num(f.get("receivedAgainstFile")) + amount)
-    # Even a late double-click must not book more than the financer committed. Without
-    # this the file read as fully disbursed on half the money (outstanding forced to 0).
-    if committed > 0 and received > committed + 0.01:
-        room = ce.round2(max(0.0, committed - ce.num(f.get("receivedAgainstFile"))))
+    settled_writeoff = ce.round2(max(0.0, ce.num(f.get("settledInFinanceAmount"))))
+    prior_received = ce.num(f.get("receivedAgainstFile"))
+    received = ce.round2(prior_received + amount)
+    # Cap against commitment after settle-in-finance write-downs — otherwise a
+    # receipt after a partial write-off reopens the written-off slice.
+    net_committed = ce.round2(max(0.0, committed - settled_writeoff))
+    if committed > 0 and received > net_committed + 0.01:
+        room = ce.round2(max(0.0, net_committed - prior_received))
         raise HTTPException(422, f"Receipt ₹{amount} is more than this file still expects. "
-                                 f"Committed ₹{ce.round2(committed)}, already received "
-                                 f"₹{ce.round2(ce.num(f.get('receivedAgainstFile')))} — only ₹{room} can be booked. "
+                                 f"Committed ₹{ce.round2(committed)}"
+                                 + (f" (−₹{settled_writeoff} settled in finance)" if settled_writeoff > 0.01 else "")
+                                 + f", already received ₹{ce.round2(prior_received)} — only ₹{room} can be booked. "
                                  f"Add the extra commitment on the lead first if the financer disbursed more.")
-    outstanding = ce.round2(max(0.0, committed - received))
+    outstanding = ce.round2(max(0.0, committed - received - settled_writeoff))
     receipt = {"amount": amount, "date": receipt_date,
                "reference": body.reference, "recordedAt": now_iso()}
     from pymongo import ReturnDocument
     write_filt = {"fileNumber": file_number}
     if committed > 0:
-        room = ce.round2(committed + 0.01 - amount)
+        room = ce.round2(net_committed + 0.01 - amount)
         write_filt["$or"] = [
             {"receivedAgainstFile": {"$lte": room}},
             {"receivedAgainstFile": {"$exists": False}},
@@ -13209,7 +13243,10 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
         "amount": amount, "date": receipt_date, "recordedAt": {"$gte": cutoff},
     }}}
     new_received = {"$add": [{"$ifNull": ["$receivedAgainstFile", 0]}, amount]}
-    outstanding_expr = {"$max": [0, {"$subtract": [committed, new_received]}]}
+    settled_expr = {"$ifNull": ["$settledInFinanceAmount", 0]}
+    outstanding_expr = {"$max": [0, {"$subtract": [
+        {"$subtract": [committed, new_received]}, settled_expr,
+    ]}]}
     updated = await db.finance.find_one_and_update(
         write_filt,
         [{"$set": {
@@ -13229,7 +13266,8 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
                 raise HTTPException(409, "Duplicate submission detected — this financer receipt was just "
                                          "recorded. Open the file to confirm before recording it again.")
         already = ce.num(fresh.get("receivedAgainstFile"))
-        room = ce.round2(max(0.0, committed - already))
+        fresh_settled = ce.round2(max(0.0, ce.num(fresh.get("settledInFinanceAmount"))))
+        room = ce.round2(max(0.0, committed - fresh_settled - already))
         raise HTTPException(422, f"Receipt ₹{amount} is more than this file still expects. "
                                  f"Committed ₹{ce.round2(committed)}, already received "
                                  f"₹{ce.round2(already)} — only ₹{room} can be booked.")
@@ -13238,9 +13276,19 @@ async def record_financer_receipt(file_number: str, body: ReceiptIn, act=Depends
     await write_audit(act, "receipt", "finance", leadId=f.get("leadId", ""), financeFileNumber=file_number,
                       old={"receivedAgainstFile": ce.num(f.get("receivedAgainstFile")), "fileOutstanding": ce.num(f.get("fileOutstanding"))},
                       new={"receivedAgainstFile": received, "fileOutstanding": outstanding, "amount": amount})
+    try:
+        import trade_advance as ta
+        covered = await ta._ta_covered_for_file(file_number)
+        excess = ce.round2(max(0.0, covered - outstanding))
+        if excess > 0.01:
+            await ta.release_for_file_amount(file_number, excess)
+        else:
+            await ta.sync_file_ta_cover(file_number)
+    except Exception:
+        logging.exception("trade_advance sync after financer receipt failed for %s", file_number)
     await sync_finance_file(file_number)
     await rebuild_finance_views()
-    return clean(await db.finance.find_one({"fileNumber": file_number}))
+    return _decorate_finance_file(clean(await db.finance.find_one({"fileNumber": file_number}) or {}))
 
 
 # ---------------------------------------------------------------- deliveries
