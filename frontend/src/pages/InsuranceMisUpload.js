@@ -76,6 +76,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           misAmount: row.misAmount,
           reference: row.reference,
           policyNumber: row.policyNumber,
+          policyDate: row.policyDate || "",
         })),
       });
       toast.success(`MIS filled on ${r.filled} payout${r.filled === 1 ? "" : "s"} — dealer earnings now use this amount`);
@@ -95,6 +96,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
           entryId: row.entryId,
           misAmount: row.misAmount,
           reference: row.reference,
+          policyDate: row.policyDate || "",
         })),
       });
       toast.success(`${r.approved} payout${r.approved === 1 ? "" : "s"} marked as mapped — dealer earnings now use the MIS amount`);
@@ -112,7 +114,7 @@ export default function InsuranceMisUpload({ onClose, onDone }) {
 
   return (
     <Drawer open onClose={onClose} width="max-w-5xl" title="Upload agent MIS"
-      subtitle="Match this month's file to payouts already in this app. Mapped means the row is on the MIS — not that money arrived."
+      subtitle="Match on chassis / policy. Insurance date from the MIS is stored as policy date (not billing / delivery day), so month-end billing and next-day policies still reconcile."
       footer={<div className="flex justify-between items-center gap-2">
         <Button variant="ghost" data-testid="mis-template-btn" onClick={downloadTemplate}>
           <Download size={15} /> Download template

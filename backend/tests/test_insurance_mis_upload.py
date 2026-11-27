@@ -276,6 +276,26 @@ async def test_apply_fills_mis_without_booking_received(client):
 
 
 @pytest.mark.asyncio
+async def test_apply_stores_mis_policy_date_over_delivery_standin(client):
+    """Insurance date from MIS becomes policyDate even when delivery was prior month."""
+    e = await _entry(client, policyNumber="POL-DATE-1")
+    await server.db.insurance.update_one(
+        {"entryId": e["entryId"]},
+        {"$set": {"deliveryDate": "2026-08-31", "policyDate": None,
+                  "chassisNumber": "MD9DATESTORE000001"}})
+    r = await client.post("/api/insurance/mis/apply", json={
+        "items": [{
+            "entryId": e["entryId"], "misAmount": 5000,
+            "policyNumber": "POL-DATE-1", "policyDate": "2026-09-01",
+        }],
+    })
+    assert r.status_code == 200, r.text
+    doc = await server.db.insurance.find_one({"entryId": e["entryId"]})
+    assert doc["policyDate"] == "2026-09-01"
+    assert doc["deliveryDate"] == "2026-08-31"
+
+
+@pytest.mark.asyncio
 async def test_approve_short_payout_closes_and_recasts_earnings(client):
     r = await client.post("/api/leads", json={
         "customerName": "MIS Earn", "mobile": "9000099991",
@@ -650,6 +670,29 @@ def test_chassis_match_stays_inside_file_month():
     assert out["totals"]["matched"] == 1
     assert out["matched"][0]["entryId"] == "AUG"
     assert {e["entryId"] for e in out["unmatchedEntries"]} == set()
+
+
+def test_month_end_delivery_matches_next_month_insurance_mis():
+    """Billed/delivered 31 Aug, insurance dated 1 Sep — still match by chassis."""
+    entries = [
+        {"entryId": "DEL31", "chassisNumber": "MD9BOUNDARY00000001",
+         "deliveryDate": "2026-08-31", "policyDate": None,
+         "expectedPayout": 5275, "receivedPayout": 0, "status": "Pending",
+         "customerName": "Boundary"},
+        {"entryId": "OTHER", "chassisNumber": "MD9OTHER0000000002",
+         "policyDate": "2026-09-05", "expectedPayout": 100, "receivedPayout": 0,
+         "status": "Pending", "customerName": "Other"},
+    ]
+    out = ins_mis.match_file([{
+        "_row": 2, "chassisNumber": "MD9BOUNDARY00000001", "misAmount": 5275,
+        "policyDate": "2026-09-01", "policyNumber": "POL-SEP-1",
+    }], entries)
+    assert out["period"]["months"] == ["2026-09"]
+    assert out["totals"]["matched"] == 1
+    assert out["matched"][0]["entryId"] == "DEL31"
+    assert out["matched"][0]["matchKey"] == "chassis"
+    # Unmatched list stays Sep-scoped (delivery Aug stand-in is not listed there).
+    assert {e["entryId"] for e in out["unmatchedEntries"]} == {"OTHER"}
 
 
 @pytest.mark.asyncio
