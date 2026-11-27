@@ -157,6 +157,56 @@ async def _ta_covered_for_file(file_number: str) -> float:
     return total
 
 
+def effective_file_open(file_doc) -> float:
+    """Amount still open from the financer after cash, finance settle, and TA cover.
+
+    fileOutstanding on disk stays sanctioned − received (− settled). TA cover is
+    dealer OD allocated against that open slice — it is not a financer receipt.
+    """
+    f = file_doc or {}
+    raw = ce.num(f.get("fileOutstanding"))
+    if raw <= 0 and "sanctionedAmount" in f:
+        raw = ce.round2(max(
+            0.0,
+            ce.num(f.get("sanctionedAmount"))
+            - ce.num(f.get("receivedAgainstFile"))
+            - ce.num(f.get("settledInFinanceAmount"))))
+    covered = ce.num(f.get("taCoveredAmount"))
+    return ce.round2(max(0.0, raw - covered))
+
+
+async def sync_file_ta_cover(file_number: str) -> float:
+    """Persist taCoveredAmount on the finance file from TA adjustments."""
+    fn = str(file_number or "").strip()
+    if not fn:
+        return 0.0
+    covered = await _ta_covered_for_file(fn)
+    f = await _db().finance.find_one({"fileNumber": fn})
+    if not f:
+        return covered
+    if abs(ce.num(f.get("taCoveredAmount")) - covered) > 0.005:
+        await _db().finance.update_one(
+            {"fileNumber": fn},
+            {"$set": {"taCoveredAmount": covered, "lastUpdated": (
+                f.get("lastUpdated") or "")}},
+        )
+    return covered
+
+
+async def heal_all_file_ta_covers() -> int:
+    """Stamp taCoveredAmount on every FN that has TA adjustments (idempotent)."""
+    rows = await _db()[COLLECTION].find({"adjustments.0": {"$exists": True}}).to_list(2000)
+    files = set()
+    for r in rows:
+        for adj in (r.get("adjustments") or []):
+            fn = str(adj.get("financeFileNumber") or "").strip()
+            if fn:
+                files.add(fn)
+    for fn in files:
+        await sync_file_ta_cover(fn)
+    return len(files)
+
+
 async def consume_existing_finance_for_tranche(tranche_id: str) -> dict:
     """FIFO-consume this tranche against open Finance file outstanding for its financer.
 
@@ -211,6 +261,7 @@ async def consume_existing_finance_for_tranche(tranche_id: str) -> dict:
             adjusted = ce.round2(adjusted + take)
             splits.append({"trancheId": tranche_id, "fileNumber": fn,
                            "leadId": f.get("leadId") or "", "amount": take})
+            await sync_file_ta_cover(fn)
     return {"adjusted": adjusted, "files": len(splits), "splits": splits}
 
 
@@ -311,6 +362,9 @@ async def consume_for_finance(*, financer: str, amount: float, lead_id: str = ""
         if not progressed:
             break
     adjusted = ce.round2(want - left)
+    fn = str(finance_file_number or "").strip()
+    if fn and adjusted > 0.01:
+        await sync_file_ta_cover(fn)
     open_bal = ce.round2(sum(r["balance"] for r in await list_open(financer)))
     return {
         "adjusted": adjusted,
@@ -372,6 +426,17 @@ async def _release_adjustments(rows: list, match_fn) -> float:
     return released
 
 
+async def _file_numbers_from_rows(rows, match_fn) -> set:
+    files = set()
+    for row in rows or []:
+        for adj in (row.get("adjustments") or []):
+            if match_fn(adj):
+                fn = str(adj.get("financeFileNumber") or "").strip()
+                if fn:
+                    files.add(fn)
+    return files
+
+
 async def release_for_receipt(receipt_number: str) -> float:
     """Undo TA consume when a Finance receipt is deleted. Returns amount released."""
     rn = str(receipt_number or "").strip()
@@ -380,8 +445,12 @@ async def release_for_receipt(receipt_number: str) -> float:
     rows = await _db()[COLLECTION].find({"adjustments.receiptNumber": rn}).to_list(50)
     if not rows:
         return 0.0
-    return await _release_adjustments(
-        rows, lambda adj: str(adj.get("receiptNumber") or "") == rn)
+    match = lambda adj: str(adj.get("receiptNumber") or "") == rn
+    files = await _file_numbers_from_rows(rows, match)
+    released = await _release_adjustments(rows, match)
+    for fn in files:
+        await sync_file_ta_cover(fn)
+    return released
 
 
 async def release_for_lead(lead_id: str) -> float:
@@ -392,8 +461,12 @@ async def release_for_lead(lead_id: str) -> float:
     rows = await _db()[COLLECTION].find({"adjustments.leadId": lid}).to_list(100)
     if not rows:
         return 0.0
-    return await _release_adjustments(
-        rows, lambda adj: str(adj.get("leadId") or "") == lid)
+    match = lambda adj: str(adj.get("leadId") or "") == lid
+    files = await _file_numbers_from_rows(rows, match)
+    released = await _release_adjustments(rows, match)
+    for fn in files:
+        await sync_file_ta_cover(fn)
+    return released
 
 
 async def release_for_file_amount(finance_file_number: str, amount: float) -> float:
@@ -459,6 +532,8 @@ async def release_for_file_amount(finance_file_number: str, amount: float) -> fl
                 released = ce.round2(released + give_back)
                 left = still
                 break
+    if released > 0.01:
+        await sync_file_ta_cover(fn)
     return released
 
 

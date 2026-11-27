@@ -3499,18 +3499,21 @@ async def dashboard():
     cust_os = sum(ce.num(l.get("customerOutstanding")) for l in leads)
     company_os = sum(ce.num(l.get("companyOutstanding")) for l in leads)
 
-    # Finance total outstanding (H1) — sum of open finance file balances
+    # Finance total outstanding (H1) — open after cash, settle-in-finance, and TA cover
+    import trade_advance as ta
     finance_os = 0.0
     finance_pending_files = []
     for f in finance_rows:
-        os_amt = ce.num(f.get("fileOutstanding"))
+        row = _decorate_finance_file(clean(f))
+        os_amt = ta.effective_file_open(row)
         finance_os += os_amt
-        if os_amt > 0 and f.get("status") != "Received":
-            finance_pending_files.append(clean(f))
+        if _finance_file_is_pending(row):
+            finance_pending_files.append(row)
     finance_overdue = await _enrich_finance_with_delivery(finance_pending_files)
     finance_overdue = [f for f in finance_overdue if f.get("overdue")]
     finance_overdue_count = len(finance_overdue)
-    finance_overdue_amount = ce.round2(sum(ce.num(f.get("fileOutstanding")) for f in finance_overdue))
+    finance_overdue_amount = ce.round2(sum(
+        ce.num(f.get("effectiveOutstanding") or f.get("fileOutstanding")) for f in finance_overdue))
 
     # Follow-up KPIs (H1) — active leads with a next-follow-up date
     def _followup_date(l):
@@ -5012,11 +5015,15 @@ async def list_leads(status: Optional[str] = None, q: Optional[str] = None,
                      limit: Optional[int] = None,
                      followup: Optional[bool] = False,
                      scope: Optional[str] = None,
+                     outstanding: Optional[bool] = False,
                      user=Depends(current_user)):
     await _ensure_pending_deals_parked()
     query = {"dealApprovalPending": {"$ne": True}}
     if status and status != "all":
         query["currentStatus"] = status
+    # Outstanding register: leads still owed by the customer.
+    if outstanding:
+        query["customerOutstanding"] = {"$gt": 0.01}
     search_or = _lead_search_or(q)
     if search_or:
         query["$or"] = search_or
@@ -12280,12 +12287,14 @@ async def _rebuild_finance_file_from_payments(lead_id, file_number):
     if not f:
         return {"ok": True, "removed": False}
     received = ce.num(f.get("receivedAgainstFile"))
+    settled = ce.round2(max(0.0, ce.num(f.get("settledInFinanceAmount"))))
     receipts = list(f.get("receipts") or [])
     ledger_left = await _finance_ledger_count(lead_id, file_number)
     # Only remove the file when nothing references it — keep a zero-commitment shell
     # while Finance credits / shortfalls still exist so deleting a shortfall can restore
     # the same file number and lead linkage.
-    if committed <= 0.01 and received <= 0.01 and not receipts and ledger_left == 0:
+    if (committed <= 0.01 and received <= 0.01 and settled <= 0.01
+            and not receipts and ledger_left == 0):
         await db.finance.delete_one({"fileNumber": file_number, "leadId": lead_id})
         await gsheets.delete_entity_row("finance", file_number)
         leftover = await db.finance.find_one({"leadId": lead_id})
@@ -12301,12 +12310,22 @@ async def _rebuild_finance_file_from_payments(lead_id, file_number):
         await db.leads.update_one({"leadId": lead_id}, {"$set": lead_set})
         await rebuild_finance_views()
         return {"ok": True, "removed": True, "fileNumber": file_number}
-    outstanding = ce.round2(max(0.0, committed - received))
+    # settledInFinanceAmount is a write-down of commitment that does not reopen
+    # customer OS — preserve it across rebuilds from the payment ledger.
+    if settled > committed + 0.01:
+        settled = committed
+    outstanding = ce.round2(max(0.0, committed - received - settled))
     status = "Received" if outstanding <= 0 else ("Partial" if received > 0 else "Pending")
     await db.finance.update_one({"fileNumber": file_number, "leadId": lead_id}, {"$set": {
-        "sanctionedAmount": committed, "fileOutstanding": outstanding, "status": status,
+        "sanctionedAmount": committed, "fileOutstanding": outstanding,
+        "settledInFinanceAmount": settled, "status": status,
         "lastUpdated": today(),
     }})
+    try:
+        import trade_advance as ta
+        await ta.sync_file_ta_cover(file_number)
+    except Exception:
+        logging.exception("ta cover sync after finance rebuild failed for %s", file_number)
     await sync_finance_file(file_number)
     await rebuild_finance_views()
     return {"ok": True, "removed": False, "fileNumber": file_number, "sanctionedAmount": committed}
@@ -12604,6 +12623,7 @@ async def sync_finance_file(file_number):
 
 
 FINANCE_RECEIPT_SLA_DAYS = 2  # port of FinanceService.gs getFinanceReceiptSlaDays_ (CRM.FINANCE_REGISTER.RECEIPT_SLA_DAYS)
+_TA_COVER_HEALED = False  # stamp taCoveredAmount from adjustments once per process
 
 
 async def _enrich_finance_with_delivery(files):
@@ -12702,9 +12722,39 @@ async def repay_trade_advance(tranche_id: str, body: TradeAdvanceRepayIn, act=De
     return row
 
 
+def _decorate_finance_file(f):
+    """Add TA cover + effective open for desk views. Never invents financer receipts."""
+    import trade_advance as ta
+    row = dict(f or {})
+    covered = ce.round2(ce.num(row.get("taCoveredAmount")))
+    row["taCoveredAmount"] = covered
+    open_amt = ta.effective_file_open(row)
+    row["effectiveOutstanding"] = open_amt
+    # Desk "Outstanding" column: still open after TA cover (cash OS stays on fileOutstanding).
+    row["openOutstanding"] = open_amt
+    return row
+
+
+def _finance_file_is_pending(f):
+    """Open from the financer after cash receipts, finance settle, and TA cover."""
+    import trade_advance as ta
+    if (f or {}).get("status") == "Received":
+        return False
+    return ta.effective_file_open(f) > 0.01
+
+
 @api.get("/finance")
 async def list_finance(view: str = "all", month: Optional[str] = None, year: Optional[str] = None,
                        user=Depends(finance_viewer_only)):
+    import trade_advance as ta
+    # Heal once per process so existing TA adjustments stamp taCoveredAmount.
+    global _TA_COVER_HEALED
+    if not _TA_COVER_HEALED:
+        try:
+            await ta.heal_all_file_ta_covers()
+            _TA_COVER_HEALED = True
+        except Exception:
+            logging.exception("finance TA cover heal failed")
     files = [clean(f) for f in await db.finance.find().to_list(1000)]
     if _is_scoped_sales(user):
         mine = await _own_lead_ids(user)
@@ -12729,9 +12779,9 @@ async def list_finance(view: str = "all", month: Optional[str] = None, year: Opt
     if lead_ids:
         async for l in db.leads.find({"leadId": {"$in": lead_ids}}, {"leadId": 1, "executive": 1}):
             exec_by[l["leadId"]] = l.get("executive") or ""
-    for f in files:
-        f["executive"] = exec_by.get(f.get("leadId") or "") or f.get("executive") or ""
-    pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
+    files = [_decorate_finance_file({**f, "executive": exec_by.get(f.get("leadId") or "") or f.get("executive") or ""})
+             for f in files]
+    pending = [f for f in files if _finance_file_is_pending(f)]
     if view == "pending":
         return pending
     if view == "overdue":
@@ -12765,12 +12815,12 @@ async def rebuild_finance_views():
     """Rebuild the derived Finance Pending & Finance Overdue sheet tabs. No-op if
     Sheets sync is disabled. Full-mirror (clear+write) so closed/received files
     correctly disappear rather than lingering."""
-    files = [clean(f) for f in await db.finance.find().to_list(2000)]
-    pending = [f for f in files if ce.num(f.get("fileOutstanding")) > 0 and f.get("status") != "Received"]
+    files = [_decorate_finance_file(clean(f)) for f in await db.finance.find().to_list(2000)]
+    pending = [f for f in files if _finance_file_is_pending(f)]
     enriched = await _enrich_finance_with_delivery(pending)
     overdue = [f for f in enriched if f.get("overdue")]
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    total_out = ce.round2(sum(ce.num(f.get("fileOutstanding")) for f in pending))
+    total_out = ce.round2(sum(ce.num(f.get("effectiveOutstanding") or f.get("fileOutstanding")) for f in pending))
 
     p_rows = [[
         f.get("fileNumber"), f.get("leadId"), f.get("customerName"), f.get("financer"),
@@ -12804,6 +12854,14 @@ class ReceiptIn(BaseModel):
     amount: float
     date: str = ""
     reference: str = ""
+
+
+class FinanceSettleIn(BaseModel):
+    """Settle remaining financer OS: recover from customer OR close in finance."""
+    amount: float = 0.0
+    mode: str = "customer"  # customer | finance
+    date: Optional[str] = None
+    reason: str = ""
 
 
 class FinanceShortfallIn(BaseModel):
@@ -12965,6 +13023,140 @@ async def finance_shortfall_to_customer(
         "taReleased": ta_released,
         "customerOutstanding": lead_after.get("customerOutstanding"),
         "totalReceived": lead_after.get("totalReceived"),
+    }
+
+
+@api.post("/finance/{file_number}/settle")
+async def finance_settle_remaining(
+        file_number: str, body: FinanceSettleIn, act=Depends(actor),
+        _money=Depends(money_desk_only)):
+    """Settle remaining financer OS: recover from customer OR close in finance.
+
+    mode=customer → same path as /to-customer (reopens customer collectable).
+    mode=finance → write down the leftover without charging the customer;
+    peels TA cover that no longer fits the reduced cash outstanding.
+    Never posts a fake financer receipt.
+    """
+    mode = (body.mode or "customer").strip().lower()
+    if mode in ("customer", "to-customer", "recover"):
+        return await finance_shortfall_to_customer(
+            file_number,
+            FinanceShortfallIn(amount=body.amount, date=body.date, reason=body.reason),
+            act=act, _money=_money)
+    if mode not in ("finance", "settle", "write-off", "writeoff"):
+        raise HTTPException(422, "Choose mode 'customer' or 'finance'")
+
+    from pymongo import ReturnDocument
+    import trade_advance as ta
+    f = await db.finance.find_one({"fileNumber": file_number})
+    if not f:
+        raise HTTPException(404, "Finance file not found")
+    amount = ce.round2(body.amount)
+    if amount <= 0:
+        raise HTTPException(422, "Enter a valid remaining amount")
+    # Cap at effective open (cash OS minus TA cover) so TA-covered files are not double-settled.
+    open_amt = ta.effective_file_open(f)
+    if amount > open_amt + 0.01:
+        raise HTTPException(
+            422,
+            f"Amount ₹{amount} is more than this file still has open "
+            f"(₹{open_amt} after Trade Advance cover).",
+        )
+    cash_os = ce.round2(ce.num(f.get("fileOutstanding")))
+    if amount > cash_os + 0.01:
+        raise HTTPException(
+            422,
+            f"Amount ₹{amount} is more than cash outstanding ₹{cash_os}.",
+        )
+    received = ce.round2(ce.num(f.get("receivedAgainstFile")))
+    sanctioned = ce.round2(ce.num(f.get("sanctionedAmount")))
+    prior_settled = ce.round2(max(0.0, ce.num(f.get("settledInFinanceAmount"))))
+    new_settled = ce.round2(prior_settled + amount)
+    if new_settled > sanctioned - received + 0.01:
+        raise HTTPException(
+            422,
+            f"Cannot settle ₹{amount} in finance — only "
+            f"₹{ce.round2(sanctioned - received - prior_settled)} remains after disbursement.",
+        )
+    settle_date = (body.date or today())[:10]
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(422, "Reason is required when settling in finance")
+    new_outstanding = ce.round2(max(0.0, sanctioned - received - new_settled))
+    status = "Received" if new_outstanding <= 0.01 else ("Partial" if received > 0.01 else "Pending")
+    audit = {
+        "amount": amount, "date": settle_date, "reason": reason,
+        "mode": "finance", "recordedAt": now_iso(),
+        "by": (act or {}).get("email") or (act or {}).get("name") or "",
+    }
+    updated = await db.finance.find_one_and_update(
+        {
+            "fileNumber": file_number,
+            "sanctionedAmount": sanctioned,
+            "receivedAgainstFile": received,
+            "fileOutstanding": cash_os,
+            "settledInFinanceAmount": prior_settled,
+        },
+        {"$set": {
+            "settledInFinanceAmount": new_settled,
+            "fileOutstanding": new_outstanding,
+            "status": status,
+            "lastUpdated": today(),
+        }, "$push": {"settlements": audit}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        # Files without settledInFinanceAmount key yet — retry without that match.
+        updated = await db.finance.find_one_and_update(
+            {
+                "fileNumber": file_number,
+                "sanctionedAmount": sanctioned,
+                "receivedAgainstFile": received,
+                "fileOutstanding": cash_os,
+            },
+            {"$set": {
+                "settledInFinanceAmount": new_settled,
+                "fileOutstanding": new_outstanding,
+                "status": status,
+                "lastUpdated": today(),
+            }, "$push": {"settlements": audit}},
+            return_document=ReturnDocument.AFTER,
+        )
+    if not updated:
+        fresh = await db.finance.find_one({"fileNumber": file_number}) or {}
+        raise HTTPException(
+            409,
+            "Finance file changed while settling "
+            f"(open now ₹{ta.effective_file_open(fresh)}). Refresh and try again.",
+        )
+    ta_released = 0.0
+    try:
+        covered = await ta._ta_covered_for_file(file_number)
+        excess = ce.round2(max(0.0, covered - new_outstanding))
+        if excess > 0.01:
+            ta_released = await ta.release_for_file_amount(file_number, excess)
+        else:
+            await ta.sync_file_ta_cover(file_number)
+    except Exception:
+        logging.exception("trade_advance release on finance settle failed for %s", file_number)
+    await sync_finance_file(file_number)
+    await rebuild_finance_views()
+    lead_id = str((updated or {}).get("leadId") or f.get("leadId") or "").strip()
+    if lead_id:
+        await write_audit(
+            act, "settle", "finance", leadId=lead_id, financeFileNumber=file_number,
+            old={"fileOutstanding": cash_os, "settledInFinanceAmount": prior_settled},
+            new={"amount": amount, "mode": "finance", "fileOutstanding": new_outstanding,
+                 "settledInFinanceAmount": new_settled, "taReleased": ta_released,
+                 "reason": reason},
+        )
+    return {
+        "ok": True,
+        "mode": "finance",
+        "finance": _decorate_finance_file(clean(
+            await db.finance.find_one({"fileNumber": file_number}) or {})),
+        "taReleased": ta_released,
+        "settledAmount": amount,
     }
 
 
