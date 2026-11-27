@@ -190,7 +190,7 @@ export function isSlowLead360Path(url) {
 // either doubles it or fails as "duplicate" on a receipt that did save. Staff
 // see the error and check the ledger instead.
 const CREATE_ONCE_LEAD_ACTIONS = /^\/leads\/[^/]+\/(payments|refund|convert-booking|delivery)$/;
-const CREATE_ONCE_MONEY = /^\/finance\/[^/]+\/receipt$/;
+const CREATE_ONCE_MONEY = /^\/finance\/[^/]+\/(receipt|to-customer)$/;
 
 export function isCreateOncePath(url) {
   const p = String(url || "").split("?")[0];

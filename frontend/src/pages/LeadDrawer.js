@@ -324,7 +324,7 @@ function UnitsTab({ lead, units, activeUnit, onOpenPrice, onOpenScheme, onSaved,
 }
 
 export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
-  const { isOwner, isField, isExecutive, isAccounts, canEditCommercials, isTl, isTeamLead, isSalesGm, isShowroomAdmin } = useAuth();
+  const { isOwner, isField, isExecutive, isAccounts, isMoneyDesk, canEditCommercials, isTl, isTeamLead, isSalesGm, isShowroomAdmin } = useAuth();
   const [data, setData] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [tab, setTab] = useState("overview");
@@ -601,7 +601,7 @@ export default function LeadDrawer({ leadId, masters, onClose, onChanged }) {
             canEditUnitVehicle={canEditUnitVehicle} />)}
       {!fieldView && tab === "price" && <PriceStructure lead={lead} actions={actions} isOwner={isOwner} unitSno={activeUnit} onUnitSno={setFocusUnit} canEditUnitVehicle={canEditUnitVehicle} onSaved={() => advance("scheme")} onRefresh={refresh} />}
       {!fieldView && tab === "scheme" && <SchemeTab lead={lead} c={c} actions={actions} isOwner={isOwner} masters={masters} unitSno={activeUnit} onUnitSno={setFocusUnit} documents={data.documents} onSaved={() => advance("payments")} onRefresh={refresh} />}
-      {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} unitSno={activeUnit} onSaved={refresh} />}
+      {!fieldView && tab === "payments" && <PaymentsTab lead={lead} actions={actions} payments={data.payments} masters={masters} isOwner={isOwner} isMoneyDesk={isMoneyDesk} financeFile={data.financeFile} unitSno={activeUnit} onSaved={refresh} />}
       {tab === "delivery" && (
         fieldView
           ? <FieldDeliveryReadOnly delivery={data.delivery} lead={lead} />
@@ -2337,12 +2337,16 @@ function unitPaymentLine(u, i = 0) {
   return { sno, payable, received, outstanding, model: u?.model || "", variant: u?.variant || "" };
 }
 
-export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, unitSno, onSaved }) {
+export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = false, isMoneyDesk = false, financeFile = null, unitSno, onSaved }) {
   const { isExecutive } = useAuth();
   const units = packUnitList(lead);
   const [form, setForm] = useState({ amount: "", paymentMode: "Cash", paymentReference: "", narration: "", financerName: "", financeFileNumber: "", date: todayISO() });
   const [paySnos, setPaySnos] = useState(() => (unitSno ? [unitSno] : (units ? units.map((u, i) => u.sno || i + 1) : [])));
   const [allocation, setAllocation] = useState("club");
+  const [shortfallOpen, setShortfallOpen] = useState(false);
+  const [shortfallBusy, setShortfallBusy] = useState(false);
+  const [shortfallAmount, setShortfallAmount] = useState("");
+  const [shortfallReason, setShortfallReason] = useState("");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
   const isFinance = form.paymentMode === "Finance";
   const locked = isFinance ? !actions.canFinanceReceipt : !actions.canPayment;
@@ -2356,6 +2360,8 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
   const excess = +(lead.excessReceived || 0);
   const refunded = +(lead.refundedAmount || 0);
   const dealCancelled = !!lead.dealCancelled;
+  const fileRemaining = Number(financeFile?.fileOutstanding) || 0;
+  const canMoveShortfall = isMoneyDesk && financeFile?.fileNumber && fileRemaining > 0.01 && financeFile.status !== "Received";
   const add = async (allowExcess = false) => {
     if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
     if (!form.date) return toast.error("Payment date is required");
@@ -2396,7 +2402,9 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
     return undefined;
   };
   const remove = async (p) => {
-    const label = p.entryType === "Refund" ? "refund" : "receipt";
+    const label = p.entryType === "Refund" ? "refund"
+      : p.entryType === "FinanceShortfall" ? "finance shortfall"
+      : "receipt";
     if (!window.confirm(`Permanently delete ${label} ${p.receiptNumber} (${inr(p.amount)})? This cannot be undone. Lead totals will be recalculated.`)) return;
     try {
       await del(`/payments/${p.receiptNumber}`);
@@ -2404,6 +2412,30 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
       onSaved();
     } catch (e) {
       toast.error(apiErrorMessage(e, "Delete failed"));
+    }
+  };
+  const openShortfall = () => {
+    setShortfallAmount(String(fileRemaining || ""));
+    setShortfallReason("");
+    setShortfallOpen(true);
+  };
+  const submitShortfall = async () => {
+    if (shortfallBusy || !financeFile?.fileNumber) return;
+    if (!shortfallAmount || +shortfallAmount <= 0) return toast.error("Enter a valid amount");
+    if (+shortfallAmount > fileRemaining + 0.01) return toast.error(`At most ${inr(fileRemaining)} is still open on the finance file`);
+    setShortfallBusy(true);
+    try {
+      const r = await post(`/finance/${encodeURIComponent(financeFile.fileNumber)}/to-customer`, {
+        amount: +shortfallAmount, reason: shortfallReason,
+      });
+      toast.success(`Moved ${inr(+shortfallAmount)} to customer collectable`
+        + (r?.customerOutstanding != null ? ` · OS ${inr(r.customerOutstanding)}` : ""));
+      setShortfallOpen(false);
+      onSaved();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not record remaining as customer"));
+    } finally {
+      setShortfallBusy(false);
     }
   };
   return (
@@ -2416,6 +2448,42 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
               ? "Convert this lead to a booking before posting customer payments."
               : "This lead is not Active — only Finance receipts are allowed."
         } />
+      )}
+      {canMoveShortfall && (
+        <Card className="p-4 mb-4 border-indigo-200 bg-indigo-50/50" data-testid="finance-shortfall-panel">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-ink">
+                Finance file remaining: <span className="font-mono text-red-600">{inr(fileRemaining)}</span>
+              </div>
+              <div className="text-xs text-ink-soft mt-0.5">
+                {financeFile.fileNumber} · {financeFile.financer || "—"} — financer has not disbursed this leftover.
+                Move it to customer collectable when the customer will pay it instead.
+              </div>
+            </div>
+            <Button variant="secondary" data-testid="payments-to-customer-btn" onClick={openShortfall}>
+              Record as customer
+            </Button>
+          </div>
+          {shortfallOpen && (
+            <div className="mt-4 pt-4 border-t border-indigo-200 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <Field label="Amount (₹)">
+                <Input data-testid="payments-shortfall-amount" type="number" value={shortfallAmount}
+                  onChange={(e) => setShortfallAmount(e.target.value)} disabled={shortfallBusy} />
+              </Field>
+              <Field label="Reason">
+                <Input data-testid="payments-shortfall-reason" value={shortfallReason}
+                  onChange={(e) => setShortfallReason(e.target.value)} disabled={shortfallBusy} />
+              </Field>
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={() => setShortfallOpen(false)} disabled={shortfallBusy}>Cancel</Button>
+                <Button data-testid="payments-shortfall-save" onClick={submitShortfall} disabled={shortfallBusy}>
+                  {shortfallBusy ? "Saving…" : "Move to customer"}
+                </Button>
+              </div>
+            </div>
+          )}
+        </Card>
       )}
       {(excess > 0 || refunded > 0) && (
         <Card className="p-4 mb-4 border-amber-200 bg-amber-50/60" data-testid="excess-panel">
@@ -2502,12 +2570,13 @@ export function PaymentsTab({ lead, actions = {}, payments, masters, isOwner = f
         {payments.length === 0 && <div className="text-sm text-ink-faint text-center py-6">No payments recorded yet</div>}
         {payments.map((p) => {
           const isRefund = p.entryType === "Refund";
+          const isShortfall = p.entryType === "FinanceShortfall";
           return (
-            <div key={p.receiptNumber} className={`flex flex-wrap items-center justify-between gap-2 border rounded-lg px-3 sm:px-4 py-2.5 ${isRefund ? "border-amber-200 bg-amber-50/50" : "border-line bg-white"}`}>
+            <div key={p.receiptNumber} className={`flex flex-wrap items-center justify-between gap-2 border rounded-lg px-3 sm:px-4 py-2.5 ${isRefund || isShortfall ? "border-amber-200 bg-amber-50/50" : "border-line bg-white"}`}>
               <div>
-                <div className={`text-sm font-semibold ${isRefund ? "text-amber-700" : "text-ink"}`}>
+                <div className={`text-sm font-semibold ${isRefund || isShortfall ? "text-amber-700" : "text-ink"}`}>
                   {inr(p.amount)}
-                  <Badge className="ml-1">{isRefund ? "Refund" : p.paymentMode}</Badge>
+                  <Badge className="ml-1">{isRefund ? "Refund" : isShortfall ? "Finance → customer" : p.paymentMode}</Badge>
                   {isRefund && p.paymentMode ? <span className="text-xs text-ink-faint ml-1">via {p.paymentMode}</span> : null}
                 </div>
                 <div className="text-xs text-ink-faint">

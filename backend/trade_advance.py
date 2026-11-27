@@ -396,6 +396,72 @@ async def release_for_lead(lead_id: str) -> float:
         rows, lambda adj: str(adj.get("leadId") or "") == lid)
 
 
+async def release_for_file_amount(finance_file_number: str, amount: float) -> float:
+    """Release up to `amount` of TA consume tagged to this finance file (LIFO).
+
+    Used when finance shortfall is converted to customer collectable — the
+    reversed commitment should free the same OD that was consumed against the file.
+    Partial peel on the newest matching adjustment when needed.
+    """
+    fn = str(finance_file_number or "").strip()
+    left = ce.round2(max(0.0, ce.num(amount)))
+    if not fn or left <= 0.01:
+        return 0.0
+    rows = await _db()[COLLECTION].find({"adjustments.financeFileNumber": fn}).to_list(100)
+    if not rows:
+        return 0.0
+    # Newest draws first so older receipt links stay intact when only a slice reverses.
+    rows = sorted(
+        rows,
+        key=lambda r: (str(r.get("drawnOn") or ""), str(r.get("createdAt") or "")),
+        reverse=True,
+    )
+    released = 0.0
+    for row in rows:
+        if left <= 0.01:
+            break
+        for _attempt in range(3):
+            fresh = await _db()[COLLECTION].find_one({"trancheId": row["trancheId"]})
+            if not fresh:
+                break
+            adjs = list(fresh.get("adjustments") or [])
+            keep = []
+            give_back = 0.0
+            still = left
+            for adj in reversed(adjs):
+                if still <= 0.01 or str(adj.get("financeFileNumber") or "") != fn:
+                    keep.insert(0, adj)
+                    continue
+                adj_amt = ce.round2(ce.num(adj.get("amount")))
+                take = ce.round2(min(adj_amt, still))
+                if take + 0.01 >= adj_amt:
+                    give_back = ce.round2(give_back + adj_amt)
+                    still = ce.round2(still - adj_amt)
+                else:
+                    shrunk = dict(adj)
+                    shrunk["amount"] = ce.round2(adj_amt - take)
+                    keep.insert(0, shrunk)
+                    give_back = ce.round2(give_back + take)
+                    still = ce.round2(still - take)
+            if give_back <= 0.01:
+                break
+            new_consumed = ce.round2(max(0.0, ce.num(fresh.get("consumed")) - give_back))
+            res = await _db()[COLLECTION].update_one(
+                {"trancheId": fresh["trancheId"], "consumed": ce.num(fresh.get("consumed"))},
+                {"$set": {
+                    "consumed": new_consumed,
+                    "adjustments": keep,
+                    "lastUpdated": datetime.now(timezone.utc).isoformat(),
+                    "status": STATUS_OPEN,
+                }, "$unset": {"closedAt": "", "closedReason": ""}},
+            )
+            if res.modified_count:
+                released = ce.round2(released + give_back)
+                left = still
+                break
+    return released
+
+
 async def repay_tranche(tranche_id: str, amount: float, *, act: Optional[dict] = None) -> dict:
     """Dealer pays leftover TA back to the financer (clear for new draw)."""
     pay = ce.round2(max(0.0, ce.num(amount)))
@@ -462,5 +528,6 @@ async def ensure_indexes():
         await _db()[COLLECTION].create_index([("status", 1), ("financer", 1), ("drawnOn", 1)])
         await _db()[COLLECTION].create_index("adjustments.receiptNumber")
         await _db()[COLLECTION].create_index("adjustments.leadId")
+        await _db()[COLLECTION].create_index("adjustments.financeFileNumber")
     except Exception:
         logger.exception("trade_advance index ensure failed")

@@ -46,6 +46,7 @@ export default function Finance() {
     return ["pending", "overdue", "all"].includes(q) ? q : "all";
   });
   const [receipt, setReceipt] = useState(false);
+  const [shortfallFile, setShortfallFile] = useState(null);
   const [taTick, setTaTick] = useState(0);
   const period = usePeriodState();
   const load = useCallback(() => get("/finance", { view, ...period.params }).then(setRows).catch(() => {
@@ -61,7 +62,7 @@ export default function Finance() {
     if (!isMoneyDesk) return undefined;
     get("/finance", { view: "pending" }).then(setAllFiles);
     return undefined;
-  }, [receipt, isMoneyDesk]);
+  }, [receipt, shortfallFile, isMoneyDesk]);
 
   const { openLead, drawer } = useLeadDrawer(load);
   const byFinancer = useMemo(() => financerRollup(rows), [rows]);
@@ -204,6 +205,20 @@ export default function Finance() {
           { key: "fileOutstanding", label: "Outstanding", align: "right", mono: true, render: (r) => <span className={r.fileOutstanding > 0 ? "text-red-600 font-semibold" : ""}>{inr(r.fileOutstanding)}</span> },
           { key: "status", label: "Status", render: (r) => <Badge>{r.status}</Badge> },
           { key: "lastPaymentDate", label: "Last Receipt", render: (r) => fmtDate(r.lastPaymentDate) },
+          ...(isMoneyDesk ? [{
+            key: "actions", label: "", render: (r) => (
+              (Number(r.fileOutstanding) || 0) > 0.01 && r.status !== "Received" ? (
+                <Button
+                  variant="secondary"
+                  className="!py-1 !px-2 text-xs"
+                  data-testid={`finance-to-customer-${r.fileNumber}`}
+                  onClick={(e) => { e.stopPropagation(); setShortfallFile(r); }}
+                >
+                  To customer
+                </Button>
+              ) : null
+            ),
+          }] : []),
         ]}
         rows={visible}
         empty={financerFilter
@@ -213,6 +228,13 @@ export default function Finance() {
       {drawer}
       {receipt && isMoneyDesk && (
         <FinanceReceiptModal files={allFiles} onClose={() => setReceipt(false)} onDone={() => { setReceipt(false); load(); }} />
+      )}
+      {shortfallFile && isMoneyDesk && (
+        <FinanceShortfallModal
+          file={shortfallFile}
+          onClose={() => setShortfallFile(null)}
+          onDone={() => { setShortfallFile(null); load(); }}
+        />
       )}
     </div>
   );
@@ -427,6 +449,73 @@ function FinanceReceiptModal({ files, onClose, onDone }) {
         <div className="flex justify-end gap-2 mt-5">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button data-testid="save-finance-receipt-btn" onClick={submit}>Record Receipt</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function FinanceShortfallModal({ file, onClose, onDone }) {
+  const max = Number(file?.fileOutstanding) || 0;
+  const [form, setForm] = useState({ amount: String(max || ""), date: todayISO(), reason: "" });
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const submit = async () => {
+    if (busy || !file) return;
+    if (!form.amount || +form.amount <= 0) return toast.error("Enter a valid amount");
+    if (+form.amount > max + 0.01) return toast.error(`At most ${inr(max)} is still open on this file`);
+    setBusy(true);
+    try {
+      const r = await post(`/finance/${encodeURIComponent(file.fileNumber)}/to-customer`, {
+        amount: +form.amount, date: form.date, reason: form.reason,
+      });
+      toast.success(
+        `₹${(+form.amount).toLocaleString("en-IN")} moved to customer collectable`
+        + (r?.customerOutstanding != null ? ` · customer OS ${inr(r.customerOutstanding)}` : ""),
+      );
+      onDone();
+    } catch (e) {
+      toast.error(apiErrorMessage(e, "Could not record remaining as customer"));
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal onClose={onClose} width="max-w-lg">
+      <div className="overflow-y-auto overscroll-contain p-6" data-testid="finance-shortfall-modal">
+        <h3 className="font-heading text-lg font-bold text-ink mb-1">Record remaining as customer</h3>
+        <p className="text-xs text-ink-soft mb-4">
+          Financer will not disburse this leftover. Shrinks the file commitment and reopens the same
+          amount as customer outstanding so you can collect it as Cash / UPI / etc.
+        </p>
+        <p className="text-sm text-ink mb-3">
+          <span className="font-semibold text-cobalt">{file?.fileNumber}</span>
+          {" · "}{file?.financer}{" · "}{file?.customerName}
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <Field label="Amount to customer (₹)">
+            <Input data-testid="finance-shortfall-amount" type="number" value={form.amount}
+              onChange={set("amount")} placeholder={String(max)} disabled={busy} />
+          </Field>
+          <Field label="Date">
+            <Input data-testid="finance-shortfall-date" type="date" value={form.date}
+              onChange={set("date")} disabled={busy} />
+          </Field>
+          <div className="sm:col-span-2">
+            <Field label="Reason / note">
+              <Input data-testid="finance-shortfall-reason" value={form.reason}
+                onChange={set("reason")} placeholder="Partial disbursement / customer will pay" disabled={busy} />
+            </Field>
+          </div>
+        </div>
+        <p className="text-xs text-ink-soft mt-2">
+          File remaining: <span className="font-mono font-semibold text-red-600">{inr(max)}</span>
+          {" · "}After save this amount becomes due from the customer.
+        </p>
+        <div className="flex justify-end gap-2 mt-5">
+          <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button data-testid="save-finance-shortfall-btn" onClick={submit} disabled={busy}>
+            {busy ? "Saving…" : "Move to customer"}
+          </Button>
         </div>
       </div>
     </Modal>
