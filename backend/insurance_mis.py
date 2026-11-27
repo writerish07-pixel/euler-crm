@@ -306,7 +306,25 @@ def _pick(hits, reason_ok, reason_amb):
     return None, ""
 
 
-def match_row(row, indexes):
+def _narrow_hits_for_period(hits, months):
+    """Prefer insurance-month alignment when several register rows share a key.
+
+    Matching itself is NOT limited to the MIS month — a delivery-dated Aug 31
+    row must still hit a Sep 1 policy MIS. When the same chassis exists in two
+    months, keep the in-period hit. When none are in-period, prefer rows that
+    still wait for a policyDate (delivery stand-in only).
+    """
+    if not hits or len(hits) <= 1 or not months:
+        return hits
+    want = set(months)
+    in_period = [e for e in hits if _ym(entry_period_date(e)) in want]
+    if in_period:
+        return in_period
+    awaiting = [e for e in hits if not str(e.get("policyDate") or "").strip()]
+    return awaiting or hits
+
+
+def match_row(row, indexes, months=None):
     """Return (entry, matchKey) or (None, reason). Chassis wins — it is unique on the vehicle."""
     by_entry, by_lead, by_chassis, by_policy, by_mobile, by_name_prem = indexes
     eid = str(row.get("entryId") or "").strip()
@@ -317,26 +335,26 @@ def match_row(row, indexes):
         return None, "entry_id_not_found"
     ch = _norm_chassis(row.get("chassisNumber"))
     if ch:
-        hits = by_chassis.get(ch) or []
+        hits = _narrow_hits_for_period(by_chassis.get(ch) or [], months)
         picked, why = _pick(hits, "chassis", "ambiguous_chassis")
         if picked or why:
             return picked, why
         return None, "chassis_not_found"
     lid = str(row.get("leadId") or "").strip()
     if lid:
-        hits = by_lead.get(lid.upper()) or []
+        hits = _narrow_hits_for_period(by_lead.get(lid.upper()) or [], months)
         picked, why = _pick(hits, "leadId", "ambiguous_lead")
         if picked or why:
             return picked, why
     pol = _alnum(row.get("policyNumber"))
     if pol:
-        hits = by_policy.get(pol) or []
+        hits = _narrow_hits_for_period(by_policy.get(pol) or [], months)
         picked, why = _pick(hits, "policyNumber", "ambiguous_policy")
         if picked or why:
             return picked, why
     mob = _digits(row.get("mobile"))
     if len(mob) == 10:
-        hits = by_mobile.get(mob) or []
+        hits = _narrow_hits_for_period(by_mobile.get(mob) or [], months)
         picked, why = _pick(hits, "mobile", "ambiguous_mobile")
         if picked or why:
             return picked, why
@@ -355,6 +373,7 @@ def match_row(row, indexes):
                     and _digits(e.get("mobile")) != row_mobile
                 )
             ]
+        hits = _narrow_hits_for_period(hits, months)
         picked, why = _pick(hits, "customer", "ambiguous_customer")
         if picked or why:
             return picked, why
@@ -443,10 +462,14 @@ def period_label(months):
 def match_file(mis_rows, entries, months=None):
     """Match MIS rows to Insurance Payout entries for the file's month(s).
 
-    Register period is policyDate else deliveryDate — the same basis as the
-    Insurance Register. When the file has dates (or `months` is passed),
-    unmatchedEntries are unpaid payouts in that month that are missing from
-    the file, not every unpaid row all-time.
+    Matching uses the full register so a unit billed/delivered on the last day
+    of a month still hits when the agent MIS is dated the 1st of next month.
+    Insurance date (`policyDate`) is preferred once stamped; until then
+    deliveryDate is only a stand-in for the register month list.
+
+    When the file has dates (or `months` is passed), unmatchedEntries stay
+    unpaid payouts in that insurance month that are missing from the file —
+    not every unpaid row all-time.
     """
     if months is None:
         months, source = infer_period_months(mis_rows)
@@ -455,7 +478,9 @@ def match_file(mis_rows, entries, months=None):
         source = "explicit" if months else "all"
     scoped = filter_entries_for_months(entries, months)
     rows, chassis_dupes = unique_by_chassis(mis_rows)
-    indexes = _entry_indexes(scoped)
+    # Index every entry for identity match; period only narrows ambiguous hits
+    # and the "not in this MIS" list.
+    indexes = _entry_indexes(entries)
     used = set()
     matched, unmatched_mis = [], []
     unmatched_mis.extend(chassis_dupes)
@@ -464,7 +489,7 @@ def match_file(mis_rows, entries, months=None):
         if amount <= 0:
             unmatched_mis.append({**_mis_public(row), "reason": "no_payout_amount"})
             continue
-        entry, key = match_row(row, indexes)
+        entry, key = match_row(row, indexes, months=months)
         if not entry:
             unmatched_mis.append({**_mis_public(row), "reason": key or "unmatched"})
             continue

@@ -17617,8 +17617,9 @@ async def insurance_mis_preview(file: UploadFile = File(...), mapping: Optional[
     that vehicle has a premium and no row yet. Single-file leads are not created
     here.
 
-    Unmatched register rows are scoped to the file's month (policyDate, else
-    deliveryDate). Pass month=YYYY-MM to override.
+    Matching uses the full register (so last-day billing / next-day insurance
+    still hits). Unmatched register rows are scoped to the file's insurance
+    month (policyDate, else deliveryDate stand-in). Pass month=YYYY-MM to override.
     """
     content = await file.read()
     try:
@@ -17704,7 +17705,16 @@ def _mis_overwrite_expected_fields(entry, amount):
     }
 
 
-async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
+def _mis_policy_date(raw) -> str:
+    """Insurance date from the agent MIS — register month follows this, not billing."""
+    s = str(raw or "").strip()[:10]
+    if len(s) == 10 and s[4] == "-" and s[7] == "-" and s[0:4].isdigit():
+        return s
+    return ""
+
+
+async def _fill_mis_item(entry, mis_amount, reference="", policy_number="",
+                         policy_date=""):
     amount = _insurance_mis_money(mis_amount)
     patch = {
         "misReference": reference or entry.get("misReference") or "",
@@ -17713,11 +17723,16 @@ async def _fill_mis_item(entry, mis_amount, reference="", policy_number=""):
     }
     if policy_number and not (entry.get("policyNumber") or "").strip():
         patch["policyNumber"] = policy_number
+    # Store the agent's insurance date irrespective of delivery / billing date
+    # so the register and next MIS reconcile on policy month.
+    pd = _mis_policy_date(policy_date)
+    if pd:
+        patch["policyDate"] = pd
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     return patch
 
 
-async def _map_insurance_mis(entry, *, amount, reference="", act=None):
+async def _map_insurance_mis(entry, *, amount, reference="", policy_date="", act=None):
     """Stamp the agent's MIS figure and overwrite expected. Does not book cash."""
     amount = _insurance_mis_money(amount)
     patch = {
@@ -17726,6 +17741,9 @@ async def _map_insurance_mis(entry, *, amount, reference="", act=None):
     }
     if reference:
         patch["misReference"] = reference
+    pd = _mis_policy_date(policy_date)
+    if pd:
+        patch["policyDate"] = pd
     await db.insurance.update_one({"entryId": entry["entryId"]}, {"$set": patch})
     updated = await db.insurance.find_one({"entryId": entry["entryId"]})
     await sheet_sync("insurance", _insurance_sheet_row(clean(updated)))
@@ -17799,8 +17817,10 @@ async def insurance_mis_apply(body: MisFillIn, act=Depends(actor), _money=Depend
                 errors.append({"entryId": eid, "error": "not_found"})
                 continue
             try:
-                await _fill_mis_item(entry, item.get("misAmount"),
-                                     item.get("reference") or "", item.get("policyNumber") or "")
+                await _fill_mis_item(
+                    entry, item.get("misAmount"),
+                    item.get("reference") or "", item.get("policyNumber") or "",
+                    item.get("policyDate") or "")
             except Exception:
                 logging.exception("MIS save failed for %s", eid)
                 errors.append({"entryId": eid, "error": "save_failed"})
@@ -17851,6 +17871,7 @@ async def insurance_mis_approve(body: MisApproveIn, act=Depends(actor), _money=D
             updated = await _map_insurance_mis(
                 entry, amount=amount,
                 reference=item.get("reference") or entry.get("misReference") or "",
+                policy_date=item.get("policyDate") or "",
                 act=act)
             approved.append({
                 "entryId": eid,
