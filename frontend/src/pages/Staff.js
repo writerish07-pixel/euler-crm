@@ -37,10 +37,17 @@ export default function Staff() {
   useEffect(() => { load(); }, [load]);
 
   const remove = async (r) => {
-    if (!window.confirm(`Remove ${r.name}?`)) return;
+    const ok = window.confirm(
+      `Terminate and remove ${r.name}?\n\nAny leads assigned to them move to Showroom Admin. Their Staff row is deleted.`
+        + (r.email ? " A matching login email in Settings is removed too." : ""));
+    if (!ok) return;
     try {
-      await del(`/staff/${r.staffId}`);
-      toast.success("Removed");
+      const res = await del(`/staff/${r.staffId}`);
+      const n = res?.reassignedCount || 0;
+      const to = res?.reassignedTo || "Showroom Admin";
+      toast.success(n
+        ? `Removed · ${n} lead${n === 1 ? "" : "s"} → ${to}`
+        : "Removed");
       load();
     } catch (e) { toast.error(apiErrorMessage(e, "Could not remove")); }
   };
@@ -121,7 +128,8 @@ export default function Staff() {
 
       <p className="text-xs text-ink-faint mt-3">
         Executive names here feed every Executive dropdown in the app. Renaming someone who already
-        has leads is blocked — set them Inactive and add the new name instead.
+        has leads is blocked — set them Inactive and add the new name instead. Terminating (delete)
+        moves their leads to Showroom Admin, then removes the row.
       </p>
 
       {edit && <StaffDrawer row={edit} people={rows} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
