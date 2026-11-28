@@ -650,7 +650,9 @@ _INVOICE_SORTS = (
     json.dumps(["invoice_date", "DESC"]),
     json.dumps(["created_at", "DESC"]),
 )
-_CANCELLED_INVOICE = {"CANCELLED", "CANCELED", "DELETED"}
+# Keep in sync with oem_sync.CANCELLED_INVOICE_STATUSES (DELETED from Coulson,
+# VOID from some Invoice List rows — both mean the bill is gone).
+_CANCELLED_INVOICE = {"CANCELLED", "CANCELED", "DELETED", "VOID"}
 _LIVE_INVOICE = {"CREATED", "ACTIVE", "POSTED", "CONFIRMED", ""}
 
 

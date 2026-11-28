@@ -918,12 +918,12 @@ export function BotspaceCard() {
         Booking and approval now send <b>booking_deal_confirm</b> with the final deal amount so the customer can check the figure.
       </p>
       <div className="text-xs text-ink-soft bg-zinc-50 rounded-lg p-3 ring-1 ring-line mb-3" data-testid="botspace-template-guide">
-        Submit these in BotSpace → WhatsApp Templates (Hindi, Utility unless noted). The app starts using each one once Meta marks it Active:
+        Submit these in BotSpace → WhatsApp Templates. Customer Utility templates are Hindi (`hi`) unless noted; Trade Advance is English (`en`). The app starts using each one once Meta marks it Active:
         <ul className="list-disc pl-5 mt-1 space-y-0.5">
-          <li><code>booking_deal_confirm</code> — booking + approval deal amount (5 variables)</li>
-          <li><code>booking_confirm</code> — fallback if the deal template is not Active yet (no amount)</li>
-          <li><code>lead_followup_3day</code>, <code>delivery_review</code>, <code>finance_overdue_exec</code></li>
-          <li><code>ta_daily_statement</code>, <code>ta_day25_clear</code>, <code>ta_low_balance</code> — Trade Advance (10:30 IST)</li>
+          <li><code>booking_deal_confirm</code> — booking + approval deal amount (5 variables, Hindi)</li>
+          <li><code>booking_confirm</code> — fallback if the deal template is not Active yet (no amount, Hindi)</li>
+          <li><code>lead_followup_3day</code>, <code>delivery_review</code>, <code>finance_overdue_exec</code> (Hindi)</li>
+          <li><code>ta_daily_statement</code>, <code>ta_day25_clear</code>, <code>ta_low_balance</code> — Trade Advance (English, 10:30 IST) — paste from <code>docs/ta-whatsapp-botspace-submit.md</code></li>
         </ul>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

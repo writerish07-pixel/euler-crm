@@ -928,11 +928,13 @@ async def _reprice_exact_variant_units(lead_id, changes):
 
 async def _apply_sold_vehicle_ids():
     delinked = {}
+    delink_error = ""
     try:
-        delinked = await oem_sync.delink_cancelled_sold_invoices(db)
-    except Exception:
+        delinked = await oem_sync.delink_cancelled_sold_invoices(db) or {}
+    except Exception as e:
         logging.exception("OEM Sold cancel-invoice delink failed")
         delinked = {}
+        delink_error = str(e) or "delink_failed"
     stamped = await oem_sync.apply_sold_vehicle_ids_to_leads(
         db, on_body_adopted=_reprice_after_sold_body,
         on_variants_corrected=_reprice_exact_variant_units)
@@ -943,6 +945,8 @@ async def _apply_sold_vehicle_ids():
     stamped["invoiceMissingCount"] = (delinked or {}).get("flagged") or 0
     stamped["autoDeliveredCount"] = auto
     stamped["reopenedOemAutoCount"] = reopened
+    if delink_error:
+        stamped["delinkError"] = delink_error
     return stamped
 
 
