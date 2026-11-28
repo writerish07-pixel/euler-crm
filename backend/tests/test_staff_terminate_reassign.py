@@ -133,6 +133,43 @@ async def test_allocate_still_requires_active_executive(client):
 
 
 @pytest.mark.asyncio
+async def test_terminate_rewrites_pending_approval_executive(client):
+    """Approve prefers payload.executive — must not restore the deleted name."""
+    admin = await _ensure_showroom_admin(client)
+    exec_row = await _add_exec(client, "Pending Exec")
+    await _lead_for("Pending Exec", lead_id="LD-TERM-PEND", mobile="9811999051")
+    await server.db.leads.update_one(
+        {"leadId": "LD-TERM-PEND"}, {"$set": {"assignmentPending": True}})
+    await server.db.lead_requests.delete_many({"requestId": "LR-TERM-PEND"})
+    await server.db.lead_requests.insert_one({
+        "requestId": "LR-TERM-PEND",
+        "status": "pending",
+        "source": "split-assignment",
+        "existingLeadId": "LD-TERM-PEND",
+        "payload": {
+            "customerName": "Term Cust", "mobile": "9811999051",
+            "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+            "executive": "Pending Exec", "budget": 700000,
+        },
+        "assignedExecutive": "Pending Exec",
+        "assignedExecutiveFold": "pending exec",
+        "submittedByName": "Pending Exec",
+        "createdAt": "2026-11-28T00:00:00+00:00",
+    })
+
+    r = await client.delete(f"/api/staff/{exec_row['staffId']}")
+    assert r.status_code == 200, r.text
+    assert r.json()["requestsPatched"] >= 1
+
+    req = await server.db.lead_requests.find_one({"requestId": "LR-TERM-PEND"})
+    assert req["assignedExecutive"] == admin["name"]
+    assert req["assignedExecutiveFold"] == server._norm_name(admin["name"])
+    assert req["payload"]["executive"] == admin["name"]
+    lead = await server.db.leads.find_one({"leadId": "LD-TERM-PEND"})
+    assert lead["executive"] == admin["name"]
+
+
+@pytest.mark.asyncio
 async def test_terminate_removes_matching_login_email(client):
     await _ensure_showroom_admin(client)
     email = "gone.exec@euler.test"

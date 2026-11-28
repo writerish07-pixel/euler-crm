@@ -16989,26 +16989,69 @@ async def _showroom_admin_staff_name(*, excluding_staff_id="") -> str:
     return str((user or {}).get("name") or "").strip()
 
 
+async def _leads_held_by_executive_fold(fold: str) -> list:
+    """Every lead whose executive name folds to `fold` — full collection, not capped."""
+    if not fold:
+        return []
+    out = []
+    async for lead in db.leads.find({}):
+        if _norm_name(lead.get("executive")) == fold:
+            out.append(lead)
+    return out
+
+
+async def _reassign_pending_requests_for_staff(from_fold: str, to_name: str, moved_ids) -> int:
+    """Keep Approvals in sync so approve cannot write the terminated name back.
+
+    `approve_lead_request` prefers `payload.executive` over the live lead. Split
+    assignment and booking-deal rows also store `assignedExecutive` / fold.
+    """
+    target = str(to_name or "").strip()
+    target_fold = _norm_name(target)
+    if not from_fold or not target or not target_fold:
+        return 0
+    moved = {str(x).strip() for x in (moved_ids or []) if str(x).strip()}
+    patched = 0
+    async for req in db.lead_requests.find({"status": {"$in": ["pending", "approving"]}}):
+        payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
+        existing_id = str(req.get("existingLeadId") or req.get("leadId") or "").strip()
+        matches = (
+            _norm_name(req.get("assignedExecutive")) == from_fold
+            or _norm_name(req.get("assignedExecutiveFold")) == from_fold
+            or _norm_name((payload or {}).get("executive")) == from_fold
+            or (existing_id and existing_id in moved)
+        )
+        if not matches:
+            continue
+        patch = {
+            "assignedExecutive": target,
+            "assignedExecutiveFold": target_fold,
+            "payload.executive": target,
+        }
+        await db.lead_requests.update_one({"requestId": req["requestId"]}, {"$set": patch})
+        patched += 1
+    return patched
+
+
 async def _reassign_staff_leads_to_showroom_admin(from_name: str, to_name: str, act) -> dict:
     """Move every lead whose executive name matches `from_name` onto Showroom Admin.
 
     Mirrors allocate history/audit so cancellations and bookings stay attributed
     to whoever held the file at the time. Does not require `to_name` on the
-    executive roster — Showroom Admin is role TL, not executive.
+    executive roster — Showroom Admin is role TL, not executive. Also rewrites
+    pending approval payloads so Approve cannot restore the deleted name.
     """
     fold = _norm_name(from_name)
     target = str(to_name or "").strip()
     if not fold or not target:
-        return {"movedCount": 0, "moved": [], "to": target}
+        return {"movedCount": 0, "moved": [], "to": target, "requestsPatched": 0}
     if _norm_name(target) == fold:
-        return {"movedCount": 0, "moved": [], "to": target}
-    # Full lead docs — sheet sync needs the same shape as allocate_leads.
-    leads = [
-        l for l in await db.leads.find({}).to_list(20000)
-        if _norm_name(l.get("executive")) == fold
-    ]
+        return {"movedCount": 0, "moved": [], "to": target, "requestsPatched": 0}
+    leads = await _leads_held_by_executive_fold(fold)
     if not leads:
-        return {"movedCount": 0, "moved": [], "to": target}
+        # Still clear pending requests that name this executive with no live lead.
+        patched = await _reassign_pending_requests_for_staff(fold, target, [])
+        return {"movedCount": 0, "moved": [], "to": target, "requestsPatched": patched}
     stamp = now_iso()
     by_email = (act or {}).get("email", "")
     moved, history, synced = [], [], []
@@ -17059,7 +17102,9 @@ async def _reassign_staff_leads_to_showroom_admin(from_name: str, to_name: str, 
         except Exception:
             logger.exception("queue sheet sync failed for %s", (doc or {}).get("leadId"))
     _schedule_sheet_syncs(synced)
-    return {"movedCount": len(moved), "moved": moved, "to": target}
+    patched = await _reassign_pending_requests_for_staff(fold, target, moved)
+    return {"movedCount": len(moved), "moved": moved, "to": target,
+            "requestsPatched": patched}
 
 
 async def _remove_linked_login_for_staff(staff_row) -> bool:
@@ -17088,18 +17133,25 @@ async def delete_staff(staff_id: str, act=Depends(actor)):
         raise HTTPException(404, "Staff member not found")
     from_name = str(existing.get("name") or "").strip()
     fold = _norm_name(from_name)
-    held = 0
+    held = await _leads_held_by_executive_fold(fold) if fold else []
+    # Pending Approvals can name this person even when no live lead matches yet.
+    pending_named = 0
     if fold:
-        held = sum(
-            1 for l in await db.leads.find({}, {"executive": 1}).to_list(20000)
-            if _norm_name(l.get("executive")) == fold)
-    reassigned = {"movedCount": 0, "moved": [], "to": ""}
-    if held:
+        async for req in db.lead_requests.find({"status": {"$in": ["pending", "approving"]}}):
+            payload = req.get("payload") if isinstance(req.get("payload"), dict) else {}
+            if (_norm_name(req.get("assignedExecutive")) == fold
+                    or _norm_name(req.get("assignedExecutiveFold")) == fold
+                    or _norm_name((payload or {}).get("executive")) == fold):
+                pending_named += 1
+                break
+    reassigned = {"movedCount": 0, "moved": [], "to": "", "requestsPatched": 0}
+    if held or pending_named:
         to_name = await _showroom_admin_staff_name(excluding_staff_id=staff_id)
         if not to_name:
+            n = len(held) or pending_named
             raise HTTPException(
                 409,
-                f"{held} lead(s) are assigned to '{from_name}'. Add an Active Showroom "
+                f"{n} lead(s) are assigned to '{from_name}'. Add an Active Showroom "
                 f"Admin on Staff & Reports first, then delete — those leads move to them.")
         reassigned = await _reassign_staff_leads_to_showroom_admin(from_name, to_name, act)
     await db.staff.delete_one({"staffId": staff_id})
@@ -17109,11 +17161,13 @@ async def delete_staff(staff_id: str, act=Depends(actor)):
         old={"staffId": staff_id, "name": from_name, "role": existing.get("role")},
         new={"reassignedTo": reassigned.get("to") or "",
              "reassignedCount": reassigned.get("movedCount") or 0,
+             "requestsPatched": reassigned.get("requestsPatched") or 0,
              "loginRemoved": login_removed})
     return {
         "ok": True,
         "reassignedCount": reassigned.get("movedCount") or 0,
         "reassignedTo": reassigned.get("to") or "",
+        "requestsPatched": reassigned.get("requestsPatched") or 0,
         "loginRemoved": login_removed,
     }
 
