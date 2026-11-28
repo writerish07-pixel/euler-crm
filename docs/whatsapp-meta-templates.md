@@ -413,6 +413,11 @@ occasional day-25 / low-balance alerts) to owner + finance manager.
 
 ---
 
+## I–K. Trade Advance (Botspace submit sheet)
+
+Paste-ready bodies + Meta sample values: **`docs/ta-whatsapp-botspace-submit.md`**.
+Category **Utility**, language **English (`en`)** for all three.
+
 ## I. `ta_daily_statement`
 
 | Field | Value |

@@ -365,7 +365,9 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
     sold_vehicles = []
     sold_error = ""
     try:
-        sold_vehicles = await asyncio.to_thread(coulson_client.fetch_sold_inventory, token) or []
+        pulled = await asyncio.to_thread(coulson_client.fetch_sold_inventory, token)
+        # Keep empty _SoldPull (falsy) — it still carries .cancelled attrs.
+        sold_vehicles = pulled if pulled is not None else []
     except coulson_client.CoulsonError as e:
         sold_error = str(e)
         log.warning("Coulson sold / invoice inventory skipped: %s", e)
@@ -519,15 +521,20 @@ async def sync_from_coulson(db, *, username=None, password=None, on_body_adopted
         db, getattr(sold_vehicles, "cancelled", ()) or (),
         ok=getattr(sold_vehicles, "invoice_list_ok", False))
     delinked = {}
+    delink_error = ""
     try:
-        delinked = await delink_cancelled_sold_invoices(db)
-    except Exception:
+        delinked = await delink_cancelled_sold_invoices(db) or {}
+    except Exception as e:
         log.exception("OEM cancelled-invoice delink failed")
         delinked = {}
+        delink_error = str(e) or "delink_failed"
     leads_vehicle_ids = await apply_sold_vehicle_ids_to_leads(
         db, on_body_adopted=on_body_adopted, on_variants_corrected=on_variants_corrected)
     leads_vehicle_ids["delinkedCount"] = (delinked or {}).get("cleared") or 0
     leads_vehicle_ids["delinkedIds"] = (delinked or {}).get("clearedIds") or []
+    leads_vehicle_ids["invoiceMissingCount"] = (delinked or {}).get("flagged") or 0
+    if delink_error:
+        leads_vehicle_ids["delinkError"] = delink_error
 
     extra = {
         "inventoryCount": yard_count,
@@ -1122,12 +1129,21 @@ async def replace_cancelled_invoices(db, vehicles, *, ok=False):
     return len(docs)
 
 
+# Keep in sync with coulson._CANCELLED_INVOICE.
+CANCELLED_INVOICE_STATUSES = frozenset({"CANCELLED", "CANCELED", "DELETED", "VOID"})
+
+
+def _is_cancelled_invoice_status(row):
+    status = str((row or {}).get("invoiceStatus") or (row or {}).get("status") or "").strip().upper()
+    return status in CANCELLED_INVOICE_STATUSES
+
+
 async def created_invoice_chassis(db):
     """Chassis that still have a Created Invoice List row."""
     out = set()
     async for r in db.oem_invoices.find({}, {"chassis": 1, "invoiceStatus": 1}):
         status = str(r.get("invoiceStatus") or "CREATED").strip().upper()
-        if status in ("CANCELLED", "CANCELED", "VOID"):
+        if status in CANCELLED_INVOICE_STATUSES:
             continue
         ch = _norm_chassis(r.get("chassis"))
         if ch:
@@ -1406,8 +1422,17 @@ async def refresh_sold_inventory(db, *, interactive=True):
         coulson_client.INVENTORY_PAGE,
         fill_models=not interactive,
         invoice_max_rows=BILLING_INVOICE_MAX_ROWS,
-    ) or []
-    if not sold_vehicles:
+    )
+    # Do not use `or []` — an empty _SoldPull is falsy but still carries
+    # .cancelled / .invoice_list_ok from a cancel-only Invoice List day.
+    if sold_vehicles is None:
+        sold_vehicles = []
+    cancelled = getattr(sold_vehicles, "cancelled", ()) or ()
+    invoice_ok = bool(getattr(sold_vehicles, "invoice_list_ok", False))
+    # Empty Created/Sold is fine when the pull only returned CANCELLED rows —
+    # still persist cancels and delink leads. A total fetch failure (no attrs)
+    # keeps the prior oem_sold count.
+    if not sold_vehicles and not cancelled:
         return await db.oem_sold.count_documents({})
     oem_models = []
     try:
@@ -1425,12 +1450,17 @@ async def refresh_sold_inventory(db, *, interactive=True):
         complete=getattr(sold_vehicles, "complete", True))
     await replace_oem_invoices(
         db, getattr(sold_vehicles, "invoices", ()) or (),
-        ok=getattr(sold_vehicles, "invoice_list_ok", False))
-    await replace_cancelled_invoices(
-        db, getattr(sold_vehicles, "cancelled", ()) or (),
-        ok=getattr(sold_vehicles, "invoice_list_ok", False))
+        ok=invoice_ok)
+    await replace_cancelled_invoices(db, cancelled, ok=invoice_ok)
+    # Always delink here — lead oem-sold?refresh=true used to store cancels
+    # without clearing lead stamps until a later OEM Billing Sync.
+    try:
+        await delink_cancelled_sold_invoices(db)
+    except Exception:
+        log.exception("OEM cancelled-invoice delink failed during sold refresh")
     await drop_billed_from_inventory(db)
-    await upsert_chassis_ledger(db, sold_vehicles, source="INVOICED")
+    if sold_vehicles:
+        await upsert_chassis_ledger(db, sold_vehicles, source="INVOICED")
     return n
 
 
@@ -3118,11 +3148,6 @@ def sold_chassis_set(sold_rows):
 
 def _row_invoice(row):
     return _norm_invoice((row or {}).get("invoiceNumber") or (row or {}).get("invoice_number"))
-
-
-def _is_cancelled_invoice_status(row):
-    status = str((row or {}).get("invoiceStatus") or (row or {}).get("status") or "").strip().upper()
-    return status in ("CANCELLED", "CANCELED", "VOID")
 
 
 def cancelled_chassis_without_live_rebill(sold_rows, cancelled_rows, live_invoice_rows=None):

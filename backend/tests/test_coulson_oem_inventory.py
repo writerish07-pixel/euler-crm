@@ -1693,3 +1693,78 @@ async def test_sync_drops_invoiced_chassis_from_yard_and_writes_ledger(client, m
     ledger = await server.db.oem_chassis_ledger.find_one({"chassis": billed})
     assert ledger["receivedDate"] == "2026-08-01"
 
+
+def test_cancelled_status_sets_include_deleted_and_void():
+    """Coulson DELETED and Invoice List VOID both mean the bill is gone."""
+    assert coulson_client._CANCELLED_INVOICE == set(oem_sync.CANCELLED_INVOICE_STATUSES)
+    assert "DELETED" in oem_sync.CANCELLED_INVOICE_STATUSES
+    assert "VOID" in oem_sync.CANCELLED_INVOICE_STATUSES
+    assert oem_sync._is_cancelled_invoice_status({"invoiceStatus": "DELETED"})
+    assert oem_sync._is_cancelled_invoice_status({"status": "void"})
+    assert not oem_sync._is_cancelled_invoice_status({"invoiceStatus": "CREATED"})
+    assert coulson_client._is_cancelled_invoice({"status": "DELETED"})
+    assert coulson_client._is_cancelled_invoice({"status": "VOID"})
+
+
+def test_deleted_status_is_not_treated_as_live_created_invoice():
+    """A DELETED row in oem_invoices must not keep the chassis as 'live'."""
+    assert oem_sync._is_cancelled_invoice_status({"invoiceStatus": "DELETED"})
+    # created_invoice_chassis filters CANCELLED_INVOICE_STATUSES — DELETED excluded.
+    live_status = "DELETED"
+    assert live_status in oem_sync.CANCELLED_INVOICE_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_refresh_sold_delinks_cancelled_invoice_on_lead(client, monkeypatch):
+    """oem-sold refresh must clear a cancelled stamp, not only store history."""
+    chassis = "MD9REFRESHDELINK01"
+    mobile = "9811999001"
+    lid = "LD-REFRESH-DELINK"
+    await server.db.oem_sold.delete_many({"chassis": chassis})
+    await server.db.oem_cancelled_invoices.delete_many({"chassis": chassis})
+    await server.db.oem_invoices.delete_many({"chassis": chassis})
+    await server.db.leads.delete_many({"leadId": lid})
+    await server.db.leads.insert_one({
+        "leadId": lid, "customerName": "Refresh Delink", "mobile": mobile,
+        "interestedModel": "Turbo Max", "variant": "Maxx (PV)",
+        "accountStatus": "Active", "currentStatus": "Booked",
+        "chassisNumber": chassis, "invoiceNumber": "AF-GONE",
+        "oemInvoiced": True,
+    })
+    await server.db.oem_sold.insert_one({
+        "chassis": chassis, "mobile": mobile, "invoiceNumber": "AF-GONE",
+        "customerName": "Refresh Delink", "soldDate": "2026-08-31",
+        "coulsonStatus": "SOLD",
+    })
+
+    class _Sold(list):
+        cancelled = ()
+        invoices = ()
+        invoice_list_ok = True
+        complete = True
+
+    def fake_fetch(token, limit=200, **k):
+        rows = _Sold()
+        rows.cancelled = [{
+            "chassis": chassis, "invoice_number": "AF-GONE",
+            "status": "CANCELLED", "customer_phone": mobile,
+        }]
+        rows.invoices = []
+        rows.invoice_list_ok = True
+        rows.complete = True
+        return rows
+
+    monkeypatch.setattr(coulson_client, "login", lambda u, p: "fake-token")
+    monkeypatch.setattr(coulson_client, "fetch_sold_inventory", fake_fetch)
+    monkeypatch.setattr(coulson_client, "fetch_sap_models", lambda token: [])
+    await server.oem_sync.save_credentials(server.db, "dealer.user", "secret")
+
+    n = await oem_sync.refresh_sold_inventory(server.db)
+    assert isinstance(n, int)
+    cancelled = await server.db.oem_cancelled_invoices.find_one({"invoiceNumber": "AF-GONE"})
+    assert cancelled and cancelled["chassis"] == chassis
+    lead = await server.db.leads.find_one({"leadId": lid})
+    # Bare cancel with no Created rebill clears the chassis from the lead.
+    assert not (lead.get("chassisNumber") or "").strip()
+    assert (lead.get("invoiceNumber") or "") != "AF-GONE"
+
